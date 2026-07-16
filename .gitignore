@@ -3,3 +3,11 @@ dist/
 .env.local
 .env
 *.local
+
+# 収集した経営者の生ログ・処理状態（極秘情報 — 絶対にコミットしない）
+data/*
+!data/.gitkeep
+
+# Plaud NotePin S 等のライフログ取り込み用ドロップフォルダ
+lifelog-inbox/*
+!lifelog-inbox/.gitkeep

@@ -30,20 +30,28 @@ npm run chat      # 対話インターフェース起動
 ## アーキテクチャとデータフロー
 
 ```
-src/collectors/  →  src/dedup/  →  src/extractors/  →  src/analyzers/  →  src/interface/
-   （収集）          （名寄せ）     （シグナル抽出）    （ストーリー構築）     （対話）
-                                        ↓                    ↓
-                                   src/database/          src/database/
-                                  （Notion保存）           （Notion保存）
+src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyzers/ → src/interface/
+   （収集）        （名寄せ）  （生ログ永続化）（シグナル抽出）  （ストーリー構築）   （対話）
+                                                   ↓                 ↓
+                                              src/database/      src/database/
+                                             （Notion保存）       （Notion保存）
 ```
 
 - `src/types/index.ts` — すべてのモジュールが共有する型定義（RawLog / Signal / Story / etc.）
-- `src/collectors/` — 各ソース（Slack/Gmail/Calendar/Meet/ライフログ）のデータ収集
-- `src/dedup/` — 時間帯と内容類似度による重複ログの名寄せ統合
-- `src/extractors/` — Claude APIを使ったシグナル抽出（hypothesis/key_person/idea/decision/trend）
-- `src/analyzers/` — Claude APIを使ったストーリー構築（月単位グループ → 因果関係 → 洞察）
-- `src/database/` — Notion API経由でのシグナル・ストーリーの永続化と読み込み
-- `src/interface/` — Claude APIを使った対話インターフェース（経営者プロファイル＋DBを参照）
+- `src/collectors/` — 各ソースのデータ収集。`googleAuth.ts`（SA+DWD共通）/ `slack.ts`
+  （search.messages+xoxp）/ `email.ts`・`calendar.ts`・`meeting.ts`（googleapis）/
+  `lifelog.ts`（Plaud NotePin S。フォルダ・ドロップ方式で .txt/.md/.srt/.vtt を取り込む）
+- `src/dedup/` — 時間帯と内容類似度（Jaccard）による重複ログの名寄せ統合
+- `src/store/` — 収集バッチと抽出バッチは別プロセスのため、生ログをローカルJSONに永続化
+  （`data/` 配下。処理済みIDも管理。Notion格納前の一時的な受け皿）
+- `src/extractors/` — Claude APIでシグナル抽出（構造化出力+adaptive thinking、重要度で足切り）
+- `src/analyzers/` — Claude APIでストーリー構築（月単位グループ → 因果関係 → 洞察）
+- `src/database/` — Notion API(v5, 2025-09-03)。database_id→data_source_id を解決し、
+  レート制限(3req/s)・rich_text≤2000文字分割・children≤100分割をラップ
+- `src/data/executiveProfile.ts` — 経営者プロファイル（価値観・15の意思決定ルール・
+  成功/失敗パターン）の単一の真実の源。要件3.3初期設定 / 3.4経営理念プロンプトに対応
+- `src/interface/` — Claude APIを使った対話インターフェース（プロファイル＋DBを参照、
+  疑似ログ再入力で対話をシグナルDBへ循環）
 
 ## 慣習と注意点
 
@@ -56,9 +64,13 @@ src/collectors/  →  src/dedup/  →  src/extractors/  →  src/analyzers/  →
 
 ## Claude API 利用方針
 
-- シグナル抽出・ストーリー生成: `claude-opus-4-8`（精度優先）
-- 対話インターフェース: `claude-opus-4-8`（推論品質優先）
-- ゼロデータリテンション（ZDR）APIキーの使用を強く推奨
+- モデルは全用途で `claude-opus-4-8`（`@anthropic-ai/sdk` は 0.111+）
+- **adaptive thinking**（`thinking: { type: 'adaptive' }`）を使う。content 配列には
+  thinking ブロックが含まれるため、text は `content[0]` 決め打ちではなく `find` で探す。
+  同一モデルでの多ターン継続では content 全体をそのまま履歴に戻す（thinking 維持）
+- 抽出・分析は **構造化出力**（`output_config: { format: { type: 'json_schema', schema } }`）
+  でJSONパースの信頼性を担保する（正規表現パースは使わない）
+- 極秘情報を扱うため、ゼロデータリテンション（ZDR）APIキーの使用を強く推奨
 
 ## Git ワークフロー
 

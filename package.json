@@ -14,9 +14,11 @@
     "chat": "tsx src/interface/index.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@notionhq/client": "^2.2.15",
-    "dotenv": "^16.4.5"
+    "@anthropic-ai/sdk": "^0.111.0",
+    "@notionhq/client": "^5.1.0",
+    "@slack/web-api": "^7.9.0",
+    "dotenv": "^16.4.5",
+    "googleapis": "^161.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

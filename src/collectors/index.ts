@@ -5,6 +5,7 @@ import { collectFromCalendar } from './calendar.js';
 import { collectFromMeetings } from './meeting.js';
 import { collectFromLifelog } from './lifelog.js';
 import { deduplicateLogs } from '../dedup/index.js';
+import { saveRawLogs } from '../store/rawLogStore.js';
 import type { RawLog } from '../types/index.js';
 
 export async function collectAll(): Promise<RawLog[]> {
@@ -31,7 +32,8 @@ export async function collectAll(): Promise<RawLog[]> {
   });
 
   const deduped = deduplicateLogs(logs);
-  console.log(`=== 収集完了: 合計${deduped.length}件（名寄せ後）===`);
+  saveRawLogs(deduped);
+  console.log(`=== 収集完了: 合計${deduped.length}件（名寄せ後）をローカルストアに保存 ===`);
   return deduped;
 }
 

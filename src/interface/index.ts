@@ -2,35 +2,14 @@ import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { createInterface } from 'readline/promises';
 import { fetchRecentSignals, fetchRecentStories, saveSignal } from '../database/index.js';
+import { EXECUTIVE_PROFILE } from '../data/executiveProfile.js';
 import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 
 const client = new Anthropic();
 
-// 経営者プロファイルを読み込む
-// 本番では NOTION_PROFILE_PAGE_ID のページから動的に取得する
-function loadExecutiveProfile(): ExecutiveProfile {
-  return {
-    name: process.env.EXECUTIVE_NAME ?? '代表取締役',
-    role: 'CEO',
-    values: [
-      '顧客価値を最優先する',
-      '高速でPDCAを回す',
-      '人材への長期投資を惜しまない',
-    ],
-    decisionRules: [
-      { id: '1', rule: '短期利益より長期の関係性を重視する', priority: 1, examples: [] },
-      { id: '2', rule: '不確実な状況では小さく試して学ぶ', priority: 2, examples: [] },
-      { id: '3', rule: '意思決定は現場の声を必ず聞いてから行う', priority: 3, examples: [] },
-      { id: '4', rule: '競合より顧客の課題に集中する', priority: 4, examples: [] },
-      { id: '5', rule: '数字より定性的な変化を先に読む', priority: 5, examples: [] },
-    ],
-    successPatterns: [],
-    failurePatterns: [],
-  };
-}
-
 function buildSystemPrompt(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
   const rules = profile.decisionRules
+    .slice()
     .sort((a, b) => a.priority - b.priority)
     .map((r) => `${r.priority}. ${r.rule}`)
     .join('\n');
@@ -45,6 +24,9 @@ function buildSystemPrompt(profile: ExecutiveProfile, signals: Signal[], stories
     .map((s) => `■ ${s.title}\n  洞察: ${s.insight}`)
     .join('\n\n');
 
+  const successPatterns = profile.successPatterns.map((p) => `・${p}`).join('\n');
+  const failurePatterns = profile.failurePatterns.map((p) => `・${p}`).join('\n');
+
   return `あなたは${profile.name}（${profile.role}）の思考を模倣するAIアシスタントです。
 以下のプロファイルと実際の言動データを基に、経営者本人として回答してください。
 
@@ -54,6 +36,12 @@ ${profile.values.join('\n')}
 【意思決定ルール（優先順位順）】
 ${rules}
 
+【過去の成功パターン】
+${successPatterns || '（未登録）'}
+
+【過去の失敗パターン】
+${failurePatterns || '（未登録）'}
+
 【最近の重要シグナル】
 ${recentSignals || '（データなし）'}
 
@@ -62,7 +50,7 @@ ${recentStories || '（データなし）'}
 
 ---
 回答の際は:
-1. 上記の意思決定ルールに基づいて判断してください
+1. 上記の意思決定ルールと過去のパターンに基づいて判断してください
 2. 回答末尾に [根拠] として参照したシグナルやストーリーを示してください
 3. 確信度が低い場合はその旨を正直に伝えてください
 4. 一人称は「私」を使い、経営者らしい簡潔なトーンで話してください`;
@@ -97,7 +85,7 @@ async function startChat(): Promise<void> {
     fetchRecentStories(10),
   ]);
 
-  const profile = loadExecutiveProfile();
+  const profile = EXECUTIVE_PROFILE;
   const systemPrompt = buildSystemPrompt(profile, signals, stories);
   const history: Anthropic.MessageParam[] = [];
 
@@ -115,13 +103,17 @@ async function startChat(): Promise<void> {
 
     const response = await client.messages.create({
       model: 'claude-opus-4-8',
-      max_tokens: 2048,
+      max_tokens: 4096,
+      thinking: { type: 'adaptive' },
       system: systemPrompt,
       messages: history,
     });
 
-    const assistantText = response.content[0].type === 'text' ? response.content[0].text : '';
-    history.push({ role: 'assistant', content: assistantText });
+    // adaptive thinking では content に thinking ブロックが含まれるため text を探す。
+    // 同一モデルでの継続では content 全体をそのまま履歴に戻す（thinking ブロック維持）。
+    const textBlock = response.content.find((b) => b.type === 'text');
+    const assistantText = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+    history.push({ role: 'assistant', content: response.content });
 
     console.log(`\n${profile.name}: ${assistantText}\n`);
 

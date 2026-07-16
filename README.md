@@ -61,18 +61,24 @@ npm run setup
 
 | 変数 | 必須 | 用途 |
 |------|------|------|
-| `ANTHROPIC_API_KEY` | ✅ | Claude API（シグナル抽出・ストーリー生成・対話） |
-| `NOTION_TOKEN` | ✅ | Notion API |
-| `NOTION_SIGNAL_DB_ID` | ✅ | シグナルデータベースのID |
-| `NOTION_STORY_DB_ID` | ✅ | ストーリーデータベースのID |
-| `SLACK_USER_TOKEN` | | Slack投稿収集 |
-| `SLACK_TARGET_USER_ID` | | 対象経営者のSlackユーザーID |
-| `GOOGLE_CLIENT_ID` | | Google OAuth2 |
-| `GOOGLE_CLIENT_SECRET` | | Google OAuth2 |
-| `GOOGLE_REFRESH_TOKEN` | | Google OAuth2リフレッシュトークン |
+| `ANTHROPIC_API_KEY` | ✅ | Claude API（シグナル抽出・ストーリー生成・対話）。ZDRキー推奨 |
+| `NOTION_TOKEN` | ✅ | Notion Internal Integration Token |
+| `NOTION_SIGNAL_DB_ID` | ✅ | シグナルDBの database_id（起動時に data_source_id へ自動解決） |
+| `NOTION_STORY_DB_ID` | ✅ | ストーリーDBの database_id |
+| `LIFELOG_INBOX_DIR` | | Plaud NotePin S 文字起こしファイルの受け皿フォルダ |
+| `SLACK_USER_TOKEN` | | 経営者本人が認可した Slack ユーザートークン(xoxp-) |
+| `SLACK_TARGET_USER_ID` | | 対象経営者のSlackユーザーID（Uxxxx） |
+| `GOOGLE_SA_CLIENT_EMAIL` | | サービスアカウントの client_email |
+| `GOOGLE_SA_PRIVATE_KEY` | | サービスアカウントの秘密鍵（\n エスケープ） |
+| `GOOGLE_TARGET_EMAIL` | | impersonate する対象経営者のメール |
 | `EXECUTIVE_NAME` | | 経営者の名前（対話表示用） |
+| `SIGNAL_IMPORTANCE_THRESHOLD` | | シグナル採用の重要度しきい値（既定5） |
 
 ### 3. Notionデータベースの準備
+
+Notion API は 2025-09-03 以降 `database_id` と `data_source_id` が別物になりました。
+本システムは `database_id` を設定すれば起動時に `data_source_id` へ自動解決します。
+作成後、各DBの **Connections** からインテグレーションを共有してください。
 
 **シグナルDB** に以下のプロパティを作成してください。
 
@@ -92,6 +98,35 @@ npm run setup
 | タイトル | タイトル |
 | 期間（開始） | 日付 |
 | 洞察 | テキスト |
+
+### 4. データソースの接続
+
+各コレクタは対応する環境変数が未設定なら安全にスキップします。必要なものだけ設定してください。
+
+#### ライフログ: Plaud NotePin S
+
+Plaud には公式のネイティブ Notion/Drive 連携が無く、手動UIにも一括/JSONエクスポートが
+無いため、本システムは **フォルダ・ドロップ方式** で取り込みます。文字起こしファイル
+（`.txt` / `.md` / `.srt` / `.vtt`）を `LIFELOG_INBOX_DIR` に置けば取り込まれ、処理後は
+`_processed/` へ退避されます。供給経路は3通り:
+
+1. **公式 Zapier 連携**（安定・推奨）: Plaud のトリガー「Transcript & Summary Ready」→
+   Google Drive / Dropbox 等にファイル出力 → そのローカル同期フォルダを受け皿に指定
+2. **非公式CLI**（完全ローカル）: `@plaud/cli` の `plaud sync <dir>` を日次 cron で実行し、
+   出力先を受け皿に指定（※Plaud非公認のリバースAPI。ToS/仕様変更リスクに留意）
+3. **手動エクスポート**: Plaud アプリから TXT/SRT 等でエクスポートしてフォルダに置く
+
+#### Slack
+
+経営者**本人**が OAuth 認可して発行したユーザートークン（`xoxp-`、スコープ `search:read`
+`users:read`）を設定します。`search.messages` の `from:<@USERID>` で全チャンネル・DMを横断
+収集します（本人が参加する会話に限定）。
+
+#### Google Workspace（Gmail / Calendar / Meet）
+
+GCP のサービスアカウント + ドメイン全体委任で対象経営者を impersonate します。Workspace
+管理コンソールでクライアントIDと readonly スコープを事前登録してください。Meet の文字起こし
+（構造化データ）は会議終了から30日で消えるため、日次バッチでの即時取得が前提です。
 
 ## 開発コマンド
 
