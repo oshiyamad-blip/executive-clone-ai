@@ -56,11 +56,17 @@ async function resolveDataSourceId(databaseId: string): Promise<string> {
     // v5 のレスポンスは data_sources[] を持つ
     const sources = (db as { data_sources?: Array<{ id: string }> }).data_sources;
     const id = sources?.[0]?.id ?? databaseId;
-    dataSourceCache.set(databaseId, id);
+    dataSourceCache.set(databaseId, id); // 成功時のみキャッシュ
     return id;
-  } catch {
-    // 与えられた ID が既に data_source_id の場合はそのまま使う
-    dataSourceCache.set(databaseId, databaseId);
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 404) {
+      // 恒久的に「見つからない」= 与えられた ID が既に data_source_id とみなしてキャッシュ
+      dataSourceCache.set(databaseId, databaseId);
+      return databaseId;
+    }
+    // 一過性エラー（429/5xx/ネットワーク）はキャッシュ汚染を避け、今回のみフォールバック
+    console.warn(`Notion: data_source_id 解決に失敗（今回のみフォールバック）: ${String(err)}`);
     return databaseId;
   }
 }
@@ -205,11 +211,13 @@ export async function fetchRecentStories(limit = 20): Promise<Story[]> {
       last_edited_time?: string;
     };
     const props = p.properties ?? {};
+    // 終了日時は Notion に保存していないため開始日時と同じにする（1970年になるのを防ぐ）
+    const startIso = readDate(props['期間（開始）']) ?? nowIso();
     return {
       id: page.id,
       title: readTitle(props['タイトル']),
       signalIds: [],
-      period: { start: new Date(readDate(props['期間（開始）']) ?? nowIso()), end: new Date(nowIso()) },
+      period: { start: new Date(startIso), end: new Date(startIso) },
       narrative: '',
       causalChain: [],
       insight: readRichText(props['洞察']),

@@ -3,6 +3,8 @@ import { collectFromSlack } from './slack.js';
 import { collectFromEmail } from './email.js';
 import { collectFromCalendar } from './calendar.js';
 import { collectFromMeetings } from './meeting.js';
+import { collectFromDocuments } from './document.js';
+import { collectFromMessenger } from './messenger.js';
 import { collectFromLifelog } from './lifelog.js';
 import { deduplicateLogs } from '../dedup/index.js';
 import { saveRawLogs } from '../store/rawLogStore.js';
@@ -16,10 +18,12 @@ export async function collectAll(): Promise<RawLog[]> {
     collectFromEmail(),
     collectFromCalendar(),
     collectFromMeetings(),
+    collectFromDocuments(),
+    collectFromMessenger(),
     collectFromLifelog(),
   ]);
 
-  const sources = ['Slack', 'メール', 'カレンダー', '会議', 'ライフログ'];
+  const sources = ['Slack', 'メール', 'カレンダー', '会議', '文書', 'メッセンジャー', 'ライフログ'];
   const logs: RawLog[] = [];
 
   results.forEach((result, i) => {

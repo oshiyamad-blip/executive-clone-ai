@@ -86,8 +86,9 @@ async function buildStoryFromGroup(period: string, signals: Signal[]): Promise<S
     .join('\n\n');
 
   const message = await client.messages.create({
+    // adaptive thinking + 構造化JSON出力の予算確保（非ストリーミング安全上限 ~16000）
     model: 'claude-opus-4-8',
-    max_tokens: 8192,
+    max_tokens: 16000,
     thinking: { type: 'adaptive' },
     system: STORY_SYSTEM,
     output_config: { format: { type: 'json_schema', schema: STORY_SCHEMA } },

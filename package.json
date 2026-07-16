@@ -11,7 +11,9 @@
     "collect": "tsx src/collectors/index.ts",
     "extract": "tsx src/extractors/index.ts",
     "analyze": "tsx src/analyzers/index.ts",
-    "chat": "tsx src/interface/index.ts"
+    "chat": "tsx src/interface/index.ts",
+    "daily": "npm run collect && npm run extract",
+    "weekly": "npm run analyze"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

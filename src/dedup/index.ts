@@ -1,10 +1,23 @@
 import type { RawLog } from '../types/index.js';
 
-// 単語集合のJaccard係数で類似度を計算する
+// 文字bigram集合のJaccard係数で類似度を計算する。
+// 日本語は単語間に空白が無いため、空白分割ではなく文字bigramでトークン化する
+// （英語テキストにも有効）。
+function charBigrams(s: string): Set<string> {
+  const t = s.replace(/\s+/g, '');
+  const grams = new Set<string>();
+  if (t.length <= 1) {
+    if (t.length === 1) grams.add(t);
+    return grams;
+  }
+  for (let i = 0; i < t.length - 1; i++) grams.add(t.slice(i, i + 2));
+  return grams;
+}
+
 function similarity(a: string, b: string): number {
-  const setA = new Set(a.split(/\s+/));
-  const setB = new Set(b.split(/\s+/));
-  const intersection = new Set([...setA].filter((w) => setB.has(w)));
+  const setA = charBigrams(a);
+  const setB = charBigrams(b);
+  const intersection = new Set([...setA].filter((g) => setB.has(g)));
   const union = new Set([...setA, ...setB]);
   return union.size === 0 ? 0 : intersection.size / union.size;
 }

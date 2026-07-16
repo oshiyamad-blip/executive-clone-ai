@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync, statSync, renameSync, mkdirSync, existsSync } from 'fs';
+import { statSync } from 'fs';
 import { join, extname, basename } from 'path';
+import { processInbox } from './fileDropInbox.js';
 import type { RawLog } from '../types/index.js';
 
 // ライフログ収集（録音デバイス: Plaud NotePin S）
@@ -13,46 +14,26 @@ import type { RawLog } from '../types/index.js';
 //   3. Plaud アプリからの手動エクスポート（TXT/SRT/DOCX 等）をフォルダに置く
 //
 // 対応形式: .txt / .md / .srt / .vtt（文字起こしテキスト）
-// 処理済みファイルは <inbox>/_processed へ退避して二重取り込みを防ぐ。
-
 const INBOX_DIR = process.env.LIFELOG_INBOX_DIR ?? join(process.cwd(), 'lifelog-inbox');
-const PROCESSED_DIR = join(INBOX_DIR, '_processed');
 const SUPPORTED_EXT = new Set(['.txt', '.md', '.srt', '.vtt']);
 
 export async function collectFromLifelog(): Promise<RawLog[]> {
-  if (!existsSync(INBOX_DIR)) {
-    console.warn(`ライフログ: 受け皿フォルダが存在しません (${INBOX_DIR})`);
-    return [];
-  }
+  return processInbox(INBOX_DIR, SUPPORTED_EXT, parseLifelogFile, 'ライフログ');
+}
 
-  const files = readdirSync(INBOX_DIR).filter((f) => SUPPORTED_EXT.has(extname(f).toLowerCase()));
-  if (files.length === 0) return [];
+function parseLifelogFile(raw: string, file: string, filePath: string): RawLog | null {
+  const ext = extname(file).toLowerCase();
+  const content = ext === '.srt' || ext === '.vtt' ? parseSubtitle(raw) : parseTranscript(raw);
+  if (!content.trim()) return null;
 
-  const logs: RawLog[] = [];
-  for (const file of files) {
-    const filePath = join(INBOX_DIR, file);
-    try {
-      const raw = readFileSync(filePath, 'utf-8');
-      const ext = extname(file).toLowerCase();
-      const content = ext === '.srt' || ext === '.vtt' ? parseSubtitle(raw) : parseTranscript(raw);
-
-      if (content.trim()) {
-        logs.push({
-          id: `lifelog_${basename(file)}`,
-          source: 'lifelog',
-          timestamp: extractTimestamp(file, filePath),
-          content,
-          participants: extractSpeakers(raw),
-          metadata: { device: 'Plaud NotePin S', originalFile: file },
-        });
-      }
-      archiveFile(filePath, file);
-    } catch (err) {
-      console.error(`ライフログ: ${file} の処理に失敗: ${String(err)}`);
-    }
-  }
-
-  return logs;
+  return {
+    id: `lifelog_${basename(file)}`,
+    source: 'lifelog',
+    timestamp: extractTimestamp(file, filePath),
+    content,
+    participants: extractSpeakers(raw),
+    metadata: { device: 'Plaud NotePin S', originalFile: file },
+  };
 }
 
 // SRT/VTT から発話テキストのみを抽出する（インデックス行・タイムコード行を除去）
@@ -82,8 +63,7 @@ function extractSpeakers(raw: string): string[] {
   const speakers = new Set<string>();
   const patterns = [/^(Speaker\s*\d+)/gim, /^(話者\s*[A-Z0-9]+)/gim, /^([^\n:：]{1,20})[:：]/gm];
   for (const pattern of patterns) {
-    const matches = raw.matchAll(pattern);
-    for (const m of matches) {
+    for (const m of raw.matchAll(pattern)) {
       const name = m[1]?.trim();
       if (name && name.length <= 20) speakers.add(name);
     }
@@ -104,16 +84,7 @@ function extractTimestamp(fileName: string, filePath: string): Date {
   try {
     return statSync(filePath).mtime;
   } catch {
-    return statSync(filePath).ctime;
-  }
-}
-
-// 取り込み済みファイルを _processed へ退避する
-function archiveFile(filePath: string, fileName: string): void {
-  try {
-    if (!existsSync(PROCESSED_DIR)) mkdirSync(PROCESSED_DIR, { recursive: true });
-    renameSync(filePath, join(PROCESSED_DIR, fileName));
-  } catch (err) {
-    console.warn(`ライフログ: ${fileName} の退避に失敗: ${String(err)}`);
+    // statSync 自体が失敗する状況では ctime も取れないため、現在時刻でフォールバック
+    return new Date();
   }
 }

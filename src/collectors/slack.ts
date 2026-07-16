@@ -21,8 +21,11 @@ export async function collectFromSlack(): Promise<RawLog[]> {
   }
 
   const client = new WebClient(token);
-  const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const query = `from:<@${targetUserId}> after:${sinceIso}`;
+  const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+  // Slack の `after:` は指定日を含まない(exclusive)。取りこぼしを防ぐため1日前を指定し、
+  // 実際のウィンドウ(過去24時間)は取得後に ts で厳密に絞る。
+  const afterDate = new Date(sinceMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const query = `from:<@${targetUserId}> after:${afterDate}`;
 
   const logs: RawLog[] = [];
   let page = 1;
@@ -41,10 +44,12 @@ export async function collectFromSlack(): Promise<RawLog[]> {
       const matches = res.messages?.matches ?? [];
       for (const m of matches) {
         if (!m.ts || !m.text) continue;
+        const tsMs = Number(m.ts) * 1000;
+        if (tsMs < sinceMs) continue; // ウィンドウ外（after: の粗さで混入した分）を除外
         logs.push({
           id: `slack_${m.ts}`,
           source: 'slack',
-          timestamp: new Date(Number(m.ts) * 1000),
+          timestamp: new Date(tsMs),
           content: m.text,
           participants: m.username ? [m.username] : [],
           metadata: {

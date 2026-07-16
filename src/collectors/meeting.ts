@@ -65,6 +65,7 @@ async function collectTranscriptText(
 ): Promise<{ content: string; speakers: Set<string> }> {
   const speakers = new Set<string>();
   const lines: string[] = [];
+  const nameCache = new Map<string, string>();
   let pageToken: string | undefined;
 
   do {
@@ -75,7 +76,8 @@ async function collectTranscriptText(
     });
 
     for (const entry of res.data.transcriptEntries ?? []) {
-      const speaker = entry.participant ?? '不明';
+      // entry.participant はリソース名なので、表示名に解決する
+      const speaker = await resolveParticipantName(meet, entry.participant, nameCache);
       speakers.add(speaker);
       if (entry.text) lines.push(`${speaker}: ${entry.text}`);
     }
@@ -84,4 +86,29 @@ async function collectTranscriptText(
   } while (pageToken);
 
   return { content: lines.join('\n'), speakers };
+}
+
+// participant リソース名（conferenceRecords/.../participants/...）を人間の表示名に解決する
+async function resolveParticipantName(
+  meet: MeetClient,
+  resourceName: string | null | undefined,
+  cache: Map<string, string>,
+): Promise<string> {
+  if (!resourceName) return '不明';
+  const cached = cache.get(resourceName);
+  if (cached) return cached;
+
+  let name = resourceName.split('/').pop() ?? '不明';
+  try {
+    const p = await meet.conferenceRecords.participants.get({ name: resourceName });
+    name =
+      p.data.signedinUser?.displayName ??
+      p.data.anonymousUser?.displayName ??
+      p.data.phoneUser?.displayName ??
+      name;
+  } catch {
+    // 解決できなければリソース名末尾でフォールバック
+  }
+  cache.set(resourceName, name);
+  return name;
 }

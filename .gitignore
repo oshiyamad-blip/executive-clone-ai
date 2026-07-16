@@ -11,3 +11,7 @@ data/*
 # Plaud NotePin S 等のライフログ取り込み用ドロップフォルダ
 lifelog-inbox/*
 !lifelog-inbox/.gitkeep
+
+# LINE等のメッセンジャー・エクスポート取り込み用ドロップフォルダ
+messenger-inbox/*
+!messenger-inbox/.gitkeep

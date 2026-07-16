@@ -77,8 +77,10 @@ export async function extractSignals(logs: RawLog[]): Promise<Signal[]> {
 
 async function extractFromLog(log: RawLog): Promise<Signal[]> {
   const message = await client.messages.create({
+    // adaptive thinking と構造化JSON出力が予算を食い合わないよう十分に確保する
+    // （非ストリーミングの安全上限 ~16000 に収める）
     model: 'claude-opus-4-8',
-    max_tokens: 4096,
+    max_tokens: 16000,
     thinking: { type: 'adaptive' },
     system: EXTRACTION_SYSTEM,
     output_config: { format: { type: 'json_schema', schema: SIGNAL_SCHEMA } },

@@ -15,34 +15,41 @@ export async function collectFromEmail(): Promise<RawLog[]> {
 
   try {
     // 過去24時間の送受信メール（下書き・スパム・ゴミ箱は除外）
-    const list = await gmail.users.messages.list({
-      userId: 'me',
-      q: 'newer_than:1d -in:drafts -in:spam -in:trash',
-      maxResults: 100,
-    });
-
-    for (const ref of list.data.messages ?? []) {
-      if (!ref.id) continue;
-      const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
-      const headers = msg.data.payload?.headers ?? [];
-      const header = (name: string) =>
-        headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? '';
-
-      const subject = header('Subject');
-      const from = header('From');
-      const to = header('To');
-      const body = extractBody(msg.data.payload);
-      const dateMs = Number(msg.data.internalDate ?? Date.now());
-
-      logs.push({
-        id: `email_${ref.id}`,
-        source: 'email',
-        timestamp: new Date(dateMs),
-        content: `件名: ${subject}\nFrom: ${from}\nTo: ${to}\n\n${body}`,
-        participants: [from, to].filter(Boolean),
-        metadata: { subject, threadId: msg.data.threadId ?? '' },
+    // nextPageToken を辿り、100通を超える分も取りこぼさない。
+    let pageToken: string | undefined;
+    do {
+      const list = await gmail.users.messages.list({
+        userId: 'me',
+        q: 'newer_than:1d -in:drafts -in:spam -in:trash',
+        maxResults: 100,
+        pageToken,
       });
-    }
+
+      for (const ref of list.data.messages ?? []) {
+        if (!ref.id) continue;
+        const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
+        const headers = msg.data.payload?.headers ?? [];
+        const header = (name: string) =>
+          headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? '';
+
+        const subject = header('Subject');
+        const from = header('From');
+        const to = header('To');
+        const body = extractBody(msg.data.payload);
+        const dateMs = Number(msg.data.internalDate ?? Date.now());
+
+        logs.push({
+          id: `email_${ref.id}`,
+          source: 'email',
+          timestamp: new Date(dateMs),
+          content: `件名: ${subject}\nFrom: ${from}\nTo: ${to}\n\n${body}`,
+          participants: [from, to].filter(Boolean),
+          metadata: { subject, threadId: msg.data.threadId ?? '' },
+        });
+      }
+
+      pageToken = list.data.nextPageToken ?? undefined;
+    } while (pageToken);
   } catch (err) {
     console.error(`メール: 収集中にエラー: ${String(err)}`);
   }
