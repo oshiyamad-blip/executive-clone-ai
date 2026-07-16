@@ -1,0 +1,11 @@
+[Unit]
+Description=Executive Clone AI - daily batch (collect + extract)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ↓ 自分の環境に合わせて WorkingDirectory と User を書き換える
+WorkingDirectory=/opt/executive-clone-ai
+ExecStart=/opt/executive-clone-ai/scripts/run-daily.sh
+User=exec-clone

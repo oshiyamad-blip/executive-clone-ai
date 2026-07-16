@@ -15,3 +15,7 @@ lifelog-inbox/*
 # LINE等のメッセンジャー・エクスポート取り込み用ドロップフォルダ
 messenger-inbox/*
 !messenger-inbox/.gitkeep
+
+# 実行ログ
+logs/*
+!logs/.gitkeep

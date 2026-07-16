@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { fetchRecentSignals, saveStory } from '../database/index.js';
 import type { Signal, Story, CausalLink } from '../types/index.js';

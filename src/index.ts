@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env.js';
 
 console.log('経営者クローンAIシステム');
 console.log('');

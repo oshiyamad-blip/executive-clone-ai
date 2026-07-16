@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { loadUnprocessedLogs, markProcessed } from '../store/rawLogStore.js';
 import { saveSignal } from '../database/index.js';

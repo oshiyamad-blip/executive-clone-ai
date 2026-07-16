@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../env.js';
 import { collectFromSlack } from './slack.js';
 import { collectFromEmail } from './email.js';
 import { collectFromCalendar } from './calendar.js';

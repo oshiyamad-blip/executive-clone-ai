@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { createInterface } from 'readline/promises';
 import { fetchRecentSignals, fetchRecentStories, saveSignal } from '../database/index.js';
