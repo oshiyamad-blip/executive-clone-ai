@@ -34,7 +34,11 @@ const NOISE_ONLY = new Set([
 ]);
 
 export async function collectFromMessenger(): Promise<RawLog[]> {
-  return processInbox(INBOX_DIR, SUPPORTED_EXT, parseLineExport, 'メッセンジャー');
+  // 既定は非破壊（ファイルを移動しない）。同期フォルダ運用＋全履歴再エクスポートでも、
+  // 下流ストアが「トーク×日付」単位で重複排除するため各データは一度だけ処理される。
+  // ローカルの使い捨てフォルダで退避したい場合は MESSENGER_ARCHIVE=true。
+  const archive = process.env.MESSENGER_ARCHIVE === 'true';
+  return processInbox(INBOX_DIR, SUPPORTED_EXT, parseLineExport, 'メッセンジャー', { archive });
 }
 
 interface DayBucket {
