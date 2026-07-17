@@ -178,12 +178,19 @@ export interface NegotiationProposal {
   resultingGrossMarginJpy: number; // 交渉成立時の粗利（円/月）
 }
 
+// スキル確度バンド。strong=強マッチ、tentative=許容範囲（参考提案）
+export type MatchBand = 'strong' | 'tentative';
+
+// マッチの表示区分。優先度: review > tentative > negotiable > confirmed
+export type MatchCategory = 'confirmed' | 'negotiable' | 'tentative' | 'review';
+
 // 一次選抜（LLM不使用）を通過した候補ペア
 export interface MatchPair {
   project: Project;
   engineer: Engineer;
   grossMarginJpy: number; // 現状の粗利額（円/月。交渉前）
-  skillMatchRate: number; // 必須スキル一致率 0〜1
+  skillMatchRate: number; // 必須スキル一致率 0〜1（同義辞書考慮後）
+  band: MatchBand; // 強マッチ / 参考（許容範囲）
   locationOk: boolean;
   timingOk: boolean;
   needsReview: boolean; // 単金・勤務地不明などの「要確認」枠
@@ -208,6 +215,8 @@ export interface MatchResult {
   score: number; // 適合スコア 0〜100
   reason: string; // 判定根拠文
   needsReview: boolean;
+  band: MatchBand; // スキル確度バンド
+  category: MatchCategory; // 表示区分（成立候補/交渉提案/参考提案/要確認）
   negotiation?: NegotiationProposal; // 交渉で成立見込みの提案（あれば「交渉提案」枠）
   draftToProject?: DraftRef;
   draftToEngineer?: DraftRef;
@@ -272,6 +281,8 @@ export interface ReviewMatch {
   score: number;
   reason: string;
   needsReview: boolean;
+  band: MatchBand;
+  category: MatchCategory;
   negotiation?: NegotiationProposal; // 交渉提案（あれば「交渉提案」枠として表示）
   status: MatchStatus;
   draftToProjectUrl: string | null;
@@ -279,6 +290,8 @@ export interface ReviewMatch {
   draftToProjectText: string | null; // demoは下書き本文をインライン、本番は null（URLリンク）
   draftToEngineerText: string | null;
   notionPageId?: string; // あればステータス更新をNotionへ反映
+  lastActionBy?: string; // 直近にステータスを変更した人（複数人運用の記録）
+  lastActionAt?: string; // その日時 ISO
 }
 
 // 自社社員と案件のマッチ（金額条件は「案件単価 ≥ 必要案件単価」）
@@ -300,4 +313,39 @@ export interface OwnMatch {
   reason: string; // 提示理由
   agentEmail: string; // 案件の営業元（打診先）
   detectedAt: Date;
+}
+
+// ===== 人間フィードバックによる精度向上 =====
+
+// マッチ評価（妥当/ズレ）。複数人運用のため評価者名を持つ。共有の正はNotion。
+export type FeedbackVerdict = 'good' | 'bad';
+export interface MatchFeedback {
+  matchId: string;
+  matchTitle: string;
+  verdict: FeedbackVerdict; // 妥当(good)/ズレ(bad)
+  note: string; // 自由記述（例: PHPとLaravelは実質同じ、経験浅すぎ 等）
+  reviewer: string; // 評価者名
+  band?: MatchBand; // 評価時点のバンド（バンド別成約率の集計用）
+  at: string; // ISO日時
+}
+
+// スキル同義・類似辞書のエントリ。人のフィードバックで育てる（a と b を相互に満たすとみなす）。
+export interface SkillEquivalence {
+  a: string; // 正規化スキル
+  b: string; // 正規化スキル
+  addedBy: string; // 追加者名
+  at: string; // ISO日時
+}
+
+// バンド別の成約率メトリクス
+export interface BandMetrics {
+  band: MatchBand | 'negotiable';
+  total: number; // 検出数
+  introduced: number; // 紹介済
+  closedWon: number; // 成約
+  dropped: number; // 見送り
+  good: number; // 妥当評価
+  bad: number; // ズレ評価
+  winRate: number | null; // 成約率 = closedWon / (closedWon + dropped)
+  goodRate: number | null; // 妥当率 = good / (good + bad)
 }

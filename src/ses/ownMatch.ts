@@ -8,6 +8,7 @@ import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { skillMatchRate } from './pricing.js';
 import { isAdjacentOrSame } from './prefecture.js';
+import { loadSkillEquivalences } from './skillEquiv.js';
 import { writeReviewOwnMatches } from './review.js';
 import { loadFixtureOwnEngineers } from './fixtures/ownEngineers.js';
 import { fetchOwnEngineers, fetchOpenProjects } from '../database/index.js';
@@ -148,6 +149,7 @@ export async function runOwnMatch(): Promise<OwnMatch[]> {
   console.log('=== 自社社員→案件探し 開始 ===');
   console.log(`モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'}`);
 
+  await loadSkillEquivalences(); // 育てた同義辞書をスキル判定に反映
   const [own, projects] = await Promise.all([loadOwnEngineers(), loadProjects()]);
   console.log(`自社社員: ${own.length}名 / 募集中案件: ${projects.length}件`);
 

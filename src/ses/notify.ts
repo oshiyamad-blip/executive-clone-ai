@@ -52,18 +52,21 @@ async function persistMatches(
 }
 
 function buildSummary(matches: MatchResult[]): string {
-  const confirmed = matches.filter((m) => !m.needsReview && !m.negotiation);
-  const negotiable = matches.filter((m) => m.negotiation);
-  const needsReview = matches.filter((m) => m.needsReview);
+  const confirmed = matches.filter((m) => m.category === 'confirmed');
+  const tentative = matches.filter((m) => m.category === 'tentative');
+  const negotiable = matches.filter((m) => m.category === 'negotiable');
+  const needsReview = matches.filter((m) => m.category === 'review');
 
   const lines: string[] = [];
   lines.push('=== SESマッチング結果サマリ ===');
   lines.push(`検出日時: ${new Date().toLocaleString('ja-JP')}`);
-  lines.push(`成立候補: ${confirmed.length}件 / 交渉提案: ${negotiable.length}件 / 要確認: ${needsReview.length}件`);
+  lines.push(
+    `成立候補: ${confirmed.length}件 / 交渉提案: ${negotiable.length}件 / 参考提案: ${tentative.length}件 / 要確認: ${needsReview.length}件`,
+  );
   lines.push('');
 
   if (matches.length === 0) {
-    lines.push('今回のバッチで粗利条件を満たす・交渉で成立見込みのペアは検出されませんでした。');
+    lines.push('今回のバッチで成立・交渉・参考のいずれの候補も検出されませんでした。');
   } else {
     if (confirmed.length > 0) {
       lines.push('【成立候補】');
@@ -72,6 +75,14 @@ function buildSummary(matches: MatchResult[]): string {
         lines.push(`  根拠: ${m.reason}`);
         if (m.draftToProject) lines.push(`  案件側下書き: ${m.draftToProject.url}`);
         if (m.draftToEngineer) lines.push(`  要員側下書き: ${m.draftToEngineer.url}`);
+      }
+      lines.push('');
+    }
+    if (tentative.length > 0) {
+      lines.push('【参考提案（スキルは許容範囲内・人によるご確認を推奨）】');
+      for (const m of tentative) {
+        lines.push(`・${m.title} — 適合スコア${m.score}点`);
+        lines.push(`  根拠: ${m.reason}`);
       }
       lines.push('');
     }

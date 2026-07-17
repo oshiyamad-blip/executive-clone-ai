@@ -3,6 +3,8 @@
 import { generateJson } from '../llm/index.js';
 import { skillMatchRate } from './pricing.js';
 import { isAdjacentOrSame } from './prefecture.js';
+import { loadSkillEquivalences } from './skillEquiv.js';
+import { buildFeedbackFewShot } from './feedback.js';
 import {
   isDemo,
   maxCandidatesPerItem,
@@ -10,11 +12,20 @@ import {
   matchTimingGraceDays,
   minGrossMarginJpy,
   skillMatchThreshold,
+  skillMatchStrongThreshold,
   enableNegotiation,
   maxNegotiationRaiseMan,
   maxNegotiationCutMan,
 } from './config.js';
-import type { Project, Engineer, MatchPair, MatchResult, NegotiationProposal } from '../types/index.js';
+import type {
+  Project,
+  Engineer,
+  MatchPair,
+  MatchResult,
+  NegotiationProposal,
+  MatchBand,
+  MatchCategory,
+} from '../types/index.js';
 
 // 一次選抜のみ（LLM不使用・純関数。demo/本番共通で使う）
 export function primarySelect(projects: Project[], engineers: Engineer[]): MatchPair[] {
@@ -36,9 +47,11 @@ export function primarySelect(projects: Project[], engineers: Engineer[]): Match
 }
 
 function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
-  // 3. スキル一致（必須スキルの被覆率）。閾値未満は候補から除外
+  // 3. スキル一致（必須スキルの被覆率・同義辞書考慮）。許容範囲の下限未満は除外。
+  // 下限〜強マッチ閾値未満は「参考提案(tentative)」バンド、強マッチ閾値以上は「強マッチ(strong)」。
   const matchRate = skillMatchRate(project.requiredSkills, engineer.skills);
   if (matchRate < skillMatchThreshold()) return null;
+  const band: MatchBand = matchRate >= skillMatchStrongThreshold() ? 'strong' : 'tentative';
 
   // 4. 勤務地。フルリモート可 または 都道府県が同一/隣接ならOK。両方不明なら判定不能として通過(要確認)
   const bothPrefectureUnknown = project.prefecture === null && engineer.prefecture === null;
@@ -70,11 +83,20 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
     engineer,
     grossMarginJpy,
     skillMatchRate: matchRate,
+    band,
     locationOk: locationOk || bothPrefectureUnknown,
     timingOk,
     needsReview,
     negotiation,
   };
+}
+
+// 表示区分を決める。優先度: 要確認 > 参考提案(tentative) > 交渉提案 > 成立候補
+function categoryOf(pair: MatchPair): MatchCategory {
+  if (pair.needsReview) return 'review';
+  if (pair.band === 'tentative') return 'tentative';
+  if (pair.negotiation) return 'negotiable';
+  return 'confirmed';
 }
 
 // 現状粗利が下限未満のペアについて、案件単金の値上げと要員単金の値下げで下限に届く提案を作る。
@@ -123,7 +145,11 @@ function isTimingWithinGrace(startDateIso: string, availableFromIso: string): bo
 
 // 一次選抜 → 通過ペアのみ最終判定（本番=Sonnet / demo・要確認枠=ヒューリスティック）
 export async function matchAll(projects: Project[], engineers: Engineer[]): Promise<MatchResult[]> {
+  await loadSkillEquivalences(); // 育てた同義辞書を読み込んでからスキル判定に入る
   const pairs = primarySelect(projects, engineers);
+
+  // 本番の最終判定に、過去の人間フィードバックをfew-shotとして渡す（御社の許容感覚を学習）
+  const fewShot = isDemo() ? '' : await buildFeedbackFewShot();
 
   const results: MatchResult[] = [];
   for (const pair of pairs) {
@@ -134,7 +160,7 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
       continue;
     }
     try {
-      results.push(await judgeWithLlm(pair));
+      results.push(await judgeWithLlm(pair, fewShot));
     } catch (err) {
       console.error(`SESマッチ: 最終判定に失敗 (${pair.project.title} × ${pair.engineer.displayName}): ${String(err)}`);
       results.push(buildHeuristicResult(pair)); // 判定失敗時はヒューリスティックにフォールバック
@@ -156,6 +182,8 @@ function buildHeuristicResult(pair: MatchPair): MatchResult {
       `案件単金を+${n.projectRaiseMan}万円（→${n.targetProjectRateMan}万円）・` +
       `要員単金を−${n.engineerCutMan}万円（→${n.targetEngineerRateMan}万円）で交渉すれば` +
       `粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月を確保できます（スキル一致率${pct}%）。`;
+  } else if (pair.band === 'tentative') {
+    reason = `スキル一致率${pct}%（許容範囲内の参考提案・人によるご確認をおすすめします）・勤務地${pair.locationOk ? '適合' : '要確認'}・時期${pair.timingOk ? '適合' : '要確認'}。`;
   } else {
     reason = `スキル一致率${pct}%・勤務地${pair.locationOk ? '適合' : '要確認'}・時期${pair.timingOk ? '適合' : '要確認'}に基づく機械判定です。`;
   }
@@ -172,6 +200,8 @@ function buildMatchResult(pair: MatchPair, score: number, reason: string): Match
     score,
     reason,
     needsReview: pair.needsReview,
+    band: pair.band,
+    category: categoryOf(pair),
     negotiation: pair.negotiation,
     status: 'unconfirmed',
     detectedAt: new Date(),
@@ -192,9 +222,10 @@ const MATCH_SCHEMA = {
   required: ['score', 'reason'],
 } as const;
 
-async function judgeWithLlm(pair: MatchPair): Promise<MatchResult> {
+async function judgeWithLlm(pair: MatchPair, fewShot: string): Promise<MatchResult> {
+  const system = fewShot ? `${MATCH_SYSTEM}\n\n${fewShot}` : MATCH_SYSTEM;
   const parsed = await generateJson<{ score: number; reason: string }>(
-    MATCH_SYSTEM,
+    system,
     buildMatchPrompt(pair),
     MATCH_SCHEMA,
     { model: matchModel(), maxTokens: 1024 },

@@ -18,9 +18,14 @@ export function maxCandidatesPerItem(): number {
   return Number(process.env.MAX_CANDIDATES_PER_ITEM ?? '5');
 }
 
-// 必須スキル一致率の下限（0〜1）
+// 必須スキル一致率の下限（0〜1）。これ未満は除外（＝許容範囲の下端）
 export function skillMatchThreshold(): number {
   return Number(process.env.SKILL_MATCH_THRESHOLD ?? '0.6');
+}
+
+// 「強マッチ」の下限（0〜1）。この値以上は成立候補、下限〜この値未満は「参考提案」バンド
+export function skillMatchStrongThreshold(): number {
+  return Number(process.env.SKILL_MATCH_STRONG_THRESHOLD ?? '0.8');
 }
 
 // 時給→月額換算の稼働時間
@@ -85,6 +90,16 @@ export function notionOwnEngineerDbId(): string {
   return process.env.NOTION_OWN_ENGINEER_DB_ID ?? '';
 }
 
+// マッチ評価（フィードバック）ログDB。複数人の「妥当/ズレ」評価を共有の正として蓄積
+export function notionFeedbackDbId(): string {
+  return process.env.NOTION_FEEDBACK_DB_ID ?? '';
+}
+
+// スキル同義・類似辞書DB。人のフィードバックで育てる共有辞書
+export function notionSkillEquivDbId(): string {
+  return process.env.NOTION_SKILL_EQUIV_DB_ID ?? '';
+}
+
 // マッチ確認UIが読み書きするレビュー用ローカルJSONの置き場（demo/本番共通）。
 // バッチ/自社社員探しがここへ成果を書き出し、Web UIがこれを読んでステータス更新する。
 export function reviewDataDir(): string {
@@ -94,6 +109,12 @@ export function reviewDataDir(): string {
 // マッチ確認UIの待受ポート（既存の web(8787) と衝突しないよう既定8788）
 export function sesWebPort(): number {
   return Number(process.env.SES_WEB_PORT ?? '8788');
+}
+
+// マッチ確認UIの待受ホスト。複数人でLAN共有する場合は 0.0.0.0 等を設定（要 WEB_ACCESS_TOKEN）。
+// 既定は安全側でローカルのみ。
+export function sesWebHost(): string {
+  return process.env.SES_WEB_HOST ?? process.env.WEB_HOST ?? '127.0.0.1';
 }
 
 // trueでBatch API（50%割引）を使用。Phase3で参照（現状は未使用の予約設定）

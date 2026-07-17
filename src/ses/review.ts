@@ -59,6 +59,8 @@ export function writeReviewMatches(matches: MatchResult[]): void {
     score: m.score,
     reason: m.reason,
     needsReview: m.needsReview,
+    band: m.band,
+    category: m.category,
     negotiation: m.negotiation,
     status: m.status,
     draftToProjectUrl: m.draftToProject?.url ?? null,
@@ -83,11 +85,18 @@ export function readReviewOwnMatches(): OwnMatch[] {
 }
 
 // UIからのステータス更新。レビュー領域を更新し、notionPageIdがあればNotionへも反映(best-effort)。
-export async function setMatchStatus(id: string, status: MatchStatus): Promise<ReviewMatch | null> {
+// 複数人運用のため、変更者(reviewer)を記録する。
+export async function setMatchStatus(
+  id: string,
+  status: MatchStatus,
+  reviewer = '',
+): Promise<ReviewMatch | null> {
   const matches = readReviewMatches();
   const target = matches.find((m) => m.id === id);
   if (!target) return null;
   target.status = status;
+  target.lastActionBy = reviewer || '(不明)';
+  target.lastActionAt = new Date().toISOString();
   writeReviewMatches2(matches);
   if (target.notionPageId) {
     try {

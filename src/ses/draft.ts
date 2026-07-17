@@ -28,8 +28,9 @@ export async function createDrafts(
     [];
 
   for (const match of matches) {
-    // 要確認枠は単金・勤務地等の情報が不足しており下書き対象外（人が内容を補ってから紹介する）
-    if (match.needsReview) {
+    // 要確認枠(情報不足)・参考提案枠(スキルが許容範囲)は自動下書き対象外。
+    // 人が内容を確認・確定してから紹介する（誤提案を防ぐ）。
+    if (match.needsReview || match.category === 'tentative') {
       results.push(match);
       continue;
     }

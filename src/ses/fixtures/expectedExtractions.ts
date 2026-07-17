@@ -189,5 +189,61 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
     },
   ],
 
+  // P3: React/Next.js/TypeScript案件。E4(React/TypeScript)と組み合わさり「参考提案」になる
+  // （スキル2/3=67%）。React≈Next.js を同義登録すると3/3=100%となり「成立候補」に昇格する。
+  sesmail_demo_p3: [
+    {
+      kind: 'project',
+      project: {
+        id: 'proj_demo_p3',
+        title: 'SaaS管理画面フロントエンド刷新案件',
+        requiredSkills: ['React', 'Next.js', 'TypeScript'],
+        preferredSkills: ['AWS'],
+        rateMin: 70,
+        rateMax: 85,
+        location: '東京都千代田区',
+        prefecture: '東京都',
+        remote: 'partial',
+        startPeriod: '即日',
+        startDate: '2026-07-16',
+        duration: '長期',
+        businessFlow: '元請直請け。面談1回',
+        agentCompany: '株式会社シータワークス',
+        agentContact: '伊藤六郎',
+        agentEmail: 'ito@thetaworks.example.jp',
+        sourceMailId: 'sesmail_demo_p3',
+        receivedAt: new Date('2026-07-16T15:00:00+09:00'),
+        status: 'open',
+      },
+    },
+  ],
+
+  sesmail_demo_e4: [
+    {
+      kind: 'engineer',
+      engineer: {
+        id: 'eng_demo_e4',
+        displayName: 'R.T.',
+        age: 30,
+        skills: ['React', 'TypeScript'],
+        experienceYears: 5,
+        desiredRate: 65,
+        residence: '東京都品川区',
+        prefecture: '東京都',
+        nearestStation: '大井町駅',
+        availableDate: '即日',
+        availableFrom: '2026-07-16',
+        utilization: '週5',
+        remoteWish: 'partial',
+        agentCompany: '株式会社イオタソフト',
+        agentContact: '渡辺七海',
+        agentEmail: 'watanabe@iotasoft.example.jp',
+        sourceMailId: 'sesmail_demo_e4',
+        receivedAt: new Date('2026-07-16T15:30:00+09:00'),
+        status: 'available',
+      },
+    },
+  ],
+
   sesmail_demo_other: [{ kind: 'other' }],
 };

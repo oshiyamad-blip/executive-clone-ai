@@ -179,6 +179,53 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
     sheetLinks: ['https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit'],
   },
 
+  // --- P3: 案件（React/Next.js/TypeScript）。E4と組み合わさり「参考提案」（スキル2/3）になる ---
+  {
+    id: 'sesmail_demo_p3',
+    from: '伊藤六郎 <ito@thetaworks.example.jp>',
+    to: 'ses-inbox@example.com',
+    subject: '【案件情報】React/Next.js フロントエンド刷新',
+    body: `お世話になっております。株式会社シータワークスの伊藤です。
+
+案件名: SaaS管理画面フロントエンド刷新案件
+必須スキル: React, Next.js, TypeScript
+尚可スキル: AWS
+単金: 70万円〜85万円/月
+勤務地: 東京都千代田区
+リモート: 一部リモート可
+開始時期: 即日
+期間: 長期
+商流: 元請直請け。面談1回
+ご担当: 伊藤六郎（ito@thetaworks.example.jp）`,
+    receivedAt: d('2026-07-16T15:00:00+09:00'),
+    attachments: [],
+    sheetLinks: [],
+  },
+
+  // --- E4: 要員（React/TypeScript、Next.js無し）。P3と組み合わさり「参考提案」になる ---
+  {
+    id: 'sesmail_demo_e4',
+    from: '渡辺七海 <watanabe@iotasoft.example.jp>',
+    to: 'ses-inbox@example.com',
+    subject: '【要員情報】フロントエンド R.T. 即日可',
+    body: `お世話になっております。株式会社イオタソフトの渡辺です。
+
+氏名: R.T.
+年齢: 30歳
+スキル: React, TypeScript
+経験年数: 5年
+希望単金: 65万円/月
+居住地: 東京都品川区
+最寄駅: 大井町駅
+稼働開始可能日: 即日
+稼働率: 週5
+リモート希望: 一部リモート可
+ご担当: 渡辺七海（watanabe@iotasoft.example.jp）`,
+    receivedAt: d('2026-07-16T15:30:00+09:00'),
+    attachments: [],
+    sheetLinks: [],
+  },
+
   // --- その他メール: 案件でも要員でもない事務連絡（「破棄」分岐を検証） ---
   {
     id: 'sesmail_demo_other',

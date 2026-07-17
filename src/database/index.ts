@@ -9,6 +9,9 @@ import type {
   MatchStatus,
   RemoteOption,
   OwnEngineer,
+  MatchFeedback,
+  FeedbackVerdict,
+  SkillEquivalence,
 } from '../types/index.js';
 
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
@@ -23,6 +26,8 @@ const PROJECT_DB_ID = process.env.NOTION_PROJECT_DB_ID ?? '';
 const ENGINEER_DB_ID = process.env.NOTION_ENGINEER_DB_ID ?? '';
 const MATCH_DB_ID = process.env.NOTION_MATCH_DB_ID ?? '';
 const OWN_ENGINEER_DB_ID = process.env.NOTION_OWN_ENGINEER_DB_ID ?? '';
+const FEEDBACK_DB_ID = process.env.NOTION_FEEDBACK_DB_ID ?? '';
+const SKILL_EQUIV_DB_ID = process.env.NOTION_SKILL_EQUIV_DB_ID ?? '';
 
 // --- レート制限（平均 3 req/s）+ 429/529 リトライ ---
 // 全 Notion 呼び出しをこのラッパー経由にして最小間隔を空ける。
@@ -459,6 +464,93 @@ export async function updateMatchStatus(notionPageId: string, status: MatchStatu
       properties: { ステータス: { select: { name: matchStatusLabel(status) } } },
     } as never),
   );
+}
+
+// ===== フィードバック（マッチ評価ログ）: 複数人運用の共有の正 =====
+const FB_VERDICT_LABEL: Record<FeedbackVerdict, string> = { good: '妥当', bad: 'ズレ' };
+
+export async function saveMatchFeedback(fb: MatchFeedback): Promise<string> {
+  if (!FEEDBACK_DB_ID) {
+    console.warn('NOTION_FEEDBACK_DB_ID が未設定 — フィードバックの保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
+  const properties: Record<string, unknown> = {
+    マッチ: { title: toRichText(fb.matchTitle) },
+    元マッチID: { rich_text: toRichText(fb.matchId) },
+    評価: { select: { name: FB_VERDICT_LABEL[fb.verdict] } },
+    メモ: { rich_text: toRichText(fb.note) },
+    評価者: { rich_text: toRichText(fb.reviewer) },
+    日時: { date: { start: fb.at } },
+  };
+  if (fb.band) properties['バンド'] = { select: { name: fb.band } };
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
+export async function fetchRecentFeedback(limit = 200): Promise<MatchFeedback[]> {
+  if (!FEEDBACK_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
+  const response = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      sorts: [{ property: '日時', direction: 'descending' }],
+      page_size: limit,
+    }),
+  );
+  return response.results.map((page) => {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    const bandRaw = readSelect(props['バンド']);
+    return {
+      matchId: readRichText(props['元マッチID']),
+      matchTitle: readTitle(props['マッチ']),
+      verdict: readSelect(props['評価']) === 'ズレ' ? 'bad' : 'good',
+      note: readRichText(props['メモ']),
+      reviewer: readRichText(props['評価者']),
+      band: bandRaw === 'strong' || bandRaw === 'tentative' ? bandRaw : undefined,
+      at: readDate(props['日時']) ?? nowIso(),
+    };
+  });
+}
+
+// ===== スキル同義辞書（共有・育てる） =====
+export async function saveSkillEquivalence(e: SkillEquivalence): Promise<string> {
+  if (!SKILL_EQUIV_DB_ID) {
+    console.warn('NOTION_SKILL_EQUIV_DB_ID が未設定 — スキル同義の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
+  return createPageWithBody(
+    {
+      parent: { type: 'data_source_id', data_source_id: dataSourceId },
+      properties: {
+        スキルA: { title: toRichText(e.a) },
+        スキルB: { rich_text: toRichText(e.b) },
+        追加者: { rich_text: toRichText(e.addedBy) },
+        日時: { date: { start: e.at } },
+      },
+    } as never,
+    [],
+  );
+}
+
+export async function fetchSkillEquivalences(limit = 500): Promise<SkillEquivalence[]> {
+  if (!SKILL_EQUIV_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
+  const response = await throttle(() =>
+    notion.dataSources.query({ data_source_id: dataSourceId, page_size: limit }),
+  );
+  return response.results.map((page) => {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    return {
+      a: readTitle(props['スキルA']),
+      b: readRichText(props['スキルB']),
+      addedBy: readRichText(props['追加者']),
+      at: readDate(props['日時']) ?? nowIso(),
+    };
+  });
 }
 
 // 指定した親ページの下に、Markdownを変換した子ページを作成する
