@@ -1,5 +1,6 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createHash, timingSafeEqual } from 'crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import { loadCloneContext, askClone, feedbackChatLog, type CloneContext } from '../clone/engine.js';
 
@@ -35,10 +36,17 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+// 定数時間比較（トークンのタイミング攻撃対策）。長さ差を隠すため両者をハッシュ化して比較。
+function safeEqual(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
 function authorized(req: IncomingMessage): boolean {
   if (!ACCESS_TOKEN) return true; // 未設定なら認証なし（ローカル利用前提）
   const header = req.headers['authorization'] ?? '';
-  return header === `Bearer ${ACCESS_TOKEN}`;
+  return safeEqual(header, `Bearer ${ACCESS_TOKEN}`);
 }
 
 // コンテキストは日次バッチで増えるため、TTLで再読込して陳腐化を防ぐ。
