@@ -61,9 +61,9 @@
 
 | 時期 | 作業 | コマンド |
 |---|---|---|
-| 毎月5日 7:00 | 検収バッチが自動実行される（cron） | `run-monthly.sh`（`billing:inspect` → `billing:status`） |
-| 5日 | 実行結果ログ・ダッシュボードを確認 | `npm run billing:status` |
-| 5〜7日 | 「差異あり」「要確認」「未着」を解消 | Notion確認 / 委託先への催促 |
+| 毎月1日 7:00 | 検収バッチが自動実行される（cron） | `run-monthly.sh`（`billing:inspect` → `billing:status` → `match` → `billing:report`） |
+| 1日 | 実行結果ログ・ダッシュボードを確認 | `npm run billing:status` |
+| 1〜7日 | 「差異あり」「要確認」「未着」を解消。月初に届いていなかった請求書・勤表が届いたら再実行（処理済みはスキップされるので何度でも安全） | Notion確認 / 委託先への催促 / `npm run billing:inspect` |
 | 10日目安 | 検収OKが揃ったら請求書を作成 | `npm run billing:issue` |
 | 10〜12日 | Notionで請求書PDFを確認し承認 → 下書き作成 | Notion操作 → `npm run billing:drafts` |
 | 承認後すぐ | Gmail下書きを確認して送信 → ステータス更新 | Gmail操作 → Notion操作（送付済に変更） |
