@@ -2,7 +2,7 @@ import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { fetchRecentSignals, fetchRecentStories, saveSignal } from '../database/index.js';
 import { EXECUTIVE_PROFILE } from '../data/executiveProfile.js';
-import { DEMO_PROFILE, DEMO_SIGNALS, DEMO_STORIES } from '../demo/sampleData.js';
+import { getPersona } from '../demo/personas.js';
 import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 
 // DEMO_MODE=true のとき Notion 不要のサンプルデータで動く（デモ用）
@@ -46,7 +46,8 @@ function notionUrl(pageId?: string): string | undefined {
 // 除外分を見込んで多めに取得してからフィルタする。
 export async function fetchCloneData(): Promise<CloneData> {
   if (DEMO_MODE) {
-    return { profile: DEMO_PROFILE, signals: DEMO_SIGNALS, stories: DEMO_STORIES };
+    const p = getPersona(process.env.DEMO_PERSONA ?? 'mikitani');
+    return { profile: p.profile, signals: p.signals, stories: p.stories };
   }
   const [signals, stories] = await Promise.all([fetchRecentSignals(80), fetchRecentStories(10)]);
   return {
