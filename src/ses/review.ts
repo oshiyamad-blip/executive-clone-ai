@@ -59,6 +59,7 @@ export function writeReviewMatches(matches: MatchResult[]): void {
     score: m.score,
     reason: m.reason,
     needsReview: m.needsReview,
+    negotiation: m.negotiation,
     status: m.status,
     draftToProjectUrl: m.draftToProject?.url ?? null,
     draftToEngineerUrl: m.draftToEngineer?.url ?? null,

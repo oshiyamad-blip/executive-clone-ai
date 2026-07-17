@@ -122,6 +122,8 @@ function renderPage(): string {
   .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
   .card.review { border-left: 3px solid #d9a441; }
   .card.ok { border-left: 3px solid #3fb950; }
+  .card.negotiate { border-left: 3px solid #a371f7; }
+  .neg { font-size: 13px; color: #c8a6ff; background: #1c1630; border: 1px solid #3a2f52; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
   .title { font-weight: 600; margin-bottom: 4px; }
   .meta { font-size: 13px; color: #9aa4b2; margin-bottom: 6px; }
   .reason { font-size: 13px; line-height: 1.5; margin-bottom: 8px; }
@@ -130,6 +132,7 @@ function renderPage(): string {
   .b-introduced { background: #1f6feb; color: #fff; }
   .b-closed_won { background: #238636; color: #fff; }
   .b-dropped { background: #6e2f2f; color: #fff; }
+  .b-negotiate { background: #8957e5; color: #fff; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
   .actions button { background: #0f1115; color: #c9d1d9; border: 1px solid #2a2f3a; border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
   .actions button:hover { border-color: #2f6feb; }
@@ -178,14 +181,21 @@ function renderPage(): string {
     var root = document.getElementById('matches');
     if (!matches.length) { root.innerHTML = '<p class="empty">マッチはまだありません。</p>'; return; }
     root.innerHTML = matches.map(function(m){
-      var cls = m.needsReview ? 'review' : 'ok';
+      var cls = m.needsReview ? 'review' : (m.negotiation ? 'negotiate' : 'ok');
       var man = (m.grossMarginJpy/10000).toFixed(1);
+      var badge = m.negotiation ? '<span class="badge b-negotiate">交渉提案</span>' : '';
+      var negBanner = '';
+      if (m.negotiation) {
+        var n = m.negotiation;
+        negBanner = '<div class="neg">交渉案: 案件単金 +' + n.projectRaiseMan + '万円（→' + n.targetProjectRateMan + '万円/月） ／ 要員単金 −' + n.engineerCutMan + '万円（→' + n.targetEngineerRateMan + '万円/月）　⇒ 粗利 ' + (n.resultingGrossMarginJpy/10000).toFixed(1) + '万円/月</div>';
+      }
       var acts = ['unconfirmed','introduced','closed_won','dropped'].map(function(s){
         return '<button data-id="' + esc(m.id) + '" data-status="' + s + '">' + STATUS_LABEL[s] + 'にする</button>';
       }).join('');
       return '<div class="card ' + cls + '">' +
-        '<div class="title">' + esc(m.title) + statusBadge(m.status) + '</div>' +
-        '<div class="meta">粗利 ' + man + '万円/月 ・ 適合スコア ' + esc(m.score) + '点' + (m.needsReview?' ・ 要確認':'') + '</div>' +
+        '<div class="title">' + esc(m.title) + badge + statusBadge(m.status) + '</div>' +
+        '<div class="meta">現状粗利 ' + man + '万円/月 ・ 適合スコア ' + esc(m.score) + '点' + (m.needsReview?' ・ 要確認':'') + '</div>' +
+        negBanner +
         '<div class="reason">' + esc(m.reason) + '</div>' +
         draftBlock('案件側', m.draftToProjectText, m.draftToProjectUrl) +
         draftBlock('要員側', m.draftToEngineerText, m.draftToEngineerUrl) +

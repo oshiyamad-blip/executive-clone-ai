@@ -33,6 +33,21 @@ export function matchTimingGraceDays(): number {
   return Number(process.env.MATCH_TIMING_GRACE_DAYS ?? '30');
 }
 
+// 交渉提案（粗利が下限に届かないペアを、両者の単金交渉で成立させる提案）を有効にするか
+export function enableNegotiation(): boolean {
+  return (process.env.ENABLE_NEGOTIATION ?? 'true') !== 'false';
+}
+
+// 交渉で「案件単金を上げてもらう」上限（万円/月）
+export function maxNegotiationRaiseMan(): number {
+  return Number(process.env.NEGOTIATION_MAX_PROJECT_RAISE_MAN ?? '5');
+}
+
+// 交渉で「要員単金を下げてもらう」上限（万円/月）
+export function maxNegotiationCutMan(): number {
+  return Number(process.env.NEGOTIATION_MAX_ENGINEER_CUT_MAN ?? '5');
+}
+
 // 収集対象（Xserverからの転送先）Gmailアドレス
 export function sesTargetGmail(): string {
   return process.env.SES_TARGET_GMAIL ?? '';

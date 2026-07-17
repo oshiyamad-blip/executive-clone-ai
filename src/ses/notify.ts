@@ -52,17 +52,18 @@ async function persistMatches(
 }
 
 function buildSummary(matches: MatchResult[]): string {
-  const confirmed = matches.filter((m) => !m.needsReview);
+  const confirmed = matches.filter((m) => !m.needsReview && !m.negotiation);
+  const negotiable = matches.filter((m) => m.negotiation);
   const needsReview = matches.filter((m) => m.needsReview);
 
   const lines: string[] = [];
   lines.push('=== SESマッチング結果サマリ ===');
   lines.push(`検出日時: ${new Date().toLocaleString('ja-JP')}`);
-  lines.push(`成立候補: ${confirmed.length}件 / 要確認: ${needsReview.length}件`);
+  lines.push(`成立候補: ${confirmed.length}件 / 交渉提案: ${negotiable.length}件 / 要確認: ${needsReview.length}件`);
   lines.push('');
 
   if (matches.length === 0) {
-    lines.push('今回のバッチで粗利条件を満たすペアは検出されませんでした。');
+    lines.push('今回のバッチで粗利条件を満たす・交渉で成立見込みのペアは検出されませんでした。');
   } else {
     if (confirmed.length > 0) {
       lines.push('【成立候補】');
@@ -71,6 +72,19 @@ function buildSummary(matches: MatchResult[]): string {
         lines.push(`  根拠: ${m.reason}`);
         if (m.draftToProject) lines.push(`  案件側下書き: ${m.draftToProject.url}`);
         if (m.draftToEngineer) lines.push(`  要員側下書き: ${m.draftToEngineer.url}`);
+      }
+      lines.push('');
+    }
+    if (negotiable.length > 0) {
+      lines.push('【交渉提案（単金を両者で調整すれば成立見込み）】');
+      for (const m of negotiable) {
+        const n = m.negotiation!;
+        lines.push(
+          `・${m.title} — 案件+${n.projectRaiseMan}万円／要員−${n.engineerCutMan}万円で粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月, 適合スコア${m.score}点`,
+        );
+        lines.push(`  根拠: ${m.reason}`);
+        if (m.draftToProject) lines.push(`  案件側下書き（交渉前提）: ${m.draftToProject.url}`);
+        if (m.draftToEngineer) lines.push(`  要員側下書き（交渉前提）: ${m.draftToEngineer.url}`);
       }
       lines.push('');
     }

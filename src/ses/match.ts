@@ -10,8 +10,11 @@ import {
   matchTimingGraceDays,
   minGrossMarginJpy,
   skillMatchThreshold,
+  enableNegotiation,
+  maxNegotiationRaiseMan,
+  maxNegotiationCutMan,
 } from './config.js';
-import type { Project, Engineer, MatchPair, MatchResult } from '../types/index.js';
+import type { Project, Engineer, MatchPair, MatchResult, NegotiationProposal } from '../types/index.js';
 
 // 一次選抜のみ（LLM不使用・純関数。demo/本番共通で使う）
 export function primarySelect(projects: Project[], engineers: Engineer[]): MatchPair[] {
@@ -50,7 +53,15 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
   // 2. 粗利条件。どちらかの単金が不明なら判定不能→要確認枠として通過候補に含める
   const rateUnknown = project.rateMax === null || engineer.desiredRate === null;
   const grossMarginJpy = rateUnknown ? 0 : Math.round((project.rateMax! - engineer.desiredRate!) * 10000);
-  if (!rateUnknown && grossMarginJpy < minGrossMarginJpy()) return null;
+
+  // 粗利が下限未満でも、両者の単金交渉で下限に届く見込みがあれば「交渉提案」として拾い上げる。
+  // 交渉幅（案件の値上げ上限＋要員の値下げ上限）を超えて届かない場合のみ除外する。
+  let negotiation: NegotiationProposal | undefined;
+  if (!rateUnknown && grossMarginJpy < minGrossMarginJpy()) {
+    const proposal = buildNegotiation(project.rateMax!, engineer.desiredRate!, minGrossMarginJpy());
+    if (!proposal) return null; // 交渉幅を超える＝除外
+    negotiation = proposal;
+  }
 
   const needsReview = rateUnknown || bothPrefectureUnknown;
 
@@ -62,6 +73,43 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
     locationOk: locationOk || bothPrefectureUnknown,
     timingOk,
     needsReview,
+    negotiation,
+  };
+}
+
+// 現状粗利が下限未満のペアについて、案件単金の値上げと要員単金の値下げで下限に届く提案を作る。
+// 不足分をできるだけ両者で折半し、各交渉上限で頭打ちにする。交渉幅を超える場合は null（＝除外）。
+function buildNegotiation(
+  projectRateMan: number,
+  engineerRateMan: number,
+  minMarginJpy: number,
+): NegotiationProposal | null {
+  if (!enableNegotiation()) return null;
+  const currentMarginJpy = Math.round((projectRateMan - engineerRateMan) * 10000);
+  const shortfallJpy = minMarginJpy - currentMarginJpy;
+  if (shortfallJpy <= 0) return null; // 既に充足（交渉不要）
+
+  const neededMan = shortfallJpy / 10000;
+  const raiseMax = maxNegotiationRaiseMan();
+  const cutMax = maxNegotiationCutMan();
+  if (neededMan > raiseMax + cutMax + 1e-9) return null; // 交渉幅を超える
+
+  const totalMan = Math.ceil(neededMan); // 万円単位に切り上げ（下限を確実に満たす）
+  let raise = Math.min(Math.ceil(totalMan / 2), raiseMax);
+  let cut = totalMan - raise;
+  if (cut > cutMax) {
+    cut = cutMax;
+    raise = totalMan - cut;
+  }
+  const targetProjectRateMan = projectRateMan + raise;
+  const targetEngineerRateMan = engineerRateMan - cut;
+  const resultingGrossMarginJpy = Math.round((targetProjectRateMan - targetEngineerRateMan) * 10000);
+  return {
+    projectRaiseMan: raise,
+    engineerCutMan: cut,
+    targetProjectRateMan,
+    targetEngineerRateMan,
+    resultingGrossMarginJpy,
   };
 }
 
@@ -79,8 +127,9 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
 
   const results: MatchResult[] = [];
   for (const pair of pairs) {
-    // 要確認枠（単金/勤務地不明）はLLM節約のため最終判定に回さない。demoも同様にLLM不使用
-    if (pair.needsReview || isDemo()) {
+    // 要確認枠（単金/勤務地不明）と交渉提案枠はLLM節約のため最終判定に回さない。demoも同様にLLM不使用。
+    // 交渉提案は提案内容（値上げ/値下げ額）が主眼なので、根拠は決定的に生成する。
+    if (pair.needsReview || pair.negotiation || isDemo()) {
       results.push(buildHeuristicResult(pair));
       continue;
     }
@@ -96,9 +145,20 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
 
 function buildHeuristicResult(pair: MatchPair): MatchResult {
   const score = Math.round(pair.skillMatchRate * 70 + (pair.locationOk ? 20 : 0) + (pair.timingOk ? 10 : 0));
-  const reason = pair.needsReview
-    ? `単金または勤務地情報が不足しているため要確認です（スキル一致率${Math.round(pair.skillMatchRate * 100)}%）。`
-    : `スキル一致率${Math.round(pair.skillMatchRate * 100)}%・勤務地${pair.locationOk ? '適合' : '要確認'}・時期${pair.timingOk ? '適合' : '要確認'}に基づく機械判定です。`;
+  const pct = Math.round(pair.skillMatchRate * 100);
+  let reason: string;
+  if (pair.needsReview) {
+    reason = `単金または勤務地情報が不足しているため要確認です（スキル一致率${pct}%）。`;
+  } else if (pair.negotiation) {
+    const n = pair.negotiation;
+    reason =
+      `現状の粗利は${(pair.grossMarginJpy / 10000).toFixed(1)}万円ですが、` +
+      `案件単金を+${n.projectRaiseMan}万円（→${n.targetProjectRateMan}万円）・` +
+      `要員単金を−${n.engineerCutMan}万円（→${n.targetEngineerRateMan}万円）で交渉すれば` +
+      `粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月を確保できます（スキル一致率${pct}%）。`;
+  } else {
+    reason = `スキル一致率${pct}%・勤務地${pair.locationOk ? '適合' : '要確認'}・時期${pair.timingOk ? '適合' : '要確認'}に基づく機械判定です。`;
+  }
   return buildMatchResult(pair, score, reason);
 }
 
@@ -112,6 +172,7 @@ function buildMatchResult(pair: MatchPair, score: number, reason: string): Match
     score,
     reason,
     needsReview: pair.needsReview,
+    negotiation: pair.negotiation,
     status: 'unconfirmed',
     detectedAt: new Date(),
   };

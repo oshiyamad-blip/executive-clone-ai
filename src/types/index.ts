@@ -168,15 +168,26 @@ export interface Engineer {
   notionPageId?: string;
 }
 
+// 交渉提案。粗利が下限に届かないペアを、案件単金の値上げ交渉と要員単金の値下げ交渉で
+// 成立させるための提案（例: 同単金のペアを 案件+5万・要員−5万 で粗利10万円にする）。
+export interface NegotiationProposal {
+  projectRaiseMan: number; // 案件単金を上げてもらう交渉額（万円/月）
+  engineerCutMan: number; // 要員単金を下げてもらう交渉額（万円/月）
+  targetProjectRateMan: number; // 交渉後の案件単金（万円/月）
+  targetEngineerRateMan: number; // 交渉後の要員単金（万円/月）
+  resultingGrossMarginJpy: number; // 交渉成立時の粗利（円/月）
+}
+
 // 一次選抜（LLM不使用）を通過した候補ペア
 export interface MatchPair {
   project: Project;
   engineer: Engineer;
-  grossMarginJpy: number; // 粗利額（円/月）
+  grossMarginJpy: number; // 現状の粗利額（円/月。交渉前）
   skillMatchRate: number; // 必須スキル一致率 0〜1
   locationOk: boolean;
   timingOk: boolean;
   needsReview: boolean; // 単金・勤務地不明などの「要確認」枠
+  negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
 }
 
 // 紹介メール下書き参照
@@ -197,6 +208,7 @@ export interface MatchResult {
   score: number; // 適合スコア 0〜100
   reason: string; // 判定根拠文
   needsReview: boolean;
+  negotiation?: NegotiationProposal; // 交渉で成立見込みの提案（あれば「交渉提案」枠）
   draftToProject?: DraftRef;
   draftToEngineer?: DraftRef;
   status: MatchStatus;
@@ -260,6 +272,7 @@ export interface ReviewMatch {
   score: number;
   reason: string;
   needsReview: boolean;
+  negotiation?: NegotiationProposal; // 交渉提案（あれば「交渉提案」枠として表示）
   status: MatchStatus;
   draftToProjectUrl: string | null;
   draftToEngineerUrl: string | null;

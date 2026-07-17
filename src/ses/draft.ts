@@ -104,9 +104,29 @@ function buildTemplateToProject(project: Project, engineer: Engineer, match: Mat
 
 ■マッチ判定
 適合スコア: ${match.score}点
-判定根拠: ${match.reason}
+判定根拠: ${match.reason}${negotiationNoteToProject(match)}
 
 ご検討のほど、よろしくお願いいたします。`;
+}
+
+// 交渉提案がある場合、案件側（案件を出している営業）宛に「単金を上げるご相談」を添える
+function negotiationNoteToProject(match: MatchResult): string {
+  const n = match.negotiation;
+  if (!n) return '';
+  return `
+
+■単金のご相談
+本案件、現行のご提示より+${n.projectRaiseMan}万円（→${n.targetProjectRateMan}万円/月）でご調整いただけますと、双方の採算が合い、ご成約に進めやすくなります。ぜひご相談させてください。`;
+}
+
+// 交渉提案がある場合、要員側（要員を抱える営業）宛に「単金を下げるご相談」を添える
+function negotiationNoteToEngineer(match: MatchResult): string {
+  const n = match.negotiation;
+  if (!n) return '';
+  return `
+
+■単金のご相談
+ご登録単金より−${n.engineerCutMan}万円（→${n.targetEngineerRateMan}万円/月）でご調整いただけますと、本案件でのご提案が可能です。ぜひご相談させてください。`;
 }
 
 function buildTemplateToEngineer(project: Project, engineer: Engineer, match: MatchResult): string {
@@ -126,7 +146,7 @@ function buildTemplateToEngineer(project: Project, engineer: Engineer, match: Ma
 
 ■マッチ判定
 適合スコア: ${match.score}点
-判定根拠: ${match.reason}
+判定根拠: ${match.reason}${negotiationNoteToEngineer(match)}
 
 ご検討のほど、よろしくお願いいたします。`;
 }
@@ -223,11 +243,22 @@ function buildDraftPrompt(
 
 【マッチ判定】
 適合スコア: ${match.score}点
-判定根拠: ${match.reason}`;
+判定根拠: ${match.reason}${buildNegotiationContext(target, match)}`;
 
   return target === 'project'
     ? `${context}\n\n上記の案件を出している営業担当（${project.agentContact}様）宛に、上記の要員をご提案する紹介メールの本文を作成してください。`
     : `${context}\n\n上記の要員を抱える営業担当（${engineer.agentContact}様）宛に、上記の案件をご紹介する紹介メールの本文を作成してください。`;
+}
+
+// 交渉提案がある場合、生成AIに単金交渉を織り込んでもらうための文脈を付す
+function buildNegotiationContext(target: 'project' | 'engineer', match: MatchResult): string {
+  const n = match.negotiation;
+  if (!n) return '';
+  const ask =
+    target === 'project'
+      ? `案件側には、単金を+${n.projectRaiseMan}万円（→${n.targetProjectRateMan}万円/月）に上げていただけないか、丁寧に相談する一文を含めてください。`
+      : `要員側には、単金を−${n.engineerCutMan}万円（→${n.targetEngineerRateMan}万円/月）に調整いただけないか、丁寧に相談する一文を含めてください。`;
+  return `\n\n【単金交渉の提案】\n現状の粗利は${(match.grossMarginJpy / 10000).toFixed(1)}万円/月で下限に届かないため、案件単金を+${n.projectRaiseMan}万円・要員単金を−${n.engineerCutMan}万円で調整すると粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月になります。${ask}`;
 }
 
 async function createGmailDraft(gmail: gmail_v1.Gmail, to: string, subject: string, body: string): Promise<DraftRef> {
