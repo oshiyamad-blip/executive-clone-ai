@@ -29,6 +29,7 @@ npm run chat      # 対話インターフェース起動
 # 案件・請求管理
 npm run engagements:setup    # 案件系Notion DB（6つ）を一括作成
 npm run engagements:import   # 既存マスタ（CSV等）の取込（--applyで書き込み）
+npm run engagements:contracts # 契約書PDFの取込+アサインDBとの条件突合（--applyで登録）
 npm run engagements          # マスタ一覧+整合性チェック
 npm run billing:inspect      # 検収バッチ（請求書・勤表メールの突合、月次）
 npm run billing:status       # 月次ダッシュボード（未着・未発行・次のアクション）
@@ -67,9 +68,11 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 
 - `src/types/engagements.ts` — 案件管理ドメインの型（Client/Member/Assignment/RateTerms等）。
   要員は業務委託と自社正社員（準委任・派遣）の2種。RateTerms は月額+精算幅と時給×実稼働の2方式
-- `src/engagements/` — Notion 6DB（案件元/要員/案件/アサイン/稼働実績/発行請求書）のCRUD。
+- `src/engagements/` — Notion 7DB（案件元/要員/案件/アサイン/稼働実績/発行請求書/契約書）のCRUD。
   日本語プロパティ名は notionDb.ts に集約（カラム名変更はこのファイルだけ直す）。
-  setup（DB自動作成）/ import（既存CSV等のLLM構造化取込、--applyで書込）/ index（整合性チェック）
+  setup（DB自動作成）/ import（既存CSV等のLLM構造化取込、--applyで書込）/
+  contracts（契約書PDF取込+アサインDBとの条件突合。更新期限は billing:status がアラート）/
+  index（整合性チェック）
 - `src/billing/` — 検収と発行。inspect（Gmail→PDF→Claude抽出→契約突合→稼働実績DB）、
   issue（検収OK×請求側契約で請求書PDF生成→Notionへ承認待ち登録）、
   drafts（Notionで「承認済み」にしたものだけGmail下書き作成）、status（月次ダッシュボード）。

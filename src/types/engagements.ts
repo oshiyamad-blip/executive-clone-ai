@@ -190,3 +190,29 @@ export interface ContractorAvailability {
   nextAvailableDate?: Date;
   availabilityNote: string;
 }
+
+// 契約書の種別。業務委託基本契約書・個別契約書（注文書/発注書含む）・労働者派遣個別契約書
+export type ContractKind = 'basic' | 'individual' | 'dispatch_individual' | 'other';
+
+// PDFから LLM で抽出した契約書データ。アサインDBの現在値との突合原本になる
+export interface ExtractedContract {
+  contractKind: ContractKind;
+  title: string | null; // 契約書の表題
+  partyName: string | null; // 相手方の名称（自社以外）
+  personName: string | null; // 対象要員名（個別契約に記載があれば）
+  projectName: string | null; // 案件・業務内容の名称
+  periodStart: string | null; // YYYY-MM-DD
+  periodEnd: string | null;
+  autoRenewal: boolean; // 自動更新条項の有無
+  monthlyRate: number | null; // 月額単価（税抜・円）
+  lowerHours: number | null;
+  upperHours: number | null;
+  overtimeRate: number | null;
+  deductionRate: number | null;
+  hourlyRate: number | null;
+  paymentTermsNote: string | null; // 支払条件の記載（例: 翌月末払い）
+  notes: string | null; // その他特記事項（再委託禁止等）
+}
+
+// 契約書とアサインDB現在値の突合ステータス
+export type ContractMatchStatus = '一致' | '差異あり' | '照合不可';

@@ -29,6 +29,8 @@ import type {
   IssuedInvoiceDraft,
   IssuedInvoiceStatus,
   InspectionStatus,
+  ContractKind,
+  ContractMatchStatus,
 } from '../types/engagements.js';
 
 // 案件・請求管理の Notion DB 層。
@@ -42,6 +44,7 @@ export const DB_IDS = {
   assignment: process.env.NOTION_ASSIGNMENT_DB_ID ?? '',
   workRecord: process.env.NOTION_WORK_RECORD_DB_ID ?? '',
   issuedInvoice: process.env.NOTION_ISSUED_INVOICE_DB_ID ?? '',
+  contract: process.env.NOTION_CONTRACT_DB_ID ?? '',
 };
 
 // --- select 値 ⇔ コード内 enum の対応表 ---
@@ -545,6 +548,7 @@ export async function attachPdfToPage(
   pageId: string,
   pdf: Buffer,
   filename: string,
+  propertyName = '請求書PDF',
 ): Promise<boolean> {
   const token = process.env.NOTION_TOKEN;
   if (!token) return false;
@@ -568,11 +572,100 @@ export async function attachPdfToPage(
     if (!sent.ok) throw new Error(`file_uploads send: ${sent.status}`);
 
     await updatePageProperties(pageId, {
-      請求書PDF: { files: [{ type: 'file_upload', file_upload: { id: uploadId }, name: filename }] },
+      [propertyName]: { files: [{ type: 'file_upload', file_upload: { id: uploadId }, name: filename }] },
     });
     return true;
   } catch (err) {
     console.warn(`Notion: PDF添付に失敗（ローカルパスで継続）: ${String(err)}`);
     return false;
   }
+}
+
+// --- 契約書 ---
+
+const CONTRACT_KIND_LABELS: Record<ContractKind, string> = {
+  basic: '基本契約',
+  individual: '個別契約',
+  dispatch_individual: '派遣個別契約',
+  other: 'その他',
+};
+
+export function contractKindLabel(kind: ContractKind): string {
+  return CONTRACT_KIND_LABELS[kind];
+}
+
+export interface ContractRecord {
+  id: string;
+  title: string;
+  contractKind: ContractKind;
+  partyName: string;
+  memberId?: string;
+  clientId?: string;
+  assignmentId?: string;
+  periodStart?: Date;
+  periodEnd?: Date;
+  autoRenewal: boolean;
+  matchStatus: ContractMatchStatus;
+}
+
+export async function fetchContracts(): Promise<ContractRecord[]> {
+  if (warnIfMissing(DB_IDS.contract, 'NOTION_CONTRACT_DB_ID')) return [];
+  const pages = await queryAll(DB_IDS.contract);
+  return pages.map((page) => {
+    const props = page.properties ?? {};
+    const start = readDate(props['期間開始']);
+    const end = readDate(props['期間終了']);
+    return {
+      id: page.id,
+      title: readTitle(props['タイトル']),
+      contractKind: labelToKey(CONTRACT_KIND_LABELS, readSelect(props['契約種別']), 'other'),
+      partyName: readRichText(props['相手方']),
+      memberId: readRelation(props['要員'])[0],
+      clientId: readRelation(props['案件元'])[0],
+      assignmentId: readRelation(props['アサイン'])[0],
+      periodStart: start ? new Date(start) : undefined,
+      periodEnd: end ? new Date(end) : undefined,
+      autoRenewal: readCheckbox(props['自動更新']),
+      matchStatus: (readSelect(props['突合ステータス']) ?? '照合不可') as ContractMatchStatus,
+    };
+  });
+}
+
+export interface ContractInput {
+  title: string;
+  contractKind: ContractKind;
+  partyName: string;
+  memberId?: string;
+  clientId?: string;
+  assignmentId?: string;
+  periodStart?: string; // YYYY-MM-DD
+  periodEnd?: string;
+  autoRenewal: boolean;
+  matchStatus: ContractMatchStatus;
+  matchNote: string;
+  filename: string;
+  bodyMarkdown: string;
+}
+
+export async function saveContract(input: ContractInput): Promise<string> {
+  const dataSourceId = await resolveDataSourceId(DB_IDS.contract);
+  const properties: Record<string, unknown> = {
+    タイトル: { title: toRichText(input.title) },
+    契約種別: { select: { name: CONTRACT_KIND_LABELS[input.contractKind] } },
+    相手方: { rich_text: toRichText(input.partyName) },
+    自動更新: { checkbox: input.autoRenewal },
+    突合ステータス: { select: { name: input.matchStatus } },
+    突合結果: { rich_text: toRichText(input.matchNote) },
+    ファイル名: { rich_text: toRichText(input.filename) },
+  };
+  if (input.memberId) properties['要員'] = { relation: [{ id: input.memberId }] };
+  if (input.clientId) properties['案件元'] = { relation: [{ id: input.clientId }] };
+  if (input.assignmentId) properties['アサイン'] = { relation: [{ id: input.assignmentId }] };
+  if (input.periodStart) properties['期間開始'] = { date: { start: input.periodStart } };
+  if (input.periodEnd) properties['期間終了'] = { date: { start: input.periodEnd } };
+
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    markdownToBlocks(input.bodyMarkdown),
+  );
 }

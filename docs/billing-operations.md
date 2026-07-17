@@ -37,7 +37,7 @@
 担当: 構築者
 
 1. **Notion DBの作成**: `.env.local` に `NOTION_TOKEN` / `NOTION_ENGAGEMENTS_PARENT_PAGE_ID` を設定し、
-   `npm run engagements:setup` を実行 → 案件元DB/要員DB/案件DB/アサインDB/稼働実績DB/発行請求書DBの6つが作成される。
+   `npm run engagements:setup` を実行 → 案件元DB/要員DB/案件DB/アサインDB/稼働実績DB/発行請求書DB/契約書DBの7つが作成される。
    出力される `database_id` を `.env.local` に追記（`NOTION_CLIENT_DB_ID` 等）。
 2. **既存データの移行**:
    1. 手元のExcel/スプレッドシートをCSVエクスポートし、`ENGAGEMENTS_IMPORT_DIR`（既定 `./engagements-import`）フォルダに置く
@@ -45,7 +45,12 @@
    3. 内容に問題なければ `npm run engagements:import -- --apply` で実際に登録
    4. 取り込んだファイルは `engagements-import/_imported/` へ自動退避される
 3. **整合性チェック**: `npm run engagements` を実行し、relation欠落・精算幅の逆転・逆ざや・正社員の給与未設定などの警告が無いか確認。警告があればNotion上で該当レコードを修正する。
-4. **請求書発行を使う場合**: Google Workspace管理コンソールでドメイン全体委任(DWD)に
+4. **契約書の取込（推奨）**: 契約書PDF（基本契約・個別契約・派遣個別契約）を
+   `CONTRACTS_IMPORT_DIR`（既定 `./contracts-import`）に置き、`npm run engagements:contracts` でプレビュー →
+   `-- --apply` で契約書DBへ登録（PDF添付）。**契約書の記載条件とアサインDBの現在値が突合され、
+   差異（単価・精算幅・期間の食い違い）が検出される**ので、差異があればどちらかを修正する。
+   契約書は検収・請求計算の原本 — アサインDBの入力ミスをここで潰しておくと後工程の信頼性が上がる。
+5. **請求書発行を使う場合**: Google Workspace管理コンソールでドメイン全体委任(DWD)に
    `gmail.compose` スコープを追加登録する（検収・収集用の既存スコープとは別枠。未登録でも検収・案件管理は動作する）。
 
 ---
@@ -63,6 +68,7 @@
 | 10〜12日 | Notionで請求書PDFを確認し承認 → 下書き作成 | Notion操作 → `npm run billing:drafts` |
 | 承認後すぐ | Gmail下書きを確認して送信 → ステータス更新 | Gmail操作 → Notion操作（送付済に変更） |
 | 月末 | 入金確認 → ステータス更新 | Notion操作（入金確認済みに変更） |
+| 随時 | 契約更新アラート（終了60日以内）を確認し更新手続き | `npm run billing:status` / 新契約PDFを `engagements:contracts` で取込 |
 
 `npm run billing:status` は既定で「前月」を対象に表示する。当月を見たい場合は
 `npm run billing:status -- --month 2026-07` のように指定する。
@@ -89,6 +95,7 @@
 |---|---|---|
 | `npm run engagements:setup` | Notion DB(6つ)を作成。設定済みDBはスキップ | なし |
 | `npm run engagements:import` | 既存マスタデータ(CSV等)のプレビュー取込 | `-- --apply` で実登録 |
+| `npm run engagements:contracts` | 契約書PDFの取込+アサインDBとの条件突合 | `-- --apply` で契約書DBへ登録+PDF添付 |
 | `npm run engagements` | マスタ一覧表示＋整合性チェック | なし |
 | `npm run billing:inspect` | 受領書類(請求書・勤表)の検収バッチ | `-- --dry-run` で保存せず確認のみ |
 | `npm run billing:status` | 月次運用ダッシュボード（受領・発行状況＋次のアクション） | `-- --month YYYY-MM`（省略時は前月） |

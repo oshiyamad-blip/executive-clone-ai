@@ -25,6 +25,7 @@
     "engagements": "tsx src/engagements/index.ts",
     "engagements:setup": "tsx src/engagements/setup.ts",
     "engagements:import": "tsx src/engagements/import.ts",
+    "engagements:contracts": "tsx src/engagements/contracts.ts",
     "billing:inspect": "tsx src/billing/inspect.ts",
     "billing:issue": "tsx src/billing/issue.ts",
     "billing:drafts": "tsx src/billing/drafts.ts",

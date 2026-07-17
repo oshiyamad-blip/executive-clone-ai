@@ -1,13 +1,15 @@
 import '../env.js';
 import {
+  DB_IDS,
   fetchMembers,
   fetchAssignments,
   fetchProjects,
   fetchClients,
   fetchWorkRecords,
   fetchIssuedInvoices,
+  fetchContracts,
 } from '../engagements/notionDb.js';
-import type { IssuedInvoiceRecord } from '../engagements/notionDb.js';
+import type { ContractRecord, IssuedInvoiceRecord } from '../engagements/notionDb.js';
 import type { Member, Assignment, Client, WorkRecord, IssuedInvoiceStatus } from '../types/engagements.js';
 
 // 月次運用ダッシュボード（読み取り専用、npm run billing:status）
@@ -134,12 +136,30 @@ function buildIssuedLines(
   return { lines, counts };
 }
 
+// 契約終了が近い（60日以内・期限切れ含む）契約書を抽出する
+function buildRenewalAlerts(contracts: ContractRecord[], now: Date): string[] {
+  const limit = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
+  const alerts: string[] = [];
+  for (const contract of contracts) {
+    if (!contract.periodEnd) continue;
+    if (contract.periodEnd > limit) continue;
+    const endStr = contract.periodEnd.toISOString().slice(0, 10);
+    const expired = contract.periodEnd < now;
+    const renewal = contract.autoRenewal ? '（自動更新あり）' : '';
+    alerts.push(
+      `${expired ? '✗ 期限切れ' : '⚠ 終了間近'} ${contract.title}: ${endStr} まで${renewal}`,
+    );
+  }
+  return alerts;
+}
+
 function buildNextActions(
   month: string,
   receivedMissing: number,
   receivedNeedsReview: number,
   unresolvedRecords: number,
   issuedCounts: Record<IssuedInvoiceStatus | '未発行', number>,
+  renewalAlerts: string[],
 ): string[] {
   const actions: string[] = [];
 
@@ -177,6 +197,9 @@ function buildNextActions(
   if (issuedCounts.送付済 > 0) {
     actions.push(`送付済みが${issuedCounts.送付済}件あります。入金を確認したらステータスを「入金確認済み」に更新してください。`);
   }
+  if (renewalAlerts.length > 0) {
+    actions.push(`更新対応: 契約終了が近い契約書が${renewalAlerts.length}件あります。更新手続き（再契約・条件見直し）を確認してください。`);
+  }
 
   if (actions.length === 0) {
     actions.push('対象月の受領・発行はすべて完了しています。');
@@ -200,13 +223,14 @@ async function main(): Promise<void> {
 
   console.log(`=== 月次運用ダッシュボード（対象月: ${month}） ===`);
 
-  const [members, assignments, , clients, workRecords, issuedInvoices] = await Promise.all([
+  const [members, assignments, , clients, workRecords, issuedInvoices, contracts] = await Promise.all([
     fetchMembers(),
     fetchAssignments(),
     fetchProjects(),
     fetchClients(),
     fetchWorkRecords(month),
     fetchIssuedInvoices({ targetMonth: month }),
+    DB_IDS.contract ? fetchContracts() : Promise.resolve([]),
   ]);
 
   const memberById = new Map(members.map((m) => [m.id, m]));
@@ -233,8 +257,21 @@ async function main(): Promise<void> {
     for (const line of issuedLines) console.log(line);
   }
 
+  const renewalAlerts = buildRenewalAlerts(contracts, new Date());
+  if (DB_IDS.contract && renewalAlerts.length > 0) {
+    console.log('\n--- 契約更新アラート（終了60日以内） ---');
+    for (const alert of renewalAlerts) console.log(alert);
+  }
+
   console.log('\n--- 次のアクション ---');
-  const actions = buildNextActions(month, receivedMissing, receivedNeedsReview, unresolvedRecords, issuedCounts);
+  const actions = buildNextActions(
+    month,
+    receivedMissing,
+    receivedNeedsReview,
+    unresolvedRecords,
+    issuedCounts,
+    renewalAlerts,
+  );
   for (const action of actions) console.log(`・${action}`);
 }
 

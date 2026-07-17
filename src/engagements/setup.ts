@@ -144,6 +144,28 @@ async function main(): Promise<void> {
     created.push({ env: 'NOTION_ASSIGNMENT_DB_ID', id: db.databaseId, name: 'アサインDB' });
   }
 
+  // ⑦ 契約書DB（原本管理+アサインDBとの突合）
+  if (DB_IDS.contract) {
+    skipped.push('契約書DB（NOTION_CONTRACT_DB_ID 設定済み）');
+  } else {
+    const db = await createDb(parentPageId, '契約書DB', {
+      タイトル: { title: {} },
+      契約種別: select('基本契約', '個別契約', '派遣個別契約', 'その他'),
+      相手方: { rich_text: {} },
+      ...(memberDs ? { 要員: relation(memberDs) } : {}),
+      ...(clientDs ? { 案件元: relation(clientDs) } : {}),
+      ...(assignmentDs ? { アサイン: relation(assignmentDs) } : {}),
+      期間開始: { date: {} },
+      期間終了: { date: {} },
+      自動更新: { checkbox: {} },
+      突合ステータス: select('一致', '差異あり', '照合不可'),
+      突合結果: { rich_text: {} },
+      ファイル名: { rich_text: {} },
+      契約書PDF: { files: {} },
+    });
+    created.push({ env: 'NOTION_CONTRACT_DB_ID', id: db.databaseId, name: '契約書DB' });
+  }
+
   // ⑤ 稼働実績DB（受領請求書・勤表）
   if (DB_IDS.workRecord) {
     skipped.push('稼働実績DB（NOTION_WORK_RECORD_DB_ID 設定済み）');
