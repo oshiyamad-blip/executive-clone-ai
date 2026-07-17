@@ -41,7 +41,32 @@ function authorized(req: IncomingMessage): boolean {
   return header === `Bearer ${ACCESS_TOKEN}`;
 }
 
-async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: CloneContext): Promise<void> {
+// コンテキストは日次バッチで増えるため、TTLで再読込して陳腐化を防ぐ。
+let cachedCtx: CloneContext | null = null;
+let ctxLoadedAt = 0;
+let ctxLoading: Promise<void> | null = null;
+const CTX_TTL_MS = 10 * 60 * 1000;
+const MAX_HISTORY = 40; // 直近メッセージ数の上限（トークン/コスト対策）
+
+async function getContext(): Promise<CloneContext> {
+  const stale = Date.now() - ctxLoadedAt > CTX_TTL_MS;
+  if ((stale || !cachedCtx) && !ctxLoading) {
+    ctxLoading = loadCloneContext()
+      .then((c) => {
+        cachedCtx = c;
+        ctxLoadedAt = Date.now();
+      })
+      .catch((err) => console.error(`コンテキスト再読込に失敗: ${String(err)}`))
+      .finally(() => {
+        ctxLoading = null;
+      });
+  }
+  if (!cachedCtx && ctxLoading) await ctxLoading; // 初回のみ待つ（以降はバックグラウンド更新）
+  if (!cachedCtx) throw new Error('コンテキスト未読込');
+  return cachedCtx;
+}
+
+async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
 
   let body: ChatRequest;
@@ -58,8 +83,13 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: CloneC
     .map((m) => ({ role: m.role, content: m.content }));
   history.push({ role: 'user', content: message });
 
+  // 直近 MAX_HISTORY 件に制限し、先頭が user になるよう調整（Messages APIの制約）
+  let messages = history.slice(-MAX_HISTORY);
+  while (messages.length && messages[0].role === 'assistant') messages = messages.slice(1);
+
   try {
-    const result = await askClone(ctx.systemPrompt, history, ctx.sourceIndex);
+    const ctx = await getContext();
+    const result = await askClone(ctx.systemPrompt, messages, ctx.sourceIndex);
     await feedbackChatLog(message, result.answer);
     json(res, 200, {
       answer: result.answer,
@@ -72,7 +102,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: CloneC
 
 async function main(): Promise<void> {
   console.log('経営者クローンAI — Web対話サーバーを起動中...');
-  const ctx = await loadCloneContext();
+  const ctx = await getContext();
   console.log(`✅ コンテキスト読込（シグナル${ctx.signals.length}件 / ストーリー${ctx.stories.length}件）`);
   if (!ACCESS_TOKEN) {
     console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。ローカル(127.0.0.1)以外に公開しないでください。');
@@ -87,7 +117,7 @@ async function main(): Promise<void> {
       return;
     }
     if (req.method === 'POST' && req.url === '/api/chat') {
-      void handleChat(req, res, ctx);
+      void handleChat(req, res);
       return;
     }
     json(res, 404, { error: 'not found' });

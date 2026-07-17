@@ -1,6 +1,6 @@
 import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
-import { loadUnprocessedLogs, markProcessed } from '../store/rawLogStore.js';
+import { loadUnprocessedLogs, markProcessed, pruneProcessedLogs } from '../store/rawLogStore.js';
 import { saveSignal } from '../database/index.js';
 import type { RawLog, Signal, SignalCategory } from '../types/index.js';
 
@@ -136,6 +136,7 @@ async function runExtractionBatch(): Promise<void> {
 
   // 抽出できたかに関わらず、処理したログは処理済みにする
   markProcessed(logs.map((l) => l.id));
+  pruneProcessedLogs(); // 処理済みの生ログを整理してファイルサイズを抑える
   console.log(`=== 抽出バッチ完了: ${saved}件のシグナルをNotionに保存 ===`);
 }
 

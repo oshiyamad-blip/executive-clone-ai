@@ -140,7 +140,8 @@ export async function askClone(
 }
 
 // 単発の生成（ブリーフィング/ダイジェスト用）。Markdownテキストを返す。
-export async function complete(system: string, user: string, maxTokens = 8192): Promise<string> {
+// adaptive thinking と本文が予算を食い合わないよう既定を大きめに（非ストリーミング安全上限）。
+export async function complete(system: string, user: string, maxTokens = 16000): Promise<string> {
   const response = await client.messages.create({
     model: 'claude-opus-4-8',
     max_tokens: maxTokens,

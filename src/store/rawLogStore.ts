@@ -22,12 +22,17 @@ function ensureDataDir(): void {
   }
 }
 
-// 収集した生ログを追記保存する（既存IDは重複追加しない）
+// 収集した生ログを追記保存する。
+// 既存IDに加え「処理済みID」も除外する（同じファイルを再スキャンしても再蓄積しない）。
 export function saveRawLogs(logs: RawLog[]): void {
   ensureDataDir();
   const existing = loadRawLogs();
   const existingIds = new Set(existing.map((l) => l.id));
-  const merged = [...existing, ...logs.filter((l) => !existingIds.has(l.id))];
+  const processed = loadProcessedIds();
+  const merged = [
+    ...existing,
+    ...logs.filter((l) => !existingIds.has(l.id) && !processed.has(l.id)),
+  ];
 
   try {
     const serialized: StoredRawLog[] = merged.map((l) => ({
@@ -37,6 +42,23 @@ export function saveRawLogs(logs: RawLog[]): void {
     writeFileSync(RAW_LOG_FILE, JSON.stringify(serialized, null, 2), 'utf-8');
   } catch (err) {
     console.warn(`生ログの保存に失敗: ${String(err)}`);
+  }
+}
+
+// 処理済みの生ログを raw-logs.json から取り除いてファイルサイズを抑える。
+// （処理済みIDは processed-ids.json に残るため重複排除は維持される）
+export function pruneProcessedLogs(): void {
+  const processed = loadProcessedIds();
+  if (processed.size === 0) return;
+  const kept = loadRawLogs().filter((l) => !processed.has(l.id));
+  try {
+    const serialized: StoredRawLog[] = kept.map((l) => ({
+      ...l,
+      timestamp: l.timestamp.toISOString(),
+    }));
+    writeFileSync(RAW_LOG_FILE, JSON.stringify(serialized, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn(`生ログの整理に失敗: ${String(err)}`);
   }
 }
 

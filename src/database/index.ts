@@ -179,6 +179,7 @@ function markdownToBlocks(md: string): Array<Record<string, unknown>> {
   for (const rawLine of md.split(/\r?\n/)) {
     const line = rawLine.replace(/\s+$/, '');
     if (!line.trim()) continue;
+    const numbered = line.match(/^(\d+)\.\s+(.*)$/);
     if (line.startsWith('### ')) blocks.push(headingBlock('heading_3', line.slice(4)));
     else if (line.startsWith('## ')) blocks.push(headingBlock('heading_2', line.slice(3)));
     else if (line.startsWith('# ')) blocks.push(headingBlock('heading_1', line.slice(2)));
@@ -186,9 +187,15 @@ function markdownToBlocks(md: string): Array<Record<string, unknown>> {
       blocks.push({
         object: 'block',
         type: 'bulleted_list_item',
-        bulleted_list_item: { rich_text: toRichText(line.slice(2)) },
+        bulleted_list_item: { rich_text: toRichText(stripInlineMd(line.slice(2))) },
       });
-    else blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: toRichText(line) } });
+    else if (numbered)
+      blocks.push({
+        object: 'block',
+        type: 'numbered_list_item',
+        numbered_list_item: { rich_text: toRichText(stripInlineMd(numbered[2])) },
+      });
+    else blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: toRichText(stripInlineMd(line)) } });
   }
   return blocks;
 }
@@ -197,7 +204,15 @@ function headingBlock(
   type: 'heading_1' | 'heading_2' | 'heading_3',
   text: string,
 ): Record<string, unknown> {
-  return { object: 'block', type, [type]: { rich_text: toRichText(text) } };
+  return { object: 'block', type, [type]: { rich_text: toRichText(stripInlineMd(text)) } };
+}
+
+// Notion のプレーン rich_text は Markdown 記法を解釈しないため、装飾記号を除去する
+function stripInlineMd(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^\s*>\s?/, '');
 }
 
 // Notionシグナルを取得する（対話インターフェース・ストーリー分析で使用）
