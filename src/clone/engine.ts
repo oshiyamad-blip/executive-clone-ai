@@ -128,14 +128,22 @@ export async function askClone(
   sourceIndex: Map<string, SourceRef>,
 ): Promise<AskResult> {
   const response = await client.messages.create({
+    // adaptive thinking がトークン枠を消費するため、途中切れしにくい値にする
     model: 'claude-opus-4-8',
-    max_tokens: 8192,
+    max_tokens: 16000,
     thinking: { type: 'adaptive' },
     system: systemPrompt,
     messages: history,
   });
   const textBlock = response.content.find((b) => b.type === 'text');
-  const answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  let answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  // 空応答（max_tokens枯渇/refusal等）をそのまま履歴に戻すと文脈が壊れるため代替文にする
+  if (!answer.trim()) {
+    answer =
+      response.stop_reason === 'max_tokens'
+        ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
+        : '（うまく回答を生成できませんでした。もう一度お試しください。）';
+  }
   return { answer, content: response.content, sources: resolveSources(answer, sourceIndex) };
 }
 

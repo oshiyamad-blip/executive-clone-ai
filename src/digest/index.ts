@@ -24,7 +24,9 @@ const DIGEST_SYSTEM = `あなたは経営者の右腕として、今週の重要
 async function main(): Promise<void> {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const signals = (await fetchRecentSignals(100)).filter((s) => s.timestamp.getTime() >= weekAgo);
-  const stories = (await fetchRecentStories(10)).filter((s) => s.createdAt.getTime() >= weekAgo);
+  // ストーリーは「期間（開始）」降順で取得されるため、createdAt（今週作成）でフィルタすると
+  // 期間開始が古いものを取りこぼす。広めに取得してから作成日で絞る。
+  const stories = (await fetchRecentStories(50)).filter((s) => s.createdAt.getTime() >= weekAgo);
 
   if (signals.length === 0 && stories.length === 0) {
     console.log('週次ダイジェスト: 今週の新規データがないためスキップします。');
@@ -38,6 +40,11 @@ async function main(): Promise<void> {
   const context = `【今週のシグナル (${signals.length}件)】\n${signalText || '（なし）'}\n\n【今週のストーリー (${stories.length}件)】\n${storyText || '（なし）'}`;
 
   const md = await complete(DIGEST_SYSTEM, `以下は今週（過去7日）に蓄積されたデータです。\n\n${context}`);
+
+  if (!md.trim()) {
+    console.error('週次ダイジェストの生成に失敗しました（空応答）。中止します。');
+    return;
+  }
 
   const date = new Date().toISOString().slice(0, 10);
   const title = `週次ダイジェスト ${date}`;

@@ -37,6 +37,11 @@ async function main(): Promise<void> {
   const system = buildSystemPrompt(profile, signals, stories);
   const md = await complete(system, `${BRIEF_INSTRUCTION}\n\n---\n議題: ${topic}\n---`);
 
+  if (!md.trim()) {
+    console.error('ブリーフィングの生成に失敗しました（空応答）。中止します。');
+    process.exit(1);
+  }
+
   const date = new Date().toISOString().slice(0, 10);
   const title = `会議前ブリーフィング: ${topic}`;
   const body = `# ${title}\n\n_生成日: ${date} / ${profile.name}の分身_\n\n${md}`;
