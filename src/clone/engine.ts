@@ -28,14 +28,16 @@ export interface CloneData {
   stories: Story[];
 }
 
+// 対話モード。モードを追加するときは CLONE_MODES と loadCloneContext の prompts に
+// エントリを足す（消費側は prompts レコード経由で参照するため、他に触る箇所はない）。
+export type CloneMode = 'chat' | 'decision' | 'hiring';
+export const CLONE_MODES: readonly CloneMode[] = ['chat', 'decision', 'hiring'];
+
 export interface CloneContext extends CloneData {
-  systemPrompt: string; // 通常の壁打ち対話
-  decisionPrompt: string; // 営業向け即断モード
-  hiringPrompt: string; // 採用判断モード
+  // モード別システムプロンプト（chat=壁打ち / decision=営業向け即断 / hiring=採用判断）
+  prompts: Record<CloneMode, string>;
   sourceIndex: Map<string, SourceRef>;
 }
-
-export type CloneMode = 'chat' | 'decision' | 'hiring';
 
 // Notion ページIDをクリック可能なURLに変換
 function notionUrl(pageId?: string): string | undefined {
@@ -62,9 +64,11 @@ export async function loadCloneContext(): Promise<CloneContext> {
   const data = await fetchCloneData();
   return {
     ...data,
-    systemPrompt: buildSystemPrompt(data.profile, data.signals, data.stories),
-    decisionPrompt: buildDecisionPrompt(data.profile, data.signals, data.stories),
-    hiringPrompt: buildHiringPrompt(data.profile, data.signals, data.stories),
+    prompts: {
+      chat: buildSystemPrompt(data.profile, data.signals, data.stories),
+      decision: buildDecisionPrompt(data.profile, data.signals, data.stories),
+      hiring: buildHiringPrompt(data.profile, data.signals, data.stories),
+    },
     sourceIndex: buildSourceIndex(data.signals, data.stories),
   };
 }
@@ -186,6 +190,8 @@ ${criteria || '（未登録）'}
 判断の原則:
 - これは採用判断の「支援」であり、最終決定は人が行う。断定しすぎない
 - 情報が足りなければ「情報不足」とし、何を確認すべきかを明確にする
+- 上記の採用基準が「（未登録）」の場合は、合否の傾きを判定せず「情報不足」とし、
+  まず経営者の採用基準（hiringCriteria）の登録が必要である旨を伝える。基準を推測で補わない
 - 経歴の華やかさより、採用基準（特にカルチャーフィット）に沿うかを重視する
 - 学歴・性別・年齢・国籍など、公正な採用を損なう属性で判断しない。能力・行動・価値観で見る`;
 }
@@ -197,6 +203,13 @@ export function resolveSources(answer: string, index: Map<string, SourceRef>): S
   return [...used]
     .sort((a, b) => (a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : Number(a.slice(1)) - Number(b.slice(1))))
     .map((tag) => index.get(tag) ?? { tag, label: '(該当なし)' });
+}
+
+// 参照元一覧をCLI表示用に整形する（chat / decide / hire で共用）
+export function formatSourceList(sources: SourceRef[], indent = ''): string {
+  return sources
+    .map((s) => `${indent}  - ${s.tag}: ${s.label}${s.url ? ` (${s.url})` : ''}`)
+    .join('\n');
 }
 
 export interface AskResult {

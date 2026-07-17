@@ -70,4 +70,7 @@ async function main(): Promise<void> {
   console.log(`\n${body}\n`);
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1; // 失敗をCI/スクリプトから検知できるようにする
+});

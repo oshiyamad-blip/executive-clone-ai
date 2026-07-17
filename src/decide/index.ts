@@ -1,5 +1,5 @@
 import '../env.js';
-import { loadCloneContext, askClone } from '../clone/engine.js';
+import { loadCloneContext, askClone, formatSourceList } from '../clone/engine.js';
 import type { LlmMessage } from '../llm/index.js';
 
 // 営業向け即断（CLI・単発）
@@ -13,14 +13,15 @@ async function main(): Promise<void> {
 
   const ctx = await loadCloneContext();
   const history: LlmMessage[] = [{ role: 'user', content: situation }];
-  const result = await askClone(ctx.decisionPrompt, history, ctx.sourceIndex);
+  const result = await askClone(ctx.prompts.decision, history, ctx.sourceIndex);
 
   console.log(`\n${result.answer}\n`);
   if (result.sources.length > 0) {
-    console.log('参照元:');
-    result.sources.forEach((s) => console.log(`  - ${s.tag}: ${s.label}${s.url ? ` (${s.url})` : ''}`));
-    console.log('');
+    console.log(`参照元:\n${formatSourceList(result.sources)}\n`);
   }
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1; // 失敗をCI/スクリプトから検知できるようにする
+});

@@ -1,7 +1,14 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
-import { loadCloneContext, askClone, feedbackChatLog, type CloneContext } from '../clone/engine.js';
+import {
+  loadCloneContext,
+  askClone,
+  feedbackChatLog,
+  CLONE_MODES,
+  type CloneContext,
+  type CloneMode,
+} from '../clone/engine.js';
 import type { LlmMessage } from '../llm/index.js';
 
 // ② Web チャットUI（要件3.4 意思決定シミュレーション対話 / 4.1 アクセス制御）
@@ -16,7 +23,12 @@ const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
 interface ChatRequest {
   message: string;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
-  mode?: 'chat' | 'decision' | 'hiring';
+  mode?: CloneMode;
+}
+
+// JSONボディの mode は型保証がないため、既知のモードのみ受け付けて chat に縮退する
+function normalizeMode(mode: unknown): CloneMode {
+  return CLONE_MODES.includes(mode as CloneMode) ? (mode as CloneMode) : 'chat';
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -98,13 +110,11 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   try {
     const ctx = await getContext();
-    // モードに応じてプロンプトを切り替える（即断=営業向け / 採用=採用判断 / それ以外=壁打ち）
-    const prompt =
-      body.mode === 'decision' ? ctx.decisionPrompt
-      : body.mode === 'hiring' ? ctx.hiringPrompt
-      : ctx.systemPrompt;
-    const result = await askClone(prompt, messages, ctx.sourceIndex);
-    await feedbackChatLog(message, result.answer);
+    const mode = normalizeMode(body.mode);
+    const result = await askClone(ctx.prompts[mode], messages, ctx.sourceIndex);
+    // 採用モードは候補者の個人情報（履歴書・面接メモ等）を含むため、
+    // シグナルDBへはフィードバックしない（恒久保存・再学習への混入を防ぐ）
+    if (mode !== 'hiring') await feedbackChatLog(message, result.answer);
     json(res, 200, {
       answer: result.answer,
       sources: result.sources.map((s) => ({ tag: s.tag, label: s.label, url: s.url ?? null })),
@@ -161,7 +171,9 @@ function renderPage(name: string): string {
   .seg button { background: #0f1115; color: #9aa4b2; border: 0; padding: 7px 15px; font-size: 13px; cursor: pointer; }
   .seg button.on { background: #2f6feb; color: #fff; }
   main { max-width: 820px; margin: 0 auto; padding: 16px; }
-  #log { display: flex; flex-direction: column; gap: 12px; padding-bottom: 120px; }
+  #log { padding-bottom: 120px; }
+  .modelog { display: none; flex-direction: column; gap: 12px; }
+  .modelog.on { display: flex; }
   .msg { padding: 12px 14px; border-radius: 10px; white-space: pre-wrap; line-height: 1.6; }
   .user { background: #1e2735; align-self: flex-end; max-width: 80%; }
   .bot { background: #171a21; border: 1px solid #2a2f3a; }
@@ -178,9 +190,9 @@ function renderPage(name: string): string {
 <header>
   <h1>${name} の分身</h1>
   <div class="seg" id="mode">
-    <button data-mode="decision" class="on" type="button">即断</button>
-    <button data-mode="hiring" type="button">採用</button>
-    <button data-mode="chat" type="button">壁打ち</button>
+    <button data-mode="decision" data-placeholder="値引き可否・提案方針など、その場の判断を相談…" class="on" type="button">即断</button>
+    <button data-mode="hiring" data-placeholder="候補者の職歴・面接メモを貼り付けて採用判断を相談…" type="button">採用</button>
+    <button data-mode="chat" data-placeholder="議題や相談を入力…" type="button">壁打ち</button>
   </div>
   <input id="token" type="password" placeholder="アクセストークン" />
 </header>
@@ -190,24 +202,34 @@ function renderPage(name: string): string {
   <button id="send" type="submit">送信</button>
 </div></form>
 <script>
-  const log = document.getElementById('log');
+  const logRoot = document.getElementById('log');
   const form = document.getElementById('form');
   const input = document.getElementById('input');
   const send = document.getElementById('send');
   const tokenEl = document.getElementById('token');
   tokenEl.value = localStorage.getItem('ec_token') || '';
   tokenEl.addEventListener('change', () => localStorage.setItem('ec_token', tokenEl.value));
-  const history = [];
 
-  // モード切替（即断 / 壁打ち）
+  // モードごとに会話履歴と表示欄を分離する。
+  // 採用モードに貼られた候補者情報が、他モードのリクエストに紛れ込むのを防ぐ。
   var mode = 'decision';
   var modeEl = document.getElementById('mode');
+  var logs = {}, histories = {};
+  modeEl.querySelectorAll('button').forEach(function (b) {
+    var m = b.dataset.mode;
+    histories[m] = [];
+    var d = document.createElement('div');
+    d.className = 'modelog';
+    logRoot.appendChild(d);
+    logs[m] = d;
+  });
   function applyMode() {
-    modeEl.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === mode); });
-    input.placeholder =
-      mode === 'decision' ? '値引き可否・提案方針など、その場の判断を相談…'
-      : mode === 'hiring' ? '候補者の職歴・面接メモを貼り付けて採用判断を相談…'
-      : '議題や相談を入力…';
+    modeEl.querySelectorAll('button').forEach(function (b) {
+      var on = b.dataset.mode === mode;
+      b.classList.toggle('on', on);
+      logs[b.dataset.mode].classList.toggle('on', on);
+      if (on) input.placeholder = b.dataset.placeholder;
+    });
   }
   modeEl.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
@@ -215,7 +237,7 @@ function renderPage(name: string): string {
   });
   applyMode();
 
-  function add(role, text, sources) {
+  function add(m, role, text, sources) {
     const div = document.createElement('div');
     div.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
     div.textContent = text;
@@ -228,7 +250,7 @@ function renderPage(name: string): string {
       }).join('<br>');
       div.appendChild(s);
     }
-    log.appendChild(div);
+    logs[m].appendChild(div);
     window.scrollTo(0, document.body.scrollHeight);
   }
   function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -237,22 +259,23 @@ function renderPage(name: string): string {
     e.preventDefault();
     const msg = input.value.trim();
     if (!msg) return;
-    add('user', msg);
+    const m = mode; // 応答待ちの間に切り替えても、送信時のモードの欄・履歴に入れる
+    add(m, 'user', msg);
     input.value = '';
     send.disabled = true;
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value },
-        body: JSON.stringify({ message: msg, history: history, mode: mode })
+        body: JSON.stringify({ message: msg, history: histories[m], mode: m })
       });
       const data = await res.json();
-      if (!res.ok) { add('bot', '[エラー] ' + (data.error || res.status)); return; }
-      add('bot', data.answer, data.sources);
-      history.push({ role: 'user', content: msg });
-      history.push({ role: 'assistant', content: data.answer });
+      if (!res.ok) { add(m, 'bot', '[エラー] ' + (data.error || res.status)); return; }
+      add(m, 'bot', data.answer, data.sources);
+      histories[m].push({ role: 'user', content: msg });
+      histories[m].push({ role: 'assistant', content: data.answer });
     } catch (err) {
-      add('bot', '[通信エラー] ' + err);
+      add(m, 'bot', '[通信エラー] ' + err);
     } finally {
       send.disabled = false;
       input.focus();
@@ -263,4 +286,7 @@ function renderPage(name: string): string {
 </html>`;
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

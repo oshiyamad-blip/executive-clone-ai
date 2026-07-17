@@ -1,6 +1,6 @@
 import '../env.js';
 import { createInterface } from 'readline/promises';
-import { loadCloneContext, askClone, feedbackChatLog } from '../clone/engine.js';
+import { loadCloneContext, askClone, feedbackChatLog, formatSourceList } from '../clone/engine.js';
 import type { LlmMessage } from '../llm/index.js';
 
 // CLI 対話インターフェース（要件3.4 意思決定シミュレーション対話）
@@ -23,7 +23,7 @@ async function startChat(): Promise<void> {
 
     let result;
     try {
-      result = await askClone(ctx.systemPrompt, history, ctx.sourceIndex);
+      result = await askClone(ctx.prompts.chat, history, ctx.sourceIndex);
     } catch (err) {
       // 一過性のAPIエラーでセッション全体を落とさない。直前のユーザー入力は巻き戻す。
       console.error(`\n[エラー] 応答の取得に失敗しました。もう一度お試しください: ${String(err)}\n`);
@@ -36,9 +36,7 @@ async function startChat(): Promise<void> {
 
     // 根拠の明示: 参照したシグナル/ストーリーを提示
     if (result.sources.length > 0) {
-      console.log('  参照元:');
-      result.sources.forEach((s) => console.log(`    - ${s.tag}: ${s.label}${s.url ? ` (${s.url})` : ''}`));
-      console.log('');
+      console.log(`  参照元:\n${formatSourceList(result.sources, '  ')}\n`);
     }
 
     // 対話ログをシグナルDBへ循環
@@ -49,4 +47,7 @@ async function startChat(): Promise<void> {
   console.log('\n対話セッションを終了しました。');
 }
 
-startChat().catch(console.error);
+startChat().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
