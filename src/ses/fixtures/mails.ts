@@ -7,12 +7,16 @@ function d(iso: string): Date {
   return new Date(iso);
 }
 
-export const FIXTURE_MAILS: SesRawMail[] = [
+// cc/messageIdHeader/references は loadFixtureMails() で既定値を補完する（記述を簡潔に保つ）
+type FixtureMail = Omit<SesRawMail, 'cc' | 'messageIdHeader' | 'references'> &
+  Partial<Pick<SesRawMail, 'cc' | 'messageIdHeader' | 'references'>>;
+
+export const FIXTURE_MAILS: FixtureMail[] = [
   // --- P1: 案件（東京・PHP/MySQL）。E1と組み合わさって「成立」になる ---
   {
     id: 'sesmail_demo_p1',
     from: '田中一郎 <tanaka@alphatech.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【案件情報】渋谷 PHP/MySQL案件のご紹介',
     body: `お世話になっております。株式会社アルファテックの田中です。
 以下、案件のご紹介です。
@@ -45,7 +49,7 @@ export const FIXTURE_MAILS: SesRawMail[] = [
   {
     id: 'sesmail_demo_e1',
     from: '鈴木花子 <suzuki@betasol.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【要員情報】PHPエンジニア K.S. 即日稼働可',
     body: `お世話になっております。株式会社ベータソリューションズの鈴木です。
 以下、要員のご紹介です。
@@ -72,7 +76,7 @@ export const FIXTURE_MAILS: SesRawMail[] = [
   {
     id: 'sesmail_demo_p2',
     from: '佐藤次郎 <sato@gammasys.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【案件情報】大阪 Java/SpringBoot案件',
     body: `お世話になっております。株式会社ガンマシステムズの佐藤です。
 
@@ -95,7 +99,7 @@ export const FIXTURE_MAILS: SesRawMail[] = [
   {
     id: 'sesmail_demo_e2',
     from: '高橋三郎 <takahashi@deltapartners.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【要員情報】Javaエンジニア M.T. 8月稼働可',
     body: `お世話になっております。株式会社デルタパートナーズの高橋です。
 
@@ -119,7 +123,7 @@ export const FIXTURE_MAILS: SesRawMail[] = [
   {
     id: 'sesmail_demo_e3',
     from: '山本四郎 <yamamoto@epsilontech.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【要員情報】PHPエンジニア N.Y. 単金応相談',
     body: `お世話になっております。株式会社イプシロンテックの山本です。
 
@@ -143,7 +147,7 @@ export const FIXTURE_MAILS: SesRawMail[] = [
   {
     id: 'sesmail_demo_multi',
     from: '中村五郎 <nakamura@zetapartners.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【複数案件のご紹介】Python案件・Ruby案件',
     body: `お世話になっております。株式会社ゼータパートナーズの中村です。
 2件まとめてご紹介です。
@@ -183,7 +187,7 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
   {
     id: 'sesmail_demo_p3',
     from: '伊藤六郎 <ito@thetaworks.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【案件情報】React/Next.js フロントエンド刷新',
     body: `お世話になっております。株式会社シータワークスの伊藤です。
 
@@ -206,7 +210,7 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
   {
     id: 'sesmail_demo_e4',
     from: '渡辺七海 <watanabe@iotasoft.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【要員情報】フロントエンド R.T. 即日可',
     body: `お世話になっております。株式会社イオタソフトの渡辺です。
 
@@ -230,7 +234,7 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
   {
     id: 'sesmail_demo_other',
     from: '営業事務局 <admin@alphatech.example.jp>',
-    to: 'ses-inbox@example.com',
+    to: '営業部 <sales@ourcompany.example.jp>',
     subject: '【事務連絡】年末年始休業のお知らせ',
     body: `いつもお世話になっております。
 弊社の年末年始休業期間についてご案内いたします。
@@ -246,5 +250,11 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
 ];
 
 export function loadFixtureMails(): SesRawMail[] {
-  return FIXTURE_MAILS;
+  // 共有メールボックス(sales@)宛に届いた想定。cc/Message-ID/References を補完する。
+  return FIXTURE_MAILS.map((m) => ({
+    cc: '',
+    references: '',
+    messageIdHeader: `<${m.id}@partner.example.jp>`,
+    ...m,
+  }));
 }

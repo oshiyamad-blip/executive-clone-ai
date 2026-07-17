@@ -136,6 +136,7 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
   const subject = header('Subject');
   const from = header('From');
   const to = header('To');
+  const cc = header('Cc');
   const body = extractBody(msg.payload);
   const dateMs = Number(msg.internalDate ?? Date.now());
   const attachments = await collectAttachments(gmail, msg.id ?? '', msg.payload);
@@ -144,8 +145,12 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
     id: `sesmail_${msg.id}`,
     from,
     to,
+    cc,
     subject,
     body,
+    // 全員に返信のスレッド継続用。Message-ID が取れないメールは擬似スレッド化のみ（実害小）
+    messageIdHeader: header('Message-ID') || header('Message-Id'),
+    references: header('References'),
     receivedAt: new Date(dateMs),
     attachments,
     sheetLinks: extractSheetLinks(body),

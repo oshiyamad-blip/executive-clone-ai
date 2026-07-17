@@ -6,14 +6,109 @@
 // （詳細設計での変更点。docs/ses-matching-detailed-design.md に理由を明記）。
 import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { google, gmail_v1 } from 'googleapis';
+import { google } from 'googleapis';
 import { generateText } from '../llm/index.js';
-import { getGoogleAuth } from '../collectors/googleAuth.js';
+import { getGoogleAuthAs } from '../collectors/googleAuth.js';
 import { isDemo, matchModel, demoDataDir } from './config.js';
 import { writeDemoArtifact } from './store.js';
-import type { MatchResult, Project, Engineer, DraftRef, RemoteOption } from '../types/index.js';
+import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
+
+// 送信元(From)が未確定のうちは placeholder を入れておく。確認UIで担当営業が自分の会社アドレスを
+// 入れて下書きを作成するまでこの文言が残る（＝未確定のまま送らないためのガードも兼ねる）。
+export const FROM_PLACEHOLDER = '《送信元：あなたの会社ドメインのアドレスを確認して入力してください》';
+
+function ensureRe(subject: string): string {
+  const s = (subject || '').trim();
+  if (!s) return 'Re:';
+  return /^re\s*:/i.test(s) ? s : `Re: ${s}`;
+}
+
+function splitAddrs(s: string): string[] {
+  return (s || '').split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+// 全員に返信の Cc = 元メールの宛先一同（To + Cc、sales@ メーリスを含む）。重複のみ除去。
+function mergeCc(...lists: string[]): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const addr of splitAddrs(list)) {
+      const key = addr.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(addr);
+      }
+    }
+  }
+  return out.join(', ');
+}
+
+// 元メール(replyTarget)への「全員に返信」として、宛先・件名・スレッド情報＋本文をまとめる。
+// To=元送信者、Cc=元の宛先一同（メーリス含む）、件名は Re: 付与、In-Reply-To/References でスレッド継続。
+function assembleReplyRef(
+  replyTarget: ReplyTarget | undefined,
+  fallbackTo: string,
+  fallbackSubject: string,
+  body: string,
+  fromEmail?: string,
+): DraftRef {
+  demoDraftCounter += 1;
+  const to = replyTarget?.from || fallbackTo;
+  const cc = replyTarget ? mergeCc(replyTarget.to, replyTarget.cc) : '';
+  const subject = replyTarget ? ensureRe(replyTarget.subject) : fallbackSubject;
+  const inReplyTo = replyTarget?.messageId || '';
+  const references = [replyTarget?.references || '', replyTarget?.messageId || ''].filter(Boolean).join(' ');
+  return {
+    draftId: `demo_draft_${demoDraftCounter}`,
+    url: '',
+    to,
+    cc,
+    from: fromEmail || FROM_PLACEHOLDER,
+    subject,
+    inReplyTo,
+    references,
+    body,
+  };
+}
+
+// 下書き内容をローカルファイルに書き出す（demo/確認用）。ヘッダも人が読める形で残す。
+function writeDraftFile(ref: DraftRef): DraftRef {
+  try {
+    const dir = join(process.cwd(), demoDataDir(), 'drafts');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const filePath = join(dir, `${ref.draftId}.txt`);
+    const header =
+      `From: ${ref.from ?? ''}\nTo: ${ref.to}\nCc: ${ref.cc ?? ''}\nSubject: ${ref.subject}\n` +
+      (ref.inReplyTo ? `In-Reply-To: ${ref.inReplyTo}\n` : '');
+    writeFileSync(filePath, `${header}\n${ref.body ?? ''}`, 'utf-8');
+    return { ...ref, url: filePath };
+  } catch (err) {
+    console.warn(`SES下書き: ローカル保存に失敗 (${ref.draftId}): ${String(err)}`);
+    return ref;
+  }
+}
+
+// 確認UIから、担当営業本人の会社アドレスで下書きを確定する。
+// demo=Fromを入れてローカル保存、prod=本人のGmailに全員に返信のスレッド下書きを作成。
+export async function materializeReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
+  const finalized: DraftRef = { ...ref, from: fromEmail };
+  if (isDemo()) return writeDraftFile(finalized);
+
+  const auth = getGoogleAuthAs(fromEmail);
+  if (!auth) {
+    console.warn('SES下書き: Google認証未設定のため下書き作成をスキップ');
+    return finalized;
+  }
+  const gmail = google.gmail({ version: 'v1', auth });
+  const raw = buildRawReply(finalized);
+  const res = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
+  const draftId = res.data.id ?? finalized.draftId;
+  const messageId = res.data.message?.id ?? '';
+  const url = messageId ? `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}` : '';
+  return { ...finalized, draftId, url };
+}
 
 export async function createDrafts(
   matches: MatchResult[],
@@ -57,36 +152,22 @@ export async function createDrafts(
   return results;
 }
 
-// ---------- demo（テンプレート文面 + ローカル保存） ----------
+// ---------- demo（テンプレート文面 + ローカル保存。全員に返信の形） ----------
 
 function createDemoDraftPair(project: Project, engineer: Engineer, match: MatchResult): [DraftRef, DraftRef] {
-  return [
-    saveDemoDraft(
-      project.agentEmail,
-      subjectToProject(project, engineer),
-      buildTemplateToProject(project, engineer, match),
-    ),
-    saveDemoDraft(
-      engineer.agentEmail,
-      subjectToEngineer(project, engineer),
-      buildTemplateToEngineer(project, engineer, match),
-    ),
-  ];
-}
-
-function saveDemoDraft(to: string, subject: string, body: string): DraftRef {
-  demoDraftCounter += 1;
-  const draftId = `demo_draft_${demoDraftCounter}`;
-  try {
-    const dir = join(process.cwd(), demoDataDir(), 'drafts');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const filePath = join(dir, `${draftId}.txt`);
-    writeFileSync(filePath, `To: ${to}\nSubject: ${subject}\n\n${body}`, 'utf-8');
-    return { draftId, url: filePath, to, subject };
-  } catch (err) {
-    console.warn(`SES下書き: ローカル保存に失敗 (${draftId}): ${String(err)}`);
-    return { draftId, url: '', to, subject };
-  }
+  const toProject = assembleReplyRef(
+    project.replyTarget,
+    project.agentEmail,
+    subjectToProject(project, engineer),
+    buildTemplateToProject(project, engineer, match),
+  );
+  const toEngineer = assembleReplyRef(
+    engineer.replyTarget,
+    engineer.agentEmail,
+    subjectToEngineer(project, engineer),
+    buildTemplateToEngineer(project, engineer, match),
+  );
+  return [writeDraftFile(toProject), writeDraftFile(toEngineer)];
 }
 
 function buildTemplateToProject(project: Project, engineer: Engineer, match: MatchResult): string {
@@ -170,10 +251,13 @@ function subjectToEngineer(project: Project, engineer: Engineer): string {
   return `【ご紹介】${project.title} - ${engineer.displayName}様向け`;
 }
 
-// ---------- 本番（Sonnet 5生成 → Gmail下書き作成） ----------
+// ---------- 本番（Sonnet 5生成 → 全員に返信の下書き内容を用意） ----------
+// 送信元は担当営業個人の会社アドレスのため、実際のGmail下書き作成は確認UIで本人が行う
+// （materializeReplyDraft）。ここでは全員に返信の文面・宛先・スレッド情報を用意する。
 
 const DRAFT_SYSTEM = `あなたはSES事業者の営業担当として、案件と要員をつなぐ紹介メールを作成するアシスタントです。
 丁寧なビジネス日本語で、簡潔かつ具体的な文面を作成してください。件名は含めず、本文のみを返してください。
+これは共有メーリスに届いた元メールへの「全員に返信」です。冒頭に相手の担当者名への宛名を入れてください。
 単金の開示は商習慣上センシティブなため、断定せず「ご相談の上」等の含みを持たせた表現にしてください。`;
 
 async function createProdDraftPair(
@@ -181,16 +265,6 @@ async function createProdDraftPair(
   engineer: Engineer,
   match: MatchResult,
 ): Promise<[DraftRef, DraftRef]> {
-  const auth = getGoogleAuth();
-  if (!auth) {
-    console.warn('SES下書き: Google認証未設定のためテンプレート文面のみ生成し下書き保存はスキップ');
-    return [
-      { draftId: '', url: '', to: project.agentEmail, subject: subjectToProject(project, engineer) },
-      { draftId: '', url: '', to: engineer.agentEmail, subject: subjectToEngineer(project, engineer) },
-    ];
-  }
-  const gmail = google.gmail({ version: 'v1', auth });
-
   const [bodyToProject, bodyToEngineer] = await Promise.all([
     generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt('project', project, engineer, match) }], {
       model: matchModel(),
@@ -202,19 +276,10 @@ async function createProdDraftPair(
     }),
   ]);
 
-  const draftToProject = await createGmailDraft(
-    gmail,
-    project.agentEmail,
-    subjectToProject(project, engineer),
-    bodyToProject,
-  );
-  const draftToEngineer = await createGmailDraft(
-    gmail,
-    engineer.agentEmail,
-    subjectToEngineer(project, engineer),
-    bodyToEngineer,
-  );
-  return [draftToProject, draftToEngineer];
+  return [
+    assembleReplyRef(project.replyTarget, project.agentEmail, subjectToProject(project, engineer), bodyToProject),
+    assembleReplyRef(engineer.replyTarget, engineer.agentEmail, subjectToEngineer(project, engineer), bodyToEngineer),
+  ];
 }
 
 function buildDraftPrompt(
@@ -262,22 +327,13 @@ function buildNegotiationContext(target: 'project' | 'engineer', match: MatchRes
   return `\n\n【単金交渉の提案】\n現状の粗利は${(match.grossMarginJpy / 10000).toFixed(1)}万円/月で下限に届かないため、案件単金を+${n.projectRaiseMan}万円・要員単金を−${n.engineerCutMan}万円で調整すると粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月になります。${ask}`;
 }
 
-async function createGmailDraft(gmail: gmail_v1.Gmail, to: string, subject: string, body: string): Promise<DraftRef> {
-  const raw = buildRawEmail(to, subject, body);
-  const res = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
-  const draftId = res.data.id ?? '';
-  const messageId = res.data.message?.id ?? '';
-  const url = messageId ? `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}` : '';
-  return { draftId, url, to, subject };
-}
-
-function buildRawEmail(to: string, subject: string, body: string): string {
-  const message = [
-    `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`,
-    'Content-Type: text/plain; charset="UTF-8"',
-    '',
-    body,
-  ].join('\n');
-  return Buffer.from(message).toString('base64url');
+// 全員に返信のMIMEを組み立てる（From/To/Cc/In-Reply-To/References付き）。
+function buildRawReply(ref: DraftRef): string {
+  const lines: string[] = [`From: ${ref.from ?? ''}`, `To: ${ref.to}`];
+  if (ref.cc) lines.push(`Cc: ${ref.cc}`);
+  lines.push(`Subject: =?UTF-8?B?${Buffer.from(ref.subject, 'utf-8').toString('base64')}?=`);
+  if (ref.inReplyTo) lines.push(`In-Reply-To: ${ref.inReplyTo}`);
+  if (ref.references) lines.push(`References: ${ref.references}`);
+  lines.push('Content-Type: text/plain; charset="UTF-8"', '', ref.body ?? '');
+  return Buffer.from(lines.join('\n')).toString('base64url');
 }

@@ -4,9 +4,10 @@
 // demo/本番のどちらでもこのローカル領域を使うため、UIはNotion接続なしでも動く。
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { reviewDataDir, demoDataDir, isDemo } from './config.js';
+import { reviewDataDir, demoDataDir } from './config.js';
 import { updateMatchStatus } from '../database/index.js';
-import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus } from '../types/index.js';
+import { materializeReplyDraft } from './draft.js';
+import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef } from '../types/index.js';
 
 function reviewPath(name: string): string {
   return join(process.cwd(), reviewDataDir(), `${name}.json`);
@@ -51,7 +52,6 @@ function readDemoDraftText(url: string | undefined): string | null {
 
 // MatchResult[] を表示用 ReviewMatch[] に変換して書き出す（notify.ts が呼ぶ）。
 export function writeReviewMatches(matches: MatchResult[]): void {
-  const demo = isDemo();
   const review: ReviewMatch[] = matches.map((m) => ({
     id: m.id,
     title: m.title,
@@ -65,8 +65,11 @@ export function writeReviewMatches(matches: MatchResult[]): void {
     status: m.status,
     draftToProjectUrl: m.draftToProject?.url ?? null,
     draftToEngineerUrl: m.draftToEngineer?.url ?? null,
-    draftToProjectText: demo ? readDemoDraftText(m.draftToProject?.url) : null,
-    draftToEngineerText: demo ? readDemoDraftText(m.draftToEngineer?.url) : null,
+    // 全員に返信の本文をプレビュー用にインライン（本文は our 生成物なのでdemo/本番共通で保持）
+    draftToProjectText: m.draftToProject?.body ?? readDemoDraftText(m.draftToProject?.url),
+    draftToEngineerText: m.draftToEngineer?.body ?? readDemoDraftText(m.draftToEngineer?.url),
+    draftProject: m.draftToProject,
+    draftEngineer: m.draftToEngineer,
     notionPageId: m.notionPageId,
   }));
   writeJson('matches', review);
@@ -111,6 +114,31 @@ export async function setMatchStatus(
 // 既に ReviewMatch[] を持っている場合の書き出し（setMatchStatus用。変換不要）
 function writeReviewMatches2(matches: ReviewMatch[]): void {
   writeJson('matches', matches);
+}
+
+// 確認UIから「送信元＝担当営業本人の会社アドレス」で全員に返信の下書きを作成する。
+// demo=Fromを入れてローカル保存、prod=本人のGmailにスレッド返信下書きを作成。
+export async function createReplyDraftForSender(
+  matchId: string,
+  side: 'project' | 'engineer',
+  fromEmail: string,
+): Promise<DraftRef | null> {
+  const matches = readReviewMatches();
+  const target = matches.find((m) => m.id === matchId);
+  if (!target) return null;
+  const ref = side === 'project' ? target.draftProject : target.draftEngineer;
+  if (!ref) return null;
+
+  const finalized = await materializeReplyDraft(ref, fromEmail);
+  if (side === 'project') {
+    target.draftProject = finalized;
+    target.draftToProjectUrl = finalized.url;
+  } else {
+    target.draftEngineer = finalized;
+    target.draftToEngineerUrl = finalized.url;
+  }
+  writeReviewMatches2(matches);
+  return finalized;
 }
 
 // レビュー領域に何か成果があるか（UI起動時の案内用）

@@ -8,7 +8,7 @@ import { normalizeSkills } from './skillDict.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
 import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
-import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption } from '../types/index.js';
+import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyTarget } from '../types/index.js';
 
 const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリングサービス）業界の営業メールを解析する専門家です。
 メール本文・添付ファイルのテキスト・PDFから、「案件情報」と「要員（エンジニア）情報」を抽出してください。
@@ -176,9 +176,30 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractedItem[]
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
   const items: ExtractedItem[] = [];
   for (const mail of mails) {
-    items.push(...(EXPECTED_EXTRACTIONS[mail.id] ?? [{ kind: 'other' as const }]));
+    items.push(...withReplyTarget(EXPECTED_EXTRACTIONS[mail.id] ?? [{ kind: 'other' as const }], mail));
   }
   return items;
+}
+
+// 元メールのヘッダから返信情報を作り、抽出された案件/要員に付与する（全員に返信の下書き用）。
+function buildReplyTarget(mail: SesRawMail): ReplyTarget {
+  return {
+    from: mail.from,
+    to: mail.to,
+    cc: mail.cc,
+    subject: mail.subject,
+    messageId: mail.messageIdHeader,
+    references: mail.references,
+  };
+}
+
+function withReplyTarget(items: ExtractedItem[], mail: SesRawMail): ExtractedItem[] {
+  const rt = buildReplyTarget(mail);
+  return items.map((item) => {
+    if (item.kind === 'project') return { kind: 'project', project: { ...item.project, replyTarget: rt } };
+    if (item.kind === 'engineer') return { kind: 'engineer', engineer: { ...item.engineer, replyTarget: rt } };
+    return item;
+  });
 }
 
 async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
@@ -212,7 +233,7 @@ async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
     ...parsed.projects.map((p) => ({ kind: 'project' as const, project: buildProject(p, mail) })),
     ...parsed.engineers.map((e) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail) })),
   ];
-  return items.length > 0 ? items : [{ kind: 'other' }];
+  return withReplyTarget(items.length > 0 ? items : [{ kind: 'other' }], mail);
 }
 
 function hashId(prefix: string, parts: string[]): string {

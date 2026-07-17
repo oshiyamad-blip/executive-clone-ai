@@ -139,6 +139,7 @@ export interface Project {
   agentContact: string;
   agentEmail: string; // 紹介メールの宛先に使用
   sourceMailId: string; // 抽出元メールID
+  replyTarget?: ReplyTarget; // 元の案件メールへ全員に返信するための情報
   receivedAt: Date;
   status: ProjectStatus;
   notionPageId?: string;
@@ -163,6 +164,7 @@ export interface Engineer {
   agentContact: string;
   agentEmail: string;
   sourceMailId: string;
+  replyTarget?: ReplyTarget; // 元の要員メールへ全員に返信するための情報
   receivedAt: Date;
   status: EngineerStatus;
   notionPageId?: string;
@@ -197,12 +199,17 @@ export interface MatchPair {
   negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
 }
 
-// 紹介メール下書き参照
+// 紹介メール下書き参照（全員に返信のスレッド返信下書き）
 export interface DraftRef {
   draftId: string; // Gmail下書きID（demoはローカルID）
   url: string; // 下書きURL（demoはローカルファイルパス）
-  to: string;
-  subject: string;
+  to: string; // 返信の To（元送信者）
+  cc?: string; // 返信の Cc（元の宛先一同・メーリス含む）
+  from?: string; // 送信元（担当営業個人の会社アドレス。未確定なら placeholder）
+  subject: string; // Re: 付き件名
+  inReplyTo?: string; // 元 Message-ID（スレッド継続）
+  references?: string; // References ヘッダ
+  body?: string; // 返信本文（UIでの送信下書き作成に使用）
 }
 
 // 最終判定・保存対象のマッチ結果（要件定義 §6.4 マッチ結果DBに対応）
@@ -230,11 +237,26 @@ export interface SesRawMail {
   id: string; // 'sesmail_<gmailId>'
   from: string;
   to: string;
+  cc: string; // Cc ヘッダ（全員に返信の宛先組み立て用）
   subject: string;
   body: string; // text/plain 本文
+  messageIdHeader: string; // 元メールの Message-ID（In-Reply-To/References 用）
+  references: string; // 元メールの References ヘッダ（スレッド継続用）
   receivedAt: Date;
   attachments: SesAttachment[];
   sheetLinks: string[]; // 本文中の Google スプレッドシートURL
+}
+
+// 元メールへ「全員に返信」するために必要な情報（案件/要員それぞれの元メールから採取）。
+// 共有メールボックス(sales@)宛に届いた1通に対し、担当営業個人のアドレスから
+// 全員に返信（元の宛先そのまま＝メーリス含む）でスレッド返信するために使う。
+export interface ReplyTarget {
+  from: string; // 元メールの送信者 → 返信の To
+  to: string; // 元メールの To（sales@ メーリス等） → 返信の Cc に含める
+  cc: string; // 元メールの Cc → 返信の Cc に含める
+  subject: string; // 元件名（返信は Re: を付与）
+  messageId: string; // 元 Message-ID（In-Reply-To / References に設定）
+  references: string; // 元 References（スレッド継続）
 }
 
 export interface SesAttachment {
@@ -287,8 +309,10 @@ export interface ReviewMatch {
   status: MatchStatus;
   draftToProjectUrl: string | null;
   draftToEngineerUrl: string | null;
-  draftToProjectText: string | null; // demoは下書き本文をインライン、本番は null（URLリンク）
+  draftToProjectText: string | null; // 全員に返信の本文（プレビュー用）
   draftToEngineerText: string | null;
+  draftProject?: DraftRef; // 全員に返信の下書き内容（送信元入力で本人のGmailに作成する用）
+  draftEngineer?: DraftRef;
   notionPageId?: string; // あればステータス更新をNotionへ反映
   lastActionBy?: string; // 直近にステータスを変更した人（複数人運用の記録）
   lastActionAt?: string; // その日時 ISO

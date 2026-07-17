@@ -1,7 +1,7 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
-import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData } from './review.js';
+import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData, createReplyDraftForSender } from './review.js';
 import { recordFeedback, loadFeedback } from './feedback.js';
 import { addSkillEquivalence } from './skillEquiv.js';
 import { computeBandMetrics } from './metrics.js';
@@ -104,6 +104,25 @@ async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promis
   }
 }
 
+async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await parseJson(req);
+  if (!body) return json(res, 400, { error: 'invalid json' });
+  const matchId = String(body.matchId ?? '').trim();
+  const side = body.side === 'engineer' ? 'engineer' : body.side === 'project' ? 'project' : null;
+  const fromEmail = String(body.fromEmail ?? '').trim();
+  if (!matchId || !side) return json(res, 400, { error: 'matchId と side が必要です' });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) {
+    return json(res, 400, { error: '送信元となるあなたの会社メールアドレスを入力してください' });
+  }
+  try {
+    const ref = await createReplyDraftForSender(matchId, side, fromEmail);
+    if (!ref) return json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
+    return json(res, 200, { ok: true, ref });
+  } catch (err) {
+    return json(res, 502, { error: `下書き作成に失敗しました: ${String(err)}` });
+  }
+}
+
 async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJson(req);
   if (!body) return json(res, 400, { error: 'invalid json' });
@@ -154,6 +173,11 @@ function main(): void {
       void handleSkillEquiv(req, res);
       return;
     }
+    if (req.method === 'POST' && req.url === '/api/make-draft') {
+      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      void handleMakeDraft(req, res);
+      return;
+    }
     json(res, 404, { error: 'not found' });
   });
 
@@ -176,8 +200,13 @@ function renderPage(): string {
   header { padding: 12px 16px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
   header input { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px 8px; }
-  #name { width: 140px; }
-  #token { width: 140px; margin-left: auto; }
+  #name { width: 120px; }
+  #senderEmail { width: 210px; }
+  #token { width: 130px; margin-left: auto; }
+  .reply { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+  .reply-label { font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+  .reply-h { font-size: 12px; color: var(--ink-soft); font-family: var(--font-mono); line-height: 1.6; margin-bottom: 6px; word-break: break-all; }
+  .reply .made { font-size: 12px; margin-left: 8px; }
   main { max-width: 960px; margin: 0 auto; padding: 16px; }
   h2 { font-size: 14px; color: #9aa4b2; border-bottom: 1px solid #2a2f3a; padding-bottom: 6px; margin: 24px 0 12px; }
   .metrics { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -222,6 +251,7 @@ function renderPage(): string {
 <header>
   <h1>SESマッチ確認</h1>
   <input id="name" placeholder="あなたの名前" />
+  <input id="senderEmail" type="email" placeholder="あなたの会社メール（送信元）" />
   <button id="reload" type="button" style="background:#2f6feb;color:#fff;border:0;border-radius:8px;padding:7px 14px;cursor:pointer">再読込</button>
   <input id="token" type="password" placeholder="アクセストークン" />
 </header>
@@ -244,11 +274,15 @@ function renderPage(): string {
 </main>
 <script>
   var nameEl = document.getElementById('name');
+  var senderEl = document.getElementById('senderEmail');
   var tokenEl = document.getElementById('token');
   nameEl.value = localStorage.getItem('ses_reviewer') || '';
+  senderEl.value = localStorage.getItem('ses_sender') || '';
   tokenEl.value = localStorage.getItem('ses_token') || '';
   nameEl.addEventListener('change', function(){ localStorage.setItem('ses_reviewer', nameEl.value); });
+  senderEl.addEventListener('change', function(){ localStorage.setItem('ses_sender', senderEl.value); });
   tokenEl.addEventListener('change', function(){ localStorage.setItem('ses_token', tokenEl.value); });
+  function senderEmail(){ return senderEl.value.trim(); }
 
   var STATUS_LABEL = { unconfirmed: '未確認', introduced: '紹介済', closed_won: '成約', dropped: '見送り' };
   var CAT = {
@@ -267,10 +301,15 @@ function renderPage(): string {
   function statusBadge(s){ return '<span class="badge b-' + s + '">' + (STATUS_LABEL[s]||s) + '</span>'; }
   function catBadge(c){ var v = CAT[c] || CAT.review; return '<span class="badge b-' + c + '">' + v.label + '</span>'; }
 
-  function draftBlock(label, text, url){
-    if (text) return '<details class="drafts"><summary>' + label + 'の下書きを見る</summary><pre>' + esc(text) + '</pre></details>';
-    if (url) return '<div class="drafts"><a href="' + esc(url) + '" target="_blank">' + label + 'の下書き（Gmail）を開く</a></div>';
-    return '';
+  // 全員に返信の下書きセクション（宛先・本文プレビュー・自分のアドレスで下書き作成ボタン）
+  function replySection(m, side, ref, text){
+    if (!ref && !text) return '';
+    var label = (side === 'project' ? '案件側' : '要員側') + '（元メールへ全員に返信）';
+    var head = ref ? ('<div class="reply-h">To: ' + esc(ref.to) + '<br>Cc: ' + esc(ref.cc || '（なし）') + '<br>From: ' + esc(ref.from || '') + (ref.inReplyTo ? '<br>（元メールにスレッド返信）' : '') + '</div>') : '';
+    var bodyd = text ? ('<details class="drafts"><summary>本文を見る</summary><pre>' + esc(text) + '</pre></details>') : '';
+    var made = (ref && ref.url) ? ('<a class="made" href="' + esc(ref.url) + '" target="_blank">作成済みの下書きを開く</a>') : '';
+    var btn = '<button data-act="makedraft" data-id="' + esc(m.id) + '" data-side="' + side + '">自分のアドレスで下書き作成</button>';
+    return '<div class="reply"><div class="reply-label">' + label + '</div>' + head + bodyd + '<div class="actions">' + btn + made + '</div></div>';
   }
 
   function renderMetrics(metrics){
@@ -308,8 +347,8 @@ function renderPage(): string {
         '<div class="meta">現状粗利 ' + man + '万円/月 ・ 適合スコア ' + esc(m.score) + ' ・ ' + (BAND_LABEL[m.band]||m.band) + '</div>' +
         negBanner +
         '<div class="reason">' + esc(m.reason) + '</div>' +
-        draftBlock('案件側', m.draftToProjectText, m.draftToProjectUrl) +
-        draftBlock('要員側', m.draftToEngineerText, m.draftToEngineerUrl) +
+        replySection(m, 'project', m.draftProject, m.draftToProjectText) +
+        replySection(m, 'engineer', m.draftEngineer, m.draftToEngineerText) +
         '<div class="actions">' + acts + '</div>' +
         fb +
       '</div>';
@@ -378,6 +417,11 @@ function renderPage(): string {
         if (!r2.ok) { alert('評価失敗: ' + (r2.data.error||r2.status)); return; }
         if (noteEl) noteEl.value = '';
         b.textContent = b.dataset.verdict === 'good' ? '妥当✓' : 'ズレ✓';
+        await load();
+      } else if (b.dataset.act === 'makedraft') {
+        if (!senderEmail()) { alert('上部に「あなたの会社メール（送信元）」を入力してください'); return; }
+        var r3 = await post('/api/make-draft', { matchId: b.dataset.id, side: b.dataset.side, fromEmail: senderEmail() });
+        if (!r3.ok) { alert('下書き作成失敗: ' + (r3.data.error||r3.status)); return; }
         await load();
       }
     } catch (err) { alert('通信エラー: ' + err); } finally { b.disabled = false; }
