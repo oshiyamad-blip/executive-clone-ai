@@ -16,6 +16,11 @@ const SCOPES = [
   'https://www.googleapis.com/auth/calendar.readonly',
   'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/meetings.space.readonly',
+  // ↓ SESマッチング機能で追加。gmail.compose=下書き作成、gmail.send=サマリメール送信、
+  // spreadsheets.readonly=案件・要員スプレッドシートの読取。DWD側のスコープ登録も必要。
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/spreadsheets.readonly',
 ];
 
 // 認証クライアントを返す。設定不足なら null（呼び出し側で縮退動作）。

@@ -1,5 +1,14 @@
 import { Client } from '@notionhq/client';
-import type { Signal, Story } from '../types/index.js';
+import { normalizePrefecture } from '../ses/prefecture.js';
+import type {
+  Signal,
+  Story,
+  Project,
+  Engineer,
+  MatchResult,
+  MatchStatus,
+  RemoteOption,
+} from '../types/index.js';
 
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
 // ページ作成・クエリは data_source_id ベースで行う（database_id は不可）。
@@ -8,6 +17,10 @@ const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
 const SIGNAL_DB_ID = process.env.NOTION_SIGNAL_DB_ID ?? '';
 const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
+// SESマッチング機能で追加
+const PROJECT_DB_ID = process.env.NOTION_PROJECT_DB_ID ?? '';
+const ENGINEER_DB_ID = process.env.NOTION_ENGINEER_DB_ID ?? '';
+const MATCH_DB_ID = process.env.NOTION_MATCH_DB_ID ?? '';
 
 // --- レート制限（平均 3 req/s）+ 429/529 リトライ ---
 // 全 Notion 呼び出しをこのラッパー経由にして最小間隔を空ける。
@@ -155,6 +168,225 @@ export async function saveStory(story: Story): Promise<string> {
       ...toParagraphBlocks(story.narrative),
     ],
   );
+}
+
+// ===== SESマッチング機能向けの拡張 =====
+// saveSignal/saveStory と同型（data_source_id 方式・共通ヘルパー再利用）。既存関数は無変更。
+// プロパティ名は docs/ses-matching-basic-design.md §6 のNotion DB設計に一致させる。
+
+const REMOTE_LABEL: Record<RemoteOption, string> = { full: 'フル', partial: '一部', none: '不可', unknown: '不明' };
+
+function remoteLabel(remote: RemoteOption): string {
+  return REMOTE_LABEL[remote];
+}
+
+function labelToRemote(label: string | undefined): RemoteOption {
+  const entry = (Object.entries(REMOTE_LABEL) as Array<[RemoteOption, string]>).find(([, v]) => v === label);
+  return entry ? entry[0] : 'unknown';
+}
+
+const MATCH_STATUS_LABEL: Record<MatchStatus, string> = {
+  unconfirmed: '未確認',
+  introduced: '紹介済',
+  closed_won: '成約',
+  dropped: '見送り',
+};
+
+function matchStatusLabel(status: MatchStatus): string {
+  return MATCH_STATUS_LABEL[status];
+}
+
+// 要員DBの「営業元」は 会社/担当/メール を1つのrich_textに結合して保存する（Notion DB設計 §6.2）。
+// 読み戻し時は " / " 区切りで分解する（値自体に " / " を含まない前提のベストエフォート）。
+function combineAgentInfo(company: string, contact: string, email: string): string {
+  return `${company} / ${contact} / ${email}`;
+}
+
+function parseAgentInfo(combined: string): { company: string; contact: string; email: string } {
+  const [company = '', contact = '', email = ''] = combined.split(' / ');
+  return { company, contact, email };
+}
+
+// SES案件をNotion案件DBに保存する
+export async function saveProject(project: Project): Promise<string> {
+  if (!PROJECT_DB_ID) {
+    console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
+  return createPageWithBody(
+    {
+      parent: { type: 'data_source_id', data_source_id: dataSourceId },
+      properties: {
+        案件名: { title: toRichText(project.title) },
+        必須スキル: { multi_select: project.requiredSkills.map((s) => ({ name: s })) },
+        尚可スキル: { multi_select: project.preferredSkills.map((s) => ({ name: s })) },
+        単金下限: { number: project.rateMin },
+        単金上限: { number: project.rateMax },
+        勤務地: { rich_text: toRichText(project.location) },
+        リモート: { select: { name: remoteLabel(project.remote) } },
+        開始時期: { rich_text: toRichText(project.startPeriod) },
+        商流メモ: { rich_text: toRichText(project.businessFlow) },
+        営業元会社: { rich_text: toRichText(project.agentCompany) },
+        営業元担当: { rich_text: toRichText(project.agentContact) },
+        営業元メール: { rich_text: toRichText(project.agentEmail) },
+        元メールID: { rich_text: toRichText(project.sourceMailId) },
+        受信日: { date: { start: project.receivedAt.toISOString() } },
+        ステータス: { select: { name: project.status === 'closed' ? '終了' : '募集中' } },
+      },
+    } as never,
+    toParagraphBlocks(`期間: ${project.duration}\n開始日(正規化): ${project.startDate ?? '不明'}`),
+  );
+}
+
+// SES要員をNotion要員DBに保存する
+export async function saveEngineer(engineer: Engineer): Promise<string> {
+  if (!ENGINEER_DB_ID) {
+    console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
+  const properties: Record<string, unknown> = {
+    表示名: { title: toRichText(engineer.displayName) },
+    スキル: { multi_select: engineer.skills.map((s) => ({ name: s })) },
+    経験年数: { number: engineer.experienceYears },
+    希望単金: { number: engineer.desiredRate },
+    居住地: { rich_text: toRichText(engineer.residence) },
+    リモート希望: { select: { name: remoteLabel(engineer.remoteWish) } },
+    営業元: { rich_text: toRichText(combineAgentInfo(engineer.agentCompany, engineer.agentContact, engineer.agentEmail)) },
+    元メールID: { rich_text: toRichText(engineer.sourceMailId) },
+    受信日: { date: { start: engineer.receivedAt.toISOString() } },
+    ステータス: { select: { name: engineer.status === 'assigned' ? '決定済' : '提案可' } },
+  };
+  if (engineer.availableFrom) {
+    properties['稼働開始可能日'] = { date: { start: engineer.availableFrom } };
+  }
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    toParagraphBlocks(
+      `最寄り駅: ${engineer.nearestStation}\n稼働開始可能日(原文): ${engineer.availableDate}\n稼働率: ${engineer.utilization}`,
+    ),
+  );
+}
+
+// マッチ結果をNotionマッチDBに保存する。案件・要員のNotionページIDが分かればrelationも張る
+export async function saveMatch(
+  match: MatchResult,
+  refs?: { projectNotionPageId?: string; engineerNotionPageId?: string },
+): Promise<string> {
+  if (!MATCH_DB_ID) {
+    console.warn('NOTION_MATCH_DB_ID が未設定 — マッチ結果の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  const properties: Record<string, unknown> = {
+    マッチ名: { title: toRichText(match.title) },
+    粗利額: { number: match.grossMarginJpy },
+    適合スコア: { number: match.score },
+    判定根拠: { rich_text: toRichText(match.reason) },
+    案件側下書きURL: { rich_text: toRichText(match.draftToProject?.url ?? '') },
+    要員側下書きURL: { rich_text: toRichText(match.draftToEngineer?.url ?? '') },
+    ステータス: { select: { name: matchStatusLabel(match.status) } },
+    検出日時: { date: { start: match.detectedAt.toISOString() } },
+  };
+  if (refs?.projectNotionPageId) properties['案件'] = { relation: [{ id: refs.projectNotionPageId }] };
+  if (refs?.engineerNotionPageId) properties['要員'] = { relation: [{ id: refs.engineerNotionPageId }] };
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    toParagraphBlocks(match.reason),
+  );
+}
+
+// 突合対象の案件（募集中のみ）を取得する（match --match-only で使用）
+export async function fetchOpenProjects(limit = 100): Promise<Project[]> {
+  if (!PROJECT_DB_ID) {
+    console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
+  const response = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      filter: { property: 'ステータス', select: { equals: '募集中' } },
+      page_size: limit,
+    }),
+  );
+  return response.results.map((page) => projectFromPage(page));
+}
+
+// 突合対象の要員（提案可のみ）を取得する（match --match-only で使用）
+export async function fetchAvailableEngineers(limit = 100): Promise<Engineer[]> {
+  if (!ENGINEER_DB_ID) {
+    console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
+  const response = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      filter: { property: 'ステータス', select: { equals: '提案可' } },
+      page_size: limit,
+    }),
+  );
+  return response.results.map((page) => engineerFromPage(page));
+}
+
+function projectFromPage(page: unknown): Project {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const location = readRichText(props['勤務地']);
+  return {
+    id: p.id,
+    title: readTitle(props['案件名']),
+    requiredSkills: readMultiSelect(props['必須スキル']),
+    preferredSkills: readMultiSelect(props['尚可スキル']),
+    rateMin: readNumber(props['単金下限']) ?? null,
+    rateMax: readNumber(props['単金上限']) ?? null,
+    location,
+    prefecture: normalizePrefecture(location),
+    remote: labelToRemote(readSelect(props['リモート'])),
+    startPeriod: readRichText(props['開始時期']),
+    // Notion上には開始日ISOを保持していないため不明扱い（時期判定は緩め運用のため実害は小さい）
+    startDate: null,
+    duration: '',
+    businessFlow: readRichText(props['商流メモ']),
+    agentCompany: readRichText(props['営業元会社']),
+    agentContact: readRichText(props['営業元担当']),
+    agentEmail: readRichText(props['営業元メール']),
+    sourceMailId: readRichText(props['元メールID']),
+    receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
+    status: readSelect(props['ステータス']) === '終了' ? 'closed' : 'open',
+    notionPageId: p.id,
+  };
+}
+
+function engineerFromPage(page: unknown): Engineer {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const residence = readRichText(props['居住地']);
+  const agentInfo = parseAgentInfo(readRichText(props['営業元']));
+  return {
+    id: p.id,
+    displayName: readTitle(props['表示名']),
+    age: null,
+    skills: readMultiSelect(props['スキル']),
+    experienceYears: readNumber(props['経験年数']) ?? null,
+    desiredRate: readNumber(props['希望単金']) ?? null,
+    residence,
+    prefecture: normalizePrefecture(residence),
+    nearestStation: '',
+    availableDate: '',
+    availableFrom: readDate(props['稼働開始可能日']) ?? null,
+    utilization: '',
+    remoteWish: labelToRemote(readSelect(props['リモート希望'])),
+    agentCompany: agentInfo.company,
+    agentContact: agentInfo.contact,
+    agentEmail: agentInfo.email,
+    sourceMailId: readRichText(props['元メールID']),
+    receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
+    status: readSelect(props['ステータス']) === '決定済' ? 'assigned' : 'available',
+    notionPageId: p.id,
+  };
 }
 
 // 指定した親ページの下に、Markdownを変換した子ページを作成する

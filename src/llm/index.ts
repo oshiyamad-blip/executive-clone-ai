@@ -11,6 +11,7 @@ export interface LlmMessage {
 
 export interface GenOptions {
   maxTokens?: number;
+  model?: string; // 未指定なら各プロバイダの既定（env グローバル）。SES等の段階別モデル切替に使う
 }
 
 function provider(): string {
@@ -25,8 +26,8 @@ export async function generateText(
 ): Promise<string> {
   const maxTokens = opts.maxTokens ?? 8192;
   return provider() === 'gemini'
-    ? geminiText(system, messages, maxTokens)
-    : anthropicText(system, messages, maxTokens);
+    ? geminiText(system, messages, maxTokens, opts.model)
+    : anthropicText(system, messages, maxTokens, opts.model);
 }
 
 // 構造化JSON生成（シグナル抽出・ストーリー構築）。schema は JSON Schema。
@@ -38,6 +39,6 @@ export async function generateJson<T = unknown>(
 ): Promise<T> {
   const maxTokens = opts.maxTokens ?? 16000;
   return provider() === 'gemini'
-    ? (geminiJson(system, user, schema, maxTokens) as Promise<T>)
-    : (anthropicJson(system, user, schema, maxTokens) as Promise<T>);
+    ? (geminiJson(system, user, schema, maxTokens, opts.model) as Promise<T>)
+    : (anthropicJson(system, user, schema, maxTokens, opts.model) as Promise<T>);
 }

@@ -26,6 +26,7 @@ export async function geminiText(
   system: string,
   messages: LlmMessage[],
   maxTokens: number,
+  model?: string,
 ): Promise<string> {
   const ai = client();
   const contents = messages.map((m) => ({
@@ -33,7 +34,7 @@ export async function geminiText(
     parts: [{ text: m.content }],
   }));
   const response = await ai.models.generateContent({
-    model: MODEL,
+    model: model ?? MODEL,
     contents,
     config: { systemInstruction: system, maxOutputTokens: maxTokens },
   });
@@ -46,13 +47,14 @@ export async function geminiJson(
   user: string,
   schema: object,
   maxTokens: number,
+  model?: string,
 ): Promise<unknown> {
   const ai = client();
   // Gemini の responseSchema は JSON Schema と細部が異なるため、スキーマはプロンプトに
   // 埋め込み、responseMimeType=application/json で確実にJSONを得てパースする（プロバイダ非依存）。
   const prompt = `${user}\n\n次のJSON Schemaに厳密に従い、JSONのみを出力してください（前後の説明文やコードフェンスは不要）:\n${JSON.stringify(schema)}`;
   const response = await ai.models.generateContent({
-    model: MODEL,
+    model: model ?? MODEL,
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     config: { systemInstruction: system, maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
   });

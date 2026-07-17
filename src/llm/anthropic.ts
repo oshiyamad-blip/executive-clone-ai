@@ -9,15 +9,28 @@ function client(): Anthropic {
 }
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
 
+// adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）でのみ有効で、
+// Haiku 4.5 等の旧世代モデルには存在しない設定のため付与すると 400 になりうる。
+// SES抽出（extractModel）は既定で claude-haiku-4-5 を使うため、モデル名で分岐する。
+function supportsAdaptiveThinking(model: string): boolean {
+  return !model.includes('haiku');
+}
+
+function thinkingParam(model: string): { type: 'adaptive' } | undefined {
+  return supportsAdaptiveThinking(model) ? { type: 'adaptive' } : undefined;
+}
+
 export async function anthropicText(
   system: string,
   messages: LlmMessage[],
   maxTokens: number,
+  model?: string,
 ): Promise<string> {
+  const resolvedModel = model ?? MODEL;
   const response = await client().messages.create({
-    model: MODEL,
+    model: resolvedModel,
     max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
+    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
     system,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
   });
@@ -37,14 +50,47 @@ export async function anthropicJson(
   user: string,
   schema: object,
   maxTokens: number,
+  model?: string,
 ): Promise<unknown> {
+  const resolvedModel = model ?? MODEL;
   const response = await client().messages.create({
-    model: MODEL,
+    model: resolvedModel,
     max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
+    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
     system,
     output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
     messages: [{ role: 'user', content: user }],
+  });
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
+  return JSON.parse(textBlock.text);
+}
+
+// PDF読解用（documentブロック）。SES案件のスキルシートPDFなどをClaudeに直接読ませる用途。
+// 構造化出力(json_schema)と併用し、抽出結果を確実にパースする。
+export async function anthropicJsonWithDocuments(
+  system: string,
+  user: string,
+  schema: object,
+  documents: Array<{ mediaType: 'application/pdf'; dataBase64: string }>,
+  maxTokens: number,
+  model?: string,
+): Promise<unknown> {
+  const content: Array<Anthropic.Messages.DocumentBlockParam | Anthropic.Messages.TextBlockParam> = [
+    ...documents.map((d) => ({
+      type: 'document' as const,
+      source: { type: 'base64' as const, media_type: d.mediaType, data: d.dataBase64 },
+    })),
+    { type: 'text' as const, text: user },
+  ];
+  const resolvedModel = model ?? MODEL;
+  const response = await client().messages.create({
+    model: resolvedModel,
+    max_tokens: maxTokens,
+    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+    system,
+    output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+    messages: [{ role: 'user', content }],
   });
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');

@@ -24,7 +24,11 @@
     "demo:hire": "DEMO_MODE=true tsx src/hire/index.ts",
     "demo:brief": "DEMO_MODE=true tsx src/brief/index.ts",
     "daily": "npm run collect && npm run extract",
-    "weekly": "npm run analyze && npm run digest"
+    "weekly": "npm run analyze && npm run digest",
+    "ses": "tsx src/ses/index.ts",
+    "ses:demo": "DEMO_MODE=true tsx src/ses/index.ts",
+    "ses:collect": "tsx src/ses/index.ts --collect-only",
+    "ses:match": "tsx src/ses/index.ts --match-only"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
@@ -32,7 +36,8 @@
     "@notionhq/client": "^5.1.0",
     "@slack/web-api": "^7.9.0",
     "dotenv": "^16.4.5",
-    "googleapis": "^161.0.0"
+    "googleapis": "^161.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
