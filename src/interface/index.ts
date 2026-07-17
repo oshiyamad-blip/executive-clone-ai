@@ -1,14 +1,14 @@
 import '../env.js';
-import type Anthropic from '@anthropic-ai/sdk';
 import { createInterface } from 'readline/promises';
 import { loadCloneContext, askClone, feedbackChatLog } from '../clone/engine.js';
+import type { LlmMessage } from '../llm/index.js';
 
 // CLI 対話インターフェース（要件3.4 意思決定シミュレーション対話）
 async function startChat(): Promise<void> {
   console.log('経営者クローンAI — 対話インターフェースを起動中...');
 
   const ctx = await loadCloneContext();
-  const history: Anthropic.MessageParam[] = [];
+  const history: LlmMessage[] = [];
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   console.log(`\n✅ 準備完了（シグナル: ${ctx.signals.length}件 / ストーリー: ${ctx.stories.length}件）`);
@@ -31,8 +31,7 @@ async function startChat(): Promise<void> {
       continue;
     }
 
-    // 同一モデルでの継続では content 全体をそのまま履歴に戻す（thinking ブロック維持）
-    history.push({ role: 'assistant', content: result.content });
+    history.push({ role: 'assistant', content: result.answer });
     console.log(`\n${ctx.profile.name}: ${result.answer}\n`);
 
     // 根拠の明示: 参照したシグナル/ストーリーを提示

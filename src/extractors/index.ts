@@ -1,10 +1,8 @@
 import '../env.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { generateJson } from '../llm/index.js';
 import { loadUnprocessedLogs, markProcessed, pruneProcessedLogs } from '../store/rawLogStore.js';
 import { saveSignal } from '../database/index.js';
 import type { RawLog, Signal, SignalCategory } from '../types/index.js';
-
-const client = new Anthropic();
 
 const IMPORTANCE_THRESHOLD = Number(process.env.SIGNAL_IMPORTANCE_THRESHOLD ?? '5');
 
@@ -76,27 +74,12 @@ export async function extractSignals(logs: RawLog[]): Promise<Signal[]> {
 }
 
 async function extractFromLog(log: RawLog): Promise<Signal[]> {
-  const message = await client.messages.create({
-    // adaptive thinking と構造化JSON出力が予算を食い合わないよう十分に確保する
-    // （非ストリーミングの安全上限 ~16000 に収める）
-    model: 'claude-opus-4-8',
-    max_tokens: 16000,
-    thinking: { type: 'adaptive' },
-    system: EXTRACTION_SYSTEM,
-    output_config: { format: { type: 'json_schema', schema: SIGNAL_SCHEMA } },
-    messages: [
-      {
-        role: 'user',
-        content: `以下のテキストからシグナルを抽出してください。\n\n---\n${log.content}\n---`,
-      },
-    ],
-  });
-
-  const textBlock = message.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') return [];
-
-  const parsed: { signals: ExtractedSignal[] } = JSON.parse(textBlock.text);
-  return parsed.signals
+  const parsed = await generateJson<{ signals: ExtractedSignal[] }>(
+    EXTRACTION_SYSTEM,
+    `以下のテキストからシグナルを抽出してください。\n\n---\n${log.content}\n---`,
+    SIGNAL_SCHEMA,
+  );
+  return (parsed.signals ?? [])
     .filter((e) => e.importance >= IMPORTANCE_THRESHOLD)
     .map((e) => ({
       id: `sig_${log.timestamp.getTime()}_${log.id}_${e.category}`,

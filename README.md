@@ -61,7 +61,9 @@ npm run setup
 
 | 変数 | 必須 | 用途 |
 |------|------|------|
-| `ANTHROPIC_API_KEY` | ✅ | Claude API（シグナル抽出・ストーリー生成・対話）。ZDRキー推奨 |
+| `LLM_PROVIDER` | | `anthropic`（既定）/ `gemini` を選択 |
+| `ANTHROPIC_API_KEY` | △ | Claude を使う場合。ZDRキー推奨（`LLM_PROVIDER=anthropic`） |
+| `GEMINI_API_KEY` | △ | Gemini を使う場合（`LLM_PROVIDER=gemini`）。Google AI Studio の無料枠キーでも可 |
 | `NOTION_TOKEN` | ✅ | Notion Internal Integration Token |
 | `NOTION_SIGNAL_DB_ID` | ✅ | シグナルDBの database_id（起動時に data_source_id へ自動解決） |
 | `NOTION_STORY_DB_ID` | ✅ | ストーリーDBの database_id |

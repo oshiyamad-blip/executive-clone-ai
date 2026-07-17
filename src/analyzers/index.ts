@@ -1,9 +1,7 @@
 import '../env.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { generateJson } from '../llm/index.js';
 import { fetchRecentSignals, saveStory } from '../database/index.js';
 import type { Signal, Story, CausalLink } from '../types/index.js';
-
-const client = new Anthropic();
 
 const STORY_SYSTEM = `あなたは経営者の思考と行動パターンを分析する専門家です。
 時系列シグナルデータを分析し、因果関係を持つストーリーを構築してください。
@@ -85,27 +83,19 @@ async function buildStoryFromGroup(period: string, signals: Signal[]): Promise<S
     .map((s) => `[${s.id}] [${s.timestamp.toISOString()}] [${s.category}]\n概要: ${s.summary}\n詳細: ${s.detail}`)
     .join('\n\n');
 
-  const message = await client.messages.create({
-    // adaptive thinking + 構造化JSON出力の予算確保（非ストリーミング安全上限 ~16000）
-    model: 'claude-opus-4-8',
-    max_tokens: 16000,
-    thinking: { type: 'adaptive' },
-    system: STORY_SYSTEM,
-    output_config: { format: { type: 'json_schema', schema: STORY_SCHEMA } },
-    messages: [
-      {
-        role: 'user',
-        content: `対象期間: ${period}\n\n---シグナルデータ---\n${signalText}\n---\n\nストーリーを構築してください。`,
-      },
-    ],
-  });
-
-  const textBlock = message.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') return null;
+  let candidate: StoryCandidate;
+  try {
+    candidate = await generateJson<StoryCandidate>(
+      STORY_SYSTEM,
+      `対象期間: ${period}\n\n---シグナルデータ---\n${signalText}\n---\n\nストーリーを構築してください。`,
+      STORY_SCHEMA,
+    );
+  } catch (err) {
+    console.error(`ストーリー生成に失敗 (${period}): ${String(err)}`);
+    return null;
+  }
 
   try {
-    const candidate: StoryCandidate = JSON.parse(textBlock.text);
-
     const parts = period.split('-').map(Number);
     const startYear = parts[0] ?? new Date().getFullYear();
     const startMonth = parts[1] ?? 1;

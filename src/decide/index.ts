@@ -1,6 +1,6 @@
 import '../env.js';
-import type Anthropic from '@anthropic-ai/sdk';
 import { loadCloneContext, askClone } from '../clone/engine.js';
+import type { LlmMessage } from '../llm/index.js';
 
 // 営業向け即断（CLI・単発）
 // 使い方: npm run decide -- "この案件、15%値引きまでOK？"
@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   }
 
   const ctx = await loadCloneContext();
-  const history: Anthropic.MessageParam[] = [{ role: 'user', content: situation }];
+  const history: LlmMessage[] = [{ role: 'user', content: situation }];
   const result = await askClone(ctx.decisionPrompt, history, ctx.sourceIndex);
 
   console.log(`\n${result.answer}\n`);

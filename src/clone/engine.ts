@@ -1,5 +1,5 @@
 import '../env.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { generateText, type LlmMessage } from '../llm/index.js';
 import { fetchRecentSignals, fetchRecentStories, saveSignal } from '../database/index.js';
 import { EXECUTIVE_PROFILE } from '../data/executiveProfile.js';
 import { getPersona } from '../demo/personas.js';
@@ -9,7 +9,7 @@ import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 // 経営者クローンの中核ロジック。CLI対話 / Web UI / ブリーフィング / ダイジェストで共用する。
-const client = new Anthropic();
+// LLMは src/llm のプロバイダ抽象（Anthropic / Gemini）経由で呼ぶ。
 
 // 壁打ち対話ログ（疑似ログ再入力）を識別するタグ。
 // DBには残すが、生成コンテキストからは除外して自己言及ノイズの占有を防ぐ。
@@ -170,48 +170,22 @@ export function resolveSources(answer: string, index: Map<string, SourceRef>): S
 
 export interface AskResult {
   answer: string;
-  content: Anthropic.ContentBlock[];
   sources: SourceRef[];
 }
 
 // 会話1ターン（history には user メッセージまで積んだ状態で渡す）
 export async function askClone(
   systemPrompt: string,
-  history: Anthropic.MessageParam[],
+  history: LlmMessage[],
   sourceIndex: Map<string, SourceRef>,
 ): Promise<AskResult> {
-  const response = await client.messages.create({
-    // adaptive thinking がトークン枠を消費するため、途中切れしにくい値にする
-    model: 'claude-opus-4-8',
-    max_tokens: 16000,
-    thinking: { type: 'adaptive' },
-    system: systemPrompt,
-    messages: history,
-  });
-  const textBlock = response.content.find((b) => b.type === 'text');
-  let answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
-  // 空応答（max_tokens枯渇/refusal等）をそのまま履歴に戻すと文脈が壊れるため代替文にする
-  if (!answer.trim()) {
-    answer =
-      response.stop_reason === 'max_tokens'
-        ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
-        : '（うまく回答を生成できませんでした。もう一度お試しください。）';
-  }
-  return { answer, content: response.content, sources: resolveSources(answer, sourceIndex) };
+  const answer = await generateText(systemPrompt, history, { maxTokens: 16000 });
+  return { answer, sources: resolveSources(answer, sourceIndex) };
 }
 
 // 単発の生成（ブリーフィング/ダイジェスト用）。Markdownテキストを返す。
-// adaptive thinking と本文が予算を食い合わないよう既定を大きめに（非ストリーミング安全上限）。
 export async function complete(system: string, user: string, maxTokens = 16000): Promise<string> {
-  const response = await client.messages.create({
-    model: 'claude-opus-4-8',
-    max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
-    system,
-    messages: [{ role: 'user', content: user }],
-  });
-  const textBlock = response.content.find((b) => b.type === 'text');
-  return textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  return generateText(system, [{ role: 'user', content: user }], { maxTokens });
 }
 
 // 対話ログをシグナルDBにフィードバックして学習ソースとして循環させる（疑似ログ再入力）

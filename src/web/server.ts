@@ -1,8 +1,8 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
-import type Anthropic from '@anthropic-ai/sdk';
 import { loadCloneContext, askClone, feedbackChatLog, type CloneContext } from '../clone/engine.js';
+import type { LlmMessage } from '../llm/index.js';
 
 // ② Web チャットUI（要件3.4 意思決定シミュレーション対話 / 4.1 アクセス制御）
 // 経営企画・役員がブラウザで壁打ちできる軽量ローカルサーバー。
@@ -87,7 +87,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   const message = (body.message ?? '').trim();
   if (!message) return json(res, 400, { error: 'message is required' });
 
-  const history: Anthropic.MessageParam[] = (body.history ?? [])
+  const history: LlmMessage[] = (body.history ?? [])
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
     .map((m) => ({ role: m.role, content: m.content }));
   history.push({ role: 'user', content: message });
