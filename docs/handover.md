@@ -100,10 +100,72 @@ npm run chat           # 壁打ちで応答確認
 
 ---
 
+## 2.5 本番初日ランブック（デバイス入力→出力まで通す）
+
+引き渡し当日に「実データが一周する」ところまで見せる手順。**2-1〜2-2（Notion・プロファイル）完了が前提**。
+
+### (0) 朝イチ: 乾式リハーサル（Notionに書き込まずLLM経路を確認）
+
+```bash
+npm run doctor      # ❌ ゼロを確認
+npm run rehearse    # サンプル議事録で 抽出→ストーリー構築 が動くことを確認（Notion不要）
+```
+
+### (1) デバイスからの音声入力
+
+**Plaud NotePin S がある場合（初日は手動エクスポートが確実）:**
+1. CEO に1〜2分、今日の商談や考えごとを録音してもらう（ヒアリングの録音でも可）
+2. Plaud アプリで文字起こし → TXT でエクスポート（AirDrop / 共有 → Mac に保存）
+3. 保存した `.txt` を `lifelog-inbox/` に置く
+
+> Zapier 連携（Drive 同期フォルダ→自動投入）は2日目以降に設定でOK（`docs/operations.md`）。
+> デバイスが未着の場合: iPhone のボイスメモ＋Plaud アプリなしなら、議事録テキストや
+> メモの `.txt` を直接 `lifelog-inbox/` に置けば同じ経路が動く（音声は後日差し替え）。
+
+**LINE の入力:**
+1. CEO のスマホで対象トークを開く → メニュー → 「トーク履歴を送信」→ `.txt` を Mac へ
+2. `messenger-inbox/` に置く
+
+### (2) 取り込み実行と確認
+
+```bash
+npm run daily      # collect（取り込み）→ extract（シグナル抽出→Notion保存）
+```
+
+- ターミナルに「メッセンジャー: n件」「ライフログ: n件」→「n件のシグナルをNotionに保存」と出る
+- **Notion のシグナルDBを開き、行が増えていることを CEO と一緒に確認**（ここが一番のデモ）
+
+### (3) 実データで出力を確認
+
+```bash
+npm run decide -- "（今日の実際の商談の状況）"   # 権限委譲ラインどおりの線引きが出るか
+npm run web                                    # 3タブを CEO に触ってもらう
+```
+
+### (4) ストーリー構築（任意）
+
+`analyze` は**シグナル3件以上**で動く。初日に3件たまっていれば:
+
+```bash
+npm run weekly     # analyze（ストーリー構築）+ digest（週次ダイジェスト）
+```
+
+たまっていなければ週末の cron に任せる（そのために (5) を忘れずに）。
+
+### (5) 自動実行を仕込んで締め
+
+```bash
+./scripts/install-cron.sh && crontab -l | grep executive-clone-ai
+```
+
+---
+
 ## 3. 引き渡しチェックリスト（この状態で渡す）
 
 - [ ] `npm run doctor` が ❌ ゼロ
+- [ ] `npm run rehearse` が シグナル抽出＋ストーリー構築まで成功（乾式リハーサル）
 - [ ] `npm run demo:decide` で即答が返る（デモ確認）
+- [ ] **実データ一周**: デバイス録音 or LINEエクスポート → `npm run daily` → Notionにシグナル → `npm run decide`（本番初日ランブック 2.5）
 - [ ] Web UI（`npm run web` または `demo:web`）の3タブを CEO と一緒に一巡
 - [ ] 本番コースまで行った場合: Notion にシグナルが入る／`npm run chat` が本人プロファイルで応答
 - [ ] cron 設定済み（`crontab -l` に executive-clone-ai の行）

@@ -48,15 +48,29 @@ export async function geminiJson(
   maxTokens: number,
 ): Promise<unknown> {
   const ai = client();
-  // Gemini の responseSchema は JSON Schema と細部が異なるため、スキーマはプロンプトに
-  // 埋め込み、responseMimeType=application/json で確実にJSONを得てパースする（プロバイダ非依存）。
-  const prompt = `${user}\n\n次のJSON Schemaに厳密に従い、JSONのみを出力してください（前後の説明文やコードフェンスは不要）:\n${JSON.stringify(schema)}`;
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: { systemInstruction: system, maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
-  });
-  return parseJsonLoose(response.text ?? '');
+  // responseJsonSchema（標準JSON Schemaによる制約付きデコード）で出力の妥当性を担保する
+  // （Gemini 2.5系以降。それ以前のモデルを GEMINI_MODEL に指定すると非対応エラーになり得る）。
+  // それでも稀に不正なJSONが返るため、パース失敗時は1回だけ再試行する。
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      config: {
+        systemInstruction: system,
+        maxOutputTokens: maxTokens,
+        responseMimeType: 'application/json',
+        responseJsonSchema: schema,
+      },
+    });
+    try {
+      return parseJsonLoose(response.text ?? '');
+    } catch (err) {
+      lastErr = err;
+      console.error(`Gemini JSON応答のパースに失敗（試行${attempt}/2）: ${String(err).slice(0, 120)}`);
+    }
+  }
+  throw lastErr;
 }
 
 // 無料枠モデルが ```json フェンスや前後の説明文を付けることがあるため、頑健にJSONを取り出す。
