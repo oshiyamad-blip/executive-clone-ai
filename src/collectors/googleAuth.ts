@@ -20,7 +20,10 @@ const SCOPES = [
 
 // 認証クライアントを返す。設定不足なら null（呼び出し側で縮退動作）。
 // 型は googleapis 同梱の JWT に合わせるため google.auth.JWT を使う。
-export function getGoogleAuth(): InstanceType<typeof google.auth.JWT> | null {
+//
+// extraScopes: 追加スコープが必要なフロー（請求書発行の gmail.compose 等）だけが指定する。
+// 既定 SCOPES に足すと DWD 未登録の間は全収集が 403 になるため、呼び出し側で分離する。
+export function getGoogleAuth(extraScopes: string[] = []): InstanceType<typeof google.auth.JWT> | null {
   const clientEmail = process.env.GOOGLE_SA_CLIENT_EMAIL;
   const privateKey = process.env.GOOGLE_SA_PRIVATE_KEY?.replace(/\\n/g, '\n');
   const subject = process.env.GOOGLE_TARGET_EMAIL;
@@ -29,7 +32,12 @@ export function getGoogleAuth(): InstanceType<typeof google.auth.JWT> | null {
     return null;
   }
 
-  return new google.auth.JWT({ email: clientEmail, key: privateKey, scopes: SCOPES, subject });
+  return new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: [...SCOPES, ...extraScopes],
+    subject,
+  });
 }
 
 // 収集の時間窓（デフォルト: 過去24時間）

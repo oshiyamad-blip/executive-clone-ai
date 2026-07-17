@@ -22,8 +22,15 @@
     "demo:decide": "DEMO_MODE=true tsx src/decide/index.ts",
     "demo:hire": "DEMO_MODE=true tsx src/hire/index.ts",
     "demo:brief": "DEMO_MODE=true tsx src/brief/index.ts",
+    "engagements": "tsx src/engagements/index.ts",
+    "engagements:setup": "tsx src/engagements/setup.ts",
+    "billing:inspect": "tsx src/billing/inspect.ts",
+    "billing:issue": "tsx src/billing/issue.ts",
+    "billing:drafts": "tsx src/billing/drafts.ts",
+    "match": "tsx src/matching/index.ts",
     "daily": "npm run collect && npm run extract",
-    "weekly": "npm run analyze && npm run digest"
+    "weekly": "npm run analyze && npm run digest",
+    "monthly": "npm run billing:inspect"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
@@ -31,10 +38,12 @@
     "@notionhq/client": "^5.1.0",
     "@slack/web-api": "^7.9.0",
     "dotenv": "^16.4.5",
-    "googleapis": "^161.0.0"
+    "googleapis": "^161.0.0",
+    "pdfkit": "^0.19.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pdfkit": "^0.17.6",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

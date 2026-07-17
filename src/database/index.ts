@@ -4,7 +4,7 @@ import type { Signal, Story } from '../types/index.js';
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
 // ページ作成・クエリは data_source_id ベースで行う（database_id は不可）。
 // @notionhq/client v5 は既定で 2025-09-03 を使う。
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
+export const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
 const SIGNAL_DB_ID = process.env.NOTION_SIGNAL_DB_ID ?? '';
 const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
@@ -14,7 +14,7 @@ const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
 const MIN_INTERVAL_MS = 350;
 let lastCall = Promise.resolve(0);
 
-async function throttle<T>(fn: () => Promise<T>): Promise<T> {
+export async function throttle<T>(fn: () => Promise<T>): Promise<T> {
   // 直列化して最小間隔を保証する（Date.now は使えないため performance.now を利用）
   const prev = lastCall;
   let release: (t: number) => void = () => {};
@@ -47,7 +47,7 @@ function sleep(ms: number): Promise<void> {
 // --- data source ID 解決（起動時に一度だけ、キャッシュする）---
 const dataSourceCache = new Map<string, string>();
 
-async function resolveDataSourceId(databaseId: string): Promise<string> {
+export async function resolveDataSourceId(databaseId: string): Promise<string> {
   const cached = dataSourceCache.get(databaseId);
   if (cached) return cached;
 
@@ -72,7 +72,7 @@ async function resolveDataSourceId(databaseId: string): Promise<string> {
 }
 
 // --- rich_text ヘルパー（1オブジェクト最大2000文字）---
-function toRichText(text: string): Array<{ type: 'text'; text: { content: string } }> {
+export function toRichText(text: string): Array<{ type: 'text'; text: { content: string } }> {
   const chunks: string[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     chunks.push(text.slice(i, i + 2000));
@@ -81,7 +81,7 @@ function toRichText(text: string): Array<{ type: 'text'; text: { content: string
 }
 
 // 長文を段落ブロックの配列に変換する（1ブロックあたり rich_text ≤2000文字）
-function toParagraphBlocks(text: string): Array<Record<string, unknown>> {
+export function toParagraphBlocks(text: string): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   for (let i = 0; i < text.length; i += 2000) {
     blocks.push({
@@ -94,7 +94,7 @@ function toParagraphBlocks(text: string): Array<Record<string, unknown>> {
 }
 
 // children は1リクエスト最大100件。超過分は append で追記する。
-async function createPageWithBody(
+export async function createPageWithBody(
   args: Parameters<typeof notion.pages.create>[0],
   bodyBlocks: Array<Record<string, unknown>>,
 ): Promise<string> {
@@ -174,7 +174,7 @@ export async function createChildPage(
 }
 
 // 簡易 Markdown → Notion ブロック変換（見出し/箇条書き/段落）
-function markdownToBlocks(md: string): Array<Record<string, unknown>> {
+export function markdownToBlocks(md: string): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   for (const rawLine of md.split(/\r?\n/)) {
     const line = rawLine.replace(/\s+$/, '');
@@ -292,28 +292,50 @@ function nowIso(): string {
   return new Date(0).toISOString();
 }
 
-function readTitle(prop: unknown): string {
+export function readTitle(prop: unknown): string {
   const t = (prop as { title?: Array<{ plain_text?: string; text?: { content?: string } }> })?.title;
   return t?.[0]?.plain_text ?? t?.[0]?.text?.content ?? '';
 }
 
-function readRichText(prop: unknown): string {
+export function readRichText(prop: unknown): string {
   const t = (prop as { rich_text?: Array<{ plain_text?: string; text?: { content?: string } }> })?.rich_text;
   return (t ?? []).map((r) => r.plain_text ?? r.text?.content ?? '').join('');
 }
 
-function readSelect(prop: unknown): string | undefined {
+export function readSelect(prop: unknown): string | undefined {
   return (prop as { select?: { name?: string } })?.select?.name;
 }
 
-function readMultiSelect(prop: unknown): string[] {
+export function readMultiSelect(prop: unknown): string[] {
   return ((prop as { multi_select?: Array<{ name: string }> })?.multi_select ?? []).map((m) => m.name);
 }
 
-function readNumber(prop: unknown): number | undefined {
+export function readNumber(prop: unknown): number | undefined {
   return (prop as { number?: number })?.number;
 }
 
-function readDate(prop: unknown): string | undefined {
+export function readDate(prop: unknown): string | undefined {
   return (prop as { date?: { start?: string } })?.date?.start;
+}
+
+export function readRelation(prop: unknown): string[] {
+  return ((prop as { relation?: Array<{ id: string }> })?.relation ?? []).map((r) => r.id);
+}
+
+export function readCheckbox(prop: unknown): boolean {
+  return (prop as { checkbox?: boolean })?.checkbox ?? false;
+}
+
+export function readEmail(prop: unknown): string {
+  return (prop as { email?: string })?.email ?? '';
+}
+
+// ページのプロパティを部分更新する（検収ステータスや下書きIDの更新用）
+export async function updatePageProperties(
+  pageId: string,
+  properties: Record<string, unknown>,
+): Promise<void> {
+  await throttle(() =>
+    notion.pages.update({ page_id: pageId, properties: properties as never }),
+  );
 }
