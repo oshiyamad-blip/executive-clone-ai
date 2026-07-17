@@ -242,6 +242,123 @@ export async function fetchAssignments(): Promise<Assignment[]> {
   });
 }
 
+// --- マスタ登録（移行取込・手動登録用）---
+
+function billingMethodLabel(rateType: RateTerms['rateType']): string {
+  return rateType === 'hourly' ? BILLING_METHOD_LABELS.hourly : BILLING_METHOD_LABELS.monthly;
+}
+
+export async function saveClient(client: Omit<Client, 'id'>): Promise<string> {
+  const dataSourceId = await resolveDataSourceId(DB_IDS.client);
+  const properties: Record<string, unknown> = {
+    会社名: { title: toRichText(client.name) },
+    担当者: { rich_text: toRichText(client.contactPerson) },
+    メモ: { rich_text: toRichText(client.note) },
+  };
+  if (client.billingEmail) properties['請求送付先メール'] = { email: client.billingEmail };
+  if (client.closingDay) properties['締め日'] = { select: { name: client.closingDay } };
+  if (client.paymentTerms) properties['支払サイト'] = { select: { name: client.paymentTerms } };
+  if (client.status) properties['ステータス'] = { select: { name: client.status } };
+
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
+export async function saveMember(member: Omit<Member, 'id'>): Promise<string> {
+  const dataSourceId = await resolveDataSourceId(DB_IDS.member);
+  const properties: Record<string, unknown> = {
+    名前: { title: toRichText(member.name) },
+    区分: { select: { name: memberKindLabel(member.kind) } },
+    スキル: { multi_select: member.skills.map((s) => ({ name: s })) },
+    空き予定メモ: { rich_text: toRichText(member.availabilityNote) },
+  };
+  if (member.email) properties['メールアドレス'] = { email: member.email };
+  if (member.nextAvailableDate) {
+    properties['次回空き日'] = { date: { start: member.nextAvailableDate.toISOString().slice(0, 10) } };
+  }
+  if (member.status) properties['ステータス'] = { select: { name: member.status } };
+  if (member.invoiceRegistrationNumber) {
+    properties['インボイス登録番号'] = { rich_text: toRichText(member.invoiceRegistrationNumber) };
+  }
+  if (member.bankAccount) properties['振込先口座'] = { rich_text: toRichText(member.bankAccount) };
+  if (member.monthlyRateHint !== undefined) properties['単価目安'] = { number: member.monthlyRateHint };
+  if (member.monthlySalary !== undefined) properties['月額給与'] = { number: member.monthlySalary };
+  if (member.costFactor !== undefined) properties['コスト係数'] = { number: member.costFactor };
+
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
+export async function saveProject(project: Omit<Project, 'id'>): Promise<string> {
+  const dataSourceId = await resolveDataSourceId(DB_IDS.project);
+  const properties: Record<string, unknown> = {
+    案件名: { title: toRichText(project.name) },
+    必要スキル: { multi_select: project.requiredSkills.map((s) => ({ name: s })) },
+    メモ: { rich_text: toRichText(project.note) },
+  };
+  if (project.clientId) properties['案件元'] = { relation: [{ id: project.clientId }] };
+  if (project.status) properties['ステータス'] = { select: { name: project.status } };
+  if (project.period.start) properties['期間開始'] = { date: { start: project.period.start.toISOString().slice(0, 10) } };
+  if (project.period.end) properties['期間終了'] = { date: { start: project.period.end.toISOString().slice(0, 10) } };
+  if (project.rateRange.min !== undefined) properties['単価下限'] = { number: project.rateRange.min };
+  if (project.rateRange.max !== undefined) properties['単価上限'] = { number: project.rateRange.max };
+  if (project.headcount !== undefined) properties['必要人数'] = { number: project.headcount };
+
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
+export async function saveAssignment(assignment: Omit<Assignment, 'id'>): Promise<string> {
+  const dataSourceId = await resolveDataSourceId(DB_IDS.assignment);
+  const properties: Record<string, unknown> = {
+    アサイン名: { title: toRichText(assignment.name) },
+    契約形態: { select: { name: contractTypeLabel(assignment.contractType) } },
+    稼働率: { number: assignment.allocationPercent },
+    端数処理: { select: { name: ROUNDING_LABELS[assignment.rounding] } },
+    請求方式: { select: { name: billingMethodLabel(assignment.billing.rateType) } },
+  };
+  if (assignment.projectId) properties['案件'] = { relation: [{ id: assignment.projectId }] };
+  if (assignment.memberId) properties['要員'] = { relation: [{ id: assignment.memberId }] };
+  if (assignment.period.start) {
+    properties['期間開始'] = { date: { start: assignment.period.start.toISOString().slice(0, 10) } };
+  }
+  if (assignment.period.end) {
+    properties['期間終了'] = { date: { start: assignment.period.end.toISOString().slice(0, 10) } };
+  }
+  if (assignment.status) properties['ステータス'] = { select: { name: assignment.status } };
+
+  const payment = assignment.payment;
+  if (payment) {
+    if (payment.monthlyRate !== undefined) properties['支払単価'] = { number: payment.monthlyRate };
+    if (payment.lowerHours !== undefined) properties['支払精算下限h'] = { number: payment.lowerHours };
+    if (payment.upperHours !== undefined) properties['支払精算上限h'] = { number: payment.upperHours };
+    if (payment.overtimeRate !== undefined) properties['支払超過単価'] = { number: payment.overtimeRate };
+    if (payment.deductionRate !== undefined) properties['支払控除単価'] = { number: payment.deductionRate };
+  }
+
+  const billing = assignment.billing;
+  if (billing.rateType === 'hourly') {
+    if (billing.hourlyRate !== undefined) properties['請求時給単価'] = { number: billing.hourlyRate };
+  } else {
+    if (billing.monthlyRate !== undefined) properties['請求単価'] = { number: billing.monthlyRate };
+    if (billing.lowerHours !== undefined) properties['請求精算下限h'] = { number: billing.lowerHours };
+    if (billing.upperHours !== undefined) properties['請求精算上限h'] = { number: billing.upperHours };
+    if (billing.overtimeRate !== undefined) properties['請求超過単価'] = { number: billing.overtimeRate };
+    if (billing.deductionRate !== undefined) properties['請求控除単価'] = { number: billing.deductionRate };
+  }
+
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
 // --- 稼働実績（受領請求書・勤表）---
 
 const DOC_TYPE_LABELS = { invoice: '請求書', timesheet: '勤表' } as const;
