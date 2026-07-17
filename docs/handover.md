@@ -63,11 +63,19 @@ npm run demo:web       # http://127.0.0.1:8787 → 即断/採用/壁打ちタブ
 
 ### 2-1. Notion を接続する
 
+**本番DBは作成済み**（親ページ「経営者クローンAI」配下にシグナルDB・ストーリーDBをプロパティ設定済みで用意してある）。
+残る作業は次の3つだけ:
+
 1. [notion.so/my-integrations](https://www.notion.so/my-integrations) で Internal Integration を作成 → トークンを `.env.local` の `NOTION_TOKEN` へ
-2. シグナルDB / ストーリーDB を作成（プロパティは `README.md` の表どおり）
-3. 各DBの **Connections** からインテグレーションを共有
-4. DBの URL 中の ID を `NOTION_SIGNAL_DB_ID` / `NOTION_STORY_DB_ID` へ
-5. `npm run doctor` → Notion の行が ✅ になることを確認
+2. 親ページ **[経営者クローンAI](https://app.notion.com/p/3a0047a1d4c28189b2e3e7b1f7467d54)** の右上 ⋯ → **Connections** からインテグレーションを追加（配下のDBに権限が継承される）
+3. `.env.local` に DB ID を記入:
+   ```
+   NOTION_SIGNAL_DB_ID=a28913a5c34a412fada700e24ab8c432
+   NOTION_STORY_DB_ID=8235a81a0ce54c48a553d81d3c305984
+   ```
+4. `npm run doctor` → Notion の行が ✅ になることを確認
+
+> DBをゼロから作り直す場合のプロパティ定義は `README.md` の表を参照。
 
 ### 2-2. 経営者プロファイルを登録する
 
