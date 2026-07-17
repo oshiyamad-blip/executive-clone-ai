@@ -29,9 +29,12 @@ export interface CloneData {
 }
 
 export interface CloneContext extends CloneData {
-  systemPrompt: string;
+  systemPrompt: string; // 通常の壁打ち対話
+  decisionPrompt: string; // 営業向け即断モード
   sourceIndex: Map<string, SourceRef>;
 }
+
+export type CloneMode = 'chat' | 'decision';
 
 // Notion ページIDをクリック可能なURLに変換
 function notionUrl(pageId?: string): string | undefined {
@@ -58,6 +61,7 @@ export async function loadCloneContext(): Promise<CloneContext> {
   return {
     ...data,
     systemPrompt: buildSystemPrompt(data.profile, data.signals, data.stories),
+    decisionPrompt: buildDecisionPrompt(data.profile, data.signals, data.stories),
     sourceIndex: buildSourceIndex(data.signals, data.stories),
   };
 }
@@ -76,8 +80,8 @@ export function buildSourceIndex(signals: Signal[], stories: Story[]): Map<strin
   return index;
 }
 
-// 経営者クローンのシステムプロンプト（要件3.4 経営理念プロンプト）
-export function buildSystemPrompt(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
+// プロファイル＋データの共有コンテキストブロック（両モードで使う）
+function renderContext(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
   const rules = profile.decisionRules
     .slice()
     .sort((a, b) => a.priority - b.priority)
@@ -93,15 +97,16 @@ export function buildSystemPrompt(profile: ExecutiveProfile, signals: Signal[], 
     .join('\n\n');
   const successPatterns = profile.successPatterns.map((p) => `・${p}`).join('\n');
   const failurePatterns = profile.failurePatterns.map((p) => `・${p}`).join('\n');
+  const delegation = (profile.delegationRules ?? []).map((r) => `・${r}`).join('\n');
 
-  return `あなたは${profile.name}（${profile.role}）の思考を模倣するAIアシスタントです。
-以下のプロファイルと実際の言動データを基に、経営者本人として回答してください。
-
-【経営理念・価値観】
+  return `【経営理念・価値観】
 ${profile.values.join('\n')}
 
 【意思決定ルール（優先順位順）】
 ${rules}
+
+【権限委譲ライン（営業が自分で決めてよい範囲）】
+${delegation || '（未登録）'}
 
 【過去の成功パターン】
 ${successPatterns || '（未登録）'}
@@ -113,7 +118,15 @@ ${failurePatterns || '（未登録）'}
 ${recentSignals || '（データなし）'}
 
 【蓄積ストーリー（因果関係の洞察）】
-${recentStories || '（データなし）'}
+${recentStories || '（データなし）'}`;
+}
+
+// 経営者クローンのシステムプロンプト（要件3.4 経営理念プロンプト・通常の壁打ち）
+export function buildSystemPrompt(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
+  return `あなたは${profile.name}（${profile.role}）の思考を模倣するAIアシスタントです。
+以下のプロファイルと実際の言動データを基に、経営者本人として回答してください。
+
+${renderContext(profile, signals, stories)}
 
 ---
 回答の際は:
@@ -121,6 +134,28 @@ ${recentStories || '（データなし）'}
 2. シグナルやストーリーを根拠にした場合は、該当箇所に参照タグ（例: [S1] [T2]）を必ず付けてください
 3. 確信度が低い場合はその旨を正直に伝えてください
 4. 一人称は「私」を使い、経営者らしい簡潔なトーンで話してください`;
+}
+
+// 営業向け即断モードのシステムプロンプト。
+// 現場の営業が商談中に「社長ならどう判断するか」を即引きするための簡潔フォーマット。
+export function buildDecisionPrompt(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
+  return `あなたは${profile.name}（${profile.role}）の判断を代行し、現場の営業に即断で助言するAIです。
+営業は商談中で急いでいます。社長ならどう判断するかを、短く・明確に返してください。
+
+${renderContext(profile, signals, stories)}
+
+---
+必ず次のフォーマットで、簡潔に回答してください:
+
+【結論】OK / 条件付きOK / NG / 要相談（社長確認） のいずれか（1行）
+【理由】意思決定ルール・過去事例に沿って2〜3行。根拠は [S1] [T1] で明示
+【権限】「営業の裁量で進めてOK」か「社長に確認が必要」かを、上記の権限委譲ラインに照らして明記
+（条件付きOKの場合のみ）【条件】満たすべき条件を箇条書き
+
+判断の原則:
+- 権限委譲ラインを超える・不確実・情報不足なら、無理に決めず「要相談（社長確認）」にする
+- 迷ったら安全側（社長確認）に倒す。営業を勝手にリスクに晒さない
+- 前置きや長い説明は不要。営業がその場で動ける実用的な即答を優先`;
 }
 
 // 回答文中の参照タグ [S1] [T2] を検出し、参照元一覧を組み立てる

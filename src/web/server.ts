@@ -16,6 +16,7 @@ const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
 interface ChatRequest {
   message: string;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  mode?: 'chat' | 'decision';
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -97,7 +98,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   try {
     const ctx = await getContext();
-    const result = await askClone(ctx.systemPrompt, messages, ctx.sourceIndex);
+    // 即断モードなら営業向けプロンプトを使う
+    const prompt = body.mode === 'decision' ? ctx.decisionPrompt : ctx.systemPrompt;
+    const result = await askClone(prompt, messages, ctx.sourceIndex);
     await feedbackChatLog(message, result.answer);
     json(res, 200, {
       answer: result.answer,
@@ -150,7 +153,10 @@ function renderPage(name: string): string {
   body { font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
   header { padding: 12px 16px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 12px; align-items: center; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  #token { margin-left: auto; background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px 8px; width: 180px; }
+  #token { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px 8px; width: 150px; }
+  .seg { margin-left: auto; display: flex; border: 1px solid #2a2f3a; border-radius: 8px; overflow: hidden; }
+  .seg button { background: #0f1115; color: #9aa4b2; border: 0; padding: 7px 15px; font-size: 13px; cursor: pointer; }
+  .seg button.on { background: #2f6feb; color: #fff; }
   main { max-width: 820px; margin: 0 auto; padding: 16px; }
   #log { display: flex; flex-direction: column; gap: 12px; padding-bottom: 120px; }
   .msg { padding: 12px 14px; border-radius: 10px; white-space: pre-wrap; line-height: 1.6; }
@@ -167,7 +173,11 @@ function renderPage(name: string): string {
 </head>
 <body>
 <header>
-  <h1>${name} の分身｜壁打ち</h1>
+  <h1>${name} の分身</h1>
+  <div class="seg" id="mode">
+    <button data-mode="decision" class="on" type="button">即断</button>
+    <button data-mode="chat" type="button">壁打ち</button>
+  </div>
   <input id="token" type="password" placeholder="アクセストークン" />
 </header>
 <main><div id="log"></div></main>
@@ -184,6 +194,19 @@ function renderPage(name: string): string {
   tokenEl.value = localStorage.getItem('ec_token') || '';
   tokenEl.addEventListener('change', () => localStorage.setItem('ec_token', tokenEl.value));
   const history = [];
+
+  // モード切替（即断 / 壁打ち）
+  var mode = 'decision';
+  var modeEl = document.getElementById('mode');
+  function applyMode() {
+    modeEl.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === mode); });
+    input.placeholder = mode === 'decision' ? '値引き可否・提案方針など、その場の判断を相談…' : '議題や相談を入力…';
+  }
+  modeEl.addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    mode = b.dataset.mode; applyMode();
+  });
+  applyMode();
 
   function add(role, text, sources) {
     const div = document.createElement('div');
@@ -214,7 +237,7 @@ function renderPage(name: string): string {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value },
-        body: JSON.stringify({ message: msg, history: history })
+        body: JSON.stringify({ message: msg, history: history, mode: mode })
       });
       const data = await res.json();
       if (!res.ok) { add('bot', '[エラー] ' + (data.error || res.status)); return; }

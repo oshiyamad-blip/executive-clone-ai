@@ -156,8 +156,9 @@ npm run extract   # シグナル抽出バッチ（日次実行）
 npm run analyze   # ストーリー分析バッチ（週次実行）
 
 # 出力（活用）
-npm run chat                 # CLIで経営者クローンと対話
-npm run web                  # ブラウザ対話UI（http://127.0.0.1:8787）
+npm run decide -- "15%値引きOK?"  # 営業向け即断（結論＋根拠＋権限の線引き）
+npm run chat                 # CLIで経営者クローンと対話（壁打ち）
+npm run web                  # ブラウザ対話UI（即断/壁打ちトグル・http://127.0.0.1:8787）
 npm run brief -- "議題"      # 会議前ブリーフィングを生成（Markdown/Notion）
 npm run digest               # 週次ダイジェストを生成（Markdown/Notion）
 
@@ -171,8 +172,9 @@ npm run build     # TypeScriptビルド確認
 
 | 出力 | コマンド | 用途 | 受け取り方 |
 |------|---------|------|-----------|
+| **営業向け即断** | `npm run decide -- "…"` | 営業がその場で可否判断（結論＋根拠＋権限の線引き） | ターミナル / Web「即断」タブ |
 | **CLI対話** | `npm run chat` | 手元での壁打ち | ターミナル |
-| **Web対話UI** | `npm run web` | 経営企画・役員がブラウザで壁打ち | ブラウザ（参照元はNotionリンク） |
+| **Web対話UI** | `npm run web` | ブラウザで即断/壁打ち（モード切替） | ブラウザ（参照元はNotionリンク） |
 | **会議前ブリーフィング** | `npm run brief -- "議題"` | 会議前に見解＋根拠＋想定反論を1枚に | `briefings/*.md` ＋（任意）Notion |
 | **週次ダイジェスト** | `npm run digest` | 今週の重要な動きの要約 | `digests/*.md` ＋（任意）Notion |
 

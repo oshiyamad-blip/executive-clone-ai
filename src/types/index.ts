@@ -77,6 +77,9 @@ export interface ExecutiveProfile {
   decisionRules: DecisionRule[];
   successPatterns: string[];
   failurePatterns: string[];
+  // 権限委譲ライン（営業がその場で決めてよい範囲）。即断モードで参照する。
+  // 例: 「値引きは10%まで営業裁量、超える場合は社長確認」
+  delegationRules?: string[];
 }
 
 // 対話メッセージ
