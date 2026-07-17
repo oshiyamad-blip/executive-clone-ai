@@ -7,6 +7,10 @@ import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 // 経営者クローンの中核ロジック。CLI対話 / Web UI / ブリーフィング / ダイジェストで共用する。
 const client = new Anthropic();
 
+// 壁打ち対話ログ（疑似ログ再入力）を識別するタグ。
+// DBには残すが、生成コンテキストからは除外して自己言及ノイズの占有を防ぐ。
+export const DIALOGUE_TAG = 'AI対話';
+
 export interface SourceRef {
   tag: string; // [S1] [T1] 等
   label: string;
@@ -30,10 +34,16 @@ function notionUrl(pageId?: string): string | undefined {
   return pageId ? `https://www.notion.so/${pageId.replace(/-/g, '')}` : undefined;
 }
 
-// DBから最新のシグナル・ストーリーを読み込む
+// DBから最新のシグナル・ストーリーを読み込む（生成コンテキスト用）。
+// 壁打ち対話ログは除外し、本物のシグナルがプロンプトを占めるようにする。
+// 除外分を見込んで多めに取得してからフィルタする。
 export async function fetchCloneData(): Promise<CloneData> {
-  const [signals, stories] = await Promise.all([fetchRecentSignals(50), fetchRecentStories(10)]);
-  return { profile: EXECUTIVE_PROFILE, signals, stories };
+  const [signals, stories] = await Promise.all([fetchRecentSignals(80), fetchRecentStories(10)]);
+  return {
+    profile: EXECUTIVE_PROFILE,
+    signals: signals.filter((s) => !s.tags.includes(DIALOGUE_TAG)),
+    stories,
+  };
 }
 
 export async function loadCloneContext(): Promise<CloneContext> {
@@ -170,7 +180,7 @@ export async function feedbackChatLog(userInput: string, assistantResponse: stri
     category: 'decision',
     summary: `壁打ち対話: ${userInput.slice(0, 50)}...`,
     detail: `Q: ${userInput}\n\nA: ${assistantResponse}`,
-    tags: ['壁打ち', 'AI対話'],
+    tags: ['壁打ち', DIALOGUE_TAG],
     importance: 3,
     relatedPeople: [],
   };

@@ -1,7 +1,7 @@
 import '../env.js';
 import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { complete } from '../clone/engine.js';
+import { complete, DIALOGUE_TAG } from '../clone/engine.js';
 import { fetchRecentSignals, fetchRecentStories, createChildPage } from '../database/index.js';
 
 // ③ 週次ダイジェスト生成
@@ -23,7 +23,9 @@ const DIGEST_SYSTEM = `あなたは経営者の右腕として、今週の重要
 
 async function main(): Promise<void> {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const signals = (await fetchRecentSignals(100)).filter((s) => s.timestamp.getTime() >= weekAgo);
+  const signals = (await fetchRecentSignals(100)).filter(
+    (s) => s.timestamp.getTime() >= weekAgo && !s.tags.includes(DIALOGUE_TAG),
+  );
   // ストーリーは「期間（開始）」降順で取得されるため、createdAt（今週作成）でフィルタすると
   // 期間開始が古いものを取りこぼす。広めに取得してから作成日で絞る。
   const stories = (await fetchRecentStories(50)).filter((s) => s.createdAt.getTime() >= weekAgo);
