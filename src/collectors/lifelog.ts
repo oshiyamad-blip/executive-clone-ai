@@ -18,7 +18,11 @@ const INBOX_DIR = process.env.LIFELOG_INBOX_DIR ?? join(process.cwd(), 'lifelog-
 const SUPPORTED_EXT = new Set(['.txt', '.md', '.srt', '.vtt']);
 
 export async function collectFromLifelog(): Promise<RawLog[]> {
-  return processInbox(INBOX_DIR, SUPPORTED_EXT, parseLifelogFile, 'ライフログ');
+  // 既定は archive=true（Plaudは録音ごとに一意ファイルが増えるため、処理済みを退避すると
+  // 毎回の再スキャンが軽い）。Drive等の同期フォルダを使う場合は LIFELOG_ARCHIVE=false に
+  // すると、クラウド上でファイルを動かさない（重複排除はストアのIDで担保）。
+  const archive = process.env.LIFELOG_ARCHIVE !== 'false';
+  return processInbox(INBOX_DIR, SUPPORTED_EXT, parseLifelogFile, 'ライフログ', { archive });
 }
 
 function parseLifelogFile(raw: string, file: string, filePath: string): RawLog | null {
