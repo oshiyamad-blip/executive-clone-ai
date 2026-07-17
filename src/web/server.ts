@@ -16,7 +16,7 @@ const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
 interface ChatRequest {
   message: string;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
-  mode?: 'chat' | 'decision';
+  mode?: 'chat' | 'decision' | 'hiring';
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -98,8 +98,11 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   try {
     const ctx = await getContext();
-    // 即断モードなら営業向けプロンプトを使う
-    const prompt = body.mode === 'decision' ? ctx.decisionPrompt : ctx.systemPrompt;
+    // モードに応じてプロンプトを切り替える（即断=営業向け / 採用=採用判断 / それ以外=壁打ち）
+    const prompt =
+      body.mode === 'decision' ? ctx.decisionPrompt
+      : body.mode === 'hiring' ? ctx.hiringPrompt
+      : ctx.systemPrompt;
     const result = await askClone(prompt, messages, ctx.sourceIndex);
     await feedbackChatLog(message, result.answer);
     json(res, 200, {
@@ -176,6 +179,7 @@ function renderPage(name: string): string {
   <h1>${name} の分身</h1>
   <div class="seg" id="mode">
     <button data-mode="decision" class="on" type="button">即断</button>
+    <button data-mode="hiring" type="button">採用</button>
     <button data-mode="chat" type="button">壁打ち</button>
   </div>
   <input id="token" type="password" placeholder="アクセストークン" />
@@ -200,7 +204,10 @@ function renderPage(name: string): string {
   var modeEl = document.getElementById('mode');
   function applyMode() {
     modeEl.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === mode); });
-    input.placeholder = mode === 'decision' ? '値引き可否・提案方針など、その場の判断を相談…' : '議題や相談を入力…';
+    input.placeholder =
+      mode === 'decision' ? '値引き可否・提案方針など、その場の判断を相談…'
+      : mode === 'hiring' ? '候補者の職歴・面接メモを貼り付けて採用判断を相談…'
+      : '議題や相談を入力…';
   }
   modeEl.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;

@@ -31,10 +31,11 @@ export interface CloneData {
 export interface CloneContext extends CloneData {
   systemPrompt: string; // 通常の壁打ち対話
   decisionPrompt: string; // 営業向け即断モード
+  hiringPrompt: string; // 採用判断モード
   sourceIndex: Map<string, SourceRef>;
 }
 
-export type CloneMode = 'chat' | 'decision';
+export type CloneMode = 'chat' | 'decision' | 'hiring';
 
 // Notion ページIDをクリック可能なURLに変換
 function notionUrl(pageId?: string): string | undefined {
@@ -63,6 +64,7 @@ export async function loadCloneContext(): Promise<CloneContext> {
     ...data,
     systemPrompt: buildSystemPrompt(data.profile, data.signals, data.stories),
     decisionPrompt: buildDecisionPrompt(data.profile, data.signals, data.stories),
+    hiringPrompt: buildHiringPrompt(data.profile, data.signals, data.stories),
     sourceIndex: buildSourceIndex(data.signals, data.stories),
   };
 }
@@ -157,6 +159,35 @@ ${renderContext(profile, signals, stories)}
 - 権限委譲ラインを超える・不確実・情報不足なら、無理に決めず「要相談（社長確認）」にする
 - 迷ったら安全側（社長確認）に倒す。営業を勝手にリスクに晒さない
 - 前置きや長い説明は不要。営業がその場で動ける実用的な即答を優先`;
+}
+
+// 採用判断モードのシステムプロンプト。
+// 候補者情報（職歴・面接メモ・音声書き起こし等）を渡すと、社長の採用基準に照らして
+// 合否の傾き・評価点・懸念点・深掘り質問・次アクションを返す。最終判断は人が行う前提。
+export function buildHiringPrompt(profile: ExecutiveProfile, signals: Signal[], stories: Story[]): string {
+  const criteria = (profile.hiringCriteria ?? []).map((c) => `・${c}`).join('\n');
+  return `あなたは${profile.name}（${profile.role}）の採用観を代行し、採用判断を支援するAIです。
+候補者の情報（職歴・面接メモ・音声書き起こしなど）を読み、社長ならどう見るかを整理してください。
+
+${renderContext(profile, signals, stories)}
+
+【採用で重視する基準】
+${criteria || '（未登録）'}
+
+---
+必ず次のフォーマットで回答してください:
+
+【合否の傾き】採用寄り / 条件付き / 見送り寄り / 情報不足 のいずれか（1行）＋確信度（高/中/低）
+【評価できる点】採用基準に照らして良い点を2〜4個、箇条書き。根拠は [S1] [T1] で明示
+【懸念点】基準に照らして気になる点・確認が必要な点を2〜4個、箇条書き
+【深掘り質問】次の面接で必ず聞くべき質問を3〜5個（カルチャーフィット・実績の再現性を見極める質問）
+【次アクション】リファレンスチェック・追加面接・見送り連絡など、次にとるべき具体的行動
+
+判断の原則:
+- これは採用判断の「支援」であり、最終決定は人が行う。断定しすぎない
+- 情報が足りなければ「情報不足」とし、何を確認すべきかを明確にする
+- 経歴の華やかさより、採用基準（特にカルチャーフィット）に沿うかを重視する
+- 学歴・性別・年齢・国籍など、公正な採用を損なう属性で判断しない。能力・行動・価値観で見る`;
 }
 
 // 回答文中の参照タグ [S1] [T2] を検出し、参照元一覧を組み立てる

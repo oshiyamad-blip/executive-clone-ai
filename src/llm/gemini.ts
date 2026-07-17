@@ -5,7 +5,7 @@ import type { LlmMessage } from './index.js';
 // - 無料/低コスト枠: Google AI Studio の APIキー（GEMINI_API_KEY）
 // - 企業/セキュア: Vertex AI（GOOGLE_GENAI_USE_VERTEXAI=true + GCPプロジェクト）
 //   ※ Vertex なら極秘データが自社GCP内に留まり、GWS/Google環境と親和的。
-const MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+const MODEL = process.env.GEMINI_MODEL ?? 'gemini-flash-latest';
 
 function client(): GoogleGenAI {
   if (process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true') {
