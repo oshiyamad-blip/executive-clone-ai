@@ -89,9 +89,50 @@ systemctl list-timers | grep exec-clone   # 次回実行を確認
 > 差分管理も、ファイルの削除・移動も不要です。
 
 ### Plaud（ライフログ）の取り込み経路
-- **公式Zapier**「Transcript & Summary Ready」→ Drive等 → 同期フォルダを `LIFELOG_INBOX_DIR` に（ほぼ自動）
+- **公式Zapier**「Transcript & Summary Ready」→ Drive等 → 同期フォルダを `LIFELOG_INBOX_DIR` に（ほぼ自動・推奨）
 - 非公式CLI `plaud sync <dir>` を日次cron（完全ローカル、ToSリスクあり）
 - アプリから手動エクスポート
+
+---
+
+## 3.5 デバイス到着後セットアップ（Plaud NotePin S → 推奨: Zapier自動化）
+
+デバイスが届いたら、**録音 → 文字起こし → `lifelog-inbox/` 反映まで自動**にする。
+
+### A. デバイス初期設定
+1. Plaud アプリを入れてアカウント作成 → NotePin S を充電・ペアリング
+2. 言語を日本語に設定 → テスト録音で文字起こし＆要約が出るか確認
+
+### B. Zapier で「文字起こし → クラウドフォルダ」を自動化
+1. Zapを新規作成
+2. **トリガー**: Plaud → イベント「Transcript & Summary Ready」→ Plaudアカウント連携
+3. **アクション**: Google Drive →「Create File from Text」（テキストからファイル作成）
+   - Folder: 専用フォルダ（例 `PlaudTranscripts`）
+   - **File Name**: `{{StartTime|date:YYYY-MM-DD}}_{{Title}}.txt`
+     （日付をファイル名先頭に入れる。`/ : *` 等の禁止文字はTitle整形で除去）
+   - **File Content**: `{{Transcript}}`（話者ラベル付き本文。先頭に `{{Summary}}` を足してもよい）
+   - ⚠️ 出力が **Googleドキュメントでなく本物の `.txt`** になる設定にする。
+     難しければ **Dropbox の "Create/Upload File"** を使う（プレーンテキストで確実に保存される）
+4. テスト → Zapを ON
+
+### C. マシン側（PC/サーバー）
+1. Google Drive for desktop（またはDropbox）を入れ、上記フォルダを**ローカル同期**
+2. `.env.local` に設定:
+   ```
+   LIFELOG_INBOX_DIR=/絶対パス/.../PlaudTranscripts
+   LIFELOG_ARCHIVE=false      # 同期フォルダ上でファイルを動かさない
+   ```
+
+### D. 疎通確認（一度だけ）
+1. テスト録音 → 数分後にフォルダへ `.txt` が現れる
+2. `npm run collect` → `npm run extract` → Notion シグナルDB に入るか確認
+3. `npm run chat` で参照されるか確認 → 以降は日次バッチが自動処理
+
+### 注意
+- 文字起こしは会議終了後に**非同期生成**（リアルタイムではない・数分〜）
+- ファイル名は変えない（一意な録音名を重複排除IDに使う）
+- 対面録音は相手の**同意**を（特に社外）
+- Zapier連携に Plaud 有料プラン/Zapier プランが要る場合あり（要確認）
 
 ---
 
