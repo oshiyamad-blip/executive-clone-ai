@@ -19,3 +19,7 @@ messenger-inbox/*
 # 実行ログ
 logs/*
 !logs/.gitkeep
+
+# 生成された成果物（機微情報を含むためコミットしない）
+briefings/
+digests/

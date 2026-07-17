@@ -157,6 +157,49 @@ export async function saveStory(story: Story): Promise<string> {
   );
 }
 
+// 指定した親ページの下に、Markdownを変換した子ページを作成する
+// （ブリーフィング・週次ダイジェストの出力先）
+export async function createChildPage(
+  parentPageId: string,
+  title: string,
+  markdown: string,
+): Promise<string> {
+  return createPageWithBody(
+    {
+      parent: { type: 'page_id', page_id: parentPageId },
+      properties: { title: { title: toRichText(title) } },
+    } as never,
+    markdownToBlocks(markdown),
+  );
+}
+
+// 簡易 Markdown → Notion ブロック変換（見出し/箇条書き/段落）
+function markdownToBlocks(md: string): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const rawLine of md.split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+$/, '');
+    if (!line.trim()) continue;
+    if (line.startsWith('### ')) blocks.push(headingBlock('heading_3', line.slice(4)));
+    else if (line.startsWith('## ')) blocks.push(headingBlock('heading_2', line.slice(3)));
+    else if (line.startsWith('# ')) blocks.push(headingBlock('heading_1', line.slice(2)));
+    else if (/^[-*] /.test(line))
+      blocks.push({
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: { rich_text: toRichText(line.slice(2)) },
+      });
+    else blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: toRichText(line) } });
+  }
+  return blocks;
+}
+
+function headingBlock(
+  type: 'heading_1' | 'heading_2' | 'heading_3',
+  text: string,
+): Record<string, unknown> {
+  return { object: 'block', type, [type]: { rich_text: toRichText(text) } };
+}
+
 // Notionシグナルを取得する（対話インターフェース・ストーリー分析で使用）
 export async function fetchRecentSignals(limit = 50): Promise<Signal[]> {
   if (!SIGNAL_DB_ID) {

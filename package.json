@@ -12,8 +12,11 @@
     "extract": "tsx src/extractors/index.ts",
     "analyze": "tsx src/analyzers/index.ts",
     "chat": "tsx src/interface/index.ts",
+    "brief": "tsx src/brief/index.ts",
+    "digest": "tsx src/digest/index.ts",
+    "web": "tsx src/web/server.ts",
     "daily": "npm run collect && npm run extract",
-    "weekly": "npm run analyze"
+    "weekly": "npm run analyze && npm run digest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
