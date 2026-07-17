@@ -4,11 +4,14 @@ import { createChildPage } from '../database/index.js';
 import { generateJson } from '../llm/index.js';
 import { EXECUTIVE_PROFILE } from '../data/executiveProfile.js';
 import { deriveAvailability } from './availability.js';
-import type { Client, ContractorAvailability, MatchProposal, Member, Project } from '../types/engagements.js';
+import type { Assignment, Client, ContractorAvailability, MatchProposal, Member, Project } from '../types/engagements.js';
 
 // 稼働スケジュール導出＋最適案件マッチング提案のエントリ（npm run match）
+// 終了間近（60日以内）のアサインは「もうすぐ空く要員」「後任が必要になる枠」として
+// 先回りで提案対象に含める（ベンチ発生と後任不在の予防）。
 
 const MATCHING_MONTHS = 6;
+const RENEWAL_WINDOW_DAYS = 60;
 
 const MATCH_SCHEMA = {
   type: 'object',
@@ -89,15 +92,33 @@ async function main(): Promise<void> {
   );
   const openProjects = projects.filter((p) => p.status === '提案中' || p.status === '募集中');
 
-  if (availableMembers.length === 0 || openProjects.length === 0) {
+  const clientNameById = new Map<string, string>(clients.map((c: Client) => [c.id, c.name]));
+  const memberById = new Map<string, Member>(members.map((m) => [m.id, m]));
+  const projectById = new Map<string, Project>(projects.map((p) => [p.id, p]));
+
+  // 終了間近（60日以内）の契約中アサイン = もうすぐ空く要員+後任が必要になる枠
+  const renewalLimit = new Date(today.getTime() + RENEWAL_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const endingAssignments = assignments.filter(
+    (a: Assignment) => a.status === '契約中' && a.period.end !== undefined && a.period.end <= renewalLimit,
+  );
+
+  if (endingAssignments.length > 0) {
+    console.log(`\n=== 終了間近のアサイン（${RENEWAL_WINDOW_DAYS}日以内・${endingAssignments.length}件） ===`);
+    for (const assignment of endingAssignments) {
+      const member = assignment.memberId ? memberById.get(assignment.memberId) : undefined;
+      const project = assignment.projectId ? projectById.get(assignment.projectId) : undefined;
+      console.log(
+        `- ${assignment.name}: ${formatDate(assignment.period.end)} 終了予定（要員: ${member?.name ?? '未設定'} / 案件: ${project?.name ?? '未設定'}）`,
+      );
+    }
+  }
+
+  if (availableMembers.length === 0 || (openProjects.length === 0 && endingAssignments.length === 0)) {
     console.log(
-      `マッチング対象がありません（空き要員: ${availableMembers.length}件 / 募集中・提案中案件: ${openProjects.length}件）。処理を終了します。`,
+      `マッチング対象がありません（空き要員: ${availableMembers.length}件 / 募集中・提案中案件: ${openProjects.length}件 / 終了間近アサイン: ${endingAssignments.length}件）。処理を終了します。`,
     );
     return;
   }
-
-  const clientNameById = new Map<string, string>(clients.map((c: Client) => [c.id, c.name]));
-  const memberById = new Map<string, Member>(members.map((m) => [m.id, m]));
 
   const system = `あなたはSES・人材アサインの営業責任者です。空き要員と募集中案件の最適な組み合わせを提案してください。
 
@@ -111,11 +132,26 @@ async function main(): Promise<void> {
 経営者の価値観:
 ${EXECUTIVE_PROFILE.values.map((v) => `- ${v}`).join('\n')}`;
 
+  const endingSection = endingAssignments.length
+    ? `
+
+# 終了間近のアサイン（${RENEWAL_WINDOW_DAYS}日以内に契約終了予定 — 先回り対応が必要）
+${endingAssignments
+        .map((a) => {
+          const member = a.memberId ? memberById.get(a.memberId) : undefined;
+          const project = a.projectId ? projectById.get(a.projectId) : undefined;
+          return `- ${a.name}: ${formatDate(a.period.end)} 終了予定（要員: ${member?.name ?? '未設定'} / 案件: ${project?.name ?? '未設定'}）`;
+        })
+        .join('\n')}
+
+終了間近のアサインについては、(a) 空く要員の次案件、(b) 空く枠の後任要員、の両方を優先的に提案してください。`
+    : '';
+
   const user = `# 空き要員一覧
 ${availableMembers.map((a) => formatAvailableMember(a, memberById.get(a.memberId))).join('\n')}
 
 # 募集中・提案中案件一覧
-${openProjects.map((p) => formatProject(p, clientNameById)).join('\n')}
+${openProjects.length ? openProjects.map((p) => formatProject(p, clientNameById)).join('\n') : '（現在なし）'}${endingSection}
 
 上記の空き要員と案件について、要員→案件（member_to_project）・案件→要員（project_to_member）の両方向でマッチング提案をしてください。空き%はすでに計算済みの値なので、そのまま利用してください（再計算不要）。`;
 

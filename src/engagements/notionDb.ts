@@ -459,6 +459,7 @@ export interface IssuedInvoiceRecord {
   invoiceNumber: string;
   clientId?: string;
   targetMonth: string;
+  subtotal?: number; // 税抜
   total?: number;
   status: IssuedInvoiceStatus;
   gmailDraftId: string;
@@ -491,6 +492,7 @@ export async function fetchIssuedInvoices(filter?: {
       invoiceNumber: readRichText(props['請求書番号']),
       clientId: readRelation(props['案件元'])[0],
       targetMonth: readRichText(props['対象月']),
+      subtotal: readNumber(props['小計（税抜）']),
       total: readNumber(props['合計（税込）']),
       status: (readSelect(props['ステータス']) ?? '承認待ち') as IssuedInvoiceStatus,
       gmailDraftId: readRichText(props['Gmail下書きID']),

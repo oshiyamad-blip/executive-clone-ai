@@ -30,6 +30,8 @@
     "billing:issue": "tsx src/billing/issue.ts",
     "billing:drafts": "tsx src/billing/drafts.ts",
     "billing:status": "tsx src/billing/status.ts",
+    "billing:report": "tsx src/billing/report.ts",
+    "leads": "tsx src/engagements/leads.ts",
     "match": "tsx src/matching/index.ts",
     "daily": "npm run collect && npm run extract",
     "weekly": "npm run analyze && npm run digest",

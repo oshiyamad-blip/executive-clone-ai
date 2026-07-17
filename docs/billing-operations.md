@@ -101,7 +101,9 @@
 | `npm run billing:status` | 月次運用ダッシュボード（受領・発行状況＋次のアクション） | `-- --month YYYY-MM`（省略時は前月） |
 | `npm run billing:issue` | 検収OK分から請求書PDFを作成し「承認待ち」で登録 | `-- --month YYYY-MM` `-- --dry-run` |
 | `npm run billing:drafts` | 承認済みレコードをGmail下書きに変換 | なし |
-| `npm run match` | 空き要員×募集中案件のマッチング提案 | なし |
+| `npm run match` | 空き要員×案件のマッチング提案（終了60日以内アサインの後任・次案件も先回り提案） | なし |
+| `npm run leads` | メール/フォルダから案件票・要員提案を検出し「ドラフト」登録 | `-- --apply` で実登録 |
+| `npm run billing:report` | 月次経営レポート（売上・粗利・稼働率の推移+収益性ランキング） | `-- --months N`（既定6） |
 
 ---
 

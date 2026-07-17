@@ -23,3 +23,7 @@ else
   echo "[$(stamp)] monthly FAILED (exit $code)" >> "$LOG"
   exit "$code"
 fi
+
+# 先回り提案と経営レポート（失敗しても月次バッチ全体は失敗にしない）
+npm run match >> "$LOG" 2>&1 || echo "[$(stamp)] match skipped/failed" >> "$LOG"
+npm run billing:report >> "$LOG" 2>&1 || echo "[$(stamp)] report skipped/failed" >> "$LOG"
