@@ -50,3 +50,33 @@ export async function anthropicJson(
   if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
   return JSON.parse(textBlock.text);
 }
+
+// PDFを直接読解して構造化出力させる（請求書・勤表の抽出用）。
+// テキスト抽出ライブラリを介さないため、レイアウト崩れに強い。
+export async function anthropicJsonFromPdf(
+  system: string,
+  user: string,
+  pdfBase64: string,
+  schema: object,
+  maxTokens: number,
+): Promise<unknown> {
+  const response = await client().messages.create({
+    model: MODEL,
+    max_tokens: maxTokens,
+    thinking: { type: 'adaptive' },
+    system,
+    output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+          { type: 'text', text: user },
+        ],
+      },
+    ],
+  });
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
+  return JSON.parse(textBlock.text);
+}

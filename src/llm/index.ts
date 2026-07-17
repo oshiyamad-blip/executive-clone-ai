@@ -1,4 +1,4 @@
-import { anthropicText, anthropicJson } from './anthropic.js';
+import { anthropicText, anthropicJson, anthropicJsonFromPdf } from './anthropic.js';
 import { geminiText, geminiJson } from './gemini.js';
 
 // LLMプロバイダの抽象化。LLM_PROVIDER=anthropic（既定）| gemini で切替。
@@ -40,4 +40,19 @@ export async function generateJson<T = unknown>(
   return provider() === 'gemini'
     ? (geminiJson(system, user, schema, maxTokens) as Promise<T>)
     : (anthropicJson(system, user, schema, maxTokens) as Promise<T>);
+}
+
+// PDFを直接読解させて構造化JSONを生成する（請求書・勤表の抽出用）。Anthropicのみ対応。
+export async function generateJsonFromPdf<T = unknown>(
+  system: string,
+  user: string,
+  pdf: Buffer,
+  schema: object,
+  opts: GenOptions = {},
+): Promise<T> {
+  if (provider() === 'gemini') {
+    throw new Error('PDF入力は LLM_PROVIDER=anthropic のみ対応です');
+  }
+  const maxTokens = opts.maxTokens ?? 16000;
+  return anthropicJsonFromPdf(system, user, pdf.toString('base64'), schema, maxTokens) as Promise<T>;
 }

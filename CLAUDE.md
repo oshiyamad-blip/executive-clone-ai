@@ -25,6 +25,16 @@ npm run collect   # データ収集バッチ（日次）
 npm run extract   # シグナル抽出バッチ（日次）
 npm run analyze   # ストーリー分析バッチ（週次）
 npm run chat      # 対話インターフェース起動
+
+# 案件・請求管理
+npm run engagements:setup    # 案件系Notion DB（6つ）を一括作成
+npm run engagements:import   # 既存マスタ（CSV等）の取込（--applyで書き込み）
+npm run engagements          # マスタ一覧+整合性チェック
+npm run billing:inspect      # 検収バッチ（請求書・勤表メールの突合、月次）
+npm run billing:status       # 月次ダッシュボード（未着・未発行・次のアクション）
+npm run billing:issue        # 請求書作成（PDF生成→Notionに承認待ち登録）
+npm run billing:drafts       # 承認済み請求書のGmail下書き作成
+npm run match                # 空き要員×案件のマッチング提案
 ```
 
 ## アーキテクチャとデータフロー
@@ -52,6 +62,26 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
   成功/失敗パターン）の単一の真実の源。要件3.3初期設定 / 3.4経営理念プロンプトに対応
 - `src/interface/` — Claude APIを使った対話インターフェース（プロファイル＋DBを参照、
   疑似ログ再入力で対話をシグナルDBへ循環）
+
+### 案件・請求管理（SES/派遣の仲介モデル）
+
+- `src/types/engagements.ts` — 案件管理ドメインの型（Client/Member/Assignment/RateTerms等）。
+  要員は業務委託と自社正社員（準委任・派遣）の2種。RateTerms は月額+精算幅と時給×実稼働の2方式
+- `src/engagements/` — Notion 6DB（案件元/要員/案件/アサイン/稼働実績/発行請求書）のCRUD。
+  日本語プロパティ名は notionDb.ts に集約（カラム名変更はこのファイルだけ直す）。
+  setup（DB自動作成）/ import（既存CSV等のLLM構造化取込、--applyで書込）/ index（整合性チェック）
+- `src/billing/` — 検収と発行。inspect（Gmail→PDF→Claude抽出→契約突合→稼働実績DB）、
+  issue（検収OK×請求側契約で請求書PDF生成→Notionへ承認待ち登録）、
+  drafts（Notionで「承認済み」にしたものだけGmail下書き作成）、status（月次ダッシュボード）。
+  reconcile.ts は純関数のみ（精算幅計算・検収チェックリスト）
+- `src/matching/` — 空き稼働の導出（availability.ts、純関数）とLLMによる双方向マッチング提案。
+  空き%はコード側で計算し、LLMには計算させない
+- `src/data/companyProfile.ts` — 自社マスタ（社名・登録番号・振込先・メールテンプレート・
+  正社員コスト係数）。発行請求書PDFとGmail下書きが参照
+- PDFの読解は Claude の document block（テキスト抽出ライブラリ不使用）。
+  Gmail下書き作成のみ gmail.compose スコープが必要 — `getGoogleAuth(extraScopes)` で
+  発行フロー専用に分離してあり、既定スコープには足さないこと（DWD未登録時に全収集が403になる）
+- 運用ガイド: `docs/billing-operations.md`（初期セットアップ・月次タイムライン・例外対応）
 
 ## 慣習と注意点
 
