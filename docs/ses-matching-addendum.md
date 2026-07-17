@@ -1,0 +1,79 @@
+# SESマッチング 追加機能（第2弾）
+
+作成日: 2026-07-17 ／ 基本設計・詳細設計への追補
+
+要件定義・基本設計・実装（第1弾）に続き、運用フィードバックから以下3機能を追加した。既存パイプラインへの後方互換な追加であり、既存の収集→抽出→マッチ→下書き→通知の流れは変更していない。
+
+---
+
+## 1. Google スプレッドシート読取の改善（全タブ・範囲固定の撤廃）
+
+**背景**: 第1弾はスプシリンクを `A1:Z200` 固定・先頭タブのみで読んでいたため、Z列超・200行超・2枚目以降のタブを取りこぼしていた。
+
+**変更**: `src/ses/parse.ts` の `readSheetAsText` を全面改修。
+- `spreadsheets.get`（`fields: 'sheets.properties.title'`）で全タブ名を取得。
+- 各タブを `spreadsheets.values.get({ range: タブ名 })` で読む。range にタブ名のみを渡すと、そのタブの**使用済みセル全域**が返る（行・列の上限なし）。
+- タブ単位で try/catch し、`【タブ: 名前】` 見出し付きで連結。空タブはスキップ。
+
+これにより広範囲・複数タブのスプシでも取りこぼしなく抽出できる。demoは外部アクセスしないため従来どおりfixtureテキストを使う（このパスは本番のみ）。
+
+---
+
+## 2. 自社社員 → 合いそうな案件を探す機能
+
+**目的**: 外部から届く要員だけでなく、**自社の候補社員を登録して、届いた案件の中から合いそうなものを探す**。
+
+**金額条件は「必要案件単価」の閾値方式**（外部要員の粗利下限とは別ロジック）:
+- 社員ごとに「必要案件単価（万円/月）」を登録し、**案件単価（rateMax優先）≥ 必要案件単価** を満たす案件を提示。
+- 必要案件単価に希望マージンが織り込まれている前提のため、粗利下限とは独立。単価不足の案件は除外、単価不明は要確認。
+- スキル一致率・勤務地隣接・時期整合の判定は外部マッチ（`match.ts`）と同じヘルパーを流用。
+
+**構成**:
+| 追加 | 内容 |
+|---|---|
+| 型 `OwnEngineer` / `OwnMatch`（`src/types/index.ts`） | 自社社員と、その社員×案件のマッチ。`requiredProjectRate`(必要案件単価)を持つ |
+| Notion 自社社員DB（`src/database/index.ts`） | `saveOwnEngineer` / `fetchOwnEngineers`。プロパティ: 表示名・スキル・経験年数・**必要案件単価**・居住地・リモート希望・稼働可能日・ステータス（稼働可/アサイン済） |
+| `src/ses/ownMatch.ts` | `matchOwnEngineersToProjects()`（純関数）＋ `runOwnMatch()`（社員・案件を読み込み→突合→出力）。社員ごとに上位 `MAX_CANDIDATES_PER_ITEM` 件を提示 |
+| demo fixtures（`src/ses/fixtures/ownEngineers.ts`） | 単価充足で成立するケースと、単価不足で除外されるケースを網羅 |
+| npm scripts | `ses:own-match`（本番=Notion自社社員DB＋案件DB）/ `ses:own-match:demo`（fixtureで外部呼び出しなし） |
+| env | `NOTION_OWN_ENGINEER_DB_ID` |
+
+**データソース**: 本番=Notion自社社員DB＋案件DB（募集中）、demo=fixture社員＋（直前 `ses:demo` の案件成果 or fixture案件を抽出）。
+
+---
+
+## 3. マッチ確認UI（レビューダッシュボード）
+
+**目的**: マッチと紹介メール下書きを人が確認し、ステータスを更新する軽量Web UI。
+
+**方針**: 既存 `src/web/server.ts` と同じ「ビルド不要のインラインHTML＋軽量httpサーバー」流儀。ローカルバインド（127.0.0.1）＋任意の `WEB_ACCESS_TOKEN` Bearer認証。
+
+**構成**:
+| 追加 | 内容 |
+|---|---|
+| `src/ses/review.ts` | レビュー用データ層。バッチ(`notify.ts`)と自社社員探し(`ownMatch.ts`)が成果を `SES_REVIEW_DATA_DIR`(既定 `data/ses-review/`) へ書き出し、UIが読む。demo/本番共通のためUIはNotion接続なしでも動く。ステータス更新はローカル反映＋（`notionPageId`があれば）Notionへ best-effort 同期 |
+| 型 `ReviewMatch`（`src/types/index.ts`） | UIの表示用にマッチを平坦化（下書きURL/本文を保持）。demoは下書き本文をインライン、本番はGmail下書きURLへのリンク |
+| `updateMatchStatus`（`src/database/index.ts`） | マッチDBのステータスをNotionで更新 |
+| `src/ses/web.ts` | ダッシュボード。外部マッチ（成立/要確認・粗利・スコア・根拠・下書き閲覧・ステータス更新ボタン）と、自社社員→案件の候補一覧を表示 |
+| npm scripts | `ses:web` / `ses:web:demo`（既定ポート `SES_WEB_PORT=8788`） |
+
+**UIでできること**（ご要望どおり「一覧＋下書き閲覧＋ステータス更新」）:
+- 成立候補／要確認のマッチ一覧を粗利・スコア・根拠つきで表示
+- 各マッチの紹介メール下書き2通（案件側・要員側）を展開して確認（demoは本文インライン、本番はGmail下書きへのリンク）
+- ステータスを「未確認／紹介済／成約／見送り」に更新（**送信は行わず下書き止まり**の原則は維持）
+- 自社社員→案件の候補も同画面で確認
+
+---
+
+## 動作確認（demo・外部呼び出しなし）
+
+- `npm run build` … 通過（strict/noUnused/fallthrough クリーン）
+- `npm run ses:demo` … マッチ2件を検出し `data/ses-review/matches.json` を生成
+- `npm run ses:own-match:demo` … 自社社員3名 × 案件4件を突合。A.K.(必要65万)→75万案件・B.S.(必要70万)→80万案件が単価充足で成立、C.T.(必要65万・Java)は60万案件が単価不足のため候補なし（閾値方式の実証）
+- `npm run ses:web:demo` … `http://127.0.0.1:8788` でダッシュボード配信、`/api/data` がマッチ＋自社候補を返し、`/api/status` でステータス更新が反映されることを確認
+
+## 申し送り
+
+- スプシ全タブ読取・自社社員DB(Notion)・ステータスのNotion同期は**本番経路**（実Google/Notion認証が必要）で、この環境では未疎通。本番投入時に疎通確認が必要。
+- 自社社員→案件の紹介メール下書き自動生成は本追加では対象外（案件候補の提示まで）。必要なら次段で `draft.ts` を流用して追加可能。
+- 確認UIのレビュー領域(`data/ses-review/`)は系のstore(Notion)とは別の作業領域。本番ではNotionが正、UIはレビュー用キャッシュとして機能し、ステータス更新をNotionへ同期する。

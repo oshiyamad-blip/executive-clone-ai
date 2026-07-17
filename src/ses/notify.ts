@@ -8,6 +8,7 @@ import { saveMatch } from '../database/index.js';
 import { getGoogleAuth } from '../collectors/googleAuth.js';
 import { isDemo, sesNotifyTo } from './config.js';
 import { writeDemoArtifact } from './store.js';
+import { writeReviewMatches } from './review.js';
 import type { MatchResult, Project, Engineer } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -19,6 +20,8 @@ export async function persistAndNotify(
   const engineerPageIds = new Map(engineers.map((e) => [e.id, e.notionPageId]));
 
   const saved = await persistMatches(matches, projectPageIds, engineerPageIds);
+  // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
+  writeReviewMatches(saved);
   const summary = buildSummary(saved);
   await notifySummary(summary);
 }

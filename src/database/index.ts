@@ -8,6 +8,7 @@ import type {
   MatchResult,
   MatchStatus,
   RemoteOption,
+  OwnEngineer,
 } from '../types/index.js';
 
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
@@ -21,6 +22,7 @@ const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
 const PROJECT_DB_ID = process.env.NOTION_PROJECT_DB_ID ?? '';
 const ENGINEER_DB_ID = process.env.NOTION_ENGINEER_DB_ID ?? '';
 const MATCH_DB_ID = process.env.NOTION_MATCH_DB_ID ?? '';
+const OWN_ENGINEER_DB_ID = process.env.NOTION_OWN_ENGINEER_DB_ID ?? '';
 
 // --- レート制限（平均 3 req/s）+ 429/529 リトライ ---
 // 全 Notion 呼び出しをこのラッパー経由にして最小間隔を空ける。
@@ -387,6 +389,76 @@ function engineerFromPage(page: unknown): Engineer {
     status: readSelect(props['ステータス']) === '決定済' ? 'assigned' : 'available',
     notionPageId: p.id,
   };
+}
+
+// 自社社員をNotion自社社員DBに保存する（候補要員→案件探し機能）
+export async function saveOwnEngineer(own: OwnEngineer): Promise<string> {
+  if (!OWN_ENGINEER_DB_ID) {
+    console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
+  const properties: Record<string, unknown> = {
+    表示名: { title: toRichText(own.displayName) },
+    スキル: { multi_select: own.skills.map((s) => ({ name: s })) },
+    経験年数: { number: own.experienceYears },
+    必要案件単価: { number: own.requiredProjectRate },
+    居住地: { rich_text: toRichText(own.residence) },
+    リモート希望: { select: { name: remoteLabel(own.remoteWish) } },
+    ステータス: { select: { name: own.status === 'assigned' ? 'アサイン済' : '稼働可' } },
+  };
+  if (own.availableFrom) properties['稼働可能日'] = { date: { start: own.availableFrom } };
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    toParagraphBlocks(`稼働可能時期(原文): ${own.availableDate}`),
+  );
+}
+
+// 突合対象の自社社員（稼働可のみ）を取得する
+export async function fetchOwnEngineers(limit = 100): Promise<OwnEngineer[]> {
+  if (!OWN_ENGINEER_DB_ID) {
+    console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
+  const response = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      filter: { property: 'ステータス', select: { equals: '稼働可' } },
+      page_size: limit,
+    }),
+  );
+  return response.results.map((page) => ownEngineerFromPage(page));
+}
+
+function ownEngineerFromPage(page: unknown): OwnEngineer {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const residence = readRichText(props['居住地']);
+  return {
+    id: p.id,
+    displayName: readTitle(props['表示名']),
+    skills: readMultiSelect(props['スキル']),
+    experienceYears: readNumber(props['経験年数']) ?? null,
+    requiredProjectRate: readNumber(props['必要案件単価']) ?? null,
+    residence,
+    prefecture: normalizePrefecture(residence),
+    availableDate: '',
+    availableFrom: readDate(props['稼働可能日']) ?? null,
+    remoteWish: labelToRemote(readSelect(props['リモート希望'])),
+    status: readSelect(props['ステータス']) === 'アサイン済' ? 'assigned' : 'available',
+    notionPageId: p.id,
+  };
+}
+
+// マッチ結果のステータスをNotion側で更新する（確認UIの操作を系のstore=Notionへ反映）
+export async function updateMatchStatus(notionPageId: string, status: MatchStatus): Promise<void> {
+  await throttle(() =>
+    notion.pages.update({
+      page_id: notionPageId,
+      properties: { ステータス: { select: { name: matchStatusLabel(status) } } },
+    } as never),
+  );
 }
 
 // 指定した親ページの下に、Markdownを変換した子ページを作成する

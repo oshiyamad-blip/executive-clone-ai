@@ -65,6 +65,22 @@ export function notionMatchDbId(): string {
   return process.env.NOTION_MATCH_DB_ID ?? '';
 }
 
+// 自社社員DB（候補要員→案件探し機能）
+export function notionOwnEngineerDbId(): string {
+  return process.env.NOTION_OWN_ENGINEER_DB_ID ?? '';
+}
+
+// マッチ確認UIが読み書きするレビュー用ローカルJSONの置き場（demo/本番共通）。
+// バッチ/自社社員探しがここへ成果を書き出し、Web UIがこれを読んでステータス更新する。
+export function reviewDataDir(): string {
+  return process.env.SES_REVIEW_DATA_DIR ?? 'data/ses-review';
+}
+
+// マッチ確認UIの待受ポート（既存の web(8787) と衝突しないよう既定8788）
+export function sesWebPort(): number {
+  return Number(process.env.SES_WEB_PORT ?? '8788');
+}
+
 // trueでBatch API（50%割引）を使用。Phase3で参照（現状は未使用の予約設定）
 export function useBatchApi(): boolean {
   return process.env.USE_BATCH_API === 'true';

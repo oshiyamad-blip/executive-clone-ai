@@ -80,10 +80,29 @@ async function parseSheetLinks(mail: SesRawMail): Promise<SesAttachment[]> {
   return results;
 }
 
+// スプレッドシートの全タブを対象に、各タブの使用範囲すべてを読み取る。
+// まず spreadsheets.get でタブ名一覧を取得し、range にタブ名のみを渡すことで
+// そのタブの使用済みセル全域を取得する（旧実装の A1:Z200 固定による取りこぼしを解消）。
 async function readSheetAsText(sheetsApi: sheets_v4.Sheets, spreadsheetId: string): Promise<string> {
-  const resp = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: 'A1:Z200' });
-  const rows = resp.data.values ?? [];
-  return rows.map((row) => row.join('\t')).join('\n');
+  const meta = await sheetsApi.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' });
+  const titles = (meta.data.sheets ?? [])
+    .map((s) => s.properties?.title)
+    .filter((t): t is string => Boolean(t));
+  if (titles.length === 0) return '';
+
+  const parts: string[] = [];
+  for (const title of titles) {
+    try {
+      // range にタブ名だけを指定すると、そのタブの使用範囲全体が返る（行・列上限なし）
+      const resp = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: title });
+      const rows = resp.data.values ?? [];
+      if (rows.length === 0) continue; // 空タブはスキップ
+      parts.push(`【タブ: ${title}】\n${rows.map((row) => row.join('\t')).join('\n')}`);
+    } catch (err) {
+      console.warn(`SES展開: スプレッドシートのタブ読取に失敗 (${title}): ${String(err)}`);
+    }
+  }
+  return parts.join('\n\n');
 }
 
 function extractSpreadsheetId(url: string): string | null {

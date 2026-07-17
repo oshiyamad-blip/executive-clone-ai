@@ -28,7 +28,11 @@
     "ses": "tsx src/ses/index.ts",
     "ses:demo": "DEMO_MODE=true tsx src/ses/index.ts",
     "ses:collect": "tsx src/ses/index.ts --collect-only",
-    "ses:match": "tsx src/ses/index.ts --match-only"
+    "ses:match": "tsx src/ses/index.ts --match-only",
+    "ses:own-match": "tsx src/ses/ownMatch.ts",
+    "ses:own-match:demo": "DEMO_MODE=true tsx src/ses/ownMatch.ts",
+    "ses:web": "tsx src/ses/web.ts",
+    "ses:web:demo": "DEMO_MODE=true tsx src/ses/web.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

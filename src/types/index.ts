@@ -228,3 +228,63 @@ export type ExtractedItem =
   | { kind: 'project'; project: Project }
   | { kind: 'engineer'; engineer: Engineer }
   | { kind: 'other' }; // 案件でも要員でもない（破棄）
+
+// ===== 自社社員（候補要員）→ 案件探し機能 =====
+// 外部要員(Engineer)と異なり、粗利下限ではなく「必要案件単価」で案件を絞る閾値方式。
+// 必要案件単価 = その社員をアサインするのに最低限必要な案件単価（希望margin込みで営業が入力）。
+
+// 自社社員ステータス（稼働可/アサイン済）
+export type OwnEngineerStatus = 'available' | 'assigned';
+
+export interface OwnEngineer {
+  id: string; // 'own_<hash>' 決定的ID
+  displayName: string; // 氏名またはイニシャル
+  skills: string[]; // 正規化済み
+  experienceYears: number | null;
+  requiredProjectRate: number | null; // 必要案件単価（万円/月）。これ以上の案件を提示
+  residence: string; // 居住地（原文）
+  prefecture: string | null; // 正規化した都道府県名
+  availableDate: string; // 稼働可能時期（原文）
+  availableFrom: string | null; // 正規化した稼働可能日 ISO（不明は null）
+  remoteWish: RemoteOption;
+  status: OwnEngineerStatus;
+  notionPageId?: string;
+}
+
+// マッチ確認UI（web.ts）が扱う表示用のマッチ。demo/本番で同一形にするため
+// MatchResult から下書きURL/本文を平坦化して持つ（Notion内部構造から独立させる）。
+export interface ReviewMatch {
+  id: string;
+  title: string;
+  grossMarginJpy: number; // 円/月
+  score: number;
+  reason: string;
+  needsReview: boolean;
+  status: MatchStatus;
+  draftToProjectUrl: string | null;
+  draftToEngineerUrl: string | null;
+  draftToProjectText: string | null; // demoは下書き本文をインライン、本番は null（URLリンク）
+  draftToEngineerText: string | null;
+  notionPageId?: string; // あればステータス更新をNotionへ反映
+}
+
+// 自社社員と案件のマッチ（金額条件は「案件単価 ≥ 必要案件単価」）
+export interface OwnMatch {
+  id: string; // 'ownmatch_<ownId>_<projId>'
+  ownEngineerId: string;
+  ownEngineerName: string;
+  projectId: string;
+  projectTitle: string;
+  projectRate: number | null; // 案件単価（万円/月, rateMax優先）
+  requiredProjectRate: number | null; // 社員の必要案件単価
+  rateGapMan: number | null; // 案件単価 − 必要案件単価（万円/月）。不明は null
+  meetsRate: boolean; // 案件単価が必要案件単価以上か（不明は要確認扱い）
+  skillMatchRate: number; // 必須スキル一致率 0〜1
+  locationOk: boolean;
+  timingOk: boolean;
+  needsReview: boolean; // 単価・勤務地不明で要確認
+  score: number; // 適合スコア 0〜100
+  reason: string; // 提示理由
+  agentEmail: string; // 案件の営業元（打診先）
+  detectedAt: Date;
+}
