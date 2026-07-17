@@ -7,11 +7,11 @@
 
 ## 0. 最初の一度だけ（セットアップ）
 
-担当: 構築者
+担当: 構築者　※新しい端末への導入・引き渡しの当日手順は **`docs/handover.md`** に詳細あり
 
 1. `npm install`
-2. `npm run setup` で `.env.local` を生成し、最低限を記入
-   - `ANTHROPIC_API_KEY`（ZDRキー推奨）
+2. `npm run setup` で `.env.local` を生成し、最低限を記入（`npm run doctor` で不足を一括診断できる）
+   - LLMキー: `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`（無料枠可）、または `ANTHROPIC_API_KEY`（ZDRキー推奨）
    - `NOTION_TOKEN` / `NOTION_SIGNAL_DB_ID` / `NOTION_STORY_DB_ID`
 3. Notion に「シグナルDB」「ストーリーDB」を作成（プロパティは `README.md` 参照）→ 各DBの **Connections** でインテグレーションを共有
 4. `src/data/executiveProfile.ts` に経営者本人の**価値観・15の意思決定ルール・成功/失敗パターン**を登録（要件3.3 初期設定）

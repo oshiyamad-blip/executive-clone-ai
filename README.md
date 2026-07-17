@@ -46,6 +46,8 @@ executive-clone-ai/
 
 ## セットアップ
 
+> 🚚 **新しい端末への導入・引き渡しは [docs/handover.md](docs/handover.md)**（当日チェックリスト付き）を参照。
+
 ### 1. 依存関係のインストール
 
 ```bash
@@ -57,6 +59,8 @@ npm install
 ```bash
 npm run setup
 # .env.local が生成されるので各APIキーを設定する
+npm run doctor
+# 設定が揃っているか一括診断（LLM疎通・Notion接続・データソース）
 ```
 
 | 変数 | 必須 | 用途 |
@@ -169,6 +173,7 @@ npm run digest               # 週次ダイジェストを生成（Markdown/Noti
 npm run daily     # collect + extract
 npm run weekly    # analyze + digest
 npm run build     # TypeScriptビルド確認
+npm run doctor    # 環境診断（キー・Notion・データソースの設定チェック）
 ```
 
 ## アウトプット（活用方法）
