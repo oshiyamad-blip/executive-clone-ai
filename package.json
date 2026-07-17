@@ -15,6 +15,9 @@
     "brief": "tsx src/brief/index.ts",
     "digest": "tsx src/digest/index.ts",
     "web": "tsx src/web/server.ts",
+    "demo:web": "DEMO_MODE=true tsx src/web/server.ts",
+    "demo:chat": "DEMO_MODE=true tsx src/interface/index.ts",
+    "demo:brief": "DEMO_MODE=true tsx src/brief/index.ts",
     "daily": "npm run collect && npm run extract",
     "weekly": "npm run analyze && npm run digest"
   },

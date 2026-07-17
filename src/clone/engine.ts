@@ -2,7 +2,11 @@ import '../env.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { fetchRecentSignals, fetchRecentStories, saveSignal } from '../database/index.js';
 import { EXECUTIVE_PROFILE } from '../data/executiveProfile.js';
+import { DEMO_PROFILE, DEMO_SIGNALS, DEMO_STORIES } from '../demo/sampleData.js';
 import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
+
+// DEMO_MODE=true のとき Notion 不要のサンプルデータで動く（デモ用）
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 // 経営者クローンの中核ロジック。CLI対話 / Web UI / ブリーフィング / ダイジェストで共用する。
 const client = new Anthropic();
@@ -38,6 +42,9 @@ function notionUrl(pageId?: string): string | undefined {
 // 壁打ち対話ログは除外し、本物のシグナルがプロンプトを占めるようにする。
 // 除外分を見込んで多めに取得してからフィルタする。
 export async function fetchCloneData(): Promise<CloneData> {
+  if (DEMO_MODE) {
+    return { profile: DEMO_PROFILE, signals: DEMO_SIGNALS, stories: DEMO_STORIES };
+  }
   const [signals, stories] = await Promise.all([fetchRecentSignals(80), fetchRecentStories(10)]);
   return {
     profile: EXECUTIVE_PROFILE,
@@ -173,6 +180,7 @@ export async function complete(system: string, user: string, maxTokens = 16000):
 
 // 対話ログをシグナルDBにフィードバックして学習ソースとして循環させる（疑似ログ再入力）
 export async function feedbackChatLog(userInput: string, assistantResponse: string): Promise<void> {
+  if (DEMO_MODE) return; // デモではDB書き込みしない
   const signal: Signal = {
     id: `chat_${Date.now()}`,
     rawLogIds: [],
