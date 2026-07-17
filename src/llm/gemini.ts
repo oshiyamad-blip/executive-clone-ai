@@ -52,6 +52,16 @@ export async function geminiJson(
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     config: { systemInstruction: system, maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
   });
-  const text = response.text ?? '';
-  return JSON.parse(text);
+  return parseJsonLoose(response.text ?? '');
+}
+
+// 無料枠モデルが ```json フェンスや前後の説明文を付けることがあるため、頑健にJSONを取り出す。
+function parseJsonLoose(text: string): unknown {
+  let t = text.trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const start = t.search(/[[{]/);
+  const end = Math.max(t.lastIndexOf('}'), t.lastIndexOf(']'));
+  if (start >= 0 && end > start) t = t.slice(start, end + 1);
+  return JSON.parse(t);
 }
