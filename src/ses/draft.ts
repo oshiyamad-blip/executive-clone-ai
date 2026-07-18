@@ -6,9 +6,8 @@
 // （詳細設計での変更点。docs/ses-matching-detailed-design.md に理由を明記）。
 import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { google } from 'googleapis';
 import { generateText } from '../llm/index.js';
-import { getGoogleAuthAs } from '../collectors/googleAuth.js';
+import { createReplyDraftViaMail } from './mail/index.js';
 import { isDemo, matchModel, demoDataDir } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
@@ -91,23 +90,12 @@ function writeDraftFile(ref: DraftRef): DraftRef {
 }
 
 // 確認UIから、担当営業本人の会社アドレスで下書きを確定する。
-// demo=Fromを入れてローカル保存、prod=本人のGmailに全員に返信のスレッド下書きを作成。
+// demo=Fromを入れてローカル保存、prod=メールプロバイダで下書き作成
+// （xserver=共有下書きフォルダにAPPEND / gmail=本人のGmailにスレッド下書き）。
 export async function materializeReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   const finalized: DraftRef = { ...ref, from: fromEmail };
   if (isDemo()) return writeDraftFile(finalized);
-
-  const auth = getGoogleAuthAs(fromEmail);
-  if (!auth) {
-    console.warn('SES下書き: Google認証未設定のため下書き作成をスキップ');
-    return finalized;
-  }
-  const gmail = google.gmail({ version: 'v1', auth });
-  const raw = buildRawReply(finalized);
-  const res = await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
-  const draftId = res.data.id ?? finalized.draftId;
-  const messageId = res.data.message?.id ?? '';
-  const url = messageId ? `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}` : '';
-  return { ...finalized, draftId, url };
+  return createReplyDraftViaMail(finalized, fromEmail);
 }
 
 export async function createDrafts(
@@ -327,13 +315,3 @@ function buildNegotiationContext(target: 'project' | 'engineer', match: MatchRes
   return `\n\n【単金交渉の提案】\n現状の粗利は${(match.grossMarginJpy / 10000).toFixed(1)}万円/月で下限に届かないため、案件単金を+${n.projectRaiseMan}万円・要員単金を−${n.engineerCutMan}万円で調整すると粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月になります。${ask}`;
 }
 
-// 全員に返信のMIMEを組み立てる（From/To/Cc/In-Reply-To/References付き）。
-function buildRawReply(ref: DraftRef): string {
-  const lines: string[] = [`From: ${ref.from ?? ''}`, `To: ${ref.to}`];
-  if (ref.cc) lines.push(`Cc: ${ref.cc}`);
-  lines.push(`Subject: =?UTF-8?B?${Buffer.from(ref.subject, 'utf-8').toString('base64')}?=`);
-  if (ref.inReplyTo) lines.push(`In-Reply-To: ${ref.inReplyTo}`);
-  if (ref.references) lines.push(`References: ${ref.references}`);
-  lines.push('Content-Type: text/plain; charset="UTF-8"', '', ref.body ?? '');
-  return Buffer.from(lines.join('\n')).toString('base64url');
-}

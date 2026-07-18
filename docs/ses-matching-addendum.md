@@ -135,6 +135,31 @@
 - バッチは「全員に返信の内容（宛先・件名・本文・スレッド情報）」を用意するところまで。**実際のGmail下書き作成は本人が確認UIで行う**（送信元が個人アドレスのため）。送信自体は本人がGmailで最終確認して実施（下書き止まりは維持）。
 - env: `SES_TARGET_GMAIL` は共有メーリス（sales@）を指定。
 
+## 7. メール送受信プロバイダの切替（Xserver ⇄ Google Workspace）
+
+**背景**: 会社ドメインは現状 **Xserver 単独**運用だが Google Workspace(GWS) も併用しており、将来 GWS へ移行する可能性がある。収集・下書き・サマリ送信の「口」を差し替え可能にし、いまは Xserver で動かしつつ、移行後は設定変更だけで Gmail API に切り替えられるようにした。
+
+### 7-1. `MAIL_PROVIDER` による抽象化（`src/ses/mail/`）
+既存の `LLM_PROVIDER`（anthropic|gemini）と同じ流儀で、`MailTransport` インタフェース（`collect` / `createReplyDraft` / `sendPlainMail`）を定義し、`MAIL_PROVIDER` で実装を切り替える。**マッチング・確認UI・「全員に返信」の組み立ては共通**で、外部との入出力口だけが差し替わる。
+
+| ファイル | 役割 |
+| --- | --- |
+| `mail/index.ts` | `MailTransport` I/F と `transport()` セレクタ。`collectMail()` / `createReplyDraftViaMail()` / `sendPlainMailViaMail()` を公開 |
+| `mail/xserver.ts` | **既定**。IMAP(`imapflow`) で `sales@` を収集、`mailparser` で本文・添付・返信メタを解析、下書きは `nodemailer` でMIME組立→IMAP `APPEND`（下書きフォルダ）、サマリは SMTP 送信 |
+| `mail/gmail.ts` | GWS 運用時。DWD で共有メーリス収集・本人 impersonate 下書き作成・サマリ送信（従来のGmail経路を移設） |
+
+- `collect.ts` / `draft.ts`(`materializeReplyDraft`) / `notify.ts` は上記の共通関数を呼ぶだけになり、プロバイダ非依存。
+- 設定不足時は各プロバイダが warn して**縮退**（他機能は継続）。demo は `isDemo()` で全経路を短絡するため**プロバイダに一切依存せずオフライン**。
+
+### 7-2. Xserver（既定）の要点
+- **収集**: IMAP接続で `INBOX` を `SINCE`(既定1日) 検索 → `source` 取得 → `simpleParser` で `SesRawMail` 化（`id=sesmail_x<uid>`。Cc/Message-ID/References も取得し「全員に返信」に接続）。
+- **下書き**: `nodemailer` の `streamTransport`(buffer) で全員に返信のMIMEを組み立て、共有の**下書きフォルダに `APPEND`**（`\Draft` フラグ）。担当営業は共有下書きを開いて確認・送信（送信は手動＝下書き止まりを維持）。
+- **サマリ**: SMTP(465/SSL) で `SES_NOTIFY_TO` へ送信。
+- env: `XSERVER_IMAP_HOST/PORT`・`XSERVER_SMTP_HOST/PORT`・`XSERVER_SHARED_USER/PASS`・`XSERVER_DRAFTS_MAILBOX`(既定`Drafts`)・`XSERVER_COLLECT_DAYS`(既定1)。
+
+### 7-3. GWS へ移行する場合
+`MAIL_PROVIDER=gmail` に変更し、DWD 用の Google 認証（`GOOGLE_SA_*`）と `SES_TARGET_GMAIL`（共有メーリス）を設定するだけ。マッチング・UI・下書き本文生成は変更不要。
+
 ## 動作確認（demo・外部呼び出しなし）
 
 - `npm run build` … 通過（strict/noUnused/fallthrough クリーン）

@@ -3,9 +3,8 @@
 //
 // 基本設計I/F（persistAndNotify(matches): Promise<void>）に対し、実装ではマッチ結果DBのrelation
 // （案件・要員）を張るため projects/engineers を追加引数にしている（draft.tsと同様の変更点）。
-import { google } from 'googleapis';
 import { saveMatch } from '../database/index.js';
-import { getGoogleAuth } from '../collectors/googleAuth.js';
+import { sendPlainMailViaMail } from './mail/index.js';
 import { isDemo, sesNotifyTo } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
@@ -120,30 +119,9 @@ async function notifySummary(summary: string): Promise<void> {
     console.warn('SES通知: SES_NOTIFY_TO が未設定のためサマリメール送信をスキップ');
     return;
   }
-  const auth = getGoogleAuth();
-  if (!auth) {
-    console.warn('SES通知: Google認証未設定のためサマリメール送信をスキップ');
-    return;
-  }
   try {
-    const gmail = google.gmail({ version: 'v1', auth });
-    await gmail.users.messages.send({
-      userId: 'me',
-      requestBody: { raw: buildRawSummaryEmail(to, summary) },
-    });
+    await sendPlainMailViaMail(to, 'SES案件・要員マッチング バッチ実行結果', summary);
   } catch (err) {
     console.error(`SES通知: サマリメール送信に失敗: ${String(err)}`);
   }
-}
-
-function buildRawSummaryEmail(to: string, body: string): string {
-  const subject = 'SES案件・要員マッチング バッチ実行結果';
-  const message = [
-    `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`,
-    'Content-Type: text/plain; charset="UTF-8"',
-    '',
-    body,
-  ].join('\n');
-  return Buffer.from(message).toString('base64url');
 }

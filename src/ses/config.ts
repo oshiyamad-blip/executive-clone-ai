@@ -53,9 +53,44 @@ export function maxNegotiationCutMan(): number {
   return Number(process.env.NEGOTIATION_MAX_ENGINEER_CUT_MAN ?? '5');
 }
 
-// 収集対象（Xserverからの転送先）Gmailアドレス
+// メール送受信のプロバイダ。xserver（既定・IMAP/SMTP）| gmail（Google Workspace・API）。
+// マッチングやUIは共通。収集・下書き作成・サマリ送信の「口」だけがこれで切り替わる。
+export function mailProvider(): string {
+  return (process.env.MAIL_PROVIDER ?? 'xserver').toLowerCase();
+}
+
+// 収集対象（Gmailプロバイダ時の転送先）Gmailアドレス
 export function sesTargetGmail(): string {
   return process.env.SES_TARGET_GMAIL ?? '';
+}
+
+// --- Xserver（IMAP/SMTP）設定。共有メーリス(sales@)の収集・下書きAPPEND・サマリ送信に使用 ---
+export function xserverImapHost(): string {
+  return process.env.XSERVER_IMAP_HOST ?? '';
+}
+export function xserverImapPort(): number {
+  return Number(process.env.XSERVER_IMAP_PORT ?? '993');
+}
+export function xserverSmtpHost(): string {
+  return process.env.XSERVER_SMTP_HOST ?? '';
+}
+export function xserverSmtpPort(): number {
+  return Number(process.env.XSERVER_SMTP_PORT ?? '465');
+}
+// 共有メールボックス(sales@)のログイン情報（収集・下書きAPPEND・SMTP送信の認証に使用）
+export function xserverSharedUser(): string {
+  return process.env.XSERVER_SHARED_USER ?? '';
+}
+export function xserverSharedPass(): string {
+  return process.env.XSERVER_SHARED_PASS ?? '';
+}
+// 下書きフォルダ名（環境により 'Drafts' / 'INBOX.Drafts' / '下書き' 等）
+export function xserverDraftsMailbox(): string {
+  return process.env.XSERVER_DRAFTS_MAILBOX ?? 'Drafts';
+}
+// 収集の時間窓（日数）
+export function xserverCollectDays(): number {
+  return Number(process.env.XSERVER_COLLECT_DAYS ?? '1');
 }
 
 // サマリ通知の宛先

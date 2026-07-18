@@ -208,7 +208,7 @@ function base64UrlToStandard(data: string): string {
 }
 
 // 本文中の Google スプレッドシートリンクを検出する
-function extractSheetLinks(body: string): string[] {
+export function extractSheetLinks(body: string): string[] {
   const matches = body.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+[^\s]*/g);
   return matches ? [...new Set(matches)] : [];
 }
