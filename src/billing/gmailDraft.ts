@@ -33,7 +33,8 @@ export async function createInvoiceDraft(
   pdf: Buffer,
   filename: string,
 ): Promise<string | null> {
-  const auth = getGoogleAuth(['https://www.googleapis.com/auth/gmail.compose']);
+  // 共有メールボックス（billing@ 等）が設定されていればそちらに下書きを作る
+  const auth = getGoogleAuth(['https://www.googleapis.com/auth/gmail.compose'], process.env.BILLING_TARGET_EMAIL);
   if (!auth) {
     console.warn(
       'Gmail下書き作成: Google サービスアカウント設定が未完了のため、下書き作成をスキップします（GOOGLE_SA_CLIENT_EMAIL 等を確認してください）。',

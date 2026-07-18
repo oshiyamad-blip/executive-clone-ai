@@ -10,6 +10,7 @@ import {
   fetchContracts,
 } from '../engagements/notionDb.js';
 import type { ContractRecord, IssuedInvoiceRecord } from '../engagements/notionDb.js';
+import { createChildPage } from '../database/index.js';
 import type { Member, Assignment, Client, WorkRecord, IssuedInvoiceStatus } from '../types/engagements.js';
 
 // 月次運用ダッシュボード（読み取り専用、npm run billing:status）
@@ -273,6 +274,30 @@ async function main(): Promise<void> {
     renewalAlerts,
   );
   for (const action of actions) console.log(`・${action}`);
+
+  // 複数人運用: ダッシュボードをNotionページにも出力（親ページ設定時のみ）
+  const parentPageId = process.env.NOTION_ENGAGEMENTS_PARENT_PAGE_ID;
+  if (parentPageId) {
+    const markdown = [
+      '## 受領状況（委託先の請求書・正社員の勤表）',
+      ...(receivedLines.length ? receivedLines.map((l) => `- ${l.text}`) : ['- 対象月に重なる契約中アサインがありません']),
+      ...(unresolvedRecords > 0 ? [`- ⚠ アサイン未解決の受領書類: ${unresolvedRecords}件`] : []),
+      '',
+      '## 発行状況（案件元への請求書）',
+      ...(issuedLines.length ? issuedLines.map((l) => `- ${l}`) : ['- 取引中の案件元がありません']),
+      ...(renewalAlerts.length ? ['', '## 契約更新アラート（終了60日以内）', ...renewalAlerts.map((a) => `- ${a}`)] : []),
+      '',
+      '## 次のアクション',
+      ...actions.map((a) => `- ${a}`),
+    ].join('\n');
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      await createChildPage(parentPageId, `月次ダッシュボード ${month}（${today}時点）`, markdown);
+      console.log('\nNotionにダッシュボードページを作成しました');
+    } catch (err) {
+      console.warn(`Notionへのダッシュボード出力に失敗（コンソール表示は有効）: ${String(err)}`);
+    }
+  }
 }
 
 main().catch((err) => {

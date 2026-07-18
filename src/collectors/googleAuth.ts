@@ -23,10 +23,15 @@ const SCOPES = [
 //
 // extraScopes: 追加スコープが必要なフロー（請求書発行の gmail.compose 等）だけが指定する。
 // 既定 SCOPES に足すと DWD 未登録の間は全収集が 403 になるため、呼び出し側で分離する。
-export function getGoogleAuth(extraScopes: string[] = []): InstanceType<typeof google.auth.JWT> | null {
+// subjectOverride: 共有メールボックス（billing@ 等）を impersonate したいフローが指定する。
+// 省略時は GOOGLE_TARGET_EMAIL（経営者本人）。
+export function getGoogleAuth(
+  extraScopes: string[] = [],
+  subjectOverride?: string,
+): InstanceType<typeof google.auth.JWT> | null {
   const clientEmail = process.env.GOOGLE_SA_CLIENT_EMAIL;
   const privateKey = process.env.GOOGLE_SA_PRIVATE_KEY?.replace(/\\n/g, '\n');
-  const subject = process.env.GOOGLE_TARGET_EMAIL;
+  const subject = subjectOverride || process.env.GOOGLE_TARGET_EMAIL;
 
   if (!clientEmail || !privateKey || !subject) {
     return null;

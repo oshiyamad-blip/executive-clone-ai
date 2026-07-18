@@ -5,6 +5,7 @@ import { fetchIssuedInvoices, fetchClients, updateIssuedInvoiceStatus } from '..
 import type { IssuedInvoiceRecord } from '../engagements/notionDb.js';
 import { createInvoiceDraft } from './gmailDraft.js';
 import { COMPANY_PROFILE, renderTemplate } from '../data/companyProfile.js';
+import { notifyByEmail } from '../notify/index.js';
 import type { Client } from '../types/engagements.js';
 
 // 発行②下書き作成バッチ（npm run billing:drafts）。
@@ -90,6 +91,14 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nGmail下書きを${created}件作成しました。Gmailで内容を確認して送信してください。`);
+
+  // 担当者への通知（NOTIFY_EMAILS 設定時のみ）
+  if (created > 0) {
+    await notifyByEmail(
+      `【請求書下書き】${created}件作成 — 確認して送信してください`,
+      `承認済みの請求書からGmail下書きを${created}件作成しました。\nGmail（${process.env.BILLING_TARGET_EMAIL || '経営者アカウント'}）の下書きを確認して送信し、Notionのステータスを「送付済」に更新してください。`,
+    );
+  }
 }
 
 main().catch((err) => {

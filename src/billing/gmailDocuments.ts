@@ -66,7 +66,8 @@ function decodeBase64Url(data: string): Buffer {
 }
 
 export async function fetchDocumentEmails(members: Member[]): Promise<ReceivedMail[]> {
-  const auth = getGoogleAuth();
+  // 共有メールボックス（billing@ 等）が設定されていればそちらを受信箱にする
+  const auth = getGoogleAuth([], process.env.BILLING_TARGET_EMAIL);
   if (!auth) {
     console.warn('検収: Google サービスアカウント設定が未完了のため、メール取得をスキップします');
     return [];

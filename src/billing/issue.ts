@@ -14,6 +14,7 @@ import {
 } from '../engagements/notionDb.js';
 import { calcSettlement } from './reconcile.js';
 import { saveSignal } from '../database/index.js';
+import { notifyByEmail } from '../notify/index.js';
 import { renderInvoicePdf } from './invoicePdf.js';
 import { COMPANY_PROFILE } from '../data/companyProfile.js';
 import type { Client, Member, Project, Assignment, WorkRecord, InvoiceLine, IssuedInvoiceDraft } from '../types/engagements.js';
@@ -299,6 +300,21 @@ async function main(): Promise<void> {
   } else {
     console.log(
       '\nNotionで請求書PDFを確認し、ステータスを「承認済み」に変更後、npm run billing:drafts を実行してください。',
+    );
+  }
+
+  // 担当者への通知（NOTIFY_EMAILS 設定時のみ）: 承認依頼
+  if (!dryRun && profitRows.length > 0) {
+    await notifyByEmail(
+      `【請求書承認依頼】${month}分 ${profitRows.length}社`,
+      [
+        `${month}分の請求書を${profitRows.length}社分作成し、Notionの発行請求書DBに「承認待ち」で登録しました。`,
+        '',
+        ...profitRows.map((r) => `- ${r.clientName}: 請求 ${formatYen(r.billing)}（税抜）`),
+        '',
+        'NotionでPDFを確認し、問題なければステータスを「承認済み」に変更してください。',
+        'その後 npm run billing:drafts でGmail下書きが作成されます。',
+      ].join('\n'),
     );
   }
 

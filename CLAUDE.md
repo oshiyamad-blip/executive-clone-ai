@@ -84,8 +84,11 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 - `src/data/companyProfile.ts` — 自社マスタ（社名・登録番号・振込先・メールテンプレート・
   正社員コスト係数）。発行請求書PDFとGmail下書きが参照
 - PDFの読解は Claude の document block（テキスト抽出ライブラリ不使用）。
-  Gmail下書き作成のみ gmail.compose スコープが必要 — `getGoogleAuth(extraScopes)` で
-  発行フロー専用に分離してあり、既定スコープには足さないこと（DWD未登録時に全収集が403になる）
+  Gmail下書き作成のみ gmail.compose スコープが必要 — `getGoogleAuth(extraScopes, subjectOverride?)` で
+  発行フロー専用に分離してあり、既定スコープには足さないこと（DWD未登録時に全収集が403になる）。
+  billing系は `BILLING_TARGET_EMAIL`（共有メールボックス）を subjectOverride に渡す
+- `src/notify/` — 担当者へのメール通知（NOTIFY_EMAILS 設定時のみ、複数人運用）。
+  検収完了・承認依頼・下書き作成完了で呼ばれる。通知失敗は処理結果に影響させない
 - 運用ガイド: `docs/billing-operations.md`（初期セットアップ・月次タイムライン・例外対応）
 
 ## 慣習と注意点

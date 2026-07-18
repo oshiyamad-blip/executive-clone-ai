@@ -10,6 +10,7 @@ import {
 } from '../engagements/notionDb.js';
 import { fetchDocumentEmails, type ReceivedMail } from './gmailDocuments.js';
 import { saveSignal } from '../database/index.js';
+import { notifyByEmail } from '../notify/index.js';
 import { extractFromPdf } from './extractDocument.js';
 import { reconcile, acceptTimesheet } from './reconcile.js';
 import type { Assignment, ExtractedDocument, InspectionStatus, Member, ReconciliationResult } from '../types/engagements.js';
@@ -226,6 +227,20 @@ async function main(): Promise<void> {
   if (notable.length > 0) {
     console.log('\n--- 要対応一覧 ---');
     for (const r of notable) console.log(`[${r.status}] ${r.title}: ${r.note}`);
+  }
+
+  // 担当者への通知（NOTIFY_EMAILS 設定時のみ）
+  if (!dryRun && records.length > 0) {
+    const notifyBody = [
+      `検収完了: 請求書${invoiceCount}件・勤表${timesheetCount}件（検収OK${okCount}/差異あり${diffCount}/要確認${unresolvedCount}）`,
+      '',
+      ...(notable.length > 0
+        ? ['【要対応】', ...notable.map((r) => `[${r.status}] ${r.title}: ${r.note}`)]
+        : ['要対応はありません。']),
+      '',
+      '詳細はNotionの稼働実績DBを確認してください。',
+    ].join('\n');
+    await notifyByEmail(`【検収】${invoiceCount + timesheetCount}件処理・要対応${notable.length}件`, notifyBody);
   }
 
   // クローンAIとのシナジー: 検収イベントをシグナルDBへ流す（任意設定）
