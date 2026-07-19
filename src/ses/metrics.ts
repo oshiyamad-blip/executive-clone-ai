@@ -10,10 +10,15 @@ function bandKeyOf(m: ReviewMatch): BandKey {
 
 export function computeBandMetrics(matches: ReviewMatch[], feedback: MatchFeedback[]): BandMetrics[] {
   const fbByMatch = new Map<string, MatchFeedback[]>();
+  const fbByTitle = new Map<string, MatchFeedback[]>();
   for (const f of feedback) {
     const arr = fbByMatch.get(f.matchId);
     if (arr) arr.push(f);
     else fbByMatch.set(f.matchId, [f]);
+    // マッチIDは収集経路と--match-only経路で体系が異なるため、タイトル（案件×要員）でも結合できるようにする
+    const tArr = fbByTitle.get(f.matchTitle);
+    if (tArr) tArr.push(f);
+    else fbByTitle.set(f.matchTitle, [f]);
   }
 
   const keys: BandKey[] = ['strong', 'tentative', 'negotiable'];
@@ -28,7 +33,7 @@ export function computeBandMetrics(matches: ReviewMatch[], feedback: MatchFeedba
       if (m.status === 'introduced') introduced += 1;
       else if (m.status === 'closed_won') closedWon += 1;
       else if (m.status === 'dropped') dropped += 1;
-      for (const f of fbByMatch.get(m.id) ?? []) {
+      for (const f of fbByMatch.get(m.id) ?? fbByTitle.get(m.title) ?? []) {
         if (f.verdict === 'good') good += 1;
         else bad += 1;
       }

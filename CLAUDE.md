@@ -64,7 +64,10 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 
 ## Claude API 利用方針
 
-- モデルは全用途で `claude-opus-4-8`（`@anthropic-ai/sdk` は 0.111+）
+- モデルは全用途で `claude-opus-4-8`（`@anthropic-ai/sdk` は 0.111+）。
+  **例外**: SESマッチング（`src/ses/`）はコスト最適化のため既定で 抽出=Haiku 4.5・
+  最終判定/文面生成=Sonnet 5（`ANTHROPIC_MODEL_EXTRACT` / `ANTHROPIC_MODEL_MATCH` で変更可）。
+  Haiku系は adaptive thinking 非対応のため `src/llm/anthropic.ts` が自動で無効化する
 - **adaptive thinking**（`thinking: { type: 'adaptive' }`）を使う。content 配列には
   thinking ブロックが含まれるため、text は `content[0]` 決め打ちではなく `find` で探す。
   同一モデルでの多ターン継続では content 全体をそのまま履歴に戻す（thinking 維持）

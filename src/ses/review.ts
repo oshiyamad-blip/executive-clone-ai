@@ -51,28 +51,50 @@ function readDemoDraftText(url: string | undefined): string | null {
 }
 
 // MatchResult[] を表示用 ReviewMatch[] に変換して書き出す（notify.ts が呼ぶ）。
+// 既存ファイルとIDまたはタイトルでマージし、人が付けたステータス・確定済み下書きを再実行で消さない。
+// 再生成されなかった過去分も、人が触ったもの（未確認以外）は履歴として残す。
 export function writeReviewMatches(matches: MatchResult[]): void {
-  const review: ReviewMatch[] = matches.map((m) => ({
-    id: m.id,
-    title: m.title,
-    grossMarginJpy: m.grossMarginJpy,
-    score: m.score,
-    reason: m.reason,
-    needsReview: m.needsReview,
-    band: m.band,
-    category: m.category,
-    negotiation: m.negotiation,
-    status: m.status,
-    draftToProjectUrl: m.draftToProject?.url ?? null,
-    draftToEngineerUrl: m.draftToEngineer?.url ?? null,
-    // 全員に返信の本文をプレビュー用にインライン（本文は our 生成物なのでdemo/本番共通で保持）
-    draftToProjectText: m.draftToProject?.body ?? readDemoDraftText(m.draftToProject?.url),
-    draftToEngineerText: m.draftToEngineer?.body ?? readDemoDraftText(m.draftToEngineer?.url),
-    draftProject: m.draftToProject,
-    draftEngineer: m.draftToEngineer,
-    notionPageId: m.notionPageId,
-  }));
-  writeJson('matches', review);
+  const existing = readReviewMatches();
+  const prevById = new Map(existing.map((m) => [m.id, m]));
+  // マッチIDは収集経路と--match-only経路で体系が異なるため、タイトルでも既存分を引けるようにする
+  const prevByTitle = new Map(existing.map((m) => [m.title, m]));
+
+  const fresh: ReviewMatch[] = matches.map((m) => {
+    const prev = prevById.get(m.id) ?? prevByTitle.get(m.title);
+    // UIで送信元を確定済みの下書き（from入り）は温存。それ以外は今回の生成物を採用
+    const draftProject = prev?.draftProject?.from ? prev.draftProject : m.draftToProject;
+    const draftEngineer = prev?.draftEngineer?.from ? prev.draftEngineer : m.draftToEngineer;
+    return {
+      id: m.id,
+      title: m.title,
+      grossMarginJpy: m.grossMarginJpy,
+      score: m.score,
+      reason: m.reason,
+      needsReview: m.needsReview,
+      band: m.band,
+      category: m.category,
+      negotiation: m.negotiation,
+      // 人が変更したステータスは再実行で「未確認」に戻さない
+      status: prev && prev.status !== 'unconfirmed' ? prev.status : m.status,
+      lastActionBy: prev?.lastActionBy,
+      lastActionAt: prev?.lastActionAt,
+      draftToProjectUrl: draftProject?.url ?? null,
+      draftToEngineerUrl: draftEngineer?.url ?? null,
+      // 全員に返信の本文をプレビュー用にインライン（本文は our 生成物なのでdemo/本番共通で保持）
+      draftToProjectText: draftProject?.body ?? readDemoDraftText(draftProject?.url),
+      draftToEngineerText: draftEngineer?.body ?? readDemoDraftText(draftEngineer?.url),
+      draftProject,
+      draftEngineer,
+      notionPageId: m.notionPageId ?? prev?.notionPageId,
+    };
+  });
+
+  const freshIds = new Set(fresh.map((f) => f.id));
+  const freshTitles = new Set(fresh.map((f) => f.title));
+  const carried = existing.filter(
+    (m) => !freshIds.has(m.id) && !freshTitles.has(m.title) && m.status !== 'unconfirmed',
+  );
+  writeJson('matches', [...fresh, ...carried]);
 }
 
 export function readReviewMatches(): ReviewMatch[] {
@@ -133,9 +155,11 @@ export async function createReplyDraftForSender(
   if (side === 'project') {
     target.draftProject = finalized;
     target.draftToProjectUrl = finalized.url;
+    target.draftToProjectText = finalized.body ?? target.draftToProjectText;
   } else {
     target.draftEngineer = finalized;
     target.draftToEngineerUrl = finalized.url;
+    target.draftToEngineerText = finalized.body ?? target.draftToEngineerText;
   }
   writeReviewMatches2(matches);
   return finalized;

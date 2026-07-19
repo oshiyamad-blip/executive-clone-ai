@@ -152,6 +152,11 @@ export function sesWebHost(): string {
   return process.env.SES_WEB_HOST ?? process.env.WEB_HOST ?? '127.0.0.1';
 }
 
+// 確認UIのアクセストークン（共有）。空なら認証なし＝ローカル専用運用
+export function webAccessToken(): string {
+  return process.env.WEB_ACCESS_TOKEN ?? '';
+}
+
 // trueでBatch API（50%割引）を使用。Phase3で参照（現状は未使用の予約設定）
 export function useBatchApi(): boolean {
   return process.env.USE_BATCH_API === 'true';

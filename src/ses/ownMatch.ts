@@ -9,6 +9,7 @@ import { extractItems } from './extract.js';
 import { skillMatchRate } from './pricing.js';
 import { isAdjacentOrSame } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
+import { isTimingWithinGrace } from './match.js';
 import { writeReviewOwnMatches } from './review.js';
 import { loadFixtureOwnEngineers } from './fixtures/ownEngineers.js';
 import { fetchOwnEngineers, fetchOpenProjects } from '../database/index.js';
@@ -16,28 +17,22 @@ import { readDemoArtifact } from './store.js';
 import {
   isDemo,
   skillMatchThreshold,
+  skillMatchStrongThreshold,
   maxCandidatesPerItem,
-  matchTimingGraceDays,
 } from './config.js';
-import type { OwnEngineer, Project, OwnMatch, ExtractedItem } from '../types/index.js';
+import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand } from '../types/index.js';
 
 // 案件単価は上限(rateMax)を優先し、無ければ下限(rateMin)。両方無ければ null。
 function projectRateMan(project: Project): number | null {
   return project.rateMax ?? project.rateMin ?? null;
 }
 
-function isTimingWithinGrace(startDateIso: string, availableFromIso: string): boolean {
-  const start = new Date(startDateIso).getTime();
-  const available = new Date(availableFromIso).getTime();
-  if (Number.isNaN(start) || Number.isNaN(available)) return true;
-  const graceMs = matchTimingGraceDays() * 24 * 60 * 60 * 1000;
-  return available <= start + graceMs;
-}
-
 function evaluate(own: OwnEngineer, project: Project): OwnMatch | null {
-  // スキル: 必須スキルの被覆率が閾値未満なら除外
+  // スキル: 必須スキルの被覆率が閾値未満なら除外。
+  // 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける
   const matchRate = skillMatchRate(project.requiredSkills, own.skills);
   if (matchRate < skillMatchThreshold()) return null;
+  const band: MatchBand = matchRate >= skillMatchStrongThreshold() ? 'strong' : 'tentative';
 
   // 勤務地: フルリモート可 または 同一/隣接県。両方不明なら判定不能として通過(要確認)
   const bothPrefectureUnknown = project.prefecture === null && own.prefecture === null;
@@ -62,9 +57,11 @@ function evaluate(own: OwnEngineer, project: Project): OwnMatch | null {
   const needsReview = rateUnknown || bothPrefectureUnknown;
   const score = Math.round(matchRate * 70 + (locationOk || bothPrefectureUnknown ? 20 : 0) + (timingOk ? 10 : 0));
 
+  const pct = Math.round(matchRate * 100);
+  const tentativeNote = band === 'tentative' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '';
   const reason = needsReview
-    ? `案件単価または勤務地が不明のため要確認です（スキル一致率${Math.round(matchRate * 100)}%）。`
-    : `必要案件単価${required}万円に対し案件単価${rate}万円（差 +${rateGapMan}万円）・スキル一致率${Math.round(matchRate * 100)}%・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
+    ? `${tentativeNote}案件単価または勤務地が不明のため要確認です（スキル一致率${pct}%）。`
+    : `${tentativeNote}必要案件単価${required}万円に対し案件単価${rate}万円（差 +${rateGapMan}万円）・スキル一致率${pct}%・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
 
   return {
     id: `ownmatch_${own.id}_${project.id}`,
@@ -77,6 +74,7 @@ function evaluate(own: OwnEngineer, project: Project): OwnMatch | null {
     rateGapMan,
     meetsRate,
     skillMatchRate: matchRate,
+    band,
     locationOk: locationOk || bothPrefectureUnknown,
     timingOk,
     needsReview,
@@ -129,7 +127,7 @@ async function loadProjects(): Promise<Project[]> {
       return cached.map((p) => ({ ...p, receivedAt: new Date(p.receivedAt) }));
     }
     const mails = await parseAttachments(await collectSesMail());
-    const items = await extractItems(mails);
+    const { items } = await extractItems(mails);
     return items.filter(isProjectItem).map((i) => i.project);
   }
   try {
@@ -171,7 +169,8 @@ function printSummary(own: OwnEngineer[], matches: OwnMatch[]): void {
       continue;
     }
     for (const m of forEngineer) {
-      const tag = m.needsReview ? '[要確認]' : m.meetsRate ? '[単価充足]' : '';
+      const tentative = m.band === 'tentative' ? '[参考提案]' : '';
+      const tag = tentative + (m.needsReview ? '[要確認]' : m.meetsRate ? '[単価充足]' : '');
       console.log(`  ${tag} ${m.projectTitle} — 案件単価${m.projectRate ?? '不明'}万円/月, 適合スコア${m.score}点`);
       console.log(`      ${m.reason}`);
     }

@@ -123,6 +123,12 @@ function buildNegotiation(
     cut = cutMax;
     raise = totalMan - cut;
   }
+  // 上限が小数（例: 2.5万円）設定の場合、切り上げ分の再配分で raise が上限を超え得るため最終クランプする。
+  // クランプ後も不足分を賄えるなら提案は成立（粗利下限は neededMan で判定済み）
+  if (raise > raiseMax) {
+    raise = raiseMax;
+    if (raise + cut + 1e-9 < neededMan) return null;
+  }
   const targetProjectRateMan = projectRateMan + raise;
   const targetEngineerRateMan = engineerRateMan - cut;
   const resultingGrossMarginJpy = Math.round((targetProjectRateMan - targetEngineerRateMan) * 10000);
@@ -135,7 +141,8 @@ function buildNegotiation(
   };
 }
 
-function isTimingWithinGrace(startDateIso: string, availableFromIso: string): boolean {
+// ownMatch.ts（自社社員→案件）も同一ルールで時期判定するため共有する
+export function isTimingWithinGrace(startDateIso: string, availableFromIso: string): boolean {
   const start = new Date(startDateIso).getTime();
   const available = new Date(availableFromIso).getTime();
   if (Number.isNaN(start) || Number.isNaN(available)) return true; // パース不能は緩めに扱う

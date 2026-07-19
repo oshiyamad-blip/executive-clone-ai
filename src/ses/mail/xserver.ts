@@ -5,7 +5,9 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
-import { extractSheetLinks } from '../../collectors/email.js';
+import { extractSheetLinks, isSupportedAttachment } from '../../collectors/email.js';
+import { loadProcessedMailIds } from '../store.js';
+import { buildReplyMime } from './mime.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -50,12 +52,23 @@ export async function collect(): Promise<SesRawMail[]> {
       const since = new Date(Date.now() - xserverCollectDays() * 24 * 60 * 60 * 1000);
       const uids = await client.search({ since }, { uid: true });
       if (uids && uids.length > 0) {
-        for await (const msg of client.fetch(uids, { source: true }, { uid: true })) {
-          try {
-            const parsed = await simpleParser(msg.source as Buffer);
-            mails.push(toSesRawMail(parsed, msg.uid));
-          } catch (err) {
-            console.error(`Xserver収集: メール解析に失敗 (uid ${msg.uid}): ${String(err)}`);
+        // UIDはメールボックス再構築(UIDVALIDITY変化)で再利用されるため、IDにUIDVALIDITYを含めて
+        // 別メールとの誤同一視（誤スキップ）を防ぐ
+        const uidValidity = String((client.mailbox as { uidValidity?: bigint }).uidValidity ?? '0');
+        // 処理済みのUIDは本文ダウンロード前に除外する（毎回全件を再取得しない）
+        const processed = loadProcessedMailIds();
+        const targets = uids.filter((uid) => !processed.has(mailId(uidValidity, uid)));
+        if (targets.length < uids.length) {
+          console.log(`Xserver収集: ${uids.length - targets.length}件は処理済みのため取得をスキップ`);
+        }
+        if (targets.length > 0) {
+          for await (const msg of client.fetch(targets, { source: true }, { uid: true })) {
+            try {
+              const parsed = await simpleParser(msg.source as Buffer);
+              mails.push(toSesRawMail(parsed, uidValidity, msg.uid));
+            } catch (err) {
+              console.error(`Xserver収集: メール解析に失敗 (uid ${msg.uid}): ${String(err)}`);
+            }
           }
         }
       }
@@ -75,6 +88,10 @@ export async function collect(): Promise<SesRawMail[]> {
   return mails;
 }
 
+function mailId(uidValidity: string, uid: number): string {
+  return `sesmail_x${uidValidity}_${uid}`;
+}
+
 function addrText(a: AddressObject | AddressObject[] | undefined): string {
   if (!a) return '';
   if (Array.isArray(a)) return a.map((x) => x.text).filter(Boolean).join(', ');
@@ -86,15 +103,18 @@ function refsText(r: string | string[] | undefined): string {
   return Array.isArray(r) ? r.join(' ') : r;
 }
 
-function toSesRawMail(p: ParsedMail, uid: number): SesRawMail {
-  const attachments: SesAttachment[] = (p.attachments ?? []).map((a) => ({
-    filename: a.filename ?? 'attachment',
-    mimeType: a.contentType ?? '',
-    data: a.content ? a.content.toString('base64') : '',
-  }));
+function toSesRawMail(p: ParsedMail, uidValidity: string, uid: number): SesRawMail {
+  // Gmail経路と同じ許可リスト（xlsx/xls/pdf/spreadsheet）で絞り、署名画像やzip等をメモリに抱えない
+  const attachments: SesAttachment[] = (p.attachments ?? [])
+    .filter((a) => isSupportedAttachment(a.filename ?? '', a.contentType ?? ''))
+    .map((a) => ({
+      filename: a.filename ?? 'attachment',
+      mimeType: a.contentType ?? '',
+      data: a.content ? a.content.toString('base64') : '',
+    }));
   const body = p.text ?? '';
   return {
-    id: `sesmail_x${uid}`,
+    id: mailId(uidValidity, uid),
     from: addrText(p.from),
     to: addrText(p.to),
     cc: addrText(p.cc),
@@ -116,7 +136,7 @@ export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promis
     console.warn('Xserver下書き: IMAP設定が未完了のため下書き作成をスキップ');
     return finalized;
   }
-  const raw = await buildMime(finalized);
+  const raw = await buildReplyMime(finalized);
   const client = imapClient();
   try {
     await client.connect();
@@ -145,19 +165,4 @@ export async function sendPlainMail(to: string, subject: string, body: string): 
     auth: { user: xserverSharedUser(), pass: xserverSharedPass() },
   });
   await transporter.sendMail({ from: xserverSharedUser(), to, subject, text: body });
-}
-
-// nodemailer の streamTransport で、送信せずに全員に返信のMIMEバッファを組み立てる。
-async function buildMime(ref: DraftRef): Promise<Buffer> {
-  const builder = nodemailer.createTransport({ streamTransport: true, newline: 'unix', buffer: true });
-  const info = await builder.sendMail({
-    from: ref.from,
-    to: ref.to,
-    cc: ref.cc,
-    subject: ref.subject,
-    text: ref.body,
-    inReplyTo: ref.inReplyTo,
-    references: ref.references,
-  });
-  return info.message as unknown as Buffer;
 }

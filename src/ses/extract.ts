@@ -157,20 +157,28 @@ interface RawExtraction {
   engineers: RawEngineer[];
 }
 
-export async function extractItems(mails: SesRawMail[]): Promise<ExtractedItem[]> {
-  if (isDemo()) return extractItemsDemo(mails);
+export interface ExtractOutcome {
+  items: ExtractedItem[];
+  // 抽出に成功した（=処理済みにしてよい）メールのID。失敗したメールは含めず、次回バッチで再処理させる
+  processedMailIds: string[];
+}
+
+export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome> {
+  if (isDemo()) return { items: extractItemsDemo(mails), processedMailIds: mails.map((m) => m.id) };
 
   const items: ExtractedItem[] = [];
+  const processedMailIds: string[] = [];
   for (const mail of mails) {
     try {
       items.push(...(await extractFromMail(mail)));
+      processedMailIds.push(mail.id);
     } catch (err) {
-      console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${String(err)}`);
+      console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${String(err)} — 処理済みにせず次回再処理します`);
     }
   }
   const extractedCount = items.filter((i) => i.kind !== 'other').length;
   console.log(`SES抽出: ${mails.length}件のメールから案件・要員 計${extractedCount}件を抽出`);
-  return items;
+  return { items, processedMailIds };
 }
 
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
@@ -202,9 +210,14 @@ function withReplyTarget(items: ExtractedItem[], mail: SesRawMail): ExtractedIte
   });
 }
 
+// 日本のメーラーは .pdf を application/octet-stream で送ることが多いため、拡張子でも判定する
+function isPdfAttachment(a: { mimeType: string; filename: string }): boolean {
+  return a.mimeType === 'application/pdf' || /\.pdf$/i.test(a.filename);
+}
+
 async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
   const documents = mail.attachments
-    .filter((a) => a.mimeType === 'application/pdf' && a.data)
+    .filter((a) => isPdfAttachment(a) && a.data)
     .map((a) => ({ mediaType: 'application/pdf' as const, dataBase64: a.data }));
 
   const attachmentText = mail.attachments

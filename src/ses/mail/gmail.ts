@@ -1,9 +1,11 @@
 // Gmail（Google Workspace）プロバイダ。@自社を Google Workspace で運用している場合に使う。
 // ドメイン全体委任(DWD)で共有メーリスの収集・担当営業本人での下書き作成・サマリ送信を行う。
+// SES用スコープ（gmail.compose / gmail.send / spreadsheets.readonly）のDWD登録が必要。
 import { google } from 'googleapis';
 import { collectSesRawMail } from '../../collectors/email.js';
-import { getGoogleAuth, getGoogleAuthAs } from '../../collectors/googleAuth.js';
+import { getGoogleAuth, getGoogleAuthAs, SES_SCOPES } from '../../collectors/googleAuth.js';
 import { sesTargetGmail } from '../config.js';
+import { buildReplyMime, buildPlainMime } from './mime.js';
 import type { SesRawMail, DraftRef } from '../../types/index.js';
 
 export async function collect(): Promise<SesRawMail[]> {
@@ -16,15 +18,17 @@ export async function collect(): Promise<SesRawMail[]> {
 // 担当営業本人(fromEmail)を impersonate して、全員に返信のスレッド下書きを本人のGmailに作成する。
 export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   const finalized: DraftRef = { ...ref, from: fromEmail };
-  const auth = getGoogleAuthAs(fromEmail);
+  const auth = getGoogleAuthAs(fromEmail, SES_SCOPES);
   if (!auth) {
     console.warn('Gmail下書き: Google認証未設定のため下書き作成をスキップ');
     return finalized;
   }
   const gmail = google.gmail({ version: 'v1', auth });
+  // 手組みヘッダではなく共通MIMEビルダーを使う（日本語表示名のRFC2047エンコード等をXserver側と統一）
+  const raw = (await buildReplyMime(finalized)).toString('base64url');
   const res = await gmail.users.drafts.create({
     userId: 'me',
-    requestBody: { message: { raw: buildRawReply(finalized) } },
+    requestBody: { message: { raw } },
   });
   const draftId = res.data.id ?? finalized.draftId;
   const messageId = res.data.message?.id ?? '';
@@ -33,33 +37,12 @@ export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promis
 }
 
 export async function sendPlainMail(to: string, subject: string, body: string): Promise<void> {
-  const auth = getGoogleAuth();
+  const auth = getGoogleAuth(SES_SCOPES);
   if (!auth) {
     console.warn('Gmailサマリ送信: Google認証未設定のためスキップ');
     return;
   }
   const gmail = google.gmail({ version: 'v1', auth });
-  await gmail.users.messages.send({ userId: 'me', requestBody: { raw: buildRawPlain(to, subject, body) } });
-}
-
-// 全員に返信のMIME（From/To/Cc/In-Reply-To/References付き）を base64url で組み立てる。
-function buildRawReply(ref: DraftRef): string {
-  const lines: string[] = [`From: ${ref.from ?? ''}`, `To: ${ref.to}`];
-  if (ref.cc) lines.push(`Cc: ${ref.cc}`);
-  lines.push(`Subject: =?UTF-8?B?${Buffer.from(ref.subject, 'utf-8').toString('base64')}?=`);
-  if (ref.inReplyTo) lines.push(`In-Reply-To: ${ref.inReplyTo}`);
-  if (ref.references) lines.push(`References: ${ref.references}`);
-  lines.push('Content-Type: text/plain; charset="UTF-8"', '', ref.body ?? '');
-  return Buffer.from(lines.join('\n')).toString('base64url');
-}
-
-function buildRawPlain(to: string, subject: string, body: string): string {
-  const message = [
-    `To: ${to}`,
-    `Subject: =?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`,
-    'Content-Type: text/plain; charset="UTF-8"',
-    '',
-    body,
-  ].join('\n');
-  return Buffer.from(message).toString('base64url');
+  const raw = (await buildPlainMime(to, subject, body)).toString('base64url');
+  await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
 }

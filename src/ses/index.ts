@@ -68,11 +68,13 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
     console.error(`SES展開: 失敗: ${String(err)}`);
   }
 
+  // 抽出に成功したメールだけを処理済みにする（失敗分は次回バッチで再処理。データ消失防止）
   let items: ExtractedItem[] = [];
+  let processedMailIds: string[] = [];
   try {
-    items = await extractItems(parsedMails);
+    ({ items, processedMailIds } = await extractItems(parsedMails));
   } catch (err) {
-    console.error(`SES抽出: 失敗: ${String(err)}`);
+    console.error(`SES抽出: 失敗: ${String(err)}（処理済みマークを保留し次回再処理します）`);
   }
 
   const rawProjects = dedupeProjects(items.filter(isProjectItem).map((i) => i.project));
@@ -81,7 +83,7 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
   const storedProjects = await storeProjects(rawProjects);
   const storedEngineers = await storeEngineers(rawEngineers);
 
-  markMailProcessed(mails.map((m) => m.id));
+  markMailProcessed(processedMailIds);
 
   return { projects: storedProjects, engineers: storedEngineers };
 }

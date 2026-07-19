@@ -5,7 +5,7 @@ import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData,
 import { recordFeedback, loadFeedback } from './feedback.js';
 import { addSkillEquivalence } from './skillEquiv.js';
 import { computeBandMetrics } from './metrics.js';
-import { sesWebPort, sesWebHost } from './config.js';
+import { sesWebPort, sesWebHost, webAccessToken, isDemo } from './config.js';
 import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 
 // SESマッチ確認UI（複数人運用）。バッチ/自社社員探しが書き出したレビュー成果を一覧表示し、
@@ -14,7 +14,7 @@ import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 // アクセス制御: WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証。ホストは SES_WEB_HOST（既定ローカル）。
 const HOST = sesWebHost();
 const PORT = sesWebPort();
-const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
+const ACCESS_TOKEN = webAccessToken();
 const VALID_STATUSES: MatchStatus[] = ['unconfirmed', 'introduced', 'closed_won', 'dropped'];
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -63,7 +63,7 @@ async function handleData(res: ServerResponse): Promise<void> {
 
 async function handleStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'invalid json' });
+  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
   const id = String(body.id ?? '').trim();
   const status = body.status as MatchStatus;
   const reviewer = String(body.reviewer ?? '').trim();
@@ -81,7 +81,7 @@ async function handleStatus(req: IncomingMessage, res: ServerResponse): Promise<
 
 async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'invalid json' });
+  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
   const matchId = String(body.matchId ?? '').trim();
   const verdict = body.verdict === 'bad' ? 'bad' : body.verdict === 'good' ? 'good' : null;
   if (!matchId || !verdict) return json(res, 400, { error: 'matchId と verdict(good/bad) が必要です' });
@@ -97,8 +97,10 @@ async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promis
     at: new Date().toISOString(),
   };
   try {
-    await recordFeedback(fb);
-    return json(res, 200, { ok: true });
+    const savedTo = await recordFeedback(fb);
+    // 本番でNotionに書けずローカル退避した場合はUIに知らせる（黙って握りつぶさない）
+    const degraded = !isDemo() && savedTo === 'local';
+    return json(res, 200, { ok: true, degraded });
   } catch (err) {
     return json(res, 502, { error: `評価の保存に失敗しました: ${String(err)}` });
   }
@@ -106,7 +108,7 @@ async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promis
 
 async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'invalid json' });
+  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
   const matchId = String(body.matchId ?? '').trim();
   const side = body.side === 'engineer' ? 'engineer' : body.side === 'project' ? 'project' : null;
   const fromEmail = String(body.fromEmail ?? '').trim();
@@ -125,7 +127,7 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
 
 async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'invalid json' });
+  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
   const a = String(body.a ?? '').trim();
   const b = String(body.b ?? '').trim();
   const reviewer = String(body.reviewer ?? '').trim();
@@ -154,31 +156,31 @@ function main(): void {
       return;
     }
     if (req.url === '/api/data' && req.method === 'GET') {
-      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
       void handleData(res);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/status') {
-      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
       void handleStatus(req, res);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/feedback') {
-      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
       void handleFeedback(req, res);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/skill-equivalence') {
-      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
       void handleSkillEquiv(req, res);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/make-draft') {
-      if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
+      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
       void handleMakeDraft(req, res);
       return;
     }
-    json(res, 404, { error: 'not found' });
+    json(res, 404, { error: '不明なパスです' });
   });
 
   server.listen(PORT, HOST, () => {
@@ -293,7 +295,12 @@ function renderPage(): string {
   };
   var BAND_LABEL = { strong: '強マッチ', tentative: '参考(許容範囲)', negotiable: '交渉提案' };
 
-  function esc(s){ var d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
+  // 属性値にも埋め込むため引用符も含めてエスケープする（textContent方式は " をエスケープしないため不可）
+  function esc(s){
+    return (s==null?'':String(s)).replace(/[&<>"']/g, function(c){
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
   function headers(){ return { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value }; }
   function reviewer(){ return nameEl.value.trim(); }
   function pct(x){ return x==null ? '—' : Math.round(x*100) + '%'; }
@@ -307,7 +314,13 @@ function renderPage(): string {
     var label = (side === 'project' ? '案件側' : '要員側') + '（元メールへ全員に返信）';
     var head = ref ? ('<div class="reply-h">To: ' + esc(ref.to) + '<br>Cc: ' + esc(ref.cc || '（なし）') + '<br>From: ' + esc(ref.from || '') + (ref.inReplyTo ? '<br>（元メールにスレッド返信）' : '') + '</div>') : '';
     var bodyd = text ? ('<details class="drafts"><summary>本文を見る</summary><pre>' + esc(text) + '</pre></details>') : '';
-    var made = (ref && ref.url) ? ('<a class="made" href="' + esc(ref.url) + '" target="_blank">作成済みの下書きを開く</a>') : '';
+    // http(s) 以外（imap:// やローカルパス）はブラウザで開けないためリンクにせずラベル表示
+    var made = '';
+    if (ref && ref.url) {
+      made = /^https?:\\/\\//.test(ref.url)
+        ? ('<a class="made" href="' + esc(ref.url) + '" target="_blank" rel="noopener">作成済みの下書きを開く</a>')
+        : ('<span class="made empty">下書き作成済み（' + esc(ref.url) + '）</span>');
+    }
     var btn = '<button data-act="makedraft" data-id="' + esc(m.id) + '" data-side="' + side + '">自分のアドレスで下書き作成</button>';
     return '<div class="reply"><div class="reply-label">' + label + '</div>' + head + bodyd + '<div class="actions">' + btn + made + '</div></div>';
   }
@@ -362,7 +375,7 @@ function renderPage(): string {
     own.forEach(function(m){ (byEng[m.ownEngineerName] = byEng[m.ownEngineerName] || []).push(m); });
     root.innerHTML = Object.keys(byEng).map(function(name){
       var items = byEng[name].map(function(m){
-        var tag = m.needsReview ? '[要確認] ' : (m.meetsRate ? '[単価充足] ' : '');
+        var tag = (m.band === 'tentative' ? '[参考提案] ' : '') + (m.needsReview ? '[要確認] ' : (m.meetsRate ? '[単価充足] ' : ''));
         return '<div class="own-proj">' + tag + esc(m.projectTitle) + ' — 案件単価' + esc(m.projectRate==null?'不明':m.projectRate) + '万円/月, スコア' + esc(m.score) + '点<br><span class="empty">' + esc(m.reason) + '</span></div>';
       }).join('');
       return '<div class="own-eng">' + esc(name) + '</div>' + items;
@@ -415,6 +428,7 @@ function renderPage(): string {
         var note = noteEl ? noteEl.value.trim() : '';
         var r2 = await post('/api/feedback', { matchId: b.dataset.id, matchTitle: b.dataset.title, band: b.dataset.band, verdict: b.dataset.verdict, note: note, reviewer: reviewer() });
         if (!r2.ok) { alert('評価失敗: ' + (r2.data.error||r2.status)); return; }
+        if (r2.data.degraded) { alert('評価は記録しましたが、Notionへ保存できなかったためローカルに退避しました。Notionの設定・接続をご確認ください。'); }
         if (noteEl) noteEl.value = '';
         b.textContent = b.dataset.verdict === 'good' ? '妥当✓' : 'ズレ✓';
         await load();

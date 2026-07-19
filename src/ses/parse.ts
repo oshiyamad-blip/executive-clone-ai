@@ -3,7 +3,7 @@
 // demoは fixture にあらかじめ埋めたテキストをそのまま返す（外部アクセスしない）。
 import { read as readXlsx, utils as xlsxUtils } from 'xlsx';
 import { google, sheets_v4 } from 'googleapis';
-import { getGoogleAuth } from '../collectors/googleAuth.js';
+import { getGoogleAuth, SES_SCOPES } from '../collectors/googleAuth.js';
 import { isDemo } from './config.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
 
@@ -26,7 +26,7 @@ export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[
 
 async function parseAttachment(att: SesAttachment): Promise<SesAttachment> {
   if (att.text) return att; // 既にテキスト化済み
-  if (!isExcelMime(att.mimeType) || !att.data) return att; // PDFはbase64を温存しそのまま次段へ
+  if (!isExcelAttachment(att) || !att.data) return att; // PDFはbase64を温存しそのまま次段へ
 
   try {
     return { ...att, text: xlsxToText(att.data) };
@@ -34,6 +34,11 @@ async function parseAttachment(att: SesAttachment): Promise<SesAttachment> {
     console.warn(`SES展開: xlsx解析に失敗 (${att.filename}): ${String(err)}`);
     return att;
   }
+}
+
+// 日本のメーラーは .xlsx を application/octet-stream で送ることが多いため、MIMEに加え拡張子でも判定する
+function isExcelAttachment(att: SesAttachment): boolean {
+  return isExcelMime(att.mimeType) || /\.(xlsx|xls)$/i.test(att.filename);
 }
 
 function isExcelMime(mimeType: string): boolean {
@@ -54,7 +59,7 @@ function xlsxToText(base64Data: string): string {
 // 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す
 async function parseSheetLinks(mail: SesRawMail): Promise<SesAttachment[]> {
   if (mail.sheetLinks.length === 0) return [];
-  const auth = getGoogleAuth();
+  const auth = getGoogleAuth(SES_SCOPES); // spreadsheets.readonly を含むSES用スコープで認証
   if (!auth) {
     console.warn(`SES展開: Google認証未設定のためスプレッドシートリンクをスキップ (mail ${mail.id})`);
     return [];

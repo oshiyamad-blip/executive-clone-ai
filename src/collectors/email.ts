@@ -191,7 +191,8 @@ function flattenParts(payload: gmail_v1.Schema$MessagePart | undefined): gmail_v
   return parts;
 }
 
-function isSupportedAttachment(filename: string, mimeType: string): boolean {
+// Xserver(IMAP)プロバイダも同じ許可リストで添付を絞るため共有する
+export function isSupportedAttachment(filename: string, mimeType: string): boolean {
   return (
     /\.(xlsx|xls|pdf)$/i.test(filename) ||
     mimeType === 'application/pdf' ||

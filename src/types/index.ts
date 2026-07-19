@@ -330,6 +330,7 @@ export interface OwnMatch {
   rateGapMan: number | null; // 案件単価 − 必要案件単価（万円/月）。不明は null
   meetsRate: boolean; // 案件単価が必要案件単価以上か（不明は要確認扱い）
   skillMatchRate: number; // 必須スキル一致率 0〜1
+  band: MatchBand; // スキル確度バンド（外部要員マッチと同一基準。tentative=参考提案）
   locationOk: boolean;
   timingOk: boolean;
   needsReview: boolean; // 単価・勤務地不明で要確認

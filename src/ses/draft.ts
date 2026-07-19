@@ -24,17 +24,44 @@ function ensureRe(subject: string): string {
   return /^re\s*:/i.test(s) ? s : `Re: ${s}`;
 }
 
+// アドレスヘッダをカンマで分割する。ただし引用符内のカンマ（例: "Suzuki, Taro" <t@a.jp>）では
+// 分割しない（RFC 5322 の表示名対応。素朴な split(',') は宛先を壊す）。
 function splitAddrs(s: string): string[] {
-  return (s || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const out: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (const ch of s || '') {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+    } else if (ch === ',' && !inQuotes) {
+      out.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  out.push(current);
+  return out.map((x) => x.trim()).filter(Boolean);
 }
 
-// 全員に返信の Cc = 元メールの宛先一同（To + Cc、sales@ メーリスを含む）。重複のみ除去。
-function mergeCc(...lists: string[]): string {
+// 表示名付き（"名前 <addr>"）でも素のアドレスでも、比較用にメールアドレス部分だけを取り出す
+function extractEmail(addr: string): string {
+  const m = addr.match(/<([^>]+)>/);
+  return (m ? m[1] : addr).trim().toLowerCase();
+}
+
+// 全員に返信の Cc = 元メールの宛先一同（To + Cc、sales@ メーリスを含む）。
+// 重複はメールアドレス単位で除去し（表示名の有無で別人扱いしない）、To（返信先）と同一のアドレスは
+// Cc から除く（同じ相手を To と Cc の両方に入れない）。
+function mergeCc(excludeTo: string, ...lists: string[]): string {
+  const excludeKey = extractEmail(excludeTo);
   const seen = new Set<string>();
   const out: string[] = [];
   for (const list of lists) {
     for (const addr of splitAddrs(list)) {
-      const key = addr.toLowerCase();
+      const key = extractEmail(addr);
+      if (!key || key === excludeKey) continue;
       if (!seen.has(key)) {
         seen.add(key);
         out.push(addr);
@@ -55,7 +82,7 @@ function assembleReplyRef(
 ): DraftRef {
   demoDraftCounter += 1;
   const to = replyTarget?.from || fallbackTo;
-  const cc = replyTarget ? mergeCc(replyTarget.to, replyTarget.cc) : '';
+  const cc = replyTarget ? mergeCc(to, replyTarget.to, replyTarget.cc) : '';
   const subject = replyTarget ? ensureRe(replyTarget.subject) : fallbackSubject;
   const inReplyTo = replyTarget?.messageId || '';
   const references = [replyTarget?.references || '', replyTarget?.messageId || ''].filter(Boolean).join(' ');
