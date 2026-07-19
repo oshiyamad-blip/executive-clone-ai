@@ -113,8 +113,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     const mode = normalizeMode(body.mode);
     const result = await askClone(ctx.prompts[mode], messages, ctx.sourceIndex);
     // 採用モードは候補者の個人情報（履歴書・面接メモ等）を含むため、
-    // シグナルDBへはフィードバックしない（恒久保存・再学習への混入を防ぐ）
-    if (mode !== 'hiring') await feedbackChatLog(message, result.answer);
+    // シグナルDBへはフィードバックしない（恒久保存・再学習への混入を防ぐ）。
+    // フィードバックはベストエフォート（内部でtry/catch済み）なので応答を待たせない。
+    if (mode !== 'hiring') void feedbackChatLog(message, result.answer);
     json(res, 200, {
       answer: result.answer,
       sources: result.sources.map((s) => ({ tag: s.tag, label: s.label, url: s.url ?? null })),

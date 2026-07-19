@@ -48,13 +48,15 @@ export interface CausalLink {
 }
 
 // ストーリーデータベースのエントリ
+// narrative / causalChain は生成時のみ存在し、Notionにはページ本文として保存される
+// （プロパティではないため fetchRecentStories では読み戻せない → optional）。
 export interface Story {
   id: string;
   title: string;
   signalIds: string[];
   period: { start: Date; end: Date };
-  narrative: string;
-  causalChain: CausalLink[];
+  narrative?: string;
+  causalChain?: CausalLink[];
   insight: string;
   createdAt: Date;
   updatedAt: Date;
@@ -85,24 +87,3 @@ export interface ExecutiveProfile {
   hiringCriteria?: string[];
 }
 
-// 対話メッセージ
-export interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: SourceReference[];
-  timestamp: Date;
-}
-
-// 回答の根拠参照
-export interface SourceReference {
-  type: 'signal' | 'story';
-  id: string;
-  excerpt: string;
-}
-
-// バッチ処理の結果
-export interface BatchResult<T> {
-  succeeded: T[];
-  failed: Array<{ item: T; error: Error }>;
-  processedAt: Date;
-}

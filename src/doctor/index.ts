@@ -2,6 +2,8 @@ import '../env.js';
 import { existsSync } from 'fs';
 import { generateText } from '../llm/index.js';
 import { fetchRecentSignals, fetchRecentStories } from '../database/index.js';
+import { INBOX_DIR as LIFELOG_INBOX } from '../collectors/lifelog.js';
+import { INBOX_DIR as MESSENGER_INBOX } from '../collectors/messenger.js';
 
 // 環境診断（セットアップ確認用）
 // 使い方: npm run doctor
@@ -80,10 +82,9 @@ async function main(): Promise<void> {
 
   // 4. データソース（任意 — 未設定のソースは収集時にスキップされる）
   section('データソース（任意）');
-  const lifelogDir = process.env.LIFELOG_INBOX_DIR ?? './lifelog-inbox';
-  const messengerDir = process.env.MESSENGER_INBOX_DIR ?? './messenger-inbox';
-  console.log(`  ・ライフログ受け皿: ${lifelogDir} ${existsSync(lifelogDir) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
-  console.log(`  ・LINE受け皿:      ${messengerDir} ${existsSync(messengerDir) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
+  // 受け皿パスはコレクタ本体の定義を参照する（診断と実際の取り込み先がずれないように）
+  console.log(`  ・ライフログ受け皿: ${LIFELOG_INBOX} ${existsSync(LIFELOG_INBOX) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
+  console.log(`  ・LINE受け皿:      ${MESSENGER_INBOX} ${existsSync(MESSENGER_INBOX) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
   console.log(`  ・Slack:           ${envSet('SLACK_USER_TOKEN', 'SLACK_TARGET_USER_ID') ? '設定済み' : '未設定（スキップされます）'}`);
   console.log(`  ・Google Workspace: ${envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY', 'GOOGLE_TARGET_EMAIL') ? '設定済み' : '未設定（スキップされます）'}`);
 

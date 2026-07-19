@@ -96,26 +96,20 @@ async function buildStoryFromGroup(period: string, signals: Signal[]): Promise<S
     return null;
   }
 
-  try {
-    const parts = period.split('-').map(Number);
-    const startYear = parts[0] ?? new Date().getFullYear();
-    const startMonth = parts[1] ?? 1;
-
-    return {
-      id: `story_${period}_${Math.random().toString(36).slice(2, 7)}`,
-      title: candidate.title,
-      signalIds: signals.map((s) => s.id),
-      period: {
-        start: new Date(startYear, startMonth - 1, 1),
-        end: new Date(startYear, startMonth, 0),
-      },
-      narrative: candidate.narrative,
-      causalChain: candidate.causalChain,
-      insight: candidate.insight,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-  } catch {
-    return null;
-  }
+  // period は groupByMonth が toISOString().slice(0, 7) で作るため常に 'YYYY-MM'
+  const [startYear, startMonth] = period.split('-').map(Number);
+  return {
+    id: `story_${period}_${Math.random().toString(36).slice(2, 7)}`,
+    title: candidate.title,
+    signalIds: signals.map((s) => s.id),
+    period: {
+      start: new Date(startYear, startMonth - 1, 1),
+      end: new Date(startYear, startMonth, 0),
+    },
+    narrative: candidate.narrative,
+    causalChain: candidate.causalChain,
+    insight: candidate.insight,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
 }

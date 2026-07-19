@@ -1,4 +1,5 @@
 import { WebClient } from '@slack/web-api';
+import { collectionWindow } from './googleAuth.js';
 import type { RawLog } from '../types/index.js';
 
 // Slack 収集 — 対象経営者の投稿を search.messages で全チャンネル・DM横断で取得する。
@@ -21,7 +22,9 @@ export async function collectFromSlack(): Promise<RawLog[]> {
   }
 
   const client = new WebClient(token);
-  const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+  // 収集ウィンドウは他コレクタと共通の collectionWindow() を使う（ここだけ独自定義に
+  // すると、ウィンドウ変更時にSlackだけ取得範囲がずれる）
+  const sinceMs = collectionWindow().since.getTime();
   // Slack の `after:` は指定日を含まない(exclusive)。取りこぼしを防ぐため1日前を指定し、
   // 実際のウィンドウ(過去24時間)は取得後に ts で厳密に絞る。
   const afterDate = new Date(sinceMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);

@@ -11,24 +11,33 @@ const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
 
 // --- レート制限（平均 3 req/s）+ 429/529 リトライ ---
 // 全 Notion 呼び出しをこのラッパー経由にして最小間隔を空ける。
+// 間隔は「次の呼び出しの前」に空ける（呼び出し後にスリープすると、後続が無い場合でも
+// 呼び出し元の応答が毎回 MIN_INTERVAL_MS 遅れるため）。
 const MIN_INTERVAL_MS = 350;
-let lastCall = Promise.resolve(0);
+let queue: Promise<unknown> = Promise.resolve();
+let lastDoneAt = 0;
 
 async function throttle<T>(fn: () => Promise<T>): Promise<T> {
-  // 直列化して最小間隔を保証する（Date.now は使えないため performance.now を利用）
-  const prev = lastCall;
-  let release: (t: number) => void = () => {};
-  lastCall = new Promise<number>((res) => (release = res));
-
-  await prev;
-  return runWithRetry(fn).finally(() => release(0));
+  const run = queue.then(async () => {
+    const wait = MIN_INTERVAL_MS - (performance.now() - lastDoneAt);
+    if (wait > 0) await sleep(wait);
+    try {
+      return await runWithRetry(fn);
+    } finally {
+      lastDoneAt = performance.now();
+    }
+  });
+  // 失敗しても直列化キューは生かし続ける
+  queue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function runWithRetry<T>(fn: () => Promise<T>, attempt = 0): Promise<T> {
   try {
-    const result = await fn();
-    await sleep(MIN_INTERVAL_MS);
-    return result;
+    return await fn();
   } catch (err: unknown) {
     const status = (err as { status?: number }).status;
     if ((status === 429 || status === 529) && attempt < 5) {
@@ -72,25 +81,27 @@ async function resolveDataSourceId(databaseId: string): Promise<string> {
 }
 
 // --- rich_text ヘルパー（1オブジェクト最大2000文字）---
-function toRichText(text: string): Array<{ type: 'text'; text: { content: string } }> {
+// Notion の制限に合わせた分割はここに一元化する。
+function chunkText(text: string, size = 2000): string[] {
   const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += 2000) {
-    chunks.push(text.slice(i, i + 2000));
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size));
   }
+  return chunks;
+}
+
+function toRichText(text: string): Array<{ type: 'text'; text: { content: string } }> {
+  const chunks = chunkText(text);
   return (chunks.length ? chunks : ['']).map((content) => ({ type: 'text' as const, text: { content } }));
 }
 
 // 長文を段落ブロックの配列に変換する（1ブロックあたり rich_text ≤2000文字）
 function toParagraphBlocks(text: string): Array<Record<string, unknown>> {
-  const blocks: Array<Record<string, unknown>> = [];
-  for (let i = 0; i < text.length; i += 2000) {
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: { rich_text: [{ type: 'text', text: { content: text.slice(i, i + 2000) } }] },
-    });
-  }
-  return blocks;
+  return chunkText(text).map((content) => ({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: { rich_text: [{ type: 'text', text: { content } }] },
+  }));
 }
 
 // children は1リクエスト最大100件。超過分は append で追記する。
@@ -128,6 +139,9 @@ export async function saveSignal(signal: Signal): Promise<string> {
         日時: { date: { start: signal.timestamp.toISOString() } },
         タグ: { multi_select: signal.tags.map((t) => ({ name: t })) },
         関係者: { multi_select: signal.relatedPeople.map((p) => ({ name: p })) },
+        // 詳細はプロパティにも保存して読み戻し可能にする（ページ本文は人間の閲覧用）。
+        // fetchRecentSignals が空の detail を返すと、ストーリー分析のプロンプトが劣化するため。
+        詳細: { rich_text: toRichText(signal.detail) },
       },
     } as never,
     toParagraphBlocks(signal.detail),
@@ -152,7 +166,22 @@ export async function saveStory(story: Story): Promise<string> {
         type: 'heading_2',
         heading_2: { rich_text: [{ type: 'text', text: { content: 'ナラティブ' } }] },
       },
-      ...toParagraphBlocks(story.narrative),
+      ...toParagraphBlocks(story.narrative ?? ''),
+      // 因果リンクも本文に残す（人間の閲覧用。プロパティとしては読み戻さない）
+      ...(story.causalChain?.length
+        ? [
+            {
+              object: 'block',
+              type: 'heading_2',
+              heading_2: { rich_text: [{ type: 'text', text: { content: '因果リンク' } }] },
+            },
+            ...story.causalChain.map((link) => ({
+              object: 'block',
+              type: 'bulleted_list_item',
+              bulleted_list_item: { rich_text: toRichText(link.relationship) },
+            })),
+          ]
+        : []),
     ],
   );
 }
@@ -215,6 +244,31 @@ function stripInlineMd(text: string): string {
     .replace(/^\s*>\s?/, '');
 }
 
+// data source を limit 件までページネーションしながらクエリする。
+// Notion の page_size 上限は100のため、100超の limit は複数リクエストに分割する。
+async function queryDataSource(
+  dataSourceId: string,
+  sorts: Array<{ property: string; direction: 'ascending' | 'descending' }>,
+  limit: number,
+): Promise<Array<{ id: string }>> {
+  const results: Array<{ id: string }> = [];
+  let cursor: string | undefined;
+  while (results.length < limit) {
+    const response = await throttle(() =>
+      notion.dataSources.query({
+        data_source_id: dataSourceId,
+        sorts: sorts as never,
+        page_size: Math.min(100, limit - results.length),
+        ...(cursor ? { start_cursor: cursor } : {}),
+      }),
+    );
+    results.push(...response.results);
+    if (!response.has_more || !response.next_cursor) break;
+    cursor = response.next_cursor;
+  }
+  return results;
+}
+
 // Notionシグナルを取得する（対話インターフェース・ストーリー分析で使用）
 export async function fetchRecentSignals(limit = 50): Promise<Signal[]> {
   if (!SIGNAL_DB_ID) {
@@ -222,15 +276,13 @@ export async function fetchRecentSignals(limit = 50): Promise<Signal[]> {
     return [];
   }
   const dataSourceId = await resolveDataSourceId(SIGNAL_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      sorts: [{ property: '日時', direction: 'descending' }],
-      page_size: limit,
-    }),
+  const results = await queryDataSource(
+    dataSourceId,
+    [{ property: '日時', direction: 'descending' }],
+    limit,
   );
 
-  return response.results.map((page) => {
+  return results.map((page) => {
     const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
     return {
       id: page.id,
@@ -238,7 +290,7 @@ export async function fetchRecentSignals(limit = 50): Promise<Signal[]> {
       timestamp: new Date(readDate(props['日時']) ?? nowIso()),
       category: (readSelect(props['カテゴリ']) ?? 'idea') as Signal['category'],
       summary: readTitle(props['概要']),
-      detail: '',
+      detail: readRichText(props['詳細']),
       tags: readMultiSelect(props['タグ']),
       importance: readNumber(props['重要度']) ?? 5,
       relatedPeople: readMultiSelect(props['関係者']),
@@ -254,15 +306,13 @@ export async function fetchRecentStories(limit = 20): Promise<Story[]> {
     return [];
   }
   const dataSourceId = await resolveDataSourceId(STORY_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      sorts: [{ property: '期間（開始）', direction: 'descending' }],
-      page_size: limit,
-    }),
+  const results = await queryDataSource(
+    dataSourceId,
+    [{ property: '期間（開始）', direction: 'descending' }],
+    limit,
   );
 
-  return response.results.map((page) => {
+  return results.map((page) => {
     const p = page as {
       properties?: Record<string, unknown>;
       created_time?: string;
@@ -274,10 +324,10 @@ export async function fetchRecentStories(limit = 20): Promise<Story[]> {
     return {
       id: page.id,
       title: readTitle(props['タイトル']),
+      // 構成シグナルID・ナラティブ・因果リンクはプロパティとして保存していないため
+      // 読み戻せない（本文とNotion上でのみ参照可能）。型上も optional にしてある。
       signalIds: [],
       period: { start: new Date(startIso), end: new Date(startIso) },
-      narrative: '',
-      causalChain: [],
       insight: readRichText(props['洞察']),
       createdAt: new Date(p.created_time ?? nowIso()),
       updatedAt: new Date(p.last_edited_time ?? nowIso()),

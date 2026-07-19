@@ -66,21 +66,30 @@ interface ExtractedSignal {
   relatedPeople: string[];
 }
 
-export async function extractSignals(logs: RawLog[]): Promise<Signal[]> {
-  if (logs.length === 0) return [];
+export interface ExtractionOutcome {
+  signals: Signal[];
+  // 抽出（LLM呼び出し）自体が失敗したログのID。呼び出し側はこれらを処理済みに
+  // マークしてはいけない（マークすると障害日のデータが復元不能に失われる）。
+  failedLogIds: string[];
+}
+
+export async function extractSignals(logs: RawLog[]): Promise<ExtractionOutcome> {
+  if (logs.length === 0) return { signals: [], failedLogIds: [] };
 
   const signals: Signal[] = [];
+  const failedLogIds: string[] = [];
   for (const log of logs) {
     try {
       const extracted = await extractFromLog(log);
       signals.push(...extracted);
     } catch (err) {
       console.error(`抽出失敗 (log ${log.id}): ${String(err)}`);
+      failedLogIds.push(log.id);
     }
   }
 
   console.log(`シグナル抽出完了: ${logs.length}件のログから${signals.length}件を抽出`);
-  return signals;
+  return { signals, failedLogIds };
 }
 
 async function extractFromLog(log: RawLog): Promise<Signal[]> {

@@ -35,7 +35,10 @@ async function main(): Promise<void> {
   });
 
   console.log('\n■ ステップ1: シグナル抽出（本番の npm run extract と同じ経路）');
-  const signals = await extractSignals(logs);
+  const { signals, failedLogIds } = await extractSignals(logs);
+  if (failedLogIds.length > 0) {
+    console.warn(`⚠️  ${failedLogIds.length}件の入力で抽出に失敗しました`);
+  }
   if (signals.length === 0) {
     console.error(
       '❌ シグナルが1件も抽出されませんでした。LLMの疎通（npm run doctor）と入力内容を確認してください。',
