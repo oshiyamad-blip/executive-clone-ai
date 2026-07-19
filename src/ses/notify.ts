@@ -8,6 +8,7 @@ import { sendPlainMailViaMail } from './mail/index.js';
 import { isDemo, sesNotifyTo } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
+import { buildDiagnosisReport } from './heal/events.js';
 import type { MatchResult, Project, Engineer } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -21,7 +22,11 @@ export async function persistAndNotify(
   const saved = await persistMatches(matches, projectPageIds, engineerPageIds);
   // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
   writeReviewMatches(saved);
-  const summary = buildSummary(saved);
+  let summary = buildSummary(saved);
+  // 本番のみ、自動検証・修復の診断レポートをサマリ末尾に添える（コスト概算・異常検知・隔離状況）
+  if (!isDemo()) {
+    summary = `${summary}\n${buildDiagnosisReport()}`;
+  }
   await notifySummary(summary);
 }
 

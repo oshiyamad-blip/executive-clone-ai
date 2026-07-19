@@ -7,7 +7,10 @@ import { createDrafts } from './draft.js';
 import { persistAndNotify } from './notify.js';
 import { markMailProcessed, writeDemoArtifact, readDemoArtifact, dedupeProjects, dedupeEngineers } from './store.js';
 import { saveProject, saveEngineer, fetchOpenProjects, fetchAvailableEngineers } from '../database/index.js';
-import { isDemo, minGrossMarginJpy, maxCandidatesPerItem } from './config.js';
+import { isDemo, minGrossMarginJpy, maxCandidatesPerItem, repairEnabled } from './config.js';
+import { startHealBatch } from './heal/budget.js';
+import { resetHealEvents, recordStat, getStats } from './heal/events.js';
+import { runRepair } from './heal/repair.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 
 // SESマッチングバッチのオーケストレータ。collect→parse→extract→store→match→draft→notify を順に呼ぶ。
@@ -22,6 +25,10 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   console.log(
     `モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'} / 粗利下限: ${minGrossMarginJpy()}円/月 / 候補上限: ${maxCandidatesPerItem()}件`,
   );
+
+  // 自動検証・修復レイヤーの初期化（コストメーターとイベント収集。demoでは実質no-op）
+  startHealBatch();
+  resetHealEvents();
 
   let projects: Project[];
   let engineers: Engineer[];
@@ -38,6 +45,15 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
 
   const matches = await matchDraftAndNotify(projects, engineers);
   console.log(`=== SESバッチ完了: マッチ候補 計${matches.length}件 ===`);
+
+  // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）
+  if (!isDemo() && repairEnabled() && getStats().quarantinedNew > 0) {
+    try {
+      await runRepair(true);
+    } catch (err) {
+      console.error(`SES修復: パッチ案の自動生成に失敗: ${String(err)}`);
+    }
+  }
 }
 
 function isProjectItem(item: ExtractedItem): item is { kind: 'project'; project: Project } {
@@ -57,6 +73,7 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
     console.error(`SES収集: 失敗: ${String(err)}`);
   }
   console.log(`SES収集: 未処理メール${mails.length}件`);
+  recordStat('collected', mails.length);
   if (mails.length === 0) {
     console.warn('SES収集: 受信0件です（Xserverからの転送設定をご確認ください）');
   }

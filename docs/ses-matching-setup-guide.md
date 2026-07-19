@@ -244,6 +244,34 @@ cron 例（毎日 9:00 と 18:00）:
 - 処理済みメールIDはローカルに記録され、**二重処理を防止**します（`data/` 配下）。
 - `data/` は再作成される作業領域です。サーバ移設時は Notion が正となります。
 
+### 8-2. 自動検証・自己修復（うまく動かない時の自動リカバリ）
+
+バッチには**予算上限つきの自己修復レイヤー**が組み込まれています（既定ON・コード変更なしの安全な範囲）。
+
+**Phase A: 実行時の自動修復（`SES_HEAL_ENABLED=true` 既定）**
+- 抽出に失敗したメールは、**2秒後に再試行 → それでも失敗なら上位モデル（Sonnet）へ昇格**して再抽出
+- 修復に使うLLMコストは**実測トークンから円換算**され、`SES_HEAL_BUDGET_JPY`（既定50円/バッチ）で頭打ち。超えた分は次回バッチへ繰越
+- 同じメールが累計 `SES_HEAL_MAX_ATTEMPTS`（既定3回）失敗したら**隔離**（`data/ses-heal/quarantine.json`）し、無限再試行を打ち切り
+- バッチ内の**過半数が失敗**した場合は基盤障害（APIキー・Anthropic障害等）とみなし、誤隔離を防ぐためカウントを保留
+- サマリメール末尾に**診断レポート**（コスト概算・救済件数・異常検知・隔離状況）が付きます
+
+**Phase B: 修正パッチ案の自動生成（opt-in）**
+```bash
+npm run ses:repair    # 手動実行（いつでも可）
+```
+隔離メールのエラー情報＋関連ソースコードをClaudeに渡し、**原因分析と unified diff のパッチ案**を
+`data/ses-heal/repair-<日付>.md` に生成してメール送付します（予算 `SES_REPAIR_BUDGET_JPY`、既定100円/回）。
+`SES_REPAIR_ENABLED=true` にすると、隔離が増えたバッチの末尾に自動生成（1日1回まで）。
+
+> ⚠️ **パッチは自動適用されません。** 必ず人がレビューし、`npm run build`・`npm run ses:demo` で確認してから適用してください。
+> PII対策として**メール本文はAPIへ送らず**、件名・エラー文中のメールアドレス・電話番号はマスクされます。
+
+**隔離メールの復帰手順**（原因を直した後）:
+1. `data/ses-heal/quarantine.json` から該当エントリを削除
+2. `data/ses-processed-ids.json` から該当メールIDを削除 → 次回バッチで再処理されます
+
+**動作確認**: `npm run ses:heal:check`（外部呼び出しゼロのオフライン自己検証）
+
 ---
 
 ## 9. 確認UI と 複数人での共有
@@ -307,3 +335,4 @@ UIでできること:
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
 - 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_REVIEW_DATA_DIR`
+- 自己修復・パッチ案: `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_HEAL_DATA_DIR` `JPY_PER_USD` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `ANTHROPIC_MODEL_REPAIR`

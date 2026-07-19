@@ -4,6 +4,9 @@ import { createHash } from 'crypto';
 import { generateJson } from '../llm/index.js';
 import { anthropicJsonWithDocuments } from '../llm/anthropic.js';
 import { isDemo, extractModel } from './config.js';
+import { healLlmCall } from './heal/retry.js';
+import { recordFailure, recordSuccess } from './heal/quarantine.js';
+import { recordHealEvent, recordStat } from './heal/events.js';
 import { normalizeSkills } from './skillDict.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
@@ -168,16 +171,54 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome>
 
   const items: ExtractedItem[] = [];
   const processedMailIds: string[] = [];
+  const failed: Array<{ mail: SesRawMail; err: unknown }> = [];
   for (const mail of mails) {
     try {
       items.push(...(await extractFromMail(mail)));
       processedMailIds.push(mail.id);
+      recordSuccess(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
     } catch (err) {
+      // 自動修復: 予算内でバックオフ再試行 → 上位モデルへ昇格
+      const healed = await healLlmCall(`SES抽出(mail ${mail.id})`, err, (model) => extractFromMail(mail, model));
+      if (healed) {
+        items.push(...healed);
+        processedMailIds.push(mail.id);
+        recordSuccess(mail.id);
+        continue;
+      }
       console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${String(err)} — 処理済みにせず次回再処理します`);
+      failed.push({ mail, err });
     }
   }
+
+  // 失敗の累積カウントと隔離。バッチ内の過半数が失敗した場合はメール固有の問題ではなく
+  // 基盤障害（APIキー・Anthropic障害等）の可能性が高いため、誤隔離を防ぐべくカウントを保留する
+  if (failed.length > 0) {
+    recordStat('extractFailures', failed.length);
+    const massFailure = failed.length >= 3 && failed.length / mails.length > 0.5;
+    if (massFailure) {
+      recordHealEvent(
+        'critical',
+        `抽出失敗が${failed.length}/${mails.length}件と過半数です。基盤障害の可能性が高いため隔離カウントを保留しました`,
+      );
+    }
+    for (const f of failed) {
+      const { attempts, quarantined } = recordFailure(f.mail, f.err, { countTowardQuarantine: !massFailure });
+      if (quarantined) {
+        // 隔離 = 再試行を打ち切る（処理済み扱いにして次回以降スキップ。メタ情報は quarantine.json に残る）
+        processedMailIds.push(f.mail.id);
+        recordStat('quarantinedNew');
+        recordHealEvent(
+          'warn',
+          `mail ${f.mail.id} を累計${attempts}回の失敗により隔離しました（再試行を停止。ses:repair で原因分析できます）`,
+        );
+      }
+    }
+  }
+
   const extractedCount = items.filter((i) => i.kind !== 'other').length;
   console.log(`SES抽出: ${mails.length}件のメールから案件・要員 計${extractedCount}件を抽出`);
+  recordStat('extractedItems', extractedCount);
   return { items, processedMailIds };
 }
 
@@ -215,7 +256,8 @@ function isPdfAttachment(a: { mimeType: string; filename: string }): boolean {
   return a.mimeType === 'application/pdf' || /\.pdf$/i.test(a.filename);
 }
 
-async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
+// modelOverride は自動修復（heal/retry.ts）の上位モデル昇格用。通常は extractModel() を使う
+async function extractFromMail(mail: SesRawMail, modelOverride?: string): Promise<ExtractedItem[]> {
   const documents = mail.attachments
     .filter((a) => isPdfAttachment(a) && a.data)
     .map((a) => ({ mediaType: 'application/pdf' as const, dataBase64: a.data }));
@@ -227,6 +269,7 @@ async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
 
   const user = `件名: ${mail.subject}\nFrom: ${mail.from}\n\n本文:\n${mail.body}\n\n${attachmentText}`.trim();
 
+  const model = modelOverride ?? extractModel();
   const parsed =
     documents.length > 0
       ? ((await anthropicJsonWithDocuments(
@@ -235,10 +278,10 @@ async function extractFromMail(mail: SesRawMail): Promise<ExtractedItem[]> {
           EXTRACT_SCHEMA,
           documents,
           4000,
-          extractModel(),
+          model,
         )) as RawExtraction)
       : await generateJson<RawExtraction>(EXTRACT_SYSTEM, user, EXTRACT_SCHEMA, {
-          model: extractModel(),
+          model,
           maxTokens: 4000,
         });
 

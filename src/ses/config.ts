@@ -98,6 +98,44 @@ export function sesNotifyTo(): string {
   return process.env.SES_NOTIFY_TO ?? '';
 }
 
+// ===== 自動検証・自己修復（heal）と修正パッチ案生成（repair）の設定 =====
+
+// 自己修復（失敗時の再試行・モデル昇格・隔離）を有効にするか。既定ON（予算で拘束される）
+export function healEnabled(): boolean {
+  return (process.env.SES_HEAL_ENABLED ?? 'true') !== 'false';
+}
+
+// 1バッチあたりの自動修復に使ってよいLLMコスト上限（円）。超えたら修復を打ち切り次回バッチへ繰越
+export function healBudgetJpy(): number {
+  return Number(process.env.SES_HEAL_BUDGET_JPY ?? '50');
+}
+
+// 同一メールの累計失敗回数がこの値に達したら隔離（無限再試行の打ち切り。バッチ横断で数える）
+export function healMaxAttempts(): number {
+  return Number(process.env.SES_HEAL_MAX_ATTEMPTS ?? '3');
+}
+
+// 隔離リスト・診断ログの置き場
+export function healDataDir(): string {
+  return process.env.SES_HEAL_DATA_DIR ?? 'data/ses-heal';
+}
+
+// バッチ末尾での修正パッチ案の自動生成を有効にするか。既定OFF（ソースをAPIへ送るためopt-in。
+// 手動の npm run ses:repair はこの設定に関わらず実行できる）
+export function repairEnabled(): boolean {
+  return process.env.SES_REPAIR_ENABLED === 'true';
+}
+
+// 修正パッチ案生成1回あたりのLLMコスト上限（円）
+export function repairBudgetJpy(): number {
+  return Number(process.env.SES_REPAIR_BUDGET_JPY ?? '100');
+}
+
+// 修正パッチ案生成に使うモデル（既定は最終判定と同じSonnet系。コーディング品質とコストの均衡）
+export function repairModel(): string {
+  return process.env.ANTHROPIC_MODEL_REPAIR ?? matchModel();
+}
+
 // 抽出用モデル（全メール最多コール。既定Haiku）
 export function extractModel(): string {
   return process.env.ANTHROPIC_MODEL_EXTRACT ?? 'claude-haiku-4-5';

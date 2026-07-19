@@ -32,7 +32,10 @@
     "ses:own-match": "tsx src/ses/ownMatch.ts",
     "ses:own-match:demo": "DEMO_MODE=true tsx src/ses/ownMatch.ts",
     "ses:web": "tsx src/ses/web.ts",
-    "ses:web:demo": "DEMO_MODE=true tsx src/ses/web.ts"
+    "ses:web:demo": "DEMO_MODE=true tsx src/ses/web.ts",
+    "ses:repair": "tsx src/ses/repair.ts",
+    "ses:repair:demo": "DEMO_MODE=true tsx src/ses/repair.ts",
+    "ses:heal:check": "DEMO_MODE=true SES_HEAL_DATA_DIR=data/ses-heal-selftest tsx src/ses/heal/selftest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

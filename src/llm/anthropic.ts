@@ -9,6 +9,24 @@ function client(): Anthropic {
 }
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
 
+// --- 使用量の記録（コスト概算・自動修復の予算制御用） ---
+// 呼び出しごとの usage をプロセス内に蓄積する。llm/pricing.ts が円換算に使う。
+export interface LlmUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+const usageLog: LlmUsage[] = [];
+
+export function getLlmUsageLog(): readonly LlmUsage[] {
+  return usageLog;
+}
+
+function recordUsage(model: string, usage: { input_tokens: number; output_tokens: number }): void {
+  usageLog.push({ model, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens });
+}
+
 // adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）でのみ有効で、
 // Haiku 4.5 等の旧世代モデルには存在しない設定のため付与すると 400 になりうる。
 // SES抽出（extractModel）は既定で claude-haiku-4-5 を使うため、モデル名で分岐する。
@@ -34,6 +52,7 @@ export async function anthropicText(
     system,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
   });
+  recordUsage(resolvedModel, response.usage);
   const textBlock = response.content.find((b) => b.type === 'text');
   let answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
   if (!answer.trim()) {
@@ -61,6 +80,7 @@ export async function anthropicJson(
     output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
     messages: [{ role: 'user', content: user }],
   });
+  recordUsage(resolvedModel, response.usage);
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
   return JSON.parse(textBlock.text);
@@ -92,6 +112,7 @@ export async function anthropicJsonWithDocuments(
     output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
     messages: [{ role: 'user', content }],
   });
+  recordUsage(resolvedModel, response.usage);
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
   return JSON.parse(textBlock.text);
