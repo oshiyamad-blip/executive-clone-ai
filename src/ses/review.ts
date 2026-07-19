@@ -6,8 +6,14 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 
 import { join } from 'path';
 import { reviewDataDir, demoDataDir } from './config.js';
 import { updateMatchStatus } from '../database/index.js';
-import { materializeReplyDraft } from './draft.js';
+import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
 import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef } from '../types/index.js';
+
+// UIで送信元（本人の会社アドレス）を確定済みの下書きか。
+// 未確定の下書きも from にはプレースホルダー文字列が入っているため、単なる truthy 判定では誤る。
+function isFinalizedDraft(ref: DraftRef | undefined): boolean {
+  return Boolean(ref?.from) && ref!.from !== FROM_PLACEHOLDER;
+}
 
 function reviewPath(name: string): string {
   return join(process.cwd(), reviewDataDir(), `${name}.json`);
@@ -61,9 +67,9 @@ export function writeReviewMatches(matches: MatchResult[]): void {
 
   const fresh: ReviewMatch[] = matches.map((m) => {
     const prev = prevById.get(m.id) ?? prevByTitle.get(m.title);
-    // UIで送信元を確定済みの下書き（from入り）は温存。それ以外は今回の生成物を採用
-    const draftProject = prev?.draftProject?.from ? prev.draftProject : m.draftToProject;
-    const draftEngineer = prev?.draftEngineer?.from ? prev.draftEngineer : m.draftToEngineer;
+    // UIで送信元を確定済みの下書きは温存。未確定なら今回の生成物（最新の本文）を採用
+    const draftProject = isFinalizedDraft(prev?.draftProject) ? prev!.draftProject : m.draftToProject;
+    const draftEngineer = isFinalizedDraft(prev?.draftEngineer) ? prev!.draftEngineer : m.draftToEngineer;
     return {
       id: m.id,
       title: m.title,

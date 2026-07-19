@@ -40,7 +40,10 @@ function imapClient(): ImapFlow {
 
 export async function collect(): Promise<SesRawMail[]> {
   if (!imapConfigured()) {
-    console.warn('Xserver収集: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了のためスキップ');
+    console.warn(
+      'Xserver収集: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了のためスキップ' +
+        '（Google Workspace 運用の場合は MAIL_PROVIDER=gmail を設定してください）',
+    );
     return [];
   }
   const client = imapClient();
