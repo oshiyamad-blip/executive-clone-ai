@@ -335,8 +335,13 @@ async function processFile(
         status: c.status ?? '取引中',
         note: c.note ?? '',
       };
-      const id = await saveClient(client);
-      clientIdByName.set(name, id);
+      try {
+        const id = await saveClient(client);
+        clientIdByName.set(name, id);
+      } catch (err) {
+        console.error(`  案件元「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.clientsNew--;
+      }
     } else {
       clientIdByName.set(name, `__preview__:${name}`);
     }
@@ -368,8 +373,13 @@ async function processFile(
         monthlySalary: m.monthlySalary ?? undefined,
         costFactor: m.costFactor ?? undefined,
       };
-      const id = await saveMember(member);
-      memberIdByName.set(name, id);
+      try {
+        const id = await saveMember(member);
+        memberIdByName.set(name, id);
+      } catch (err) {
+        console.error(`  要員「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.membersNew--;
+      }
     } else {
       memberIdByName.set(name, `__preview__:${name}`);
     }
@@ -402,8 +412,13 @@ async function processFile(
         headcount: p.headcount ?? undefined,
         note: p.note ?? '',
       };
-      const id = await saveProject(project);
-      projectIdByName.set(name, id);
+      try {
+        const id = await saveProject(project);
+        projectIdByName.set(name, id);
+      } catch (err) {
+        console.error(`  案件「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.projectsNew--;
+      }
     } else {
       projectIdByName.set(name, `__preview__:${name}`);
     }
@@ -446,7 +461,12 @@ async function processFile(
         rounding: a.rounding ?? 'floor',
         status: a.status ?? '契約中',
       };
-      await saveAssignment(assignment);
+      try {
+        await saveAssignment(assignment);
+      } catch (err) {
+        console.error(`  アサイン「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.assignmentsNew--;
+      }
       assignmentNames.add(name);
     } else {
       assignmentNames.add(name);

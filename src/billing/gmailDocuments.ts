@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { getGoogleAuth } from '../collectors/googleAuth.js';
+import { getBillingGoogleAuth } from '../collectors/googleAuth.js';
 import type { Member } from '../types/engagements.js';
 
 // 受領書類（委託先の請求書・正社員の勤表）検出用の Gmail 収集。
@@ -67,7 +67,7 @@ function decodeBase64Url(data: string): Buffer {
 
 export async function fetchDocumentEmails(members: Member[]): Promise<ReceivedMail[]> {
   // 共有メールボックス（billing@ 等）が設定されていればそちらを受信箱にする
-  const auth = getGoogleAuth([], process.env.BILLING_TARGET_EMAIL);
+  const auth = getBillingGoogleAuth();
   if (!auth) {
     console.warn('検収: Google サービスアカウント設定が未完了のため、メール取得をスキップします');
     return [];

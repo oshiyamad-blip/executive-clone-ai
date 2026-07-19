@@ -32,6 +32,7 @@ import type {
   ContractKind,
   ContractMatchStatus,
 } from '../types/engagements.js';
+import { toLocalYmd } from './month.js';
 
 // 案件・請求管理の Notion DB 層。
 // 日本語プロパティ名はこのファイルに集約する（カラム名を変えたらここだけ直せばよい）。
@@ -192,6 +193,11 @@ export async function fetchProjects(): Promise<Project[]> {
 
 // アサインの請求/支払条件をプロパティ群から組み立てる
 function readPaymentTerms(props: Record<string, unknown>): RateTerms | undefined {
+  if (readSelect(props['支払方式']) === BILLING_METHOD_LABELS.hourly) {
+    const hourlyRate = readNumber(props['支払時給単価']);
+    if (hourlyRate === undefined) return undefined;
+    return { rateType: 'hourly', hourlyRate };
+  }
   const monthlyRate = readNumber(props['支払単価']);
   if (monthlyRate === undefined) return undefined;
   return {
@@ -338,11 +344,18 @@ export async function saveAssignment(assignment: Omit<Assignment, 'id'>): Promis
 
   const payment = assignment.payment;
   if (payment) {
-    if (payment.monthlyRate !== undefined) properties['支払単価'] = { number: payment.monthlyRate };
-    if (payment.lowerHours !== undefined) properties['支払精算下限h'] = { number: payment.lowerHours };
-    if (payment.upperHours !== undefined) properties['支払精算上限h'] = { number: payment.upperHours };
-    if (payment.overtimeRate !== undefined) properties['支払超過単価'] = { number: payment.overtimeRate };
-    if (payment.deductionRate !== undefined) properties['支払控除単価'] = { number: payment.deductionRate };
+    if (payment.rateType === 'hourly') {
+      // 時給精算の支払条件。支払方式/支払時給単価は時給契約のときのみ書く
+      // （旧スキーマのDBでは列が無く400になるため。月額契約は従来プロパティのみで互換）
+      properties['支払方式'] = { select: { name: BILLING_METHOD_LABELS.hourly } };
+      if (payment.hourlyRate !== undefined) properties['支払時給単価'] = { number: payment.hourlyRate };
+    } else {
+      if (payment.monthlyRate !== undefined) properties['支払単価'] = { number: payment.monthlyRate };
+      if (payment.lowerHours !== undefined) properties['支払精算下限h'] = { number: payment.lowerHours };
+      if (payment.upperHours !== undefined) properties['支払精算上限h'] = { number: payment.upperHours };
+      if (payment.overtimeRate !== undefined) properties['支払超過単価'] = { number: payment.overtimeRate };
+      if (payment.deductionRate !== undefined) properties['支払控除単価'] = { number: payment.deductionRate };
+    }
   }
 
   const billing = assignment.billing;
@@ -524,7 +537,7 @@ export async function saveIssuedInvoice(
         '小計（税抜）': { number: draft.subtotal },
         消費税: { number: draft.tax },
         '合計（税込）': { number: draft.total },
-        支払期日: { date: { start: draft.paymentDueDate.toISOString().slice(0, 10) } },
+        支払期日: { date: { start: toLocalYmd(draft.paymentDueDate) } },
         ステータス: { select: { name: '承認待ち' } },
         PDFパス: { rich_text: toRichText(pdfPath) },
       },

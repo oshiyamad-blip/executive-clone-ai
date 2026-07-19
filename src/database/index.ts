@@ -311,7 +311,9 @@ export function readMultiSelect(prop: unknown): string[] {
 }
 
 export function readNumber(prop: unknown): number | undefined {
-  return (prop as { number?: number })?.number;
+  // Notion は値が空のプロパティに null を返す。null が `=== undefined` ガードを
+  // 素通りして計算を NaN 化しないよう undefined に正規化する。
+  return (prop as { number?: number | null })?.number ?? undefined;
 }
 
 export function readDate(prop: unknown): string | undefined {

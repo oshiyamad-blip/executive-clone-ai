@@ -3,12 +3,12 @@ import {
   DB_IDS,
   fetchMembers,
   fetchAssignments,
-  fetchProjects,
   fetchClients,
   fetchWorkRecords,
   fetchIssuedInvoices,
   fetchContracts,
 } from '../engagements/notionDb.js';
+import { previousMonth, overlapsMonth } from '../engagements/month.js';
 import type { ContractRecord, IssuedInvoiceRecord } from '../engagements/notionDb.js';
 import { createChildPage } from '../database/index.js';
 import type { Member, Assignment, Client, WorkRecord, IssuedInvoiceStatus } from '../types/engagements.js';
@@ -17,26 +17,11 @@ import type { Member, Assignment, Client, WorkRecord, IssuedInvoiceStatus } from
 // 「誰から届いた・届いてない」「どの案件元に発行した・してない」の全体把握と、
 // 次に何をすべきかのガイドを日本語で表示する。
 
-function previousMonth(base: Date): string {
-  const d = new Date(base.getFullYear(), base.getMonth() - 1, 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-
 function parseMonthArg(args: string[]): string {
   const idx = args.findIndex((a) => a === '--month');
   const explicit = idx >= 0 ? args[idx + 1] : undefined;
   if (explicit && /^\d{4}-\d{2}$/.test(explicit)) return explicit;
   return previousMonth(new Date());
-}
-
-// アサインの契約期間が対象月に重なるか（開始/終了未設定は無期限とみなす）
-function overlapsMonth(period: { start?: Date; end?: Date }, month: string): boolean {
-  const [y, m] = month.split('-').map(Number);
-  const monthStart = new Date(y, m - 1, 1);
-  const monthEnd = new Date(y, m, 0, 23, 59, 59);
-  if (period.start && period.start > monthEnd) return false;
-  if (period.end && period.end < monthStart) return false;
-  return true;
 }
 
 function docTypeLabel(kind: Member['kind']): string {
@@ -196,7 +181,7 @@ function buildNextActions(
     );
   }
   if (issuedCounts.送付済 > 0) {
-    actions.push(`送付済みが${issuedCounts.送付済}件あります。入金を確認したらステータスを「入金確認済み」に更新してください。`);
+    actions.push(`送付済みが${issuedCounts.送付済}件あります。入金を確認したらステータスを「入金確認済」に更新してください。`);
   }
   if (renewalAlerts.length > 0) {
     actions.push(`更新対応: 契約終了が近い契約書が${renewalAlerts.length}件あります。更新手続き（再契約・条件見直し）を確認してください。`);
@@ -224,10 +209,9 @@ async function main(): Promise<void> {
 
   console.log(`=== 月次運用ダッシュボード（対象月: ${month}） ===`);
 
-  const [members, assignments, , clients, workRecords, issuedInvoices, contracts] = await Promise.all([
+  const [members, assignments, clients, workRecords, issuedInvoices, contracts] = await Promise.all([
     fetchMembers(),
     fetchAssignments(),
-    fetchProjects(),
     fetchClients(),
     fetchWorkRecords(month),
     fetchIssuedInvoices({ targetMonth: month }),

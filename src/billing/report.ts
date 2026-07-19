@@ -10,6 +10,7 @@ import {
 } from '../engagements/notionDb.js';
 import { createChildPage } from '../database/index.js';
 import { COMPANY_PROFILE } from '../data/companyProfile.js';
+import { overlapsMonth } from '../engagements/month.js';
 import type { Assignment, Member, WorkRecord } from '../types/engagements.js';
 import type { IssuedInvoiceRecord } from '../engagements/notionDb.js';
 
@@ -31,15 +32,6 @@ function parseMonthsArg(args: string[]): number {
   const idx = args.findIndex((a) => a === '--months');
   const value = idx >= 0 ? Number(args[idx + 1]) : NaN;
   return Number.isInteger(value) && value > 0 && value <= 24 ? value : 6;
-}
-
-function overlapsMonth(period: { start?: Date; end?: Date }, month: string): boolean {
-  const [y, m] = month.split('-').map(Number);
-  const monthStart = new Date(y, m - 1, 1);
-  const monthEnd = new Date(y, m, 0, 23, 59, 59);
-  if (period.start && period.start > monthEnd) return false;
-  if (period.end && period.end < monthStart) return false;
-  return true;
 }
 
 function yen(n: number): string {
@@ -95,8 +87,10 @@ function buildMonthlyFigures(
     if (member?.kind === 'employee') cost += employeeCost(member, assignment);
   }
 
-  // 稼働率: 契約中×当月重複アサインの稼働率合計 ÷（取引終了以外の要員数×100）
-  const activeMembers = [...memberById.values()].filter((m) => m.status !== '取引終了');
+  // 稼働率: 契約中×当月重複アサインの稼働率合計 ÷（取引終了・ドラフト以外の要員数×100）
+  const activeMembers = [...memberById.values()].filter(
+    (m) => m.status !== '取引終了' && m.status !== 'ドラフト',
+  );
   const allocated = assignments
     .filter((a) => a.status === '契約中' && overlapsMonth(a.period, month))
     .reduce((sum, a) => sum + Math.min(a.allocationPercent, 100), 0);

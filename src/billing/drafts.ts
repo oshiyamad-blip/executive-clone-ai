@@ -85,8 +85,18 @@ async function main(): Promise<void> {
       continue;
     }
 
-    await updateIssuedInvoiceStatus(record.notionPageId, '下書き作成済', draftId);
-    console.log(`下書き作成: ${client.name}（${record.invoiceNumber}） → Gmail下書きID ${draftId}`);
+    // Notion更新の失敗で残りの請求書処理を止めない。ただし下書きIDが未記録のままだと
+    // 再実行時に同じ下書きが重複作成されるため、手動対応を明確に警告する
+    try {
+      await updateIssuedInvoiceStatus(record.notionPageId, '下書き作成済', draftId);
+      console.log(`下書き作成: ${client.name}（${record.invoiceNumber}） → Gmail下書きID ${draftId}`);
+    } catch (err) {
+      console.error(
+        `⚠ 下書き作成: ${record.invoiceNumber} のNotionステータス更新に失敗しました。` +
+          `Gmail下書き（ID: ${draftId}）は作成済みです — 再実行前にNotionで手動で「下書き作成済」に変更するか、` +
+          `Gmailの重複下書きを削除してください: ${String(err)}`,
+      );
+    }
     created += 1;
   }
 

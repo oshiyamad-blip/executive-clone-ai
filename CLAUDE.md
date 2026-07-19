@@ -27,7 +27,7 @@ npm run analyze   # ストーリー分析バッチ（週次）
 npm run chat      # 対話インターフェース起動
 
 # 案件・請求管理
-npm run engagements:setup    # 案件系Notion DB（6つ）を一括作成
+npm run engagements:setup    # 案件系Notion DB（7つ）を一括作成
 npm run engagements:import   # 既存マスタ（CSV等）の取込（--applyで書き込み）
 npm run engagements:contracts # 契約書PDFの取込+アサインDBとの条件突合（--applyで登録）
 npm run engagements          # マスタ一覧+整合性チェック

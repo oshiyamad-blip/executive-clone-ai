@@ -45,6 +45,22 @@ export function getGoogleAuth(
   });
 }
 
+// billing系（検収受信・請求書下書き・通知送信）用の認証。
+// BILLING_TARGET_EMAIL（共有メールボックス）の解決をここに集約する。
+// 未設定なら GOOGLE_TARGET_EMAIL（経営者本人）— ただし「設定したが空」の場合は
+// 気づかず本人アカウントで動く事故になるため警告を出す。
+export function getBillingGoogleAuth(
+  extraScopes: string[] = [],
+): InstanceType<typeof google.auth.JWT> | null {
+  const billingEmail = process.env.BILLING_TARGET_EMAIL;
+  if (billingEmail !== undefined && billingEmail.trim() === '') {
+    console.warn(
+      'BILLING_TARGET_EMAIL が空です — GOOGLE_TARGET_EMAIL（経営者本人）のメールボックスを使用します。共有メールボックス運用の場合は値を設定してください。',
+    );
+  }
+  return getGoogleAuth(extraScopes, billingEmail?.trim() || undefined);
+}
+
 // 収集の時間窓（デフォルト: 過去24時間）
 export function collectionWindow(): { since: Date; until: Date } {
   const until = new Date();

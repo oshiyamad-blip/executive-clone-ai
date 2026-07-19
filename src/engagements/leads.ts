@@ -357,7 +357,12 @@ async function processSource(
         headcount: p.headcount ?? undefined,
         note: buildNote(combineNotes(p.note), source.sourceTag),
       };
-      await saveProject(project);
+      try {
+        await saveProject(project);
+      } catch (err) {
+        console.error(`  案件「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.projectsNew--;
+      }
     }
   }
 
@@ -385,7 +390,12 @@ async function processSource(
         status: 'ドラフト',
         monthlyRateHint: m.monthlyRateHint ?? undefined,
       };
-      await saveMember(member);
+      try {
+        await saveMember(member);
+      } catch (err) {
+        console.error(`  要員「${name}」のNotion登録に失敗（残りの取込は継続）: ${String(err)}`);
+        counters.membersNew--;
+      }
     }
   }
 

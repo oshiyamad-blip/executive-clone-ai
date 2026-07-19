@@ -8,13 +8,13 @@ import {
   fetchAssignments,
   fetchWorkRecords,
   fetchIssuedInvoices,
-  countIssuedInvoicesInMonth,
   saveIssuedInvoice,
   attachPdfToPage,
 } from '../engagements/notionDb.js';
 import { calcSettlement } from './reconcile.js';
 import { saveSignal } from '../database/index.js';
 import { notifyByEmail } from '../notify/index.js';
+import { previousMonth } from '../engagements/month.js';
 import { renderInvoicePdf } from './invoicePdf.js';
 import { COMPANY_PROFILE } from '../data/companyProfile.js';
 import type { Client, Member, Project, Assignment, WorkRecord, InvoiceLine, IssuedInvoiceDraft } from '../types/engagements.js';
@@ -24,11 +24,6 @@ import type { Client, Member, Project, Assignment, WorkRecord, InvoiceLine, Issu
 // → 発行請求書DBへ「承認待ち」で登録。Gmail下書きはここでは作らない（billing:drafts が担当）。
 
 const INVOICE_DIR = join(process.cwd(), 'data', 'invoices');
-
-function previousMonth(base: Date): string {
-  const d = new Date(base.getFullYear(), base.getMonth() - 1, 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
 
 function parseArgs(args: string[]): { month: string; dryRun: boolean } {
   const idx = args.findIndex((a) => a === '--month');
@@ -175,14 +170,25 @@ async function main(): Promise<void> {
     }
   }
 
-  // 案件元ごとに明細を集約
+  // 案件元ごとに明細を集約。
+  // 同一アサイン×同一月の検収OKが複数あると明細が二重計上される（請求書再送等）ため、
+  // 1件目のみ採用し2件目以降は警告してスキップする
   const byClient = new Map<string, { client: Client; contexts: LineContext[] }>();
+  const seenAssignmentMonth = new Set<string>();
   for (const record of okRecords) {
     const assignment = record.assignmentId ? assignmentById.get(record.assignmentId) : undefined;
     if (!assignment) {
       console.warn(`発行: アサインが解決できないためスキップします（稼働実績: ${record.title}）`);
       continue;
     }
+    const dedupKey = `${assignment.id}|${record.targetMonth}`;
+    if (seenAssignmentMonth.has(dedupKey)) {
+      console.warn(
+        `⚠ 発行: 同一アサイン×同一月の検収OKが複数あります（${record.title}）。2件目以降は明細から除外しました。稼働実績DBで重複を確認してください。`,
+      );
+      continue;
+    }
+    seenAssignmentMonth.add(dedupKey);
     const project = assignment.projectId ? projectById.get(assignment.projectId) : undefined;
     const client = project?.clientId ? clientById.get(project.clientId) : undefined;
     if (!client) {
@@ -207,7 +213,8 @@ async function main(): Promise<void> {
     console.warn(`発行: 保存先ディレクトリの作成に失敗: ${String(err)}`);
   });
 
-  let seq = (await countIssuedInvoicesInMonth(month)) + 1;
+  // 採番: 同月の既存件数+1（existingInvoices は取得済みのため再クエリしない）
+  let seq = existingInvoices.length + 1;
   const invoiceMonthKey = month.replace('-', '');
 
   interface ProfitRow {

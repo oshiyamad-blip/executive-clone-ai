@@ -1,4 +1,5 @@
 import type { Assignment, ContractorAvailability, Member } from '../types/engagements.js';
+import { formatMonth, overlapsMonth } from '../engagements/month.js';
 
 // 稼働スケジュール導出（純関数のみ・I/O禁止）。
 // 要員×月の空き% = 100 − その月に期間が重なる「契約中」アサインの稼働率合計（下限0）。
@@ -9,28 +10,9 @@ export function monthRange(from: Date, months: number): string[] {
   const year = from.getFullYear();
   const month = from.getMonth(); // 0-indexed
   for (let i = 0; i < months; i++) {
-    const d = new Date(year, month + i, 1);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    result.push(`${y}-${m}`);
+    result.push(formatMonth(new Date(year, month + i, 1)));
   }
   return result;
-}
-
-// 'YYYY-MM' の初日・末日（末日は翌月0日で取得）
-function monthBounds(monthStr: string): { start: Date; end: Date } {
-  const [y, m] = monthStr.split('-').map(Number);
-  const start = new Date(y, m - 1, 1);
-  const end = new Date(y, m, 0, 23, 59, 59, 999);
-  return { start, end };
-}
-
-// アサイン期間が対象月と重なるか。start未指定=無期限開始、end未指定=無期限継続
-function overlapsMonth(period: { start?: Date; end?: Date }, monthStr: string): boolean {
-  const { start: monthStart, end: monthEnd } = monthBounds(monthStr);
-  const assignmentStart = period.start ?? new Date(-8640000000000000); // 無期限開始
-  const assignmentEnd = period.end ?? new Date(8640000000000000); // 無期限継続
-  return assignmentStart <= monthEnd && assignmentEnd >= monthStart;
 }
 
 export function deriveAvailability(
@@ -42,7 +24,8 @@ export function deriveAvailability(
   const targetMonths = monthRange(fromMonth, months);
 
   return members
-    .filter((member) => member.status !== '取引終了')
+    // ドラフト = leads が自動登録した未確認要員。人が昇格させるまで提案・稼働率計算の対象外
+    .filter((member) => member.status !== '取引終了' && member.status !== 'ドラフト')
     .map((member) => {
       const memberAssignments = assignments.filter(
         (a) => a.memberId === member.id && a.status === '契約中',

@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { getGoogleAuth } from '../collectors/googleAuth.js';
+import { getBillingGoogleAuth } from '../collectors/googleAuth.js';
 
 // 案件元への請求書メールを Gmail 下書きとして作成する。
 // multipart/mixed の MIME を手組みし、gmail.users.drafts.create に raw(base64url) で渡す。
@@ -34,7 +34,7 @@ export async function createInvoiceDraft(
   filename: string,
 ): Promise<string | null> {
   // 共有メールボックス（billing@ 等）が設定されていればそちらに下書きを作る
-  const auth = getGoogleAuth(['https://www.googleapis.com/auth/gmail.compose'], process.env.BILLING_TARGET_EMAIL);
+  const auth = getBillingGoogleAuth(['https://www.googleapis.com/auth/gmail.compose']);
   if (!auth) {
     console.warn(
       'Gmail下書き作成: Google サービスアカウント設定が未完了のため、下書き作成をスキップします（GOOGLE_SA_CLIENT_EMAIL 等を確認してください）。',

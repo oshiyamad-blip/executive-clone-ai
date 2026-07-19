@@ -11,6 +11,7 @@ import {
 import { fetchDocumentEmails, type ReceivedMail } from './gmailDocuments.js';
 import { saveSignal } from '../database/index.js';
 import { notifyByEmail } from '../notify/index.js';
+import { previousMonth, overlapsMonth } from '../engagements/month.js';
 import { extractFromPdf } from './extractDocument.js';
 import { reconcile, acceptTimesheet } from './reconcile.js';
 import type { Assignment, ExtractedDocument, InspectionStatus, Member, ReconciliationResult } from '../types/engagements.js';
@@ -23,26 +24,6 @@ interface RecordSummary {
   status: InspectionStatus | '未検収';
   title: string;
   note: string;
-}
-
-// 対象月（YYYY-MM）の月初・月末を返す
-function monthRange(month: string): { start: Date; end: Date } {
-  const [y, m] = month.split('-').map(Number);
-  return { start: new Date(Date.UTC(y, m - 1, 1)), end: new Date(Date.UTC(y, m, 0, 23, 59, 59, 999)) };
-}
-
-// アサイン期間が対象月と重なるか（期間未設定側は無期限として扱う）
-function overlapsMonth(period: { start?: Date; end?: Date }, month: string): boolean {
-  const { start, end } = monthRange(month);
-  const periodStart = period.start ?? new Date(-8640000000000000);
-  const periodEnd = period.end ?? new Date(8640000000000000);
-  return periodStart <= end && periodEnd >= start;
-}
-
-// 受信月の前月（YYYY-MM）。抽出結果に対象月が無いときのフォールバック
-function previousMonth(date: Date): string {
-  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 // From で要員を特定できなかった場合、発行者名/氏名と要員名の部分一致で解決を試みる
@@ -140,7 +121,12 @@ async function processMail(
     );
     if (candidates.length === 1) {
       assignment = candidates[0];
-      result = member.kind === 'employee' ? acceptTimesheet(assignment, extracted) : reconcile(assignment, extracted, member);
+      // 書類種別で検収方法を選ぶ（要員区分ではなく）。業務委託者が勤務表を別送しても
+      // 金額突合を強要せず、勤表として稼働時間を記録する
+      result =
+        extracted.docType === 'timesheet'
+          ? acceptTimesheet(assignment, extracted)
+          : reconcile(assignment, extracted, member);
       status = result.status;
     } else if (candidates.length === 0) {
       unresolvedNote = `要員「${member.name}」の対象月(${targetMonth})に契約中のアサインが見つかりませんでした`;
