@@ -25,7 +25,7 @@ function usdPerMTok(model: string): UsdPerMTok {
 }
 
 export function jpyPerUsd(): number {
-  return Number(process.env.JPY_PER_USD ?? '150');
+  return Number(process.env.JPY_PER_USD ?? '160');
 }
 
 export function usageCostJpy(usage: LlmUsage): number {
