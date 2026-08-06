@@ -2,6 +2,7 @@ import { Client } from '@notionhq/client';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { normalizeSkills } from '../ses/skillDict.js';
 import {
+  dbProvider,
   notionProjectDbId,
   notionEngineerDbId,
   notionMatchDbId,
@@ -9,6 +10,17 @@ import {
   notionFeedbackDbId,
   notionSkillEquivDbId,
 } from '../ses/config.js';
+import * as sheetsDb from './sheets.js';
+import {
+  remoteLabel,
+  labelToRemote,
+  matchStatusLabel,
+  FB_VERDICT_LABEL,
+  combineAgentInfo,
+  parseAgentInfo,
+  replyMetaJson,
+  parseReplyMeta,
+} from './mapping.js';
 import type {
   Signal,
   Story,
@@ -16,11 +28,8 @@ import type {
   Engineer,
   MatchResult,
   MatchStatus,
-  RemoteOption,
-  ReplyTarget,
   OwnEngineer,
   MatchFeedback,
-  FeedbackVerdict,
   SkillEquivalence,
 } from '../types/index.js';
 
@@ -191,62 +200,12 @@ export async function saveStory(story: Story): Promise<string> {
 // saveSignal/saveStory と同型（data_source_id 方式・共通ヘルパー再利用）。既存関数は無変更。
 // プロパティ名は docs/ses-matching-basic-design.md §6 のNotion DB設計に一致させる。
 
-const REMOTE_LABEL: Record<RemoteOption, string> = { full: 'フル', partial: '一部', none: '不可', unknown: '不明' };
-
-function remoteLabel(remote: RemoteOption): string {
-  return REMOTE_LABEL[remote];
-}
-
-function labelToRemote(label: string | undefined): RemoteOption {
-  const entry = (Object.entries(REMOTE_LABEL) as Array<[RemoteOption, string]>).find(([, v]) => v === label);
-  return entry ? entry[0] : 'unknown';
-}
-
-const MATCH_STATUS_LABEL: Record<MatchStatus, string> = {
-  unconfirmed: '未確認',
-  introduced: '紹介済',
-  closed_won: '成約',
-  dropped: '見送り',
-};
-
-function matchStatusLabel(status: MatchStatus): string {
-  return MATCH_STATUS_LABEL[status];
-}
-
-// 要員DBの「営業元」は 会社/担当/メール を1つのrich_textに結合して保存する（Notion DB設計 §6.2）。
-// 読み戻し時は " / " 区切りで分解する（値自体に " / " を含まない前提のベストエフォート）。
-function combineAgentInfo(company: string, contact: string, email: string): string {
-  return `${company} / ${contact} / ${email}`;
-}
-
-function parseAgentInfo(combined: string): { company: string; contact: string; email: string } {
-  const parts = combined.split(' / ').map((s) => s.trim());
-  // 会社名等に " / " が含まれて桁がずれても、メールだけは '@' を含むトークンから確実に拾う
-  // （紹介メールの宛先に使う最重要フィールドのため）
-  const emailIdx = parts.findIndex((p) => p.includes('@'));
-  const email = emailIdx >= 0 ? parts[emailIdx] : '';
-  const rest = parts.filter((_, i) => i !== emailIdx);
-  return { company: rest[0] ?? '', contact: rest[1] ?? '', email };
-}
-
-// 全員に返信のメタ情報（ReplyTarget）をNotionへJSONで永続化・復元する。
-// これが無いと --match-only（Notion読み出し）経路の下書きがスレッド返信にならない。
-function replyMetaJson(rt: ReplyTarget | undefined): string {
-  return rt ? JSON.stringify(rt) : '';
-}
-
-function parseReplyMeta(json: string): ReplyTarget | undefined {
-  if (!json) return undefined;
-  try {
-    const o = JSON.parse(json) as ReplyTarget;
-    return o && typeof o.from === 'string' && o.from ? o : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// ラベル変換・返信メタ・営業元の結合/分解は DBプロバイダ共通のため ./mapping.ts に集約
+// （Sheets版バックエンド ./sheets.ts と同じ表記で保存・復元するための単一の変換層）
 
 // SES案件をNotion案件DBに保存する
 export async function saveProject(project: Project): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveProjectSheets(project);
   if (!PROJECT_DB_ID) {
     console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件の保存をスキップします');
     return '';
@@ -280,6 +239,7 @@ export async function saveProject(project: Project): Promise<string> {
 
 // SES要員をNotion要員DBに保存する
 export async function saveEngineer(engineer: Engineer): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveEngineerSheets(engineer);
   if (!ENGINEER_DB_ID) {
     console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員の保存をスキップします');
     return '';
@@ -315,6 +275,7 @@ export async function saveMatch(
   match: MatchResult,
   refs?: { projectNotionPageId?: string; engineerNotionPageId?: string },
 ): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveMatchSheets(match);
   if (!MATCH_DB_ID) {
     console.warn('NOTION_MATCH_DB_ID が未設定 — マッチ結果の保存をスキップします');
     return '';
@@ -366,6 +327,7 @@ async function findMatchPageIdByTitle(dataSourceId: string, title: string): Prom
 
 // 突合対象の案件（募集中のみ）を取得する（match --match-only で使用）
 export async function fetchOpenProjects(limit = 100): Promise<Project[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchOpenProjectsSheets(limit);
   if (!PROJECT_DB_ID) {
     console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件なしで継続します');
     return [];
@@ -383,6 +345,7 @@ export async function fetchOpenProjects(limit = 100): Promise<Project[]> {
 
 // 突合対象の要員（提案可のみ）を取得する（match --match-only で使用）
 export async function fetchAvailableEngineers(limit = 100): Promise<Engineer[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchAvailableEngineersSheets(limit);
   if (!ENGINEER_DB_ID) {
     console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員なしで継続します');
     return [];
@@ -460,6 +423,7 @@ function engineerFromPage(page: unknown): Engineer {
 
 // 自社社員をNotion自社社員DBに保存する（候補要員→案件探し機能）
 export async function saveOwnEngineer(own: OwnEngineer): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveOwnEngineerSheets(own);
   if (!OWN_ENGINEER_DB_ID) {
     console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員の保存をスキップします');
     return '';
@@ -483,6 +447,7 @@ export async function saveOwnEngineer(own: OwnEngineer): Promise<string> {
 
 // 突合対象の自社社員（稼働可のみ）を取得する
 export async function fetchOwnEngineers(limit = 100): Promise<OwnEngineer[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchOwnEngineersSheets(limit);
   if (!OWN_ENGINEER_DB_ID) {
     console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員なしで継続します');
     return [];
@@ -521,6 +486,7 @@ function ownEngineerFromPage(page: unknown): OwnEngineer {
 
 // マッチ結果のステータスをNotion側で更新する（確認UIの操作を系のstore=Notionへ反映）
 export async function updateMatchStatus(notionPageId: string, status: MatchStatus): Promise<void> {
+  if (dbProvider() === 'sheets') return sheetsDb.updateMatchStatusSheets(notionPageId, status);
   await throttle(() =>
     notion.pages.update({
       page_id: notionPageId,
@@ -530,9 +496,9 @@ export async function updateMatchStatus(notionPageId: string, status: MatchStatu
 }
 
 // ===== フィードバック（マッチ評価ログ）: 複数人運用の共有の正 =====
-const FB_VERDICT_LABEL: Record<FeedbackVerdict, string> = { good: '妥当', bad: 'ズレ' };
 
 export async function saveMatchFeedback(fb: MatchFeedback): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveMatchFeedbackSheets(fb);
   if (!FEEDBACK_DB_ID) {
     console.warn('NOTION_FEEDBACK_DB_ID が未設定 — フィードバックの保存をスキップします');
     return '';
@@ -554,6 +520,7 @@ export async function saveMatchFeedback(fb: MatchFeedback): Promise<string> {
 }
 
 export async function fetchRecentFeedback(limit = 200): Promise<MatchFeedback[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchRecentFeedbackSheets(limit);
   if (!FEEDBACK_DB_ID) return [];
   const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
   const response = await throttle(() =>
@@ -580,6 +547,7 @@ export async function fetchRecentFeedback(limit = 200): Promise<MatchFeedback[]>
 
 // ===== スキル同義辞書（共有・育てる） =====
 export async function saveSkillEquivalence(e: SkillEquivalence): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveSkillEquivalenceSheets(e);
   if (!SKILL_EQUIV_DB_ID) {
     console.warn('NOTION_SKILL_EQUIV_DB_ID が未設定 — スキル同義の保存をスキップします');
     return '';
@@ -600,6 +568,7 @@ export async function saveSkillEquivalence(e: SkillEquivalence): Promise<string>
 }
 
 export async function fetchSkillEquivalences(limit = 500): Promise<SkillEquivalence[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchSkillEquivalencesSheets(limit);
   if (!SKILL_EQUIV_DB_ID) return [];
   const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
   const response = await throttle(() =>

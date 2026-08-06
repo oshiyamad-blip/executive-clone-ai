@@ -99,9 +99,16 @@ async function main(): Promise<void> {
     else warn('Xserver設定が不足（XSERVER_IMAP_HOST/SHARED_USER/SHARED_PASS）— SES収集はスキップされます');
     if (!envSet('XSERVER_SMTP_HOST')) warn('XSERVER_SMTP_HOST 未設定 — サマリメール送信はスキップされます');
   }
-  console.log(
-    `  ・Notion SES DB:   ${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '設定済み（案件/要員/マッチ）' : '未設定（保存はスキップされます）'}`,
-  );
+  const dbProvider = (process.env.DB_PROVIDER ?? 'notion').toLowerCase();
+  if (dbProvider === 'sheets') {
+    console.log(
+      `  ・データ保存先:    sheets（スプレッドシート ${envSet('SHEETS_DB_SPREADSHEET_ID') ? '設定済み' : '未設定 — SHEETS_DB_SPREADSHEET_ID が必要'}／Google認証 ${envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY') ? '設定済み' : '未設定'}）`,
+    );
+  } else {
+    console.log(
+      `  ・データ保存先:    notion（${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '案件/要員/マッチDB 設定済み' : 'DB未設定 — 保存はスキップされます'}）`,
+    );
+  }
   console.log(`  ・通知先:          ${process.env.SES_NOTIFY_TO?.trim() ? process.env.SES_NOTIFY_TO : '未設定（サマリはコンソールのみ）'}`);
   const healOn = (process.env.SES_HEAL_ENABLED ?? 'true') !== 'false';
   console.log(

@@ -69,9 +69,12 @@ npm run ses:web:demo        # 確認UI（http://127.0.0.1:8788）
 
 ---
 
-## 4. Notion の準備
+## 4. データ保存先の準備（Notion または スプレッドシート）
 
-Notion で内部インテグレーションを作成し、対象データベースに**コネクト（共有）**します。
+保存先は `DB_PROVIDER` で選べます。**Notion（既定・4-1〜4-6）** か **Googleスプレッドシート（4-7）** のどちらか一方を準備すればOKです。
+スプシ派のチーム・Notionの追加課金を避けたい場合は 4-7 のスプレッドシート方式が手軽です（DB手作成が不要）。
+
+Notion を使う場合: 内部インテグレーションを作成し、対象データベースに**コネクト（共有）**します。
 各DBは以下のプロパティ名で作成してください（**名前は完全一致**が必要です）。
 
 ### 4-1. 案件DB（`NOTION_PROJECT_DB_ID`）
@@ -133,6 +136,29 @@ Notion で内部インテグレーションを作成し、対象データベー�
 
 > DB IDは各DBのURLに含まれる32桁の英数字です。起動時に自動で `data_source_id` に解決されます。
 > 4-4〜4-6は未設定でも縮退動作します（自社社員突合・学習機能がスキップされるだけ）。
+
+### 4-7. 【代替】Googleスプレッドシートを保存先にする（`DB_PROVIDER=sheets`）
+
+Notionのかわりに、**1つのスプレッドシート（6タブ）**をデータ保存先にできます。
+タブ（案件／要員／マッチ／自社社員／評価／スキル同義）と**ヘッダー行は初回実行時に自動生成**されるため、
+Notionのような手動DB作成は不要です。営業チームが普段のスプシ操作でソート・フィルタできる利点もあります。
+
+**手順**:
+1. Googleドライブで**空のスプレッドシートを1つ作成**し、URLの `/d/` と `/edit` の間のIDを控える
+2. そのシートを `GOOGLE_TARGET_EMAIL` のユーザー（サービスアカウントが impersonate するユーザー）が編集できる状態にする
+3. Workspace管理コンソールのDWD登録に `https://www.googleapis.com/auth/spreadsheets` スコープを追加
+4. `.env.local` に設定:
+```
+DB_PROVIDER=sheets
+SHEETS_DB_SPREADSHEET_ID=<手順1のID>
+GOOGLE_SA_CLIENT_EMAIL=...
+GOOGLE_SA_PRIVATE_KEY=...
+GOOGLE_TARGET_EMAIL=...
+```
+
+- Notion用の `NOTION_*_DB_ID` は不要になります（`NOTION_TOKEN` も SES用途では不要）
+- マッチのステータス更新（確認UI）・評価・同義辞書もすべて同じシートに読み書きされます
+- `DB_PROVIDER=notion` に戻せばいつでもNotion運用に切替可能（データ移行は手動）
 
 ---
 

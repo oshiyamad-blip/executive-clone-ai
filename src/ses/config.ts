@@ -146,6 +146,17 @@ export function matchModel(): string {
   return process.env.ANTHROPIC_MODEL_MATCH ?? 'claude-sonnet-5';
 }
 
+// SESデータの保存先。notion（既定）| sheets（Googleスプレッドシート）。
+// マッチング・UI・メール処理は共通で、保存・読出の「口」だけが切り替わる（MAIL_PROVIDERと同じ流儀）
+export function dbProvider(): string {
+  return (process.env.DB_PROVIDER ?? 'notion').toLowerCase();
+}
+
+// DB_PROVIDER=sheets のときに使うスプレッドシートID（URLの /d/ と /edit の間の文字列）
+export function sheetsDbSpreadsheetId(): string {
+  return process.env.SHEETS_DB_SPREADSHEET_ID ?? '';
+}
+
 export function notionProjectDbId(): string {
   return process.env.NOTION_PROJECT_DB_ID ?? '';
 }
