@@ -17,6 +17,24 @@ export interface Series {
   bars: Bar[];
 }
 
+/** 現金配当。exDate（権利落ち日）に価格が落ちるので、同じ日に現金を計上する */
+export interface Dividend {
+  exDate: string; // YYYY-MM-DD
+  amount: number; // 1株あたりの金額（税引き前）
+}
+
+export interface DividendSeries {
+  symbol: string;
+  dividends: Dividend[];
+}
+
+/**
+ * 価格が何で調整されているか。ここを間違えると配当を二重計上する。
+ * - total: 配当込みで調整済み（Alpacaの adjustment=all）。配当を現金計上してはいけない
+ * - split: 分割のみ調整。配当は現金として別建てで受け取る
+ */
+export type PriceAdjustment = 'total' | 'split';
+
 export type ProviderName = 'stooq' | 'alpaca' | 'csv' | 'synthetic';
 
 /** 決済理由。ギャップ約定は損切り価格で約定できなかったケースを区別する */
@@ -96,6 +114,12 @@ export interface BacktestConfig {
   universe: string[];
   /** 選定を見直す間隔（営業日） */
   rebalanceDays: number;
+  /** 価格の調整方法。split のときだけ配当を現金計上する */
+  priceAdjustment: PriceAdjustment;
+  /** 米国での配当源泉税率。日米租税条約で0.10 */
+  dividendWithholding: number;
+  /** 配当への日本の課税率。外国税額控除で源泉分を相殺する */
+  dividendTaxRate: number;
 }
 
 /** 評価指標 */
@@ -121,6 +145,8 @@ export interface SleeveResult {
   trades: Trade[];
   /** 日次のスリーブ評価額 */
   equity: number[];
+  /** 受け取った配当の総額（源泉税を引く前） */
+  dividendGross: number;
 }
 
 export interface BacktestResult {
@@ -137,4 +163,12 @@ export interface BacktestResult {
   afterTaxTotalReturn: number;
   /** データが揃わず母集団から外れた銘柄 */
   skippedSymbols: string[];
+  /** 配当の内訳。priceAdjustment=total のときは価格に含まれるため 0 になる */
+  dividends: {
+    gross: number;        // 受取総額（税引き前）
+    withheld: number;     // 米国で源泉徴収された額
+    japanTax: number;     // 外国税額控除を効かせた後の日本の追加課税
+    net: number;          // 手取り
+    shareOfReturn: number; // 総リターンのうち配当が占める割合
+  };
 }

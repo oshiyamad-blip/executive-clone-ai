@@ -2,9 +2,13 @@ import '../env.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadSeries, loadUniverse, sleep, type LoadOptions } from './data.js';
+import { loadDividends } from './dividends.js';
 import { runBacktest } from './engine.js';
 import { yearsToSignificance } from './metrics.js';
-import type { BacktestConfig, BacktestResult, Metrics, ProviderName, Series, SleeveRule } from './types.js';
+import type {
+  BacktestConfig, BacktestResult, DividendSeries, Metrics,
+  PriceAdjustment, ProviderName, Series, SleeveRule,
+} from './types.js';
 
 /**
  * 実際の株価で「−8%損切り / +20%利確」ルールを検証するCLI。
@@ -90,6 +94,11 @@ function buildConfig(): BacktestConfig {
     sleeves,
     universe: [],
     rebalanceDays: Number(arg('rebalance', '5')),
+    // 既定は split。配当を価格に埋め込まず現金として受け取るので、
+    // 「配当がいくら入ったか」「源泉税でいくら引かれたか」が金額で見える。
+    priceAdjustment: (arg('price-adjustment', 'split') as PriceAdjustment),
+    dividendWithholding: Number(arg('dividend-withholding', '0.10')),
+    dividendTaxRate: Number(arg('dividend-tax', '0.20315')),
   };
 }
 
@@ -152,6 +161,27 @@ function printReport(r: BacktestResult): void {
     console.log(`    最悪の1トレード   ${pct(worst)}   ※ルール上の損切り幅を超えた分がギャップの実害`);
   }
 
+  const d = r.dividends;
+  console.log('\n  ── 配当 ──');
+  if (cfg.priceAdjustment === 'total') {
+    console.log('    価格が配当込みで調整されているため、配当は上のリターンに含まれています。');
+    console.log('    金額の内訳を見たい場合は --price-adjustment split で実行してください。');
+  } else if (d.gross === 0) {
+    console.log('    ⚠ 配当データが読み込まれていません。配当収入がゼロとして計算されています。');
+    console.log('      → 配当貴族スリーブのリターンが実際より低く出ます。');
+    console.log('      → --provider alpaca で実行するか、data/dividends/<SYMBOL>.csv を用意してください。');
+  } else {
+    console.log(`    受取総額（税引前）  $${d.gross.toFixed(0)}`);
+    console.log(`    米国源泉税（${(cfg.dividendWithholding * 100).toFixed(0)}%）   -$${d.withheld.toFixed(0)}`);
+    console.log(`    日本の追加課税      -$${d.japanTax.toFixed(0)}   ※外国税額控除で源泉分を相殺した差額`);
+    console.log(`    手取り              $${d.net.toFixed(0)}`);
+    console.log(`    総リターンに占める割合  ${pct(d.shareOfReturn)}`);
+    console.log('\n    スリーブ別の受取（税引前）');
+    for (const s of r.sleeves) {
+      if (s.dividendGross > 0) console.log(`      ${pad(s.name, 26)}$${s.dividendGross.toFixed(0)}`);
+    }
+  }
+
   if (r.skippedSymbols.length > 0) {
     console.log(`\n  ⚠ データが取れず母集団から除外: ${r.skippedSymbols.join(', ')}`);
   }
@@ -187,7 +217,10 @@ async function main(): Promise<void> {
   const coreSymbols = cfg.sleeves.flatMap((s) => s.selection.symbols ?? []);
   const needed = Array.from(new Set([cfg.benchmark, ...coreSymbols, ...universe]));
 
-  const opts: LoadOptions = { provider, from: cfg.from, to: cfg.to, refresh: flag('refresh') };
+  const opts: LoadOptions = {
+    provider, from: cfg.from, to: cfg.to,
+    refresh: flag('refresh'), priceAdjustment: cfg.priceAdjustment,
+  };
   const seriesList: Series[] = [];
   const skipped: string[] = [];
 
@@ -203,6 +236,22 @@ async function main(): Promise<void> {
   }
   console.log(`  取得できた銘柄: ${seriesList.length} / ${needed.length}`);
 
+  // 配当。priceAdjustment='split' のときだけ現金として計上する
+  let dividendSeries: DividendSeries[] = [];
+  if (cfg.priceAdjustment === 'split' && !selftest) {
+    console.log('現金配当を取得します…');
+    dividendSeries = await loadDividends(seriesList.map((s) => s.symbol), {
+      provider, from: cfg.from, to: cfg.to, refresh: flag('refresh'),
+    });
+    const withDivs = dividendSeries.filter((d) => d.dividends.length > 0).length;
+    console.log(`  配当データがある銘柄: ${withDivs} / ${seriesList.length}`);
+    if (withDivs === 0) {
+      console.warn('  ⚠ 配当データが1件も取れませんでした。配当収入ゼロとして計算されます。');
+      console.warn('    Stooqは配当を配信しません。--provider alpaca を使うか、');
+      console.warn('    data/dividends/<SYMBOL>.csv（ex_date,amount）を用意してください。');
+    }
+  }
+
   if (!seriesList.some((s) => s.symbol === cfg.benchmark)) {
     console.error(`\n❌ ベンチマーク ${cfg.benchmark} のデータが取得できませんでした。`);
     console.error('   ネットワークが遮断されている場合は、CSVを data/prices/ に置いて --provider csv で実行してください。');
@@ -214,7 +263,7 @@ async function main(): Promise<void> {
   const available = new Set(seriesList.map((s) => s.symbol));
   cfg.universe = universe.filter((s) => available.has(s.toUpperCase()));
 
-  const result = runBacktest({ config: cfg, seriesList, skippedSymbols: skipped });
+  const result = runBacktest({ config: cfg, seriesList, dividendSeries, skippedSymbols: skipped });
   printReport(result);
 
   const tradesPath = arg('trades');

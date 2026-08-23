@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Bar, ProviderName, Series } from './types.js';
+import type { Bar, PriceAdjustment, ProviderName, Series } from './types.js';
 
 const CACHE_DIR = 'data/prices';
 
@@ -52,8 +52,14 @@ function toCsv(bars: Bar[]): string {
   return ['Date,Open,High,Low,Close,Volume', ...rows].join('\n');
 }
 
-async function readCache(symbol: string): Promise<Bar[] | null> {
-  const path = join(CACHE_DIR, `${symbol.toUpperCase()}.csv`);
+/** 調整方法ごとにキャッシュを分ける。split版とtotal版が混ざると価格系列が壊れる */
+function cachePath(symbol: string, adjustment: PriceAdjustment): string {
+  const suffix = adjustment === 'total' ? '.total' : '';
+  return join(CACHE_DIR, `${symbol.toUpperCase()}${suffix}.csv`);
+}
+
+async function readCache(symbol: string, adjustment: PriceAdjustment): Promise<Bar[] | null> {
+  const path = cachePath(symbol, adjustment);
   if (!existsSync(path)) return null;
   try {
     return parseCsv(await readFile(path, 'utf8'), symbol);
@@ -62,9 +68,9 @@ async function readCache(symbol: string): Promise<Bar[] | null> {
   }
 }
 
-async function writeCache(symbol: string, bars: Bar[]): Promise<void> {
+async function writeCache(symbol: string, bars: Bar[], adjustment: PriceAdjustment): Promise<void> {
   await mkdir(CACHE_DIR, { recursive: true });
-  await writeFile(join(CACHE_DIR, `${symbol.toUpperCase()}.csv`), toCsv(bars), 'utf8');
+  await writeFile(cachePath(symbol, adjustment), toCsv(bars), 'utf8');
 }
 
 async function fetchStooq(symbol: string): Promise<Bar[]> {
@@ -81,7 +87,12 @@ async function fetchStooq(symbol: string): Promise<Bar[]> {
   return parseCsv(text, symbol);
 }
 
-async function fetchAlpaca(symbol: string, from: string, to: string): Promise<Bar[]> {
+async function fetchAlpaca(
+  symbol: string,
+  from: string,
+  to: string,
+  adjustment: PriceAdjustment,
+): Promise<Bar[]> {
   const key = process.env.ALPACA_API_KEY ?? '';
   const secret = process.env.ALPACA_API_SECRET ?? '';
   if (!key || !secret) throw new Error('ALPACA_API_KEY / ALPACA_API_SECRET が未設定です');
@@ -93,7 +104,8 @@ async function fetchAlpaca(symbol: string, from: string, to: string): Promise<Ba
     url.searchParams.set('timeframe', '1Day');
     url.searchParams.set('start', from);
     url.searchParams.set('end', to);
-    url.searchParams.set('adjustment', 'all'); // 分割・配当調整
+    // total: 配当込みで調整済みの価格 / split: 分割のみ調整（配当は別途現金計上する）
+    url.searchParams.set('adjustment', adjustment === 'total' ? 'all' : 'split');
     url.searchParams.set('limit', '10000');
     if (pageToken) url.searchParams.set('page_token', pageToken);
 
@@ -175,6 +187,8 @@ export interface LoadOptions {
   to: string;
   /** キャッシュがあってもデータ取得元に取りに行く */
   refresh?: boolean;
+  /** total なら配当込みの価格、split なら分割のみ調整した価格を取る */
+  priceAdjustment: PriceAdjustment;
 }
 
 /**
@@ -191,7 +205,7 @@ export async function loadSeries(symbol: string, opts: LoadOptions): Promise<Ser
   }
 
   if (!opts.refresh) {
-    const cached = await readCache(sym);
+    const cached = await readCache(sym, opts.priceAdjustment);
     if (cached && cached.length > 0) return { symbol: sym, bars: cached };
   }
   if (opts.provider === 'csv') return null;
@@ -202,10 +216,10 @@ export async function loadSeries(symbol: string, opts: LoadOptions): Promise<Ser
     try {
       const bars =
         opts.provider === 'alpaca'
-          ? await fetchAlpaca(sym, opts.from, opts.to)
+          ? await fetchAlpaca(sym, opts.from, opts.to, opts.priceAdjustment)
           : await fetchStooq(sym);
       if (bars.length === 0) return null;
-      await writeCache(sym, bars);
+      await writeCache(sym, bars, opts.priceAdjustment);
       return { symbol: sym, bars };
     } catch (err) {
       if (attempt < attempts) {

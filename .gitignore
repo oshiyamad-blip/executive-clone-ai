@@ -27,5 +27,6 @@ digests/
 # バックテスト: 母集団の定義だけは追跡し、取得した価格や結果は追跡しない
 !data/universe/
 data/prices/
+data/dividends/
 data/backtest*.json
 data/backtest*.csv

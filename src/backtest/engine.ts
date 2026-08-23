@@ -2,6 +2,7 @@ import type {
   BacktestConfig,
   BacktestResult,
   Bar,
+  DividendSeries,
   ExitReason,
   Series,
   SleeveResult,
@@ -27,6 +28,8 @@ interface SleeveState {
   equity: number[];
   /** 翌営業日の寄りで新規に買う銘柄 */
   pendingEntries: string[];
+  /** 受け取った配当の総額（源泉税を引く前） */
+  dividendGross: number;
 }
 
 interface ExitDecision {
@@ -105,6 +108,8 @@ export interface RunInput {
   config: BacktestConfig;
   /** ベンチマークを含む全銘柄の日足 */
   seriesList: Series[];
+  /** 現金配当。config.priceAdjustment='split' のときだけ現金計上する */
+  dividendSeries?: DividendSeries[];
   skippedSymbols: string[];
 }
 
@@ -135,7 +140,18 @@ export function runBacktest(input: RunInput): BacktestResult {
     trades: [],
     equity: [],
     pendingEntries: [],
+    dividendGross: 0,
   }));
+
+  // 権利落ち日 → 1株あたり配当。priceAdjustment='total' の価格は配当込みなので、
+  // ここで現金計上すると二重計上になる。split のときだけ有効にする。
+  const payDividends = cfg.priceAdjustment === 'split';
+  const divBySymbol = new Map<string, Map<string, number>>();
+  for (const ds of input.dividendSeries ?? []) {
+    const m = new Map<string, number>();
+    for (const d of ds.dividends) m.set(d.exDate, (m.get(d.exDate) ?? 0) + d.amount);
+    divBySymbol.set(ds.symbol.toUpperCase(), m);
+  }
 
   const slip = cfg.slippageBps / 10000;
   const equity: number[] = [];
@@ -157,6 +173,18 @@ export function runBacktest(input: RunInput): BacktestResult {
     const closeOf = (symbol: string): number | null => barOf(symbol)?.close ?? null;
 
     for (const state of states) {
+      // 0. 配当。権利落ち日の前日までに買っていた分だけが受け取れるため、
+      //    今日の寄りで建てるポジションは対象にならない（この順序が重要）。
+      if (payDividends) {
+        for (const pos of state.positions) {
+          const amount = divBySymbol.get(pos.symbol)?.get(date);
+          if (amount === undefined) continue;
+          const gross = amount * pos.shares;
+          state.dividendGross += gross;
+          state.cash += gross * (1 - cfg.dividendWithholding); // 米国で源泉徴収された残りが入金される
+        }
+      }
+
       // 1. 前日に決めた新規建てを、今日の寄りで約定させる（判断日の終値では買わない）
       const entries = state.pendingEntries;
       state.pendingEntries = [];
@@ -223,6 +251,7 @@ export function runBacktest(input: RunInput): BacktestResult {
     name: s.rule.name,
     trades: s.trades,
     equity: s.equity,
+    dividendGross: s.dividendGross,
   }));
 
   const allTrades = states.flatMap((s) => s.trades);
@@ -232,8 +261,19 @@ export function runBacktest(input: RunInput): BacktestResult {
   // 実現益にのみ課税する（含み益は繰り延べ）。損失は同年内で相殺できるものとして扱う
   const realized = allTrades.reduce((sum, t) => sum + t.pnl, 0);
   const tax = realized > 0 ? realized * cfg.taxRate : 0;
+
+  // 配当は米国で源泉徴収された上で、日本でも課税される。
+  // 二重課税分は外国税額控除で取り戻せるため、日本の追加課税は差額のみとする。
+  const divGross = states.reduce((sum, s) => sum + s.dividendGross, 0);
+  const divWithheld = divGross * cfg.dividendWithholding;
+  const divJapanTax = Math.max(0, divGross * cfg.dividendTaxRate - divWithheld);
+
   const finalEquity = equity[equity.length - 1]!;
-  const afterTaxTotalReturn = (finalEquity - tax - cfg.initialCapital) / cfg.initialCapital;
+  const afterTaxTotalReturn =
+    (finalEquity - tax - divJapanTax - cfg.initialCapital) / cfg.initialCapital;
+
+  const totalGain = finalEquity - cfg.initialCapital;
+  const divNet = divGross - divWithheld - divJapanTax;
 
   return {
     config: cfg,
@@ -245,5 +285,12 @@ export function runBacktest(input: RunInput): BacktestResult {
     benchmarkMetrics,
     afterTaxTotalReturn,
     skippedSymbols: input.skippedSymbols,
+    dividends: {
+      gross: divGross,
+      withheld: divWithheld,
+      japanTax: divJapanTax,
+      net: divNet,
+      shareOfReturn: totalGain > 0 ? divNet / totalGain : 0,
+    },
   };
 }
