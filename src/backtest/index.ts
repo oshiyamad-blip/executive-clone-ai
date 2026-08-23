@@ -1,7 +1,7 @@
 import '../env.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadSeries, loadUniverse, type LoadOptions } from './data.js';
+import { loadSeries, loadUniverse, sleep, type LoadOptions } from './data.js';
 import { runBacktest } from './engine.js';
 import { yearsToSignificance } from './metrics.js';
 import type { BacktestConfig, BacktestResult, Metrics, ProviderName, Series, SleeveRule } from './types.js';
@@ -177,6 +177,13 @@ async function main(): Promise<void> {
     console.log(`母集団: ${universe.length}銘柄（${universePath}）`);
   }
 
+  // --limit は疎通確認用。母集団を先頭N銘柄に絞って短時間で1周させる
+  const limit = Number(arg('limit', '0'));
+  if (limit > 0) {
+    universe = universe.slice(0, limit);
+    console.log(`  --limit ${limit} により母集団を${universe.length}銘柄に絞りました（疎通確認用）`);
+  }
+
   const coreSymbols = cfg.sleeves.flatMap((s) => s.selection.symbols ?? []);
   const needed = Array.from(new Set([cfg.benchmark, ...coreSymbols, ...universe]));
 
@@ -191,6 +198,8 @@ async function main(): Promise<void> {
     if (s && s.bars.length > 0) seriesList.push(s);
     else skipped.push(symbol);
     if ((i + 1) % 20 === 0) console.log(`  ${i + 1}/${needed.length} …`);
+    // キャッシュから読めた場合は待たない
+    if (provider !== 'csv' && provider !== 'synthetic' && i < needed.length - 1) await sleep(250);
   }
   console.log(`  取得できた銘柄: ${seriesList.length} / ${needed.length}`);
 

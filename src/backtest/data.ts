@@ -5,6 +5,8 @@ import type { Bar, ProviderName, Series } from './types.js';
 
 const CACHE_DIR = 'data/prices';
 
+export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 /**
  * 日足データの取得元。
  * - stooq:  APIキー不要・無料。まずこれで十分（分割調整済み）
@@ -194,16 +196,25 @@ export async function loadSeries(symbol: string, opts: LoadOptions): Promise<Ser
   }
   if (opts.provider === 'csv') return null;
 
-  try {
-    const bars =
-      opts.provider === 'alpaca'
-        ? await fetchAlpaca(sym, opts.from, opts.to)
-        : await fetchStooq(sym);
-    if (bars.length === 0) return null;
-    await writeCache(sym, bars);
-    return { symbol: sym, bars };
-  } catch (err) {
-    console.warn(`  ⚠ ${sym}: 取得に失敗しました（${(err as Error).message}）`);
-    return null;
+  // Stooqは短時間に連続で叩くと弾くため、間隔を空けつつ1度だけ再試行する
+  const attempts = 2;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const bars =
+        opts.provider === 'alpaca'
+          ? await fetchAlpaca(sym, opts.from, opts.to)
+          : await fetchStooq(sym);
+      if (bars.length === 0) return null;
+      await writeCache(sym, bars);
+      return { symbol: sym, bars };
+    } catch (err) {
+      if (attempt < attempts) {
+        await sleep(3000);
+        continue;
+      }
+      console.warn(`  ⚠ ${sym}: 取得に失敗しました（${(err as Error).message}）`);
+      return null;
+    }
   }
+  return null;
 }

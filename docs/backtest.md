@@ -21,8 +21,14 @@ npm run backtest -- --from 2015-01-01 --to 2026-08-01
 npm run backtest -- --trades data/backtest-trades.csv --json data/backtest.json
 ```
 
-初回は母集団のぶんだけ日足を取りに行くので数分かかります。2回目以降は `data/prices/` の
+初回は母集団のぶんだけ日足を取りに行くので数分かかります（レート制限を避けるため1銘柄ずつ、
+250ms間隔。失敗した銘柄は3秒空けて1度だけ再試行）。2回目以降は `data/prices/` の
 キャッシュを読むのでオフラインで動きます。取り直したいときは `--refresh`。
+
+```bash
+# 疎通確認: 母集団を先頭3銘柄に絞って短時間で1周させる
+npm run backtest -- --limit 3
+```
 
 ---
 
