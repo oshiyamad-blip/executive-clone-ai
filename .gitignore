@@ -23,3 +23,9 @@ logs/*
 # 生成された成果物（機微情報を含むためコミットしない）
 briefings/
 digests/
+
+# バックテスト: 母集団の定義だけは追跡し、取得した価格や結果は追跡しない
+!data/universe/
+data/prices/
+data/backtest*.json
+data/backtest*.csv
