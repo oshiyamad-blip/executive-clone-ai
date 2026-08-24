@@ -27,7 +27,10 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # enablement: true で Pages 自体の有効化まで行う（Settings での手動設定が不要になる）
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dopamine-detox-app
