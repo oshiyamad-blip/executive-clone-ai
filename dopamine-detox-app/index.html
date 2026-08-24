@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#ffffff">
+<meta name="description" content="スマホ断ちセッションと衝動ログで、ドーパミンデトックスを続けるためのアプリ。">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>ドーパミンデトックス</title>
+<link rel="manifest" href="./app.webmanifest">
+<link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./assets/icon-180.png">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1 id="view-title">セッション</h1>
+  <p id="today-line" class="topbar__sub">—</p>
+</header>
+
+<main id="main">
+
+  <!-- ── セッション ───────────────────────────────── -->
+  <section id="view-session" class="view" aria-labelledby="view-title">
+
+    <div id="dial" class="dial">
+      <svg class="dial__svg" viewBox="0 0 200 200" aria-hidden="true">
+        <circle class="dial__track" cx="100" cy="100" r="88" />
+        <circle id="dial-arc" class="dial__arc" cx="100" cy="100" r="88"
+                pathLength="1000" stroke-dasharray="1000" stroke-dashoffset="1000" />
+      </svg>
+      <div class="dial__center">
+        <output id="dial-time" class="dial__time" aria-live="off">00:00</output>
+        <p id="dial-caption" class="dial__caption">今日のセッションを始める</p>
+      </div>
+    </div>
+
+    <!-- 待機中 -->
+    <div id="session-idle" class="stack">
+      <div class="chips" id="duration-chips" role="radiogroup" aria-label="セッションの長さ"></div>
+      <label class="custom-duration">
+        <span>カスタム（分）</span>
+        <input id="custom-duration" type="number" inputmode="numeric" min="1" max="600" step="1" placeholder="例: 25">
+      </label>
+      <button id="btn-start" class="btn btn--primary btn--lg" type="button">セッションを開始</button>
+    </div>
+
+    <!-- 実行中 -->
+    <div id="session-running" class="stack" hidden>
+      <p class="running-note">画面を伏せて、終わるまで待つ。<br>衝動が来たら記録だけして、開かない。</p>
+      <button id="btn-resist" class="btn btn--ghost btn--lg" type="button">衝動を記録する</button>
+      <button id="btn-abort" class="btn btn--quiet" type="button">セッションを中断する</button>
+    </div>
+
+    <!-- 直後の結果 -->
+    <div id="session-result" class="stack" hidden>
+      <p id="result-note" class="result-note"></p>
+      <button id="btn-again" class="btn btn--primary btn--lg" type="button">もう一度</button>
+    </div>
+
+  </section>
+
+  <!-- ── 記録 ─────────────────────────────────────── -->
+  <section id="view-log" class="view" hidden aria-labelledby="view-title">
+    <div class="summary" id="summary"></div>
+    <div class="log" id="log-list"></div>
+  </section>
+
+  <!-- ── 設定 ─────────────────────────────────────── -->
+  <section id="view-settings" class="view" hidden aria-labelledby="view-title">
+
+    <h2 class="section-title">セッション</h2>
+    <label class="row">
+      <span class="row__label">既定の長さ（分）</span>
+      <input id="set-default-duration" class="row__control" type="number" inputmode="numeric" min="1" max="600" step="1">
+    </label>
+    <label class="row">
+      <span class="row__label">実行中は画面を消さない<em class="row__hint">端末が対応している場合のみ</em></span>
+      <input id="set-keep-awake" class="row__control" type="checkbox">
+    </label>
+
+    <h2 class="section-title">終了の合図</h2>
+    <label class="row">
+      <span class="row__label">通知を出す</span>
+      <input id="set-notify" class="row__control" type="checkbox">
+    </label>
+    <label class="row">
+      <span class="row__label">音を鳴らす</span>
+      <input id="set-sound" class="row__control" type="checkbox">
+    </label>
+    <label class="row">
+      <span class="row__label">振動する<em class="row__hint">Android のみ</em></span>
+      <input id="set-vibrate" class="row__control" type="checkbox">
+    </label>
+
+    <h2 class="section-title">データ</h2>
+    <p class="note">記録はこの端末の中だけに保存されます。サーバーには何も送りません。<strong>ブラウザのデータを消すと記録も消えます。</strong>ときどき書き出しておいてください。</p>
+    <div class="stack">
+      <button id="btn-export" class="btn" type="button">JSON を書き出す</button>
+      <button id="btn-import" class="btn" type="button">JSON を読み込む</button>
+      <input id="file-import" type="file" accept="application/json,.json" hidden>
+      <button id="btn-wipe" class="btn btn--quiet" type="button">すべての記録を削除</button>
+    </div>
+
+    <p class="version" id="version-line"></p>
+  </section>
+
+</main>
+
+<button id="fab-impulse" class="fab" type="button">衝動を記録</button>
+
+<nav class="tabbar" aria-label="画面切り替え">
+  <button class="tabbar__btn is-active" type="button" data-view="session" aria-current="page">セッション</button>
+  <button class="tabbar__btn" type="button" data-view="log">記録</button>
+  <button class="tabbar__btn" type="button" data-view="settings">設定</button>
+</nav>
+
+<!-- ── 衝動ログ入力シート ──────────────────────────── -->
+<div id="impulse-sheet" class="sheet" hidden>
+  <div class="sheet__backdrop" data-close></div>
+  <form id="impulse-form" class="sheet__panel" aria-label="衝動の記録">
+    <h2 class="sheet__title">何に手が伸びた？</h2>
+    <div class="chips" id="impulse-targets" role="radiogroup" aria-label="対象"></div>
+
+    <h3 class="sheet__sub">強さ</h3>
+    <div class="chips chips--tight" id="impulse-intensity" role="radiogroup" aria-label="衝動の強さ"></div>
+
+    <h3 class="sheet__sub">きっかけ<span class="sheet__hint">複数選択可</span></h3>
+    <div class="chips" id="impulse-triggers" role="group" aria-label="きっかけ"></div>
+
+    <h3 class="sheet__sub">結果</h3>
+    <div class="chips chips--tight" id="impulse-outcome" role="radiogroup" aria-label="結果"></div>
+
+    <label class="sheet__memo">
+      <span class="visually-hidden">メモ</span>
+      <input id="impulse-note" type="text" maxlength="140" placeholder="メモ（任意）">
+    </label>
+
+    <div class="sheet__actions">
+      <button type="button" class="btn btn--ghost" data-close>やめる</button>
+      <button type="submit" class="btn btn--primary">記録する</button>
+    </div>
+  </form>
+</div>
+
+<!-- ── 中断理由シート ─────────────────────────────── -->
+<div id="abort-sheet" class="sheet" hidden>
+  <div class="sheet__backdrop" data-close></div>
+  <form id="abort-form" class="sheet__panel" aria-label="中断の記録">
+    <h2 class="sheet__title">何に負けた？</h2>
+    <p class="sheet__lead">責めるためではなく、次に備えるために残します。</p>
+    <div class="chips" id="abort-targets" role="radiogroup" aria-label="対象"></div>
+    <label class="sheet__memo">
+      <span class="visually-hidden">メモ</span>
+      <input id="abort-note" type="text" maxlength="140" placeholder="メモ（任意）">
+    </label>
+    <div class="sheet__actions">
+      <button type="button" class="btn btn--ghost" data-close>続ける</button>
+      <button type="submit" class="btn btn--strong">中断して記録</button>
+    </div>
+  </form>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>
