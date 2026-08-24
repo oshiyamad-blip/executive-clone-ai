@@ -1,0 +1,28 @@
+{
+  "_comment": "許可するアプリ。process はプロセス名（.exe は付けても付けなくてもよい）。調べるには .\\detox-focus.ps1 -Identify を実行して、目的のアプリに切り替える。",
+
+  "allow": [
+    {
+      "label": "YouTube Music（Chrome のアプリウィンドウ）",
+      "process": "chrome.exe",
+      "titleContains": "YouTube Music",
+      "titleNotContains": " - Google Chrome"
+    },
+    {
+      "label": "YouTube Music（Edge のアプリウィンドウ）",
+      "process": "msedge.exe",
+      "titleContains": "YouTube Music",
+      "titleNotContains": " - Microsoft Edge"
+    },
+    {
+      "label": "Word",
+      "process": "WINWORD.EXE"
+    },
+    {
+      "label": "脚本エディタ（自分の環境に合わせて書き換える）",
+      "process": "your-editor.exe"
+    }
+  ],
+
+  "neverTouch": []
+}

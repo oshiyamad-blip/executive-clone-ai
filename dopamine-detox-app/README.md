@@ -102,6 +102,16 @@ GitHub Actions のワークフローはリポジトリのルートにしか置�
 
 アプリを更新したときは `sw.js` の `CACHE` の値を上げると、古いキャッシュが確実に捨てられる。
 
+## PC 側（Windows）
+
+`desktop-windows/` に、セッション中に許可したアプリ以外を前面に出させない常駐ツールがある。
+「YouTube Music と Word だけで書く時間」をつくるためのもの。
+
+記録はこのアプリの書き出しと同じ JSON 形式で残るので、PC のログをスマホに送って
+**設定 → JSON を読み込む** で取り込めば、PC とスマホの記録がひとつに並ぶ。
+
+詳しくは [`desktop-windows/README.md`](desktop-windows/README.md)。
+
 ## 制限
 
 - Android Chrome を想定している。iOS Safari でも動くはずだが、通知と Wake Lock は期待しない方がいい
