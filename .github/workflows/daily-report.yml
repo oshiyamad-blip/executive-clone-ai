@@ -1,0 +1,48 @@
+# 運用結果を毎日Slackへ投げる。
+#
+# ⚠ セキュリティ: このワークフローが使うAlpacaのキーは取引権限を持ちます。
+#   ワークフローを書き換えられる人＝資金を動かせる人になるため、
+#   ブランチ保護と Environment 承認を必ず設定してください（docs/daily-report.md）。
+#   レポート目的ならペーパー口座のキーで十分です。
+
+name: 日次レポート
+
+on:
+  schedule:
+    # 21:30 UTC = 米国東部の 17:30（夏時間）/ 16:30（冬時間）。どちらも大引け後。
+    # GitHub Actions の cron は UTC 固定なので、夏時間の切り替わりでは実行時刻が1時間ずれます。
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:
+
+# 読み取りのみ。このワークフローはリポジトリに何も書き込まない
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: レポートを作成してSlackへ投稿
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          # ペーパー口座を読む場合は 'true'（既定）。実口座を読むときだけ 'false'
+          ALPACA_PAPER: ${{ vars.ALPACA_PAPER || 'true' }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          BENCHMARK: ${{ vars.BENCHMARK || 'SPY' }}
+          DAILY_LOSS_LIMIT: ${{ vars.DAILY_LOSS_LIMIT || '0.03' }}
+        run: npm run report:daily

@@ -26,7 +26,8 @@
     "demo:brief": "DEMO_MODE=true tsx src/brief/index.ts",
     "daily": "npm run collect && npm run extract",
     "weekly": "npm run analyze && npm run digest",
-    "backtest": "tsx src/backtest/index.ts"
+    "backtest": "tsx src/backtest/index.ts",
+    "report:daily": "tsx src/report/daily.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

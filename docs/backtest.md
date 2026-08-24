@@ -17,9 +17,14 @@ npm run backtest -- --selftest
 # 2) 実データ。APIキー不要（Stooqから取得し data/prices/ にキャッシュ）
 npm run backtest -- --from 2015-01-01 --to 2026-08-01
 
-# 3) 全トレードをCSVに出す
-npm run backtest -- --trades data/backtest-trades.csv --json data/backtest.json
+# 3) 全トレードをCSVに、結果をHTMLレポートに出す
+npm run backtest -- --trades data/backtest-trades.csv --json data/backtest.json \
+  --report data/backtest-report.html
 ```
+
+`--report` で出るHTMLは1枚で完結していて（外部ファイル不要）、そのまま人に渡せます。
+資産推移とドローダウンのグラフ、スリーブ別の内訳、決済理由の分布、損切りのギャップ約定率、
+配当の内訳が入ります。ライト／ダークどちらの表示にも対応しています。
 
 初回は母集団のぶんだけ日足を取りに行くので数分かかります（レート制限を避けるため1銘柄ずつ、
 250ms間隔。失敗した銘柄は3秒空けて1度だけ再試行）。2回目以降は `data/prices/` の

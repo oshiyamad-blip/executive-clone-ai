@@ -5,6 +5,7 @@ import { loadSeries, loadUniverse, sleep, type LoadOptions } from './data.js';
 import { loadDividends } from './dividends.js';
 import { runBacktest } from './engine.js';
 import { yearsToSignificance } from './metrics.js';
+import { renderHtml } from './report.js';
 import type {
   BacktestConfig, BacktestResult, DividendSeries, Metrics,
   PriceAdjustment, ProviderName, Series, SleeveRule,
@@ -279,6 +280,13 @@ async function main(): Promise<void> {
     await mkdir(dirname(tradesPath), { recursive: true });
     await writeFile(tradesPath, csv, 'utf8');
     console.log(`  全トレードを ${tradesPath} に書き出しました（${rows.length}件）`);
+  }
+
+  const reportPath = arg('report');
+  if (reportPath) {
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, renderHtml(result, { synthetic: selftest }), 'utf8');
+    console.log(`  HTMLレポートを ${reportPath} に書き出しました`);
   }
 
   const jsonPath = arg('json');
