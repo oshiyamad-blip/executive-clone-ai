@@ -11,7 +11,7 @@
 
 ## Android にインストールする
 
-1. GitHub Pages などの **HTTPS** で公開する（下記「公開する」参照）
+1. GitHub Pages などの **HTTPS** で公開する（下記「置き場所と公開」参照）
 2. Chrome for Android でその URL を開く
 3. メニュー → **アプリをインストール**（または「ホーム画面に追加」）
 
@@ -55,6 +55,8 @@
 
 ## 開発
 
+すべて `dopamine-detox-app/` の中で実行する。
+
 ```bash
 npm install        # typescript と @types/node だけ（実行時の依存はゼロ）
 npm start          # http://localhost:5173 で配信
@@ -80,11 +82,23 @@ scripts/serve.mjs   開発用の静的サーバー
 scripts/gen-icons.mjs  PNG アイコン生成
 ```
 
-## 公開する
+## 置き場所と公開
 
-`main` に push すると GitHub Actions がリポジトリのルートをそのまま GitHub Pages に上げる
-（`.github/workflows/pages.yml`）。初回だけリポジトリの **Settings → Pages → Source** を
-**GitHub Actions** にしておく必要がある。
+このアプリは `executive-clone-ai` リポジトリの `dopamine-detox-app/` に同居している。
+GitHub Actions のワークフローはリポジトリのルートにしか置けないため、ビルド定義だけは
+親リポジトリの `.github/workflows/` にある。
+
+- `detox-pages.yml` — `main` への push で **`dopamine-detox-app/` だけを** GitHub Pages に公開する。
+  `path` をこのディレクトリに限定してあるので、親リポジトリの他の内容は成果物に含まれない
+- `detox-typecheck.yml` — このディレクトリが変更されたときだけ型チェックを走らせる
+
+公開に必要な手順は2つ。
+
+1. このディレクトリを `main` に入れる
+2. リポジトリの **Settings → Pages → Source** を **GitHub Actions** にする
+
+公開後の URL は `https://oshiyamad-blip.github.io/executive-clone-ai/` になる。
+アプリ内のパスはすべて相対（`./`）なので、このようなサブパス配信でも動く。
 
 アプリを更新したときは `sw.js` の `CACHE` の値を上げると、古いキャッシュが確実に捨てられる。
 

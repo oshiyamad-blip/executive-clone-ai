@@ -1,8 +1,13 @@
-name: Deploy to GitHub Pages
+# dopamine-detox-app/ だけを GitHub Pages に公開する。
+# path をディレクトリに限定しているため、リポジトリの他の内容は成果物に含まれない。
+name: Deploy dopamine-detox-app to Pages
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'dopamine-detox-app/**'
+      - '.github/workflows/detox-pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +30,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: dopamine-detox-app
       - id: deploy
         uses: actions/deploy-pages@v4

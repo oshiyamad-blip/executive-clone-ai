@@ -1,14 +1,19 @@
-name: Typecheck
+name: Typecheck dopamine-detox-app
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
+    paths: ['dopamine-detox-app/**']
   pull_request:
+    paths: ['dopamine-detox-app/**']
   workflow_dispatch:
 
 jobs:
   typecheck:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dopamine-detox-app
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
