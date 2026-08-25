@@ -1,4 +1,4 @@
-# 許可判定と対象推定。Windows API に触らない純粋なロジックだけを置き、
+﻿# 許可判定と対象推定。Windows API に触らない純粋なロジックだけを置き、
 # ここだけは Windows 以外でもテストできるようにしてある（tests/matching.tests.ps1）。
 
 Set-StrictMode -Version Latest

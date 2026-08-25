@@ -1,4 +1,4 @@
-# 許可判定のテスト。Windows API に触れないので、pwsh があればどの OS でも走る。
+﻿# 許可判定のテスト。Windows API に触れないので、pwsh があればどの OS でも走る。
 #   pwsh -NoProfile -File tests/matching.tests.ps1
 
 Set-StrictMode -Version Latest

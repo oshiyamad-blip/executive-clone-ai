@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   セッション中、許可したアプリ以外を前面に出させない常駐ツール（Windows）。
@@ -150,6 +150,20 @@ if ($Identify) {
 }
 
 # ── セッション ───────────────────────────────────────────────────────────
+
+# ダブルクリック起動では引数を渡せないので、-Minutes が無いときは対話で聞く
+if (-not $PSBoundParameters.ContainsKey('Minutes')) {
+  $answer = Read-Host '何分にしますか？ (そのまま Enter で30分)'
+  if (-not [string]::IsNullOrWhiteSpace($answer)) {
+    $parsed = 0
+    if ([int]::TryParse($answer.Trim(), [ref]$parsed) -and $parsed -ge 1) {
+      $Minutes = $parsed
+    } else {
+      throw "分は1以上の数字で入れてください（入力: $answer）"
+    }
+  }
+}
+
 if ($Minutes -lt 1) { throw 'Minutes は 1 以上にしてください。' }
 
 $script:startedAt  = Get-EpochMs
