@@ -75,3 +75,77 @@ function ng_chrome_footer( $note = '（本番では既存サイトのフッタ�
 		. '〒163-0539 東京都新宿区西新宿1-26-2 新宿野村ビル39階'
 		. '<br><small>' . esc_html( $note ) . '</small></footer>' . "\n";
 }
+
+/**
+ * CSS を「スマートフォン幅で見たときに効くルールだけ」に組み替える。
+ *
+ * 意匠の切替ページで PC/SP を切り替えるためのもの。
+ * 画面を実際に狭くしないとメディアクエリは効かないため、
+ * あらかじめ SP のときだけ効くCSSを作っておき、<style> ごと差し替える。
+ *
+ * やっていること
+ *   1. コメントを除く（中に { } を含むものがあり、括弧の対応が取れなくなるため）
+ *   2. min-width のブロックを捨てる（PCでしか効かないルール）
+ *   3. max-width のブロックは囲みを外して直接書き出す（SPでは常に効く）
+ *   4. vw と svh を 375×667 の端末に置き換える
+ *      （幅を狭めても vw は実際の画面幅で計算されてしまうため）
+ *
+ * 出来上がったものは本番には出ない。確認ページの中だけで使う。
+ *
+ * @param string $css 元のCSS。
+ * @return string SP用に組み替えたCSS。
+ */
+function ng_sp_css( $css ) {
+	/* 1. コメントを除去 */
+	$css = preg_replace( '!/\*.*?\*/!s', '', $css );
+
+	/* 2〜3. トップレベルのブロックに分けて振り分ける */
+	$out   = '';
+	$depth = 0;
+	$start = 0;
+	$len   = strlen( $css );
+
+	for ( $i = 0; $i < $len; $i++ ) {
+		$ch = $css[ $i ];
+		if ( '{' === $ch ) {
+			$depth++;
+		} elseif ( '}' === $ch ) {
+			$depth--;
+			if ( 0 === $depth ) {
+				$block = substr( $css, $start, $i - $start + 1 );
+				$start = $i + 1;
+
+				$brace   = strpos( $block, '{' );
+				$prelude = trim( substr( $block, 0, $brace ) );
+
+				if ( 0 === stripos( $prelude, '@media' ) ) {
+					if ( false !== stripos( $prelude, 'min-width' ) ) {
+						continue; // PC専用。SPでは効かない
+					}
+					if ( false !== stripos( $prelude, 'max-width' ) ) {
+						// 囲みを外して中身をそのまま出す
+						$body = substr( $block, $brace + 1 );
+						$body = substr( $body, 0, strrpos( $body, '}' ) );
+						$out .= $body . "\n";
+						continue;
+					}
+				}
+				$out .= $block . "\n";
+			}
+		}
+	}
+
+	/* 4. 画面幅に依存する単位を、375×667 の端末の値に置き換える */
+	$out = preg_replace_callback(
+		'/(-?[0-9]*\.?[0-9]+)vw\b/',
+		function ( $m ) { return round( (float) $m[1] * 3.75, 2 ) . 'px'; },
+		$out
+	);
+	$out = preg_replace_callback(
+		'/(-?[0-9]*\.?[0-9]+)s?vh\b/',
+		function ( $m ) { return round( (float) $m[1] * 6.67, 2 ) . 'px'; },
+		$out
+	);
+
+	return $out;
+}

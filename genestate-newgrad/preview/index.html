@@ -684,6 +684,15 @@
 	border-radius: inherit;
 }
 
+/* SPでは英字ラベルと短い和文が1行に収まらないので、罫線を落として2段に置く。
+   写真の帯も 4:1 のままだと低すぎて絵にならないため、縦を伸ばす。 */
+@media (max-width: 767px) {
+	.ng-hero__meta { flex-wrap: wrap; gap: 6px 12px; }
+	.ng-hero__metarule { display: none; }
+	.ng-hero__metaen { font-size: var(--ng-fs-tiny); letter-spacing: .14em; }
+	.ng-hero__band { aspect-ratio: 3 / 2; }
+}
+
 /* --- d タイポ主役＋写真グリッド --- */
 .ng-hero--d {
 	background: var(--ng-c-bg-subtle);
@@ -1415,6 +1424,116 @@
 	.ng { color: #000; }
 }
 
+
+/* ==========================================================================
+   6. トンマナの案
+   --------------------------------------------------------------------------
+   採用サイトだけコーポレートと調子を変える会社は多い。
+   （例：サイボウズは同じドメインで、コーポレートが Lato、採用が
+     Montserrat + Roboto + Noto Sans JP と書体自体を分けている）
+
+   ここでは3案を用意し、`.ng` の data-tone で切り替える。
+   どの案を使うかは子テーマの NG_TONE で決める（未定義なら a）。
+
+     a  コーポレート準拠   実サイトの採取値そのまま。既定
+     b  新卒向け・やわらかめ 色は1色も変えず、硬さの原因だけを抜く
+     c  新卒向け・ダーク    黒と金だけで面を反転する
+
+   ★ b と c には、実サイトに存在しない値が入る（サイズ・角丸・反転色）。
+     色そのものは a の実値から動かしていないが、役割の割り当ては変えている。
+   ========================================================================== */
+
+/* --- b 新卒向け・やわらかめ ---------------------------------------------
+   狙い：コーポレートとの連続性は色で担保したまま、学生が身構える原因
+         （明朝の英字・小さすぎる和文見出し・鋭い角）だけを取り除く。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="b"] {
+	/* 欧文の明朝をやめる。明朝は格を出すが、学生には硬く映る */
+	--ng-font-en: "Zen Kaku Gothic New", sans-serif;
+	/* 本文をわずかに大きく。行間は実サイトの2のまま */
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-fs-hero: clamp(30px, 4.4vw, 58px);
+	--ng-fs-h2:   clamp(26px, 3.4vw, 40px);
+	/* 英字は主役から添え物へ戻す */
+	--ng-fs-en-sec: clamp(13px, 1.2vw, 15px);
+	--ng-ls-en: .18em;
+	/* 角を丸くして当たりを柔らかくする */
+	--ng-radius: 16px;
+	--ng-corner: 120px;
+	--ng-corner-sp: 64px;
+}
+/* 見出しの主従を戻す。学生が読むのは日本語のほう */
+.ng[data-tone="b"] .ng-head__en {
+	margin-bottom: 10px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+.ng[data-tone="b"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.4;
+}
+/* 金の丸は英字ラベルの側へ移す。サイトの記号は残したい */
+.ng[data-tone="b"] .ng-head__title::before { content: none; }
+.ng[data-tone="b"] .ng-head__en::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 8px;
+	border-radius: 100%;
+	background: var(--ng-c-accent);
+	vertical-align: middle;
+}
+@media (max-width: 767px) {
+	.ng[data-tone="b"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+}
+
+/* --- c 新卒向け・ダーク --------------------------------------------------
+   狙い：一期生の「はじまり」を強く出す。新しく色を足さず、
+         実サイトが持つ黒と金だけで面を反転する。
+         エンジニア採用のサイトに多い方向。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="c"] {
+	--ng-c-fg:          #F5F4EE; /* 生成りを文字色に */
+	--ng-c-fg-muted:    #A8A199;
+	--ng-c-fg-invert:   #19110C;
+	--ng-c-bg:          #19110C; /* 黒を地に */
+	--ng-c-bg-subtle:   #241B14; /* 黒を少し起こした面 */
+	--ng-c-brand:       #F5F4EE; /* 反転面は明るい面になる */
+	--ng-c-brand-dark:  #19110C;
+	--ng-c-brand-tint:  #241B14;
+	--ng-c-line:        #3A302A;
+	--ng-c-line-strong: #C7A52D; /* ボタンの罫線は金 */
+}
+/* 反転面（数字セクション）は明るい地になるので、載る要素を黒側へ寄せる */
+.ng[data-tone="c"] .ng-section--brand .ng-head__title::before { background: var(--ng-c-accent); }
+.ng[data-tone="c"] .ng-section--brand .ng-numbers__item {
+	background: rgba(25, 17, 12, .04);
+	border-color: rgba(25, 17, 12, .18);
+}
+.ng[data-tone="c"] .ng-section--brand .ng-numbers__value { color: var(--ng-c-fg-invert); }
+.ng[data-tone="c"] .ng-section--brand .ng-numbers__desc { color: rgba(25, 17, 12, .72); }
+.ng[data-tone="c"] .ng-section--brand .ng-note { color: rgba(25, 17, 12, .72); }
+/* 写真プレースホルダの斜線は、暗い地に合わせて反転する */
+.ng[data-tone="c"] .ng-ph {
+	background: repeating-linear-gradient(-45deg, #241B14 0 10px, #2E231A 10px 20px);
+	border-color: #3A302A;
+}
+.ng[data-tone="c"] .ng-section--brand .ng-ph {
+	background: repeating-linear-gradient(-45deg, #EDEBE2 0 10px, #E3E0D5 10px 20px);
+}
+/* CTAは地と同じ黒だと沈むので、起こした面に置く */
+.ng[data-tone="c"] .ng-cta { background: var(--ng-c-bg-subtle); }
+/* 白地の上に置く前提だったカードの枠を、暗い地でも見えるようにする */
+.ng[data-tone="c"] .ng-work__item,
+.ng[data-tone="c"] .ng-growth__feature { background: var(--ng-c-bg-subtle); }
+
 </style>
 <style>
 /* ---- プレビュー専用 ---- */
@@ -1458,7 +1577,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 <p class="pv-note">これは確認用の静的プレビューです。ヘッダーとフッターは仮のもので、本番では親テーマの実物が入ります（トンマナはそこで自動的に揃います）。</p>
 <header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><span class="pv-header__right"><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav><span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span></span></header>
 
-<main class="ng" id="newgrad">
+<main class="ng" id="newgrad" data-tone="a">
 
 			<div class="ng-draftbar">
 			下書きモード：社内未確認の項目が <strong>24</strong> 件あります。

@@ -38,9 +38,13 @@ function get_header() {
 	echo "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n";
 	echo "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n";
 	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
-	echo "<style>\n" . $css . "\n</style>\n";
-
-	echo "<style>\n" . ng_chrome_css() . "\n</style>\n";
+	/* PC用（本番と同じCSS）と、SP用（メディアクエリを展開したもの）を2枚出し、
+	   スイッチで有効・無効を入れ替える。SP用は確認ページの中だけで使う。 */
+	echo "<style id=\"ng-css-pc\">\n" . $css . "\n</style>\n";
+	echo "<style id=\"ng-chrome-pc\">\n" . ng_chrome_css() . "\n</style>\n";
+	echo "<style id=\"ng-css-sp\" media=\"not all\">\n"
+		. ng_sp_css( $css ) . "\n"
+		. ng_sp_css( ng_chrome_css() ) . "\n</style>\n";
 
 	echo <<<'SWCSS'
 <style>
@@ -175,6 +179,31 @@ body {
 :root[data-mv="c"] .ng-hero:not(.ng-hero--c),
 :root[data-mv="d"] .ng-hero:not(.ng-hero--d) { display: none !important; }
 
+/* --- 表示の切替（PC / スマホ） -----------------------------------------------
+   画面を実際に狭くしないとメディアクエリは効かないため、
+   SP用に組み替えたCSSを別の <style> で持ち、JSで有効・無効を入れ替えている。
+   ここでは、本体を端末幅の枠に収める見た目だけを受け持つ。
+   -------------------------------------------------------------------------- */
+:root[data-view="sp"] body { background: var(--sw-bone); }
+:root[data-view="sp"] .sw-stage {
+	width: 375px;
+	margin: 32px auto 56px;
+	background: var(--sw-white);
+	border: 1px solid var(--sw-line);
+	border-radius: 20px;
+	overflow: hidden;
+	box-shadow: 0 8px 32px rgba(25, 17, 12, .12);
+}
+
+/* 固定CTAは position:fixed のため、そのままだと枠の外いっぱいに広がってしまう。
+   確認しやすいよう、端末の幅に合わせて中央に置く（本番の指定には手を入れない） */
+:root[data-view="sp"] .ng-fixedcta {
+	left: 50%;
+	right: auto;
+	width: 375px;
+	transform: translateX(-50%);
+}
+
 /* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
 .ng-draftbar { display: none !important; }
 
@@ -223,18 +252,37 @@ SWCSS;
 			</div>
 		</div>
 
+		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-tone">トンマナ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-tone">
+				<button type="button" data-part="tone" data-value="a" aria-pressed="true">A 準拠</button>
+				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B やわらかめ</button>
+				<button type="button" data-part="tone" data-value="c" aria-pressed="false">C ダーク</button>
+			</div>
+		</div>
+
+		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-view">表示</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-view">
+				<button type="button" data-part="view" data-value="pc" aria-pressed="true">PC</button>
+				<button type="button" data-part="view" data-value="sp" aria-pressed="false">スマホ</button>
+			</div>
+		</div>
+
 		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
 	</div>
 </div>
 <p class="sw-note">斜線のボックスは写真が入る位置です（撮影がまだのため、指示文を表示しています）。黄色の「要確認」は社内で数値の確定が必要な箇所です。上下のヘッダーとフッターは形だけの代役で、本番では既存サイトの実物が入ります。</p>
 SWBAR;
 
-	echo "\n" . ng_chrome_header();
+	echo "\n<div class=\"sw-stage\">\n";
+	echo ng_chrome_header();
 }
 
 function get_footer() {
 	$js = file_get_contents( dirname( __DIR__ ) . '/theme/assets/js/newgrad.js' );
 	echo ng_chrome_footer();
+	echo "</div>\n"; // .sw-stage
 	echo "<script>\n" . $js . "\n</script>\n";
 
 	echo <<<'SWJS'
@@ -245,11 +293,11 @@ function get_footer() {
    選んだ内容は端末に覚えさせ、開き直しても保たれるようにしている。 */
 (function () {
 	var STORE = 'ng-switcher';
-	var state = { mv: 'a', numbers: 'a', growth: 'a' };
+	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', view: 'pc' };
 
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-		['mv', 'numbers', 'growth'].forEach(function (k) {
+		['mv', 'numbers', 'growth', 'tone', 'view'].forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
@@ -269,15 +317,33 @@ function get_footer() {
 		list.classList.toggle('ng-growth__timeline--vertical', v === 'b');
 	}
 
+	/* PC用とSP用のCSSを入れ替える。SP用はメディアクエリを展開してあるので、
+	   画面幅に関係なくスマートフォンのときの見た目になる。 */
+	function applyView(v) {
+		var isSp = v === 'sp';
+		['ng-css-pc', 'ng-chrome-pc'].forEach(function (id) {
+			var el = document.getElementById(id);
+			if (el) { el.media = isSp ? 'not all' : 'all'; }
+		});
+		var sp = document.getElementById('ng-css-sp');
+		if (sp) { sp.media = isSp ? 'all' : 'not all'; }
+	}
+
 	function label() {
-		var mv = state.mv.toUpperCase();
-		return 'MV-' + mv + ' ／ 数字-' + state.numbers.toUpperCase() + ' ／ 育成-' + state.growth.toUpperCase();
+		return 'MV-' + state.mv.toUpperCase()
+			+ ' ／ 数字-' + state.numbers.toUpperCase()
+			+ ' ／ 育成-' + state.growth.toUpperCase()
+			+ ' ／ トンマナ-' + state.tone.toUpperCase();
 	}
 
 	function render() {
 		root.setAttribute('data-mv', state.mv);
+		root.setAttribute('data-view', state.view);
 		applyNumbers(state.numbers);
 		applyGrowth(state.growth);
+		applyView(state.view);
+		var main = document.getElementById('newgrad');
+		if (main) { main.setAttribute('data-tone', state.tone); }
 
 		document.querySelectorAll('.sw-seg button').forEach(function (b) {
 			var on = state[b.dataset.part] === b.dataset.value;
@@ -295,8 +361,8 @@ function get_footer() {
 			state[b.dataset.part] = b.dataset.value;
 			render();
 
-			/* MV は画面の一番上にあるので、切り替えたら見える位置まで戻す */
-			if (b.dataset.part === 'mv') {
+			/* MV と表示の切替は画面の上のほうに効くので、見える位置まで戻す */
+			if (b.dataset.part === 'mv' || b.dataset.part === 'view' || b.dataset.part === 'tone') {
 				var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 				window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
 			}

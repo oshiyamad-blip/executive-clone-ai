@@ -31,6 +31,7 @@ genestate-newgrad/
 │   ├── 02-sitemap-ia.md               サイトマップ / 下層ページのコンテンツ設計
 │   ├── 04-photo-requirements.md       必要写真18カットの撮影指示書
 │   ├── 05-data-requests.md            社内で確定が必要な情報リスト
+│   ├── 07-tone-references.md          トンマナの方針と参考サイト
 │   └── 06-design-token-request.md    配色・フォント採取の記録（採取済みの値と出どころ）
 │
 ├── theme/                             WordPress子テーマに設置するファイル
@@ -192,6 +193,8 @@ php tools/render-switcher.php > preview/switcher.html
 | MV | A 全面写真 ／ B 左右分割 ／ C 白ベース ／ D タイポ主役 |
 | 数字 | A 黒ベタ ／ B 白ベース・細罫 |
 | 育成 | A 横4ステップ ／ B 縦タイムライン |
+| トンマナ | A コーポレート準拠 ／ B やわらかめ ／ C ダーク |
+| 表示 | PC ／ スマホ |
 
 社内で決まったら、子テーマの `functions.php` に定数として書く。
 
@@ -199,6 +202,7 @@ php tools/render-switcher.php > preview/switcher.html
 define( 'NG_MV',      'c' );
 define( 'NG_NUMBERS', 'b' );
 define( 'NG_GROWTH',  'b' );
+define( 'NG_TONE',    'b' );
 ```
 
 書かなければすべて `a` になる。定義の実体は `theme/inc/newgrad-variants.php`。
@@ -207,6 +211,16 @@ CSSだけが違うのでクラスを付け替えている。
 
 > 切替ページは4案すべてをHTMLに含んでいる（表示はCSSで1案に絞る）。
 > 本番では選ばれた1案だけが描画されるので、余分なHTMLは出ない。
+
+**トンマナ**は、採用サイトだけコーポレートと調子を変える会社が多いことを踏まえた3案。
+配色は実サイトの3色（黒・金・生成り）のままで、新しい色は足していない。
+変えているのは書体・大きさ・角の丸み・色の役割だけ。
+考え方と参考サイトは `docs/07-tone-references.md`。
+
+**スマホ表示**は、メディアクエリを展開したCSSを別に生成して `<style>` ごと
+入れ替えている（画面を実際に狭くしないとメディアクエリは効かないため）。
+`vw` と `svh` は 375×667 の端末の値に置き換えてある。
+この変換用CSSは確認ページの中だけで使い、本番には出ない。
 
 ### 社内共有（URLを配ってレビューしてもらう）
 

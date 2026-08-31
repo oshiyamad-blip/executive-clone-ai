@@ -8,6 +8,7 @@
  *   define( 'NG_MV',      'c' );  // MV        a=全面写真 / b=左右分割 / c=白ベース / d=タイポ主役
  *   define( 'NG_NUMBERS', 'b' );  // 数字      a=黒ベタ   / b=白ベース・細罫
  *   define( 'NG_GROWTH',  'b' );  // 育成      a=横4ステップ / b=縦タイムライン
+ *   define( 'NG_TONE',    'b' );  // トンマナ  a=コーポレート準拠 / b=やわらかめ / c=ダーク
  *
  * 定義しなければ 'a'（現在の実装）になる。
  *
@@ -28,6 +29,7 @@ function ng_variant( $key ) {
 		'mv'      => array( 'const' => 'NG_MV',      'allow' => array( 'a', 'b', 'c', 'd' ) ),
 		'numbers' => array( 'const' => 'NG_NUMBERS', 'allow' => array( 'a', 'b' ) ),
 		'growth'  => array( 'const' => 'NG_GROWTH',  'allow' => array( 'a', 'b' ) ),
+		'tone'    => array( 'const' => 'NG_TONE',    'allow' => array( 'a', 'b', 'c' ) ),
 	);
 	if ( ! isset( $map[ $key ] ) ) {
 		return 'a';

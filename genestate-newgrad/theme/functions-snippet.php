@@ -35,6 +35,11 @@
  *   NG_GROWTH   育成セクションの年表
  *                 a … 横4ステップ
  *                 b … 縦タイムライン（文字数を多く載せられる）
+ *   NG_TONE     トンマナ（配色は3色のまま。書体・大きさ・角の丸みが変わる）
+ *                 a … コーポレート準拠
+ *                 b … 新卒向け・やわらかめ
+ *                 c … 新卒向け・ダーク
+ *               → 考え方と参考サイトは docs/07-tone-references.md
  *
  * 案は preview/switcher.html で切り替えながら見比べられる。
  * 画面で選んだ組み合わせを、そのままここに書けばよい。
@@ -42,6 +47,7 @@
 // define( 'NG_MV',      'c' );
 // define( 'NG_NUMBERS', 'b' );
 // define( 'NG_GROWTH',  'b' );
+// define( 'NG_TONE',    'b' );
 
 require_once get_stylesheet_directory() . '/inc/newgrad-functions.php';
 

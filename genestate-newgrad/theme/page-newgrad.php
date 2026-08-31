@@ -25,7 +25,7 @@ $ng_entry_url = ng_url( $ng_meta['entry_url'] );
 get_header();
 ?>
 
-<main class="ng" id="newgrad">
+<main class="ng" id="newgrad" data-tone="<?php echo esc_attr( ng_variant( 'tone' ) ); ?>">
 
 	<?php if ( ng_is_draft() ) : ?>
 		<div class="ng-draftbar">
