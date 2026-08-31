@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", system-ui, sans-serif; font-feature-settings: "palt" 1; -webkit-font-smoothing: antialiased; }
+    a { color: #0B3A6F; } a:hover { color: #07284D; }
+    .en { font-family: "Barlow", "Helvetica Neue", Arial, sans-serif; letter-spacing: .16em; }
+  </style>
+</helmet>
+<div style="position: relative; width: 1440px; height: 900px; overflow: hidden; background: #07284D;">
+
+  <!-- ヒーロー本体 844px + アンカーバー 56px -->
+  <div style="position: relative; height: 844px; overflow: hidden;">
+
+    <!-- 写真 -->
+    <div style="position: absolute; inset: 0;">
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; background: repeating-linear-gradient(-45deg, #D9E1E9 0 14px, #CAD5E0 14px 28px); color: #5C6672; text-align: center;">
+        <span class="en" style="font-size: 20px; font-weight: 700; color: #0B3A6F;">P-01</span>
+        <span style="font-size: 14px; max-width: 26em; line-height: 1.7;">MV／横位置・引き。社員2〜4名が自然に会話している場面。上部3〜4割は文字が乗るため余白を残す</span>
+      </div>
+    </div>
+
+    <!-- 可読性のためのグラデーション -->
+    <div style="position: absolute; inset: 0; background: linear-gradient(to top, rgba(7,40,77,.88) 0%, rgba(7,40,77,.58) 38%, rgba(7,40,77,.20) 70%, rgba(7,40,77,.32) 100%);"></div>
+
+    <!-- コピー -->
+    <div style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0 100px 88px; color: #fff;">
+      <div style="display: inline-block; margin-bottom: 28px; padding: 9px 20px; border: 1px solid rgba(255,255,255,.62); border-radius: 999px; font-size: 13px; font-weight: 700; letter-spacing: .1em; line-height: 1;">20XX年卒 新卒採用（一期生）</div>
+      <h1 style="margin: 0; font-size: 62px; font-weight: 700; line-height: 1.24; letter-spacing: .02em; text-shadow: 0 2px 24px rgba(7,40,77,.45);">
+        <span style="display: block;">「育てる」を、</span>
+        <span style="display: block;">事業にしてきた会社です。</span>
+      </h1>
+      <p style="max-width: 34em; margin: 26px 0 0; font-size: 18px; line-height: 1.9; text-shadow: 0 1px 16px rgba(7,40,77,.5);">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+      <div style="display: flex; gap: 16px; margin-top: 40px;">
+        <a href="#" style="display: inline-flex; align-items: center; gap: 12px; padding: 19px 40px; background: #C8752B; border-radius: 4px; color: #fff; font-size: 16px; font-weight: 700; letter-spacing: .04em; line-height: 1; text-decoration: none;">エントリーする<span style="width: 8px; height: 8px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; transform: rotate(45deg);"></span></a>
+      </div>
+    </div>
+  </div>
+
+  <!-- アンカーナビ -->
+  <div style="display: flex; align-items: center; gap: 36px; height: 56px; padding: 0 100px; background: #0B3A6F; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .06em;">
+    <span style="border-bottom: 2px solid #fff; padding-bottom: 4px;">代表メッセージ</span>
+    <span>数字で見る</span><span>事業を知る</span><span>仕事を知る</span><span>育成・研修</span><span>人を知る</span><span>働く環境</span><span>募集要項</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

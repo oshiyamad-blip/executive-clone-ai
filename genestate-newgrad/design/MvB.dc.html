@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", system-ui, sans-serif; font-feature-settings: "palt" 1; -webkit-font-smoothing: antialiased; }
+    a { color: #0B3A6F; } a:hover { color: #07284D; }
+    .en { font-family: "Barlow", "Helvetica Neue", Arial, sans-serif; letter-spacing: .16em; }
+  </style>
+</helmet>
+<div style="display: flex; width: 1440px; height: 900px; overflow: hidden; background: #fff;">
+
+  <!-- 左：コピー面（写真の明るさに左右されず常に可読） -->
+  <div style="display: flex; flex-direction: column; justify-content: center; width: 620px; flex: none; padding: 0 72px; background: #fff;">
+    <div style="display: inline-block; align-self: flex-start; margin-bottom: 30px; padding: 9px 20px; background: #EAF0F7; border-radius: 999px; color: #0B3A6F; font-size: 13px; font-weight: 700; letter-spacing: .1em; line-height: 1;">20XX年卒 新卒採用（一期生）</div>
+    <h1 style="margin: 0; color: #16191D; font-size: 54px; font-weight: 700; line-height: 1.3; letter-spacing: .02em;">
+      <span style="display: block;">「育てる」を、</span>
+      <span style="display: block;">事業にしてきた会社です。</span>
+    </h1>
+    <div style="width: 64px; height: 3px; margin: 32px 0; background: #C8752B;"></div>
+    <p style="margin: 0; color: #5C6672; font-size: 17px; line-height: 2;">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+    <div style="display: flex; align-items: center; gap: 28px; margin-top: 44px;">
+      <a href="#" style="display: inline-flex; align-items: center; gap: 12px; padding: 19px 40px; background: #C8752B; border-radius: 4px; color: #fff; font-size: 16px; font-weight: 700; letter-spacing: .04em; line-height: 1; text-decoration: none;">エントリーする<span style="width: 8px; height: 8px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; transform: rotate(45deg);"></span></a>
+      <a href="#" style="color: #0B3A6F; font-size: 15px; font-weight: 700; text-decoration: none; border-bottom: 1px solid #B9C2CC; padding-bottom: 4px;">募集要項を見る</a>
+    </div>
+  </div>
+
+  <!-- 右：写真（フルブリード） -->
+  <div style="flex: 1; position: relative;">
+    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; height: 100%; background: repeating-linear-gradient(-45deg, #D9E1E9 0 14px, #CAD5E0 14px 28px); color: #5C6672; text-align: center;">
+      <span class="en" style="font-size: 20px; font-weight: 700; color: #0B3A6F;">P-01</span>
+      <span style="font-size: 14px; max-width: 22em; line-height: 1.7;">MV／縦位置寄りにトリミング。社員2〜3名が会話している場面</span>
+    </div>
+    <!-- 左面との境界を締めるフチ -->
+    <div style="position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: #DDE3E9;"></div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

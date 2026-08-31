@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", system-ui, sans-serif; font-feature-settings: "palt" 1; -webkit-font-smoothing: antialiased; }
+    a { color: #0B3A6F; } a:hover { color: #07284D; }
+    .en { font-family: "Barlow", "Helvetica Neue", Arial, sans-serif; letter-spacing: .16em; }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 760px; padding: 76px 100px; box-sizing: border-box; background: #F5F7F9; color: #16191D; overflow: hidden;">
+  <div style="display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.1fr); gap: 64px; align-items: end; margin-bottom: 40px;">
+    <div>
+      <p class="en" style="margin: 0 0 12px; font-size: 13px; font-weight: 700; color: #0B3A6F;">GROWTH</p>
+      <h2 style="margin: 0; font-size: 36px; font-weight: 700; letter-spacing: .04em;">育て方に、根拠があります。</h2>
+    </div>
+    <p style="margin: 0; color: #5C6672; font-size: 17px; line-height: 1.9;">入社してから1年間、何を学ぶのかを月単位でお見せします。<strong style="color: #16191D;">学生が最も知りたい情報を、ページを離脱せずに読み切れる形に。</strong></p>
+  </div>
+
+  <!-- 縦タイムライン：左に時期、右に内容。情報量を増やせる -->
+  <div style="display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 0 32px; background: #fff; border: 1px solid #DDE3E9; border-radius: 4px; padding: 8px 40px 8px 32px;">
+
+    <div style="display: flex; align-items: center; padding: 24px 0; border-bottom: 1px solid #DDE3E9;"><span class="en" style="color: #0B3A6F; font-size: 15px; font-weight: 700;">APR</span><span style="margin-left: 10px; font-size: 13px; font-weight: 700; color: #5C6672;">入社</span></div>
+    <div style="padding: 24px 0; border-bottom: 1px solid #DDE3E9;">
+      <h3 style="margin: 0; font-size: 18px; font-weight: 700;">新入社員研修</h3>
+      <p style="margin: 8px 0 0; color: #5C6672; font-size: 14px; line-height: 1.9;">ビジネスマナー、事業理解、同期でのグループワーク。職種を問わず全員が受けます。</p>
+    </div>
+
+    <div style="display: flex; align-items: center; padding: 24px 0; border-bottom: 1px solid #DDE3E9;"><span class="en" style="color: #0B3A6F; font-size: 15px; font-weight: 700;">MAY–AUG</span></div>
+    <div style="padding: 24px 0; border-bottom: 1px solid #DDE3E9;">
+      <h3 style="margin: 0; font-size: 18px; font-weight: 700;">職種別の育成プログラム</h3>
+      <p style="margin: 8px 0 0; color: #5C6672; font-size: 14px; line-height: 1.9;">エンジニア志望者は自社開発の「G-Tech」へ。Javaの基礎文法から体系的に学び、JavaScript・SQL・Linux・PHPなど実務で使う技術を扱います。講師とはチャットで常時つながっています。</p>
+    </div>
+
+    <div style="display: flex; align-items: center; padding: 24px 0; border-bottom: 1px solid #DDE3E9;"><span class="en" style="color: #0B3A6F; font-size: 15px; font-weight: 700;">SEP–</span><span style="margin-left: 10px; font-size: 13px; font-weight: 700; color: #5C6672;">配属</span></div>
+    <div style="padding: 24px 0; border-bottom: 1px solid #DDE3E9;">
+      <h3 style="margin: 0; font-size: 18px; font-weight: 700;">現場での実践とフォロー</h3>
+      <p style="margin: 8px 0 0; color: #5C6672; font-size: 14px; line-height: 1.9;">現場に出たあとも育成は終わりません。担当者が定期的に面談し、つまずきを早い段階で拾います。一期生には、経営層も直接関わります。</p>
+    </div>
+
+    <div style="display: flex; align-items: center; padding: 24px 0;"><span class="en" style="color: #0B3A6F; font-size: 15px; font-weight: 700;">1年目以降</span></div>
+    <div style="padding: 24px 0;">
+      <h3 style="margin: 0; font-size: 18px; font-weight: 700;">資格取得支援</h3>
+      <p style="margin: 8px 0 0; color: #5C6672; font-size: 14px; line-height: 1.9;">業務に必要な資格の取得を、会社として支援します。</p>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

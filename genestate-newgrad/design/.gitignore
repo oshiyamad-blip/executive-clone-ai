@@ -1,0 +1,3 @@
+# 書き出し済みキャンバス（約2MBのエディタ同梱ファイル）。
+# *.dc.html と canvas.json から seed-canvas.mjs でいつでも再生成できるため追跡しない。
+genestate-newgrad-mv.html

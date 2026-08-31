@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", system-ui, sans-serif; font-feature-settings: "palt" 1; -webkit-font-smoothing: antialiased; }
+    a { color: #0B3A6F; } a:hover { color: #07284D; }
+    .en { font-family: "Barlow", "Helvetica Neue", Arial, sans-serif; letter-spacing: .16em; }
+  </style>
+</helmet>
+<div style="display: flex; align-items: center; gap: 72px; width: 1440px; height: 900px; padding: 0 100px; overflow: hidden; background: #EAF0F7; box-sizing: border-box;">
+
+  <!-- 左：タイポグラフィが主役 -->
+  <div style="width: 560px; flex: none;">
+    <div style="display: inline-block; margin-bottom: 28px; padding: 9px 20px; background: #0B3A6F; border-radius: 999px; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .1em; line-height: 1;">20XX年卒 新卒採用（一期生）</div>
+    <h1 style="margin: 0; color: #07284D; font-size: 60px; font-weight: 700; line-height: 1.26; letter-spacing: .01em;">
+      <span style="display: block;">「育てる」を、</span>
+      <span style="display: block;">事業にしてきた</span>
+      <span style="display: block;">会社です。</span>
+    </h1>
+    <p style="margin: 30px 0 0; color: #44505E; font-size: 17px; line-height: 2;">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+    <a href="#" style="display: inline-flex; align-items: center; gap: 12px; margin-top: 40px; padding: 19px 40px; background: #C8752B; border-radius: 4px; color: #fff; font-size: 16px; font-weight: 700; letter-spacing: .04em; line-height: 1; text-decoration: none;">エントリーする<span style="width: 8px; height: 8px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; transform: rotate(45deg);"></span></a>
+  </div>
+
+  <!-- 右：写真を3枚、段差をつけて配置 -->
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; flex: 1; align-items: start;">
+    <div style="grid-column: 1; height: 420px; border-radius: 4px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; background: repeating-linear-gradient(-45deg, #D9E1E9 0 14px, #CAD5E0 14px 28px); color: #5C6672; text-align: center; padding: 16px;">
+        <span class="en" style="font-size: 18px; font-weight: 700; color: #0B3A6F;">P-01</span>
+        <span style="font-size: 13px; line-height: 1.6;">社員の会話シーン（縦）</span>
+      </div>
+    </div>
+    <div style="grid-column: 2; margin-top: 72px; height: 300px; border-radius: 4px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; background: repeating-linear-gradient(-45deg, #D9E1E9 0 14px, #CAD5E0 14px 28px); color: #5C6672; text-align: center; padding: 16px;">
+        <span class="en" style="font-size: 18px; font-weight: 700; color: #0B3A6F;">P-02</span>
+        <span style="font-size: 13px; line-height: 1.6;">先輩が若手に教えている場面</span>
+      </div>
+    </div>
+    <div style="grid-column: 2; height: 220px; border-radius: 4px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 100%; background: repeating-linear-gradient(-45deg, #D9E1E9 0 14px, #CAD5E0 14px 28px); color: #5C6672; text-align: center; padding: 16px;">
+        <span class="en" style="font-size: 18px; font-weight: 700; color: #0B3A6F;">P-09</span>
+        <span style="font-size: 13px; line-height: 1.6;">研修風景</span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
