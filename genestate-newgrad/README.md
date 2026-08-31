@@ -13,7 +13,7 @@
 | 下層ページ | 📄 コンテンツ設計済み・未実装（`docs/02-sitemap-ia.md`） |
 | 掲載する数値・募集要項 | ⚠️ **未確定。プレースホルダ**（`docs/05-data-requests.md`） |
 | 写真 | ⚠️ **未入稿。18カット必要**（`docs/04-photo-requirements.md`） |
-| 配色・フォント | ⚠️ **暫定値。実サイトのCSS取得待ち**（`theme/assets/css/newgrad.css` 冒頭） |
+| 配色・フォント | ⚠️ **暫定値。実サイトのCSS取得待ち**（依頼内容は `docs/06-design-token-request.md`） |
 
 未確定の項目があるあいだは**下書きモード**で動作し、
 該当箇所に「要確認」バッジが表示され、検索エンジンにも拾われない（noindex）。
@@ -30,7 +30,8 @@ genestate-newgrad/
 │   ├── 01-strategy.md                 採用コンセプト / メッセージ設計 / コピー候補
 │   ├── 02-sitemap-ia.md               サイトマップ / 下層ページのコンテンツ設計
 │   ├── 04-photo-requirements.md       必要写真18カットの撮影指示書
-│   └── 05-data-requests.md            社内で確定が必要な情報リスト
+│   ├── 05-data-requests.md            社内で確定が必要な情報リスト
+│   └── 06-design-token-request.md    配色・フォント採取の依頼書（採取スクリプト付き）
 │
 ├── theme/                             WordPress子テーマに設置するファイル
 │   ├── page-newgrad.php               採用トップのページテンプレート
@@ -174,6 +175,9 @@ CSSとJSがインライン化された1枚のHTMLなので、そのままメー�
 | コンテンツ最大幅 | `--ng-container` |
 
 **ここを書き換えるだけでページ全体の見た目が既存サイトに揃う。**
+
+DevTools を開かずに済ませたい場合は、`docs/06-design-token-request.md` の
+採取用スクリプトを Console に貼るだけで、必要な値が一括で取得できる。
 各セクションのCSSはすべてこの変数を参照しており、色やフォントを直接
 書いている箇所は無い。
 
