@@ -83,7 +83,7 @@ HEADCSS;
 
 function get_footer() {
 	$js = file_get_contents( dirname( __DIR__ ) . '/theme/assets/js/newgrad.js' );
-	echo '<footer class="pv-footer">株式会社ジーンステイト<br>東京都新宿区西新宿6-5-1 新宿アイランドタワー5階<br><small>（プレビュー用の仮フッター）</small></footer>' . "\n";
+	echo '<footer class="pv-footer">株式会社ジーンステイト<br>東京都新宿区西新宿1-26-2 新宿野村ビル39階<br><small>（プレビュー用の仮フッター）</small></footer>' . "\n";
 	echo "<script>\n" . $js . "\n</script>\n";
 	echo "</body>\n</html>\n";
 }
