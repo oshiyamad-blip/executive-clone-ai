@@ -65,7 +65,7 @@
 	           "BIZ UDPGothic", Meiryo, system-ui, sans-serif;
 	--ng-font-en: "Barlow", "Helvetica Neue", Arial, sans-serif;
 
-	--ng-fs-hero:  clamp(2.25rem, 6.4vw, 4.25rem);
+	--ng-fs-hero:  clamp(1.875rem, 5.2vw, 3.5rem);
 	--ng-fs-h2:    clamp(1.5rem, 3.4vw, 2.375rem);
 	--ng-fs-h3:    clamp(1.125rem, 2.2vw, 1.5rem);
 	--ng-fs-lead:  clamp(0.9375rem, 1.6vw, 1.125rem);
@@ -383,6 +383,9 @@
 	line-height: 1.22;
 	text-shadow: 0 2px 24px rgba(7, 40, 77, .45);
 }
+/* キャッチコピーは content 側で指定した位置で折り返す */
+.ng-hero__catchline { display: block; }
+
 .ng-hero__sub {
 	max-width: 34em;
 	margin-top: 1.4em;
@@ -1020,8 +1023,11 @@ body { margin: 0; font-family: "Noto Sans JP", system-ui, sans-serif; }
 		<div class="ng-hero__inner ng-container">
 			<p class="ng-hero__badge">
 				20XX年卒 新卒採用（一期生）				<span class="ng-todo">要確認</span>			</p>
-			<h1 class="ng-hero__catch" id="ng-hero-catch">素質は、動き出せる。</h1>
-			<p class="ng-hero__sub">まだ名前のついていないあなたの力を、仕事のかたちにする。</p>
+			<h1 class="ng-hero__catch" id="ng-hero-catch">
+									<span class="ng-hero__catchline">「育てる」を、</span>
+									<span class="ng-hero__catchline">事業にしてきた会社です。</span>
+							</h1>
+			<p class="ng-hero__sub">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
 			<p class="ng-hero__actions">
 				<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
 			</p>
@@ -1050,7 +1056,7 @@ body { margin: 0; font-family: "Noto Sans JP", system-ui, sans-serif; }
 				<div class="ng-intro__media ng-reveal"><div class="ng-ph" role="img" aria-label="イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット"><span class="ng-ph__id">P-02</span><span class="ng-ph__note">イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット</span></div></div>
 				<div class="ng-intro__body ng-reveal">
 					<p class="ng-head__en">INTRODUCTION</p>
-					<h2 class="ng-head__title" id="ng-intro-title">「育てる」を、事業にしてきた会社です。</h2>
+					<h2 class="ng-head__title" id="ng-intro-title">素質は、動き出せる。</h2>
 					<div style="margin-top:1.75em"><p>ジーンステイトという社名は、Gene（人が本来もつ可能性・素質）と State（組織）を組み合わせたものです。人の中にある、まだ名前のついていない力を見つけ、組織のかたちにして社会に還していく。創業からの約10年、私たちはそれを理念ではなく事業として続けてきました。</p><p>未経験からエンジニアを育てるプログラムを自社で開発し、はたらく人のキャリアに伴走してきました。つまり私たちにとって「人を育てること」は、新卒採用のために用意した約束ではなく、売上を生んできた本業そのものです。</p><p>だからこそ、はじめての新卒採用に踏み出します。</p></div>
 					<p class="ng-sectionfoot">
 						<a class="ng-link" href="https://genestate.co.jp/newgrad/about/">ジーンステイトを知る</a>

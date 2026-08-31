@@ -55,7 +55,7 @@
 	           "BIZ UDPGothic", Meiryo, system-ui, sans-serif;
 	--ng-font-en: "Barlow", "Helvetica Neue", Arial, sans-serif;
 
-	--ng-fs-hero:  clamp(2.25rem, 6.4vw, 4.25rem);
+	--ng-fs-hero:  clamp(1.875rem, 5.2vw, 3.5rem);
 	--ng-fs-h2:    clamp(1.5rem, 3.4vw, 2.375rem);
 	--ng-fs-h3:    clamp(1.125rem, 2.2vw, 1.5rem);
 	--ng-fs-lead:  clamp(0.9375rem, 1.6vw, 1.125rem);
@@ -373,6 +373,9 @@
 	line-height: 1.22;
 	text-shadow: 0 2px 24px rgba(7, 40, 77, .45);
 }
+/* キャッチコピーは content 側で指定した位置で折り返す */
+.ng-hero__catchline { display: block; }
+
 .ng-hero__sub {
 	max-width: 34em;
 	margin-top: 1.4em;

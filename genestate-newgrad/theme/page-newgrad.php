@@ -48,7 +48,11 @@ get_header();
 				<?php echo esc_html( $ng_meta['grad_year']['value'] ); ?>年卒 <?php echo esc_html( $hero['badge'] ); ?>
 				<?php ng_todo( $ng_meta['grad_year'] ); ?>
 			</p>
-			<h1 class="ng-hero__catch" id="ng-hero-catch"><?php echo esc_html( $hero['catch'] ); ?></h1>
+			<h1 class="ng-hero__catch" id="ng-hero-catch">
+				<?php foreach ( (array) $hero['catch'] as $line ) : ?>
+					<span class="ng-hero__catchline"><?php echo esc_html( $line ); ?></span>
+				<?php endforeach; ?>
+			</h1>
 			<p class="ng-hero__sub"><?php echo esc_html( $hero['sub'] ); ?></p>
 			<p class="ng-hero__actions">
 				<a class="ng-btn ng-btn--primary" href="<?php echo $ng_entry_url; ?>">エントリーする</a>
