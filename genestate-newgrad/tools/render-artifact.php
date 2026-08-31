@@ -41,10 +41,7 @@ function get_header() {
 	/* Artifact 側の <head> には charset と viewport しか入らないため、
 	   <title> と <style>、フォントの読み込みをここで出す。 */
 	echo "<title>ジーンステイト 新卒採用サイト案</title>\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n";
-	/* 実サイトが読み込んでいるものと同一の指定 */
-	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
+	echo ng_fonts_link();
 
 	echo "<style>\n" . $css . "\n</style>\n";
 

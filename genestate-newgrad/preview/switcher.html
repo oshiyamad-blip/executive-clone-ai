@@ -1,7 +1,7 @@
 <title>新卒採用トップ 意匠の切替</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&family=Noto+Serif+JP:wght@400;600;700&family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap" rel="stylesheet">
 <style id="ng-css-pc">
 /* ==========================================================================
    新卒採用サイト（/newgrad/）専用スタイル
@@ -1589,6 +1589,85 @@
 /* 白地の上に置く前提だったカードの枠を、暗い地でも見えるようにする */
 .ng[data-tone="c"] .ng-work__item,
 .ng[data-tone="c"] .ng-growth__feature { background: var(--ng-c-bg-subtle); }
+
+/* --- d 明朝・エディトリアル ----------------------------------------------
+   狙い：「育てる」を事業にしてきたという誠実さを、読み物として伝える。
+         和文も明朝に替え、角を落とさず罫線で区切る。
+         3案のなかで最も「落ち着き」に寄る。
+   ★ 和文書体 Noto Serif JP を新たに読み込む（他の案では不要）。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="d"] {
+	--ng-font: "Noto Serif JP", serif;
+	/* 欧文は Marcellus のまま。明朝どうしで骨格がそろう */
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-lh-body: 2.1;
+	--ng-ls-head: .06em;
+	/* 明朝に丸い角は合わない。直線で通す */
+	--ng-radius: 0;
+	--ng-radius-pill: 0;
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+}
+/* 角を落とさないぶん、セクションの境目は細い罫線で示す */
+.ng[data-tone="d"] .ng-section { border-top: 1px solid var(--ng-c-line); }
+.ng[data-tone="d"] .ng-section::before { content: none; }
+/* 矢印の丸だけは残す。直線のなかで1つだけ丸があると視線が留まる */
+.ng[data-tone="d"] .ng-btn { padding: 12px 8px 12px 24px; }
+.ng[data-tone="d"] .ng-hero__band { border-radius: 0; }
+
+/* --- e 丸ゴシック・親しみ ------------------------------------------------
+   狙い：学生向けの定番の方向。丸ゴシックで警戒心を下げ、要素を大きく丸くする。
+         5案のなかで最も「やわらかさ」に寄る。
+   ★ 和文書体 M PLUS Rounded 1c を新たに読み込む（他の案では不要）。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="e"] {
+	--ng-font:    "M PLUS Rounded 1c", "Zen Kaku Gothic New", sans-serif;
+	--ng-font-en: "M PLUS Rounded 1c", sans-serif;
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-fs-hero: clamp(30px, 4.4vw, 56px);
+	--ng-fs-h2:   clamp(26px, 3.4vw, 38px);
+	--ng-fs-en-sec: clamp(13px, 1.2vw, 15px);
+	--ng-ls-en: .16em;
+	/* 角を大きく丸める */
+	--ng-radius: 24px;
+	--ng-corner: 48px;
+	--ng-corner-sp: 32px;
+}
+
+/* --- b / e 共通：見出しの主従を戻す ---------------------------------------
+   英字を主役にする組み方は既存サイトの作法だが、この2案では
+   「学生が読むのは日本語」を優先して、和文を主役に戻している。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="e"] .ng-head__en {
+	margin-bottom: 10px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+.ng[data-tone="e"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.5;
+}
+.ng[data-tone="e"] .ng-head__title::before { content: none; }
+.ng[data-tone="e"] .ng-head__en::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 8px;
+	border-radius: 100%;
+	background: var(--ng-c-accent);
+	vertical-align: middle;
+}
+@media (max-width: 767px) {
+	.ng[data-tone="e"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+}
 
 </style>
 <style id="ng-chrome-pc">
@@ -3261,6 +3340,83 @@
 .ng[data-tone="c"] .ng-growth__feature { background: var(--ng-c-bg-subtle); }
 
 
+
+.ng[data-tone="d"] {
+	--ng-font: "Noto Serif JP", serif;
+	
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-lh-body: 2.1;
+	--ng-ls-head: .06em;
+	
+	--ng-radius: 0;
+	--ng-radius-pill: 0;
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+}
+
+
+.ng[data-tone="d"] .ng-section { border-top: 1px solid var(--ng-c-line); }
+
+.ng[data-tone="d"] .ng-section::before { content: none; }
+
+
+.ng[data-tone="d"] .ng-btn { padding: 12px 8px 12px 24px; }
+
+.ng[data-tone="d"] .ng-hero__band { border-radius: 0; }
+
+
+
+.ng[data-tone="e"] {
+	--ng-font:    "M PLUS Rounded 1c", "Zen Kaku Gothic New", sans-serif;
+	--ng-font-en: "M PLUS Rounded 1c", sans-serif;
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-fs-hero: clamp(30px, 16.5px, 56px);
+	--ng-fs-h2:   clamp(26px, 12.75px, 38px);
+	--ng-fs-en-sec: clamp(13px, 4.5px, 15px);
+	--ng-ls-en: .16em;
+	
+	--ng-radius: 24px;
+	--ng-corner: 48px;
+	--ng-corner-sp: 32px;
+}
+
+
+
+.ng[data-tone="e"] .ng-head__en {
+	margin-bottom: 10px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+
+.ng[data-tone="e"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.5;
+}
+
+.ng[data-tone="e"] .ng-head__title::before { content: none; }
+
+.ng[data-tone="e"] .ng-head__en::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 8px;
+	border-radius: 100%;
+	background: var(--ng-c-accent);
+	vertical-align: middle;
+}
+
+	.ng[data-tone="e"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+
+
+
 .pv-header {
 	display: flex; align-items: center; justify-content: space-between; gap: 16px;
 	padding: 16px 40px; background: #FFFFFF; color: #19110C;
@@ -3499,8 +3655,10 @@ body {
 			<span class="sw-group__label" id="sw-l-tone">トンマナ</span>
 			<div class="sw-seg" role="group" aria-labelledby="sw-l-tone">
 				<button type="button" data-part="tone" data-value="a" aria-pressed="true">A 準拠</button>
-				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B やわらかめ</button>
+				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B 生成り＋金</button>
 				<button type="button" data-part="tone" data-value="c" aria-pressed="false">C ダーク</button>
+				<button type="button" data-part="tone" data-value="d" aria-pressed="false">D 明朝</button>
+				<button type="button" data-part="tone" data-value="e" aria-pressed="false">E 丸ゴシック</button>
 			</div>
 		</div>
 
@@ -4402,6 +4560,19 @@ body {
 		if (sp) { sp.media = isSp ? 'all' : 'not all'; }
 	}
 
+	/* いま画面の上端にいちばん近いセクションを返す。
+	   表示やトンマナを切り替えても、その要素を同じ高さに保つために使う。 */
+	function currentAnchor() {
+		var els  = document.querySelectorAll('.ng-section, .ng-cta');
+		var best = null;
+		var bestTop = -Infinity;
+		for (var i = 0; i < els.length; i++) {
+			var t = els[i].getBoundingClientRect().top;
+			if (t <= 120 && t > bestTop) { bestTop = t; best = els[i]; }
+		}
+		return best;
+	}
+
 	function label() {
 		return 'MV-' + state.mv.toUpperCase()
 			+ ' ／ 数字-' + state.numbers.toUpperCase()
@@ -4431,13 +4602,26 @@ body {
 
 	document.querySelectorAll('.sw-seg button').forEach(function (b) {
 		b.addEventListener('click', function () {
+			/* MV は画面の一番上にあるので、切り替えたら見える位置まで戻す。
+			   表示（PC/スマホ）とトンマナは、ページのどこを見ていても
+			   同じ場所のまま比べたいので、見ていた位置を保つ。 */
+			var toTop  = b.dataset.part === 'mv';
+			var anchor = toTop ? null : currentAnchor();
+			var before = anchor ? anchor.getBoundingClientRect().top : 0;
+
 			state[b.dataset.part] = b.dataset.value;
 			render();
 
-			/* MV と表示の切替は画面の上のほうに効くので、見える位置まで戻す */
-			if (b.dataset.part === 'mv' || b.dataset.part === 'view' || b.dataset.part === 'tone') {
+			if (toTop) {
 				var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 				window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+			} else if (anchor) {
+				/* 組み替え後にレイアウトが確定してから、同じ要素が
+				   同じ高さに来るようにスクロール量を補正する */
+				requestAnimationFrame(function () {
+					if (!document.contains(anchor)) { return; }
+					window.scrollBy({ top: anchor.getBoundingClientRect().top - before, behavior: 'auto' });
+				});
 			}
 		});
 	});

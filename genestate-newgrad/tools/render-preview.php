@@ -32,10 +32,8 @@ function get_header() {
 	echo "<meta charset=\"utf-8\">\n";
 	echo "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n";
 	echo "<title>新卒採用｜株式会社ジーンステイト（プレビュー）</title>\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n";
 	/* 実サイトが読み込んでいるものと同一の指定（display=swap まで含めて同じ）。 */
-	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
+	echo ng_fonts_link();
 	echo "<style>\n" . $css . "\n</style>\n";
 	echo "<style>\n";
 	echo <<<'HEADCSS'

@@ -35,9 +35,7 @@ function get_header() {
 	$css = preg_replace( '/^@charset\s+"[^"]*";\s*/i', '', $css );
 
 	echo "<title>新卒採用トップ 意匠の切替</title>\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n";
-	echo "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n";
-	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
+	echo ng_fonts_link();
 	/* PC用（本番と同じCSS）と、SP用（メディアクエリを展開したもの）を2枚出し、
 	   スイッチで有効・無効を入れ替える。SP用は確認ページの中だけで使う。 */
 	echo "<style id=\"ng-css-pc\">\n" . $css . "\n</style>\n";
@@ -256,8 +254,10 @@ SWCSS;
 			<span class="sw-group__label" id="sw-l-tone">トンマナ</span>
 			<div class="sw-seg" role="group" aria-labelledby="sw-l-tone">
 				<button type="button" data-part="tone" data-value="a" aria-pressed="true">A 準拠</button>
-				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B やわらかめ</button>
+				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B 生成り＋金</button>
 				<button type="button" data-part="tone" data-value="c" aria-pressed="false">C ダーク</button>
+				<button type="button" data-part="tone" data-value="d" aria-pressed="false">D 明朝</button>
+				<button type="button" data-part="tone" data-value="e" aria-pressed="false">E 丸ゴシック</button>
 			</div>
 		</div>
 
@@ -329,6 +329,19 @@ function get_footer() {
 		if (sp) { sp.media = isSp ? 'all' : 'not all'; }
 	}
 
+	/* いま画面の上端にいちばん近いセクションを返す。
+	   表示やトンマナを切り替えても、その要素を同じ高さに保つために使う。 */
+	function currentAnchor() {
+		var els  = document.querySelectorAll('.ng-section, .ng-cta');
+		var best = null;
+		var bestTop = -Infinity;
+		for (var i = 0; i < els.length; i++) {
+			var t = els[i].getBoundingClientRect().top;
+			if (t <= 120 && t > bestTop) { bestTop = t; best = els[i]; }
+		}
+		return best;
+	}
+
 	function label() {
 		return 'MV-' + state.mv.toUpperCase()
 			+ ' ／ 数字-' + state.numbers.toUpperCase()
@@ -358,13 +371,26 @@ function get_footer() {
 
 	document.querySelectorAll('.sw-seg button').forEach(function (b) {
 		b.addEventListener('click', function () {
+			/* MV は画面の一番上にあるので、切り替えたら見える位置まで戻す。
+			   表示（PC/スマホ）とトンマナは、ページのどこを見ていても
+			   同じ場所のまま比べたいので、見ていた位置を保つ。 */
+			var toTop  = b.dataset.part === 'mv';
+			var anchor = toTop ? null : currentAnchor();
+			var before = anchor ? anchor.getBoundingClientRect().top : 0;
+
 			state[b.dataset.part] = b.dataset.value;
 			render();
 
-			/* MV と表示の切替は画面の上のほうに効くので、見える位置まで戻す */
-			if (b.dataset.part === 'mv' || b.dataset.part === 'view' || b.dataset.part === 'tone') {
+			if (toTop) {
 				var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 				window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+			} else if (anchor) {
+				/* 組み替え後にレイアウトが確定してから、同じ要素が
+				   同じ高さに来るようにスクロール量を補正する */
+				requestAnimationFrame(function () {
+					if (!document.contains(anchor)) { return; }
+					window.scrollBy({ top: anchor.getBoundingClientRect().top - before, behavior: 'auto' });
+				});
 			}
 		});
 	});

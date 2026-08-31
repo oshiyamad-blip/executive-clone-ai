@@ -1585,3 +1585,82 @@
 /* 白地の上に置く前提だったカードの枠を、暗い地でも見えるようにする */
 .ng[data-tone="c"] .ng-work__item,
 .ng[data-tone="c"] .ng-growth__feature { background: var(--ng-c-bg-subtle); }
+
+/* --- d 明朝・エディトリアル ----------------------------------------------
+   狙い：「育てる」を事業にしてきたという誠実さを、読み物として伝える。
+         和文も明朝に替え、角を落とさず罫線で区切る。
+         3案のなかで最も「落ち着き」に寄る。
+   ★ 和文書体 Noto Serif JP を新たに読み込む（他の案では不要）。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="d"] {
+	--ng-font: "Noto Serif JP", serif;
+	/* 欧文は Marcellus のまま。明朝どうしで骨格がそろう */
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-lh-body: 2.1;
+	--ng-ls-head: .06em;
+	/* 明朝に丸い角は合わない。直線で通す */
+	--ng-radius: 0;
+	--ng-radius-pill: 0;
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+}
+/* 角を落とさないぶん、セクションの境目は細い罫線で示す */
+.ng[data-tone="d"] .ng-section { border-top: 1px solid var(--ng-c-line); }
+.ng[data-tone="d"] .ng-section::before { content: none; }
+/* 矢印の丸だけは残す。直線のなかで1つだけ丸があると視線が留まる */
+.ng[data-tone="d"] .ng-btn { padding: 12px 8px 12px 24px; }
+.ng[data-tone="d"] .ng-hero__band { border-radius: 0; }
+
+/* --- e 丸ゴシック・親しみ ------------------------------------------------
+   狙い：学生向けの定番の方向。丸ゴシックで警戒心を下げ、要素を大きく丸くする。
+         5案のなかで最も「やわらかさ」に寄る。
+   ★ 和文書体 M PLUS Rounded 1c を新たに読み込む（他の案では不要）。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="e"] {
+	--ng-font:    "M PLUS Rounded 1c", "Zen Kaku Gothic New", sans-serif;
+	--ng-font-en: "M PLUS Rounded 1c", sans-serif;
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-fs-hero: clamp(30px, 4.4vw, 56px);
+	--ng-fs-h2:   clamp(26px, 3.4vw, 38px);
+	--ng-fs-en-sec: clamp(13px, 1.2vw, 15px);
+	--ng-ls-en: .16em;
+	/* 角を大きく丸める */
+	--ng-radius: 24px;
+	--ng-corner: 48px;
+	--ng-corner-sp: 32px;
+}
+
+/* --- b / e 共通：見出しの主従を戻す ---------------------------------------
+   英字を主役にする組み方は既存サイトの作法だが、この2案では
+   「学生が読むのは日本語」を優先して、和文を主役に戻している。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="e"] .ng-head__en {
+	margin-bottom: 10px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+.ng[data-tone="e"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.5;
+}
+.ng[data-tone="e"] .ng-head__title::before { content: none; }
+.ng[data-tone="e"] .ng-head__en::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 8px;
+	border-radius: 100%;
+	background: var(--ng-c-accent);
+	vertical-align: middle;
+}
+@media (max-width: 767px) {
+	.ng[data-tone="e"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+}

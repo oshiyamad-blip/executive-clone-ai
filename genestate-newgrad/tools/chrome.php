@@ -149,3 +149,28 @@ function ng_sp_css( $css ) {
 
 	return $out;
 }
+
+/**
+ * Google Fonts の読み込みタグ。
+ *
+ * トンマナの案によって使う書体が変わるため、確認ページでは全案分をまとめて読む。
+ * 本番では選んだ案の書体だけでよい（NG_TONE に対応するものを残す）。
+ *
+ *   a / b / c … Zen Kaku Gothic New ＋ Marcellus
+ *   d         … Noto Serif JP ＋ Marcellus
+ *   e         … M PLUS Rounded 1c
+ *
+ * @return string
+ */
+function ng_fonts_link() {
+	$families = array(
+		'Marcellus',
+		'Zen+Kaku+Gothic+New:wght@300;400;500;700',
+		'Noto+Serif+JP:wght@400;600;700',
+		'M+PLUS+Rounded+1c:wght@400;500;700',
+	);
+	return "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n"
+		. "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n"
+		. '<link href="https://fonts.googleapis.com/css2?family='
+		. implode( '&family=', $families ) . '&display=swap" rel="stylesheet">' . "\n";
+}
