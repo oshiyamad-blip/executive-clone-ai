@@ -251,13 +251,15 @@ SWCSS;
 		</div>
 
 		<div class="sw-group">
-			<span class="sw-group__label" id="sw-l-tone">トンマナ</span>
+			<span class="sw-group__label" id="sw-l-tone">トンマナ<br><small style="font-weight:400;letter-spacing:0">F・Gは新色</small></span>
 			<div class="sw-seg" role="group" aria-labelledby="sw-l-tone">
 				<button type="button" data-part="tone" data-value="a" aria-pressed="true">A 準拠</button>
 				<button type="button" data-part="tone" data-value="b" aria-pressed="false">B 生成り＋金</button>
 				<button type="button" data-part="tone" data-value="c" aria-pressed="false">C ダーク</button>
 				<button type="button" data-part="tone" data-value="d" aria-pressed="false">D 明朝</button>
 				<button type="button" data-part="tone" data-value="e" aria-pressed="false">E 丸ゴシック</button>
+				<button type="button" data-part="tone" data-value="f" aria-pressed="false">F 紺×ライム</button>
+				<button type="button" data-part="tone" data-value="g" aria-pressed="false">G 白と朱</button>
 			</div>
 		</div>
 

@@ -1675,6 +1675,152 @@
 	.ng[data-tone="e"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
 }
 
+/* ==========================================================================
+   6-2. ゼロベースの案（F / G）
+   --------------------------------------------------------------------------
+   A〜E は既存サイトの3色（黒・金・生成り）の枠内で作った案。
+   ここから下の F・G は、その枠を外して「この会社の新卒ページを
+   まっさらから考えるなら」で組んだ案。**新しい色を使う。**
+
+   金（#C7A52D）は"格"の色で、若さの色ではない。既存サイトが
+   取引先・株主に向けて作られている以上、そこは当然の設計になっている。
+   学生に向けるなら別の色を選ぶ、という選択肢を見るための2案。
+   ========================================================================== */
+
+/* --- F 素質 — 紺 × ライム ------------------------------------------------
+   狙い：「未経験からエンジニアへ」という道筋を、色で理系に寄せる。
+         社名 Gene（素質）＝まだ動いていない可能性を、
+         電気的な青と蛍光ライムで「これから動き出す」側へ引っぱる。
+   向く相手：IT・エンジニア志望。理系／情報系の学生。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="f"] {
+	--f-lime: #C9F24E; /* 数字と強調に使う第2の色 */
+
+	--ng-c-fg:          #0C1226; /* 黒ではなく深い紺。黒より若く見える */
+	--ng-c-fg-muted:    #6B7290;
+	--ng-c-fg-invert:   #FFFFFF;
+	--ng-c-bg:          #FFFFFF;
+	--ng-c-bg-subtle:   #F1F3FF; /* 青みのオフホワイト */
+	--ng-c-brand:       #0C1226;
+	--ng-c-brand-dark:  #0C1226;
+	--ng-c-brand-tint:  #F1F3FF;
+	--ng-c-accent:      #2F4BFF; /* CTA。電気的な青 */
+	--ng-c-line:        #DCE0F0;
+	--ng-c-line-strong: #2F4BFF;
+	--ng-c-brand-rgb:   12, 18, 38;
+
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-fs-en-sec: clamp(13px, 1.2vw, 15px);
+	--ng-ls-en: .16em;
+	--ng-font-en: "Zen Kaku Gothic New", sans-serif;
+	/* ピルをやめ、角の小さい矩形寄りに。テック寄りの硬さを出す */
+	--ng-radius: 12px;
+	--ng-radius-pill: 12px;
+	--ng-corner: 24px;
+	--ng-corner-sp: 16px;
+}
+/* セクションは四隅をそろえて丸める（片角の切り欠きは使わない） */
+.ng[data-tone="f"] .ng-section,
+.ng[data-tone="f"] .ng-section--subtle,
+.ng[data-tone="f"] .ng-section--brand { border-radius: var(--ng-corner); }
+.ng[data-tone="f"] .ng-section::before { content: none; }
+/* 数字は紺地にライム。ページで最も明るい点をここに置く */
+.ng[data-tone="f"] .ng-numbers__value { color: var(--f-lime); }
+.ng[data-tone="f"] .ng-numbers__item {
+	background: rgba(255, 255, 255, .06);
+	border-color: rgba(255, 255, 255, .18);
+}
+.ng[data-tone="f"] .ng-ph {
+	background: repeating-linear-gradient(-45deg, var(--ng-c-bg-subtle) 0 10px, #E4E8FA 10px 20px);
+}
+.ng[data-tone="f"] .ng-hero__band { border-radius: var(--ng-corner); }
+/* 見出しは和文を主役に。英字は青の小ラベル */
+.ng[data-tone="f"] .ng-head__en {
+	margin-bottom: 10px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+.ng[data-tone="f"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.45;
+}
+.ng[data-tone="f"] .ng-head__title::before { content: none; }
+.ng[data-tone="f"] .ng-head__en::before {
+	content: "";
+	display: inline-block;
+	width: 6px; height: 6px;
+	margin-right: 8px;
+	border-radius: 100%;
+	background: var(--f-lime);
+	vertical-align: middle;
+}
+
+/* --- G 一期生 — 白と朱 ---------------------------------------------------
+   狙い：「先輩が、まだいない。」という弱みの開示を、静けさで強さに変える。
+         色は1色だけ。余白を極端に大きく取り、要素を減らす。
+         日本の質の高い採用サイトに多い作法で、読ませる文章と相性がよい。
+   向く相手：文系・未経験を含む広い層。誠実さで選ぶ学生。
+   ---------------------------------------------------------------------- */
+.ng[data-tone="g"] {
+	--ng-c-fg:          #1A1A18;
+	--ng-c-fg-muted:    #7A756E;
+	--ng-c-fg-invert:   #FFFFFF;
+	--ng-c-bg:          #FFFFFF;
+	--ng-c-bg-subtle:   #F7F4F0; /* わずかに温かいオフホワイト */
+	--ng-c-brand:       #1A1A18;
+	--ng-c-brand-dark:  #1A1A18;
+	--ng-c-brand-tint:  #F7F4F0;
+	--ng-c-accent:      #DC4B32; /* 朱。ページで唯一の色 */
+	--ng-c-line:        #E5E1DA;
+	--ng-c-line-strong: #1A1A18;
+	--ng-c-brand-rgb:   26, 26, 24;
+
+	--ng-fs-body: 17px;
+	--ng-fs-lead: 17px;
+	--ng-lh-body: 2.1;
+	--ng-fs-en-sec: clamp(12px, 1.1vw, 14px);
+	--ng-ls-en: .22em;
+	--ng-font-en: "Zen Kaku Gothic New", sans-serif;
+	/* 角は落とさない。潔さで見せる */
+	--ng-radius: 0;
+	--ng-radius-pill: 0;
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+	/* 余白を大きく取る。ここがこの案の主役 */
+	--ng-section-y: clamp(120px, 12vw, 180px);
+}
+.ng[data-tone="g"] .ng-section { border-top: 1px solid var(--ng-c-line); }
+.ng[data-tone="g"] .ng-section::before { content: none; }
+.ng[data-tone="g"] .ng-hero__band { border-radius: 0; }
+.ng[data-tone="g"] .ng-ph {
+	background: repeating-linear-gradient(-45deg, var(--ng-c-bg-subtle) 0 10px, #EFEAE3 10px 20px);
+}
+/* 見出しは和文を主役に。英字は朱の小ラベル、字間を広く取って静かに */
+.ng[data-tone="g"] .ng-head__en {
+	margin-bottom: 14px;
+	color: var(--ng-c-accent);
+	font-weight: 700;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+.ng[data-tone="g"] .ng-head__title {
+	margin-top: 0;
+	padding-left: 0;
+	font-size: var(--ng-fs-h2);
+	letter-spacing: var(--ng-ls-head);
+	line-height: 1.5;
+}
+.ng[data-tone="g"] .ng-head__title::before { content: none; }
+/* 数字は朱。白地に1色だけが乗る */
+.ng[data-tone="g"] .ng-numbers--plain .ng-numbers__value { color: var(--ng-c-accent); }
+.ng[data-tone="g"] .ng-btn { padding: 14px 8px 14px 24px; }
+
 </style>
 <style>
 /* ---- プレビュー専用 ---- */

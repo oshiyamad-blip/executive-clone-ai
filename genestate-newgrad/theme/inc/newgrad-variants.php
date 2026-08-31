@@ -10,6 +10,7 @@
  *   define( 'NG_GROWTH',  'b' );  // 育成      a=横4ステップ / b=縦タイムライン
  *   define( 'NG_TONE',    'b' );  // トンマナ  a=準拠 / b=生成り＋金 / c=ダーク
  *                                 //           d=明朝 / e=丸ゴシック
+ *                                 //           f=紺×ライム / g=白と朱（ゼロベース。新色）
  *
  * 定義しなければ 'a'（現在の実装）になる。
  *
@@ -30,7 +31,7 @@ function ng_variant( $key ) {
 		'mv'      => array( 'const' => 'NG_MV',      'allow' => array( 'a', 'b', 'c', 'd' ) ),
 		'numbers' => array( 'const' => 'NG_NUMBERS', 'allow' => array( 'a', 'b' ) ),
 		'growth'  => array( 'const' => 'NG_GROWTH',  'allow' => array( 'a', 'b' ) ),
-		'tone'    => array( 'const' => 'NG_TONE',    'allow' => array( 'a', 'b', 'c', 'd', 'e' ) ),
+		'tone'    => array( 'const' => 'NG_TONE',    'allow' => array( 'a', 'b', 'c', 'd', 'e', 'f', 'g' ) ),
 	);
 	if ( ! isset( $map[ $key ] ) ) {
 		return 'a';
