@@ -3,8 +3,9 @@
 `theme/assets/css/newgrad.css` 冒頭「0. デザイントークン」を実サイトの値へ差し替えるために
 必要な情報のリスト。**この1ファイルが埋まれば、トンマナ反映は完了する。**
 
-> 現状：作業環境から genestate.co.jp へ到達できず（外部ネットワーク全体が遮断されている）、
-> トークンは**暫定値のまま**。`docs/05-data-requests.md` の 🟡 19〜22 と対応する。
+> 現状：作業環境のネットワーク許可リスト（Claude Code の「Trusted」レベル）に
+> genestate.co.jp が含まれておらず到達できないため、トークンは**暫定値のまま**。
+> `docs/05-data-requests.md` の 🟡 19〜22 と対応する。
 
 ---
 
@@ -95,11 +96,46 @@ CSSファイルに触れない場合はこちら。**トップページを表示
 トップページに加えて **`/about/` と `/recruit/`** でも同じものを実行して、
 3ページ分もらえると精度が上がる（下層でしか出てこない罫線色・見出しのあしらいがあるため）。
 
-### 方法C：作業環境から genestate.co.jp への通信を許可する
+### 方法C：作業環境から genestate.co.jp への通信を許可する（一度やれば恒久的に解決）
 
-Claude Code on the web の環境設定でネットワークポリシーを変更し、
-`genestate.co.jp` を許可リストに入れる。これができれば以降は自動で採取できる。
-参考：https://code.claude.com/docs/en/claude-code-on-the-web
+Claude Code on the web の環境設定に `genestate.co.jp` を追加する。
+以降のセッションでは自動で採取できるようになるため、**繰り返し作業が発生するなら最も効率がよい**。
+
+1. https://claude.ai/code を開き、**メッセージ入力欄のすぐ上の行**にある雲アイコン
+   （現在の環境名が表示されている）をクリックする
+   ※ 専用の設定ページや直リンクURLは存在しない
+2. 一覧の環境にマウスを乗せると右に出る**歯車アイコン**をクリックする
+   （新規に作る場合は **Add cloud environment**）
+3. **Network access** を `Custom` に変更する
+
+   | レベル | 通信できる範囲 |
+   | --- | --- |
+   | None | 外部通信なし |
+   | Trusted | 既定の許可リストのみ（**現状ここ**。genestate.co.jp は含まれない） |
+   | Full | 任意のドメイン |
+   | **Custom** | 自分で指定した許可リスト（＋任意で既定リスト） |
+
+4. **Allowed domains** に1行1ドメインで入力する
+   （先頭の `*.` はサブドメイン全体にマッチする。apex ドメインは別行が必要）
+
+   ```text
+   genestate.co.jp
+   *.genestate.co.jp
+   ```
+
+5. **「Also include default list of common package managers」に必ずチェックを入れる**
+   外すと、ここに書いたドメイン以外がすべて不通になり npm / PyPI などが落ちる
+6. 保存する。**設定はセッション起動時に適用されるため、実行中のセッションには反映されない。**
+   保存後に新しいセッションを開始すること
+
+補足：
+- 環境はアカウント個人のもの。Owner が作成した共有環境は Owner しか編集できない
+  （https://claude.ai/admin-settings の Cloud environments ページ）。
+  その場合は自分用の環境を新規作成するのが早い
+- GitHub 通信と MCP コネクタは別経路のため、この許可リストの影響を受けない
+- `Full`（全ドメイン許可）でも動くが、必要なドメインだけを列挙する `Custom` を推奨
+
+参考：https://code.claude.com/docs/en/cloud-environments
 
 ### 方法D：スクリーンショット
 
