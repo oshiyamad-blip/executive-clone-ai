@@ -46,10 +46,13 @@ genestate-newgrad/
 │       └── img/                       ここに P-01.jpg 〜 P-18.jpg を置く
 │
 ├── tools/
-│   └── render-preview.php             WordPress無しで見た目を確認する静的プレビュー生成
+│   ├── wp-stubs.php                   WordPress関数の最小スタブ（下の2本が共通で使う）
+│   ├── render-preview.php             ローカル確認用の静的プレビュー生成
+│   └── render-artifact.php            社内共有用（Artifact）HTML の生成
 │
 └── preview/
-    └── index.html                     生成済みプレビュー（ブラウザで開ける）
+    ├── index.html                     生成済みプレビュー（ブラウザで開ける）
+    └── artifact.html                  生成済み社内共有版（Artifact へ公開する中身）
 ```
 
 **★印の3ファイルだけで、掲載内容・写真・デザインのすべてが変えられる。**
@@ -144,15 +147,36 @@ assets/img/P-03.webp
 
 ## プレビュー（WordPress無しで見た目を確認する）
 
+用途に応じて2本ある。どちらも `page-newgrad.php` をそのまま実行して書き出すので、
+中身は常に本体と一致する。
+
+### ローカルで開く
+
 ```bash
 php tools/render-preview.php > preview/index.html
 ```
 
 生成された `preview/index.html` をブラウザで開く。
-CSSとJSがインライン化された1枚のHTMLなので、そのままメールで送って
-社内確認に回すこともできる。
+CSSとJSがインライン化された1枚のHTMLなので、そのままメールで送ることもできる。
 
-⚠️ プレビューのヘッダー・フッターは**確認用の仮のもの**。
+### 社内共有（URLを配ってレビューしてもらう）
+
+```bash
+php tools/render-artifact.php > preview/artifact.html
+```
+
+書き出した `preview/artifact.html` を claude.ai の Artifact として公開すると、
+URL で共有できる。**既定は非公開**で、共有相手はページの共有メニューから選ぶ。
+閲覧者はページにコメントを残せるので、フィードバックの回収にも使える。
+
+ローカル版との違いは出力形式と、冒頭に付く**レビュー用の説明帯**だけ。
+帯には未確定の件数・写真の未入稿数と、デザイン担当以外が誤解しやすい2点
+（斜線のボックスは写真の位置、黄色の「要確認」は数値が未確定）の凡例が入る。
+採用ページ本体（`.ng` 配下）には手を入れていない。
+
+同じページを更新するときは、`artifact.html` を作り直して**同じURLへ再公開**する。
+
+⚠️ どちらもヘッダー・フッターは**確認用の仮のもの**。
 本番では親テーマの実物に置き換わる。
 
 ---

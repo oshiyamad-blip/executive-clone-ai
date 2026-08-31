@@ -1,0 +1,2185 @@
+<title>ジーンステイト 新卒採用サイト案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ==========================================================================
+   新卒採用サイト（/newgrad/）専用スタイル
+   株式会社ジーンステイト
+
+   構成
+     0. デザイントークン  ← ★既存サイトのトンマナ反映は、ここだけを書き換える
+     1. スコープ内リセット
+     2. レイアウト部品
+     3. 汎用パーツ（見出し・ボタン・写真プレースホルダ）
+     4. セクション別
+     5. ユーティリティ
+
+   すべてのセレクタを .ng 配下にスコープしている。
+   親テーマのスタイルと衝突させず、また本CSSが親テーマを汚染しないため。
+   ========================================================================== */
+
+
+/* ==========================================================================
+   0. デザイントークン
+   --------------------------------------------------------------------------
+   ★★★ ここが唯一の「トンマナ差し替えポイント」 ★★★
+
+   2026-08-31 採取・反映済み。
+   出典はコーポレートサイトが実際に読み込んでいる下記1枚のCSS。
+     https://genestate.co.jp/cms/wp-content/themes/genestate/assets/css/main.css
+
+   各行の末尾に出典を書いてある。
+     「実値」… その値が出典CSSにそのまま存在する。勝手に決めた値ではない。
+     「派生」… 出典CSSに該当が無く、実値から機械的に導いた値。
+
+   ■ 単位を px で持つ理由（重要）
+     親テーマは html { font-size: 62.5% } を敷いている。つまり本番環境では
+     1rem = 10px になる。ここを rem で書くと、本番でだけ全体が 62.5% に
+     縮んでしまう。そのため本CSSのサイズはすべて px で持つ。
+     親テーマ自身も px 指定（rem は互換用の重ね書き）なので、作法も揃う。
+
+   ■ 実サイトの :root（そのまま転記）
+     --white:#fff  --black:#19110C  --gold:#C7A52D
+     --gray:#756F6B  --bg:#F5F4EE  --border:#DDD
+   ========================================================================== */
+.ng {
+	/* --- 色 ------------------------------------------------------------- */
+	--ng-c-fg:          #19110C; /* 実値 --black。body の color */
+	--ng-c-fg-muted:    #756F6B; /* 実値 --gray。日付・補足文 */
+	--ng-c-fg-invert:   #FFFFFF; /* 実値 --white */
+	--ng-c-bg:          #FFFFFF; /* 実値 --white */
+	--ng-c-bg-subtle:   #F5F4EE; /* 実値 --bg。背景付きセクション・表の見出し列 */
+	--ng-c-brand:       #19110C; /* 実値 --black。フッター・CVカードの地色 */
+	--ng-c-brand-dark:  #19110C; /* 実値。実サイトの黒は1色のみ。MV下地も同じ黒 */
+	--ng-c-brand-tint:  #F5F4EE; /* 実値 --bg。淡色パネルは --bg を使う流儀 */
+	--ng-c-accent:      #C7A52D; /* 実値 --gold。CTA・英字ラベル・矢印アイコン */
+	--ng-c-line:        #DDDDDD; /* 実値 --border。表の罫線 */
+	--ng-c-line-strong: #484231; /* 実値。.modBtn の border-color */
+	/* 写真の上に敷くスクリム用。rgba() に混ぜるため RGB 成分でも持つ。
+	   値は --ng-c-brand（#19110C）と同じ黒。ここも差し替えは1箇所で済む。 */
+	--ng-c-brand-rgb: 25, 17, 12; /* 実値 #19110C の RGB */
+
+	/* --- タイポグラフィ -------------------------------------------------- */
+	--ng-font:    "Zen Kaku Gothic New", sans-serif; /* 実値 body */
+	--ng-font-en: "Marcellus", serif;                /* 実値。英字は明朝系セリフ */
+
+	/* 和文。PC値／SP値とも実サイトの実測に合わせた clamp */
+	--ng-fs-hero:  clamp(28px, 4vw, 55px);   /* 実値 MVキャッチ clamp(38px,3vw,55px) / SP 28px */
+	--ng-fs-h2:    clamp(25px, 3.2vw, 36px); /* 実値 36px / SP 25px */
+	--ng-fs-h3:    clamp(18px, 2vw, 20px);   /* 実値 clamp(16px,2vw,20px) 系 */
+	--ng-fs-lead:  16px;                     /* 実値 リード文 */
+	--ng-fs-body:  16px;                     /* 実値 body */
+	--ng-fs-small: 14px;                     /* 実値 */
+	--ng-fs-tiny:  12px;                     /* 実値 SPのラベル */
+
+	/* 欧文（Marcellus）。実サイトでは英字が見出しの主役で、和文が小さい添え物 */
+	--ng-fs-en-sec: clamp(33px, 4.2vw, 48px); /* 実値 48px / SP 33px */
+
+	--ng-lh-tight: 1.2;   /* 実値 見出し英字 */
+	--ng-lh-head:  1.8;   /* 実値 和文の大見出し */
+	--ng-lh-body:  2;     /* 実値 body */
+	--ng-ls-head:  .04em; /* 実値 リード・説明文 */
+	--ng-ls-en:    .05em; /* 実値 見出し英字 */
+	--ng-ls-label: .14em; /* 実値 2px ÷ 14px。和文の小ラベル */
+
+	/* --- レイアウト ------------------------------------------------------ */
+	--ng-container:        1120px; /* 実値 1220px から左右 padding 50px を引いた内寸 */
+	--ng-container-narrow: 760px;
+	--ng-gutter:    clamp(20px, 4vw, 50px);   /* 実値 PC 50px / SP 20px */
+	--ng-section-y: clamp(100px, 9vw, 120px); /* 実値 PC 120px / SP 100px */
+
+	/* --- あしらい -------------------------------------------------------- */
+	--ng-radius:      8px;  /* 実値 画像・カード */
+	--ng-radius-pill: 50px; /* 実値 .modBtn。ボタンはピル型 */
+	/* 実サイト最大の特徴。セクションとフッターの片方の角だけを大きく落とす */
+	--ng-corner:    240px; /* 実値 PC */
+	--ng-corner-sp: 120px; /* 実値 SP */
+	--ng-icon:      30px;  /* 実値 .modIconArrow の直径 */
+
+	--ng-ease:   ease; /* 実値 .modBtn の transition */
+	--ng-dur:    .6s;  /* 実値 */
+}
+
+
+/* ==========================================================================
+   1. スコープ内リセット
+   ========================================================================== */
+.ng,
+.ng *,
+.ng *::before,
+.ng *::after { box-sizing: border-box; }
+
+.ng {
+	margin: 0;
+	color: var(--ng-c-fg);
+	background: var(--ng-c-bg);
+	font-family: var(--ng-font);
+	font-size: var(--ng-fs-body);
+	font-weight: 400;
+	line-height: var(--ng-lh-body);
+	/* 実サイトは font-feature-settings を使っていない（palt 指定なし）ので、
+	   約物の詰めも入れない。ここを入れると本文の字面だけが本家より詰まる。 */
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale; /* 実サイトも指定あり */
+	overflow-x: clip;
+}
+
+/* リセットは :where() で包み、詳細度を 0 にしている。
+   素の `.ng a { color: inherit }`（詳細度 0,1,1）は
+   `.ng-btn--onbrand { color: ... }`（0,1,0）に勝ってしまい、
+   黒地セクションのボタンが白文字＝白地に白、で消えていた。
+   :where() なら要素リセットがコンポーネント指定を上書きすることはない。 */
+:where(.ng) :where(p) { margin: 0 0 1.4em; }
+:where(.ng) :where(p:last-child) { margin-bottom: 0; }
+:where(.ng) :where(h1, h2, h3, h4) {
+	margin: 0;
+	line-height: var(--ng-lh-tight);
+	letter-spacing: var(--ng-ls-head);
+	font-weight: 700;
+}
+:where(.ng) :where(ul, ol) { margin: 0; padding: 0; list-style: none; }
+:where(.ng) :where(img) { display: block; max-width: 100%; height: auto; }
+:where(.ng) :where(a) { color: inherit; text-decoration: none; }
+.ng a:focus-visible,
+.ng button:focus-visible {
+	outline: 2px solid var(--ng-c-accent);
+	outline-offset: 3px;
+	border-radius: 2px;
+}
+
+
+/* ==========================================================================
+   2. レイアウト部品
+   ========================================================================== */
+.ng-container {
+	width: 100%;
+	max-width: var(--ng-container);
+	margin-inline: auto;
+	padding-inline: var(--ng-gutter);
+}
+.ng-container--narrow { max-width: var(--ng-container-narrow); }
+
+/* --- セクション --------------------------------------------------------
+   実サイトで最も目を引く意匠が、セクションの「片方の上角だけを大きく落とす」処理。
+   本家 .modSection の実装をそのまま移植している。
+
+     .modSection      { border-radius: 240px 0 0 0 }  ← 白。左上を落とす
+     .modSection--bg  { border-radius: 0 240px 0 0 }  ← 地色。右上を落とす
+     .modSection--bg + .modSection::before            ← 継ぎ目の作り
+         { height:50%; background:var(--bg); z-index:-1 }
+
+   角丸だけでは背景が同じ白どうしで切り欠きが見えないため、
+   「地色セクションの直後の白セクション」は ::before で上半分に前のセクションの
+   地色を敷き、白い角丸で切り取ることで層が重なったように見せる。
+   ::before は z-index:-1 で親の背景より後ろに回る（親に z-index を与えないこと）。
+   ---------------------------------------------------------------------- */
+.ng-section {
+	position: relative;
+	padding-block: var(--ng-section-y);
+	background: var(--ng-c-bg);
+	border-radius: var(--ng-corner) 0 0 0;
+}
+.ng-section > * { position: relative; z-index: 1; }
+
+.ng-section--subtle {
+	background: var(--ng-c-bg-subtle);
+	border-radius: 0 var(--ng-corner) 0 0;
+}
+.ng-section--brand {
+	background: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+	border-radius: 0 var(--ng-corner) 0 0;
+}
+
+/* 直前のセクションの地色を、切り欠きから覗かせるための下敷き */
+.ng-section--subtle + .ng-section:not(.ng-section--subtle):not(.ng-section--brand)::before,
+.ng-section--brand  + .ng-section:not(.ng-section--subtle):not(.ng-section--brand)::before,
+.ng-hero + .ng-anchors + .ng-section::before {
+	content: "";
+	position: absolute;
+	top: 0; left: 0;
+	z-index: -1;
+	width: 100%;
+	height: 50%;
+}
+.ng-section--subtle + .ng-section::before { background: var(--ng-c-bg-subtle); }
+.ng-section--brand  + .ng-section::before,
+.ng-hero + .ng-anchors + .ng-section::before { background: var(--ng-c-brand); }
+
+.ng-section--brand .ng-head__title,
+.ng-section--brand .ng-lead { color: inherit; }
+.ng-section--brand .ng-head__en { color: var(--ng-c-fg-invert); }
+/* 反転面では金の点が沈むので白に置く（本家 .modListCv--contact と同じ処理） */
+.ng-section--brand .ng-head__title::before { background: var(--ng-c-fg-invert); }
+
+/* SPでは切り欠きを半分に。実値 120px */
+@media (max-width: 767px) {
+	.ng-section { border-radius: var(--ng-corner-sp) 0 0 0; }
+	.ng-section--subtle,
+	.ng-section--brand { border-radius: 0 var(--ng-corner-sp) 0 0; }
+}
+
+
+/* ==========================================================================
+   3. 汎用パーツ
+   ========================================================================== */
+
+/* --- セクション見出し -------------------------------------------------- */
+/* 実サイトの見出しは「英字が主役・和文が添え物」という珍しい組み方をしている。
+   本家 .modHeadingLv02 の実装：
+     __title__en { font-family:"Marcellus",serif; font-size:48px(SP 33px); letter-spacing:.05em }
+     __title__jp { font-size:14px(SP 12px); font-weight:700; letter-spacing:2px; padding-left:20px }
+     __title__jp::before { 6px の金色の丸 }
+   マークアップ（<p class="ng-head__en"> + <h2 class="ng-head__title">）は
+   本家と同じ並びなので、見え方の主従だけをCSSで入れ替えている。 */
+.ng-head { margin-bottom: 56px; } /* 実値 */
+.ng-head__en {
+	display: block;
+	margin: 0;
+	color: inherit;
+	font-family: var(--ng-font-en);
+	font-size: var(--ng-fs-en-sec);
+	font-weight: 400; /* Marcellus は単一ウェイト。太字指定は偽ボールドになる */
+	letter-spacing: var(--ng-ls-en);
+	line-height: 1.5; /* 実値 */
+}
+.ng-head__title {
+	position: relative;
+	margin-top: 10px; /* 実値 */
+	padding-left: 20px; /* 実値 */
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: var(--ng-ls-label);
+	line-height: 1.6;
+}
+/* 見出しのあしらいは罫線ではなく「金色の丸」。サイト全体で共通の記号 */
+.ng-head__title::before {
+	content: "";
+	position: absolute;
+	top: 11px; /* 実値 */
+	left: 5px; /* 実値 */
+	width: 6px;
+	height: 6px;
+	border-radius: 100%;
+	background: var(--ng-c-accent);
+}
+@media (max-width: 767px) {
+	.ng-head { margin-bottom: 40px; } /* 実値 */
+	.ng-head__title {
+		padding-left: 10px; /* 実値 */
+		font-size: var(--ng-fs-tiny);
+		letter-spacing: 0; /* 実値。SPでは字間を詰めない */
+	}
+	.ng-head__title::before { top: 11px; left: -1px; width: 4px; height: 4px; } /* 実値 */
+}
+/* 本家 .modHeadingLv02__text__description は 16px / 行間2 / 字間.04em、
+   色は本文と同じ黒。リード文をグレーに落とす作法は実サイトには無い。 */
+.ng-head__lead {
+	max-width: 46em;
+	margin-top: 24px;
+	color: inherit;
+	font-size: var(--ng-fs-lead);
+	line-height: var(--ng-lh-body);
+	letter-spacing: var(--ng-ls-head);
+}
+
+/* --- ボタン ------------------------------------------------------------
+   本家 .modBtn をそのまま移植。
+     ・ピル型（border-radius:50px）。角丸ではない
+     ・白地＋#484231 の 1px 罫線。文字は 700、行間2、字間は詰めない
+     ・右端に金色の丸（30px）。その中に白い矢印
+     ・ホバーで地が黒へ反転し、矢印が丸の左外から滑り込み直す
+       （本家 @keyframes arrowRightLeft と同じ動き）
+   矢印は本家では SVG 画像。ここでは同形を data URI で内蔵し、
+   画像ファイルの入稿を待たずに成立するようにしている。
+   ---------------------------------------------------------------------- */
+.ng-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0 20px;               /* 実値 */
+	padding: 7px 5px 7px 20px; /* 実値 */
+	border: 1px solid var(--ng-c-line-strong);
+	border-radius: var(--ng-radius-pill);
+	background: var(--ng-c-bg);
+	color: var(--ng-c-fg);
+	font-size: var(--ng-fs-body);
+	font-weight: 700;        /* 実値 */
+	letter-spacing: normal;  /* 実値。ボタンだけ字間を詰めない */
+	line-height: 2;          /* 実値 */
+	cursor: pointer;
+	transition: all var(--ng-dur) var(--ng-ease); /* 実値 all .6s ease */
+}
+/* 金色の丸＋矢印 */
+.ng-btn::after {
+	content: "";
+	flex: none;
+	width: var(--ng-icon);
+	height: var(--ng-icon);
+	border-radius: 100%;
+	background-color: var(--ng-c-accent);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ffffff' d='M8 0l4 4-4 4V5H0V3h8z'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: center;
+	background-size: 12px 8px; /* 実値 */
+	transition: background-color var(--ng-dur) var(--ng-ease);
+}
+/* 丸の外（左）から矢印が入ってくる。丸の外側は背景の描画範囲外なので自然に切れる */
+@keyframes ngArrowIn {
+	from { background-position: -100% center; }
+	to   { background-position: center; }
+}
+.ng-btn:hover::after { animation: ngArrowIn var(--ng-dur) var(--ng-ease) forwards; }
+
+/* 既定（白地）のホバーは黒へ反転。本家 .modBtn:hover と同じ */
+.ng-btn:hover {
+	background: var(--ng-c-brand);
+	border-color: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+
+/* 金地。本家 .modBtn--gold。丸が白へ、矢印が金へ入れ替わる */
+.ng-btn--primary {
+	background: var(--ng-c-accent);
+	border-color: var(--ng-c-accent);
+	color: var(--ng-c-fg-invert);
+}
+.ng-btn--primary::after {
+	background-color: var(--ng-c-fg-invert);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23C7A52D' d='M8 0l4 4-4 4V5H0V3h8z'/%3E%3C/svg%3E");
+}
+/* 本家は金地→白地へ「明るく」反転する。暗くするホバーはこのサイトには無い */
+.ng-btn--primary:hover {
+	background: var(--ng-c-bg);
+	border-color: var(--ng-c-accent);
+	color: var(--ng-c-accent);
+}
+.ng-btn--primary:hover::after {
+	background-color: var(--ng-c-accent);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ffffff' d='M8 0l4 4-4 4V5H0V3h8z'/%3E%3C/svg%3E");
+}
+
+/* 罫線のみ。本家 .modListCircleBtnArea__btn（金の罫線・金の文字） */
+.ng-btn--ghost {
+	border-color: var(--ng-c-accent);
+	background: var(--ng-c-bg);
+	color: var(--ng-c-accent);
+	padding: 15px 5px 15px 40px; /* 実値 padding:15px 40px 相当 */
+}
+.ng-btn--ghost:hover {
+	background: var(--ng-c-accent);
+	border-color: var(--ng-c-accent);
+	color: var(--ng-c-fg-invert);
+}
+.ng-btn--ghost:hover::after {
+	background-color: var(--ng-c-fg-invert);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23C7A52D' d='M8 0l4 4-4 4V5H0V3h8z'/%3E%3C/svg%3E");
+}
+
+/* 黒地の上に置く白ピル */
+.ng-btn--onbrand {
+	background: var(--ng-c-fg-invert);
+	border-color: var(--ng-c-fg-invert);
+	color: var(--ng-c-brand);
+}
+.ng-btn--onbrand:hover {
+	background: var(--ng-c-accent);
+	border-color: var(--ng-c-accent);
+	color: var(--ng-c-fg-invert);
+}
+
+/* --- テキストリンク ---------------------------------------------------- */
+/* 本家の本文中リンクは「既定で下線あり・ホバーで下線を消す」。色は変えない。
+     .content__link { color:var(--black); text-decoration:underline;
+                      text-underline-offset:2px; text-decoration-thickness:.8px }
+     .content__link:hover { text-decoration:none }
+   罫線＋矢印のリンクはこのサイトには無いので、その作りをやめている。 */
+.ng-link {
+	display: inline-flex;
+	align-items: center;
+	gap: .6em;
+	color: var(--ng-c-fg);
+	font-weight: 700;
+	text-decoration: underline;
+	text-underline-offset: 2px;    /* 実値 */
+	text-decoration-thickness: .8px; /* 実値 */
+	transition: color var(--ng-dur) var(--ng-ease),
+	            opacity var(--ng-dur) var(--ng-ease);
+}
+/* 矢印は本家と同じく金の丸に載せる（ボタンと同じ記号で統一） */
+.ng-link::after {
+	content: "";
+	flex: none;
+	width: 25px;  /* 実値 .modBtnArea--list の小さい方の丸 */
+	height: 25px;
+	border-radius: 100%;
+	background-color: var(--ng-c-accent);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ffffff' d='M8 0l4 4-4 4V5H0V3h8z'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: center;
+	background-size: 12px 8px;
+}
+.ng-link:hover { text-decoration: none; opacity: .7; } /* 実値 hover は opacity:.7 */
+.ng-link:hover::after { animation: ngArrowIn var(--ng-dur) var(--ng-ease) forwards; }
+
+.ng-sectionfoot { margin-top: 34px; } /* 実値 .modBtnArea の margin-top */
+
+/* 本文に素で置くリンクは金＋下線。本家 .newsDetail__content a の実装。
+   （矢印付きの導線リンク .ng-link は黒＋下線で、こちらとは別系統） */
+.ng-cta__sub a,
+.ng-note a,
+.ng-prose a {
+	color: var(--ng-c-accent);
+	text-decoration: underline;
+	text-underline-position: under; /* 実値 */
+	text-decoration-thickness: 1px; /* 実値 */
+	text-decoration-skip-ink: none; /* 実値 */
+}
+
+/* --- 写真プレースホルダ ------------------------------------------------
+   写真が未入稿の間、どのカットが入るのかを画面上に明示する。
+   docs/04-photo-requirements.md の写真IDと対応。
+   実画像を登録すると自動的に <img> に置き換わる。
+   ---------------------------------------------------------------------- */
+.ng-ph {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: .5em;
+	padding: 24px;
+	background:
+		repeating-linear-gradient(
+			-45deg,
+			var(--ng-c-bg-subtle) 0 10px,
+			#EBE9E0 10px 20px
+		);
+	border: 1px dashed var(--ng-c-line-strong);
+	border-radius: var(--ng-radius);
+	color: var(--ng-c-fg-muted);
+	text-align: center;
+	line-height: 1.5;
+}
+.ng-ph__id {
+	font-family: var(--ng-font-en);
+	font-size: 18px;
+	font-weight: 400;
+	letter-spacing: var(--ng-ls-en);
+	color: var(--ng-c-accent);
+}
+.ng-ph__note { font-size: var(--ng-fs-small); max-width: 28em; }
+
+/* --- 未確認項目バッジ（下書きモードのみ表示） -------------------------- */
+.ng-todo {
+	display: inline-block;
+	margin-inline-start: .4em;
+	padding: .15em .6em;
+	background: #FFF3CD;
+	border: 1px solid #E0B44C;
+	border-radius: 2px;
+	color: #7A5300;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: .06em;
+	line-height: 1.6;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+.ng-draftbar {
+	position: sticky;
+	top: 0;
+	z-index: 40;
+	padding: .7em var(--ng-gutter);
+	background: #7A5300;
+	color: #fff;
+	font-size: var(--ng-fs-small);
+	line-height: 1.6;
+	text-align: center;
+}
+
+
+/* ==========================================================================
+   4. セクション別
+   ========================================================================== */
+
+/* --- 4-1. MV ----------------------------------------------------------- */
+.ng-hero {
+	position: relative;
+	display: grid;
+	align-items: end;
+	min-height: clamp(480px, 82svh, 736px);
+	background: var(--ng-c-brand-dark);
+	color: var(--ng-c-fg-invert);
+	overflow: hidden;
+}
+.ng-hero__media {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+}
+.ng-hero__media img {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	object-position: center 35%;
+}
+/* 全面背景として使う場所では、プレースホルダの説明文がコピーと重なって
+   読めなくなる。IDだけを控えめに残し、指示文は隠す（写真が入れば全て消える） */
+.ng-hero__media .ng-ph,
+.ng-cta__media .ng-ph {
+	height: 100%;
+	border: 0;
+	border-radius: 0;
+	justify-content: flex-start;
+	padding-top: 24px;
+}
+.ng-hero__media .ng-ph__note,
+.ng-cta__media .ng-ph__note { display: none; }
+.ng-hero__media .ng-ph__id,
+.ng-cta__media .ng-ph__id { opacity: .55; }
+/* 写真の上に文字を載せるための可読性グラデーション */
+.ng-hero__scrim {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	/* 下部にコピーが乗るため下ほど濃く。上部は人物が来るので覆わない */
+	background: linear-gradient(
+		to top,
+		rgba(var(--ng-c-brand-rgb), .90) 0%,
+		rgba(var(--ng-c-brand-rgb), .62) 34%,
+		rgba(var(--ng-c-brand-rgb), .22) 62%,
+		rgba(var(--ng-c-brand-rgb), 0) 88%
+	);
+}
+.ng-hero__inner {
+	position: relative;
+	z-index: 2;
+	padding-block: clamp(48px, 8vw, 88px);
+}
+.ng-hero__badge {
+	display: inline-block;
+	margin-bottom: 1.5em;
+	padding: .55em 1.2em;
+	border: 1px solid rgba(255, 255, 255, .6);
+	border-radius: 999px;
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .1em;
+	line-height: 1;
+}
+.ng-hero__catch {
+	font-size: var(--ng-fs-hero);
+	font-weight: 700;
+	letter-spacing: .02em;
+	line-height: 1.22;
+	text-shadow: 0 2px 24px rgba(var(--ng-c-brand-rgb), .45);
+}
+/* キャッチコピーは content 側で指定した位置で折り返す */
+.ng-hero__catchline { display: block; }
+
+.ng-hero__sub {
+	max-width: 34em;
+	margin-top: 1.4em;
+	font-size: var(--ng-fs-lead);
+	line-height: 1.9;
+	text-shadow: 0 1px 16px rgba(var(--ng-c-brand-rgb), .5);
+}
+.ng-hero__actions { margin-top: clamp(32px, 4vw, 44px); }
+
+/* アンカーナビ：モバイルは横スクロール */
+.ng-anchors {
+	position: relative;
+	z-index: 3;
+	background: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+.ng-anchors__list {
+	display: flex;
+	gap: clamp(16px, 3vw, 36px);
+	overflow-x: auto;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
+}
+.ng-anchors__list::-webkit-scrollbar { display: none; }
+.ng-anchors__list a {
+	display: block;
+	padding: 1.15em 0;
+	border-bottom: 2px solid transparent;
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .06em;
+	white-space: nowrap;
+	transition: border-color var(--ng-dur) var(--ng-ease),
+	            opacity var(--ng-dur) var(--ng-ease);
+}
+.ng-anchors__list a:hover { border-color: var(--ng-c-fg-invert); }
+/* JS がスクロール位置に応じて付与する現在地表示 */
+.ng-anchors__list a.is-current { border-color: var(--ng-c-fg-invert); }
+
+/* --- 4-2. INTRODUCTION ------------------------------------------------- */
+.ng-intro__grid {
+	display: grid;
+	gap: clamp(32px, 5vw, 64px);
+}
+.ng-intro__media { aspect-ratio: 4 / 3; }
+.ng-intro__media img,
+.ng-intro__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-intro__body { max-width: 40em; }
+
+/* --- 4-3. MESSAGE ------------------------------------------------------ */
+.ng-message__grid {
+	display: grid;
+	gap: clamp(32px, 5vw, 64px);
+	align-items: start;
+}
+.ng-message__media { aspect-ratio: 3 / 4; }
+.ng-message__media img,
+.ng-message__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-message__lead {
+	margin-bottom: 1.6em;
+	font-size: var(--ng-fs-h3);
+	font-weight: 700;
+	line-height: 1.7;
+}
+.ng-message__sign {
+	display: flex;
+	align-items: baseline;
+	gap: .9em;
+	margin-top: 2em;
+	padding-top: 1.4em;
+	border-top: 1px solid var(--ng-c-line);
+}
+.ng-message__pos { color: var(--ng-c-fg-muted); font-size: var(--ng-fs-small); }
+.ng-message__name { font-size: var(--ng-fs-h3); font-weight: 700; }
+
+/* --- 4-4. NUMBERS ------------------------------------------------------ */
+/* 実サイトの .modListAboutNumbers と同じく、独立したカードを並べる方式。
+   以前は gap を罫線に見せる作りだったが、項目数が列数の倍数でないときに
+   空セルが半透明の塊として残ってしまうため取りやめた。 */
+.ng-numbers__grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 8px; /* 実値。数値タイルの密集グリッドは 8px が実サイトの作法 */
+}
+.ng-numbers__item {
+	padding: clamp(24px, 3vw, 40px);
+	background: rgba(255, 255, 255, .05);
+	border: 1px solid rgba(255, 255, 255, .22);
+	border-radius: var(--ng-radius);
+}
+.ng-numbers__label {
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .08em;
+	opacity: .82;
+}
+.ng-numbers__value {
+	display: flex;
+	align-items: baseline;
+	gap: .15em;
+	margin-top: .3em;
+	font-family: var(--ng-font-en);
+	font-size: clamp(44px, 7vw, 64px);
+	font-weight: 400; /* Marcellus は単一ウェイト。700 指定は偽ボールドになる */
+	color: var(--ng-c-accent); /* 黒地の上の数値は金。本家 .modBtn__number と同じ扱い */
+	line-height: 1;
+	letter-spacing: -.01em;
+}
+.ng-numbers__unit { font-family: var(--ng-font); font-size: 16px; font-weight: 700; }
+.ng-numbers__desc {
+	margin-top: .9em;
+	font-size: var(--ng-fs-small);
+	line-height: 1.85;
+	opacity: .82;
+}
+.ng-note {
+	margin-top: 1.5em;
+	font-size: var(--ng-fs-small);
+	opacity: .72;
+}
+
+/* --- 4-5. BUSINESS ----------------------------------------------------- */
+.ng-biz__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(256px, 1fr));
+	gap: clamp(24px, 3vw, 40px);
+}
+.ng-biz__item {
+	display: flex;
+	flex-direction: column;
+	background: var(--ng-c-bg);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+.ng-biz__media { aspect-ratio: 16 / 10; }
+.ng-biz__media img,
+.ng-biz__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0; border-radius: 0;
+}
+.ng-biz__body { padding: clamp(24px, 3vw, 32px); }
+/* 英字ラベルは本家では金・Marcellus。太字にはしない */
+.ng-biz__no {
+	display: block;
+	color: var(--ng-c-accent);
+	font-family: var(--ng-font-en);
+	font-size: var(--ng-fs-small);
+	font-weight: 400;
+	letter-spacing: var(--ng-ls-en);
+}
+.ng-biz__name { margin-top: .5em; font-size: var(--ng-fs-h3); }
+.ng-biz__catch {
+	margin-top: .7em;
+	color: var(--ng-c-brand);
+	font-weight: 700;
+	line-height: 1.7;
+}
+.ng-biz__text {
+	margin-top: .9em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+
+/* --- 4-6. WORK --------------------------------------------------------- */
+.ng-work__note {
+	margin-top: 1.25em;
+	padding: 1em 1.25em;
+	background: var(--ng-c-brand-tint);
+	border-left: 3px solid var(--ng-c-brand);
+	border-radius: 0 var(--ng-radius) var(--ng-radius) 0;
+	font-size: 15px;
+	line-height: 1.9;
+}
+.ng-work__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(304px, 1fr));
+	gap: clamp(24px, 3vw, 40px);
+}
+.ng-work__item {
+	display: block;
+	background: var(--ng-c-bg);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+	transition: box-shadow var(--ng-dur) var(--ng-ease),
+	            transform var(--ng-dur) var(--ng-ease),
+	            border-color var(--ng-dur) var(--ng-ease);
+}
+/* 実サイトはカード・図版に影を一切使わない。奥行きは地色の面と余白で出す。
+   ホバーは罫線を締めるだけに留める（本家のカードも同様） */
+.ng-work__item:hover {
+	border-color: var(--ng-c-line-strong);
+}
+.ng-work__media { aspect-ratio: 16 / 9; }
+.ng-work__media img,
+.ng-work__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0; border-radius: 0;
+}
+.ng-work__body { padding: clamp(24px, 3vw, 32px); }
+.ng-work__name { font-size: var(--ng-fs-h3); }
+.ng-work__catch { margin-top: .6em; color: var(--ng-c-brand); font-weight: 700; }
+.ng-work__text {
+	margin-top: .9em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+.ng-work__more { margin-top: 1.4em; }
+
+/* --- 4-7. GROWTH ------------------------------------------------------- */
+.ng-growth__timeline {
+	display: grid;
+	gap: 0;
+	margin-bottom: clamp(40px, 5vw, 64px);
+}
+.ng-growth__step {
+	position: relative;
+	padding: 0 0 36px 36px;
+	border-left: 2px solid var(--ng-c-line);
+}
+.ng-growth__step:last-child { padding-bottom: 0; border-left-color: transparent; }
+.ng-growth__step::before {
+	content: "";
+	position: absolute;
+	top: .45em; left: -8px;
+	width: 14px; height: 14px;
+	background: var(--ng-c-bg);
+	border: 3px solid var(--ng-c-accent); /* 見出しの金ドットと同じ記号で揃える */
+	border-radius: 50%;
+}
+.ng-growth__term {
+	display: inline-block;
+	margin-bottom: .5em;
+	padding: .3em .85em;
+	background: var(--ng-c-brand);
+	border-radius: 999px;
+	color: var(--ng-c-fg-invert);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .06em;
+	line-height: 1.5;
+}
+.ng-growth__steptitle { font-size: var(--ng-fs-h3); }
+.ng-growth__steptext {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+/* 数値グリッドと同じ理由で、独立したカードを並べる方式にしている。
+   隙間を罫線に見せる作りだと、項目数が列数の倍数でないときに
+   空セルが灰色の塊として残ってしまう。 */
+.ng-growth__features {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+	gap: clamp(16px, 2vw, 32px); /* 実値 PC 32px / SP 16px。カードの house standard */
+}
+.ng-growth__feature {
+	padding: clamp(24px, 3vw, 32px);
+	background: var(--ng-c-bg);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+}
+.ng-growth__featuretitle {
+	font-size: 17px;
+	line-height: 1.6;
+}
+.ng-growth__featuretext {
+	margin-top: .8em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+.ng-growth__media { margin-bottom: clamp(32px, 4vw, 48px); aspect-ratio: 21 / 9; }
+.ng-growth__media img,
+.ng-growth__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+
+/* --- 4-8. PEOPLE ------------------------------------------------------- */
+.ng-people__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(224px, 1fr));
+	gap: clamp(20px, 2.5vw, 32px);
+}
+.ng-people__item { display: block; }
+.ng-people__media {
+	aspect-ratio: 3 / 4;
+	overflow: hidden;
+	border-radius: var(--ng-radius);
+}
+.ng-people__media img,
+.ng-people__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	transition: transform .6s var(--ng-ease);
+}
+.ng-people__item:hover .ng-people__media img { transform: scale(1.04); }
+.ng-people__cat {
+	display: inline-block;
+	margin-top: 1.1em;
+	color: var(--ng-c-accent);
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .06em;
+}
+.ng-people__catch {
+	margin-top: .4em;
+	font-size: 17px;
+	font-weight: 700;
+	line-height: 1.65;
+}
+.ng-people__prof {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: var(--ng-fs-small);
+	line-height: 1.75;
+}
+
+/* --- 4-9. CULTURE ------------------------------------------------------ */
+.ng-culture__gallery {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: clamp(12px, 1.5vw, 16px);
+	margin-bottom: clamp(32px, 4vw, 48px);
+}
+.ng-culture__gallery > * { aspect-ratio: 4 / 3; }
+.ng-culture__gallery img,
+.ng-culture__gallery .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-culture__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: clamp(20px, 2.5vw, 32px);
+}
+.ng-culture__item {
+	padding-top: 1.25em;
+	border-top: 2px solid var(--ng-c-fg);
+}
+.ng-culture__itemtitle { font-size: 17px; }
+.ng-culture__itemtext {
+	margin-top: .7em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+
+/* --- 4-10. RECRUIT ----------------------------------------------------- */
+.ng-table {
+	width: 100%;
+	border-collapse: collapse;
+	border-top: 1px solid var(--ng-c-line);
+	text-align: left;
+}
+/* 本家 .modTable の作法をそのまま採用。
+     tr { border-top:1px solid var(--border); line-height:2 }（最終行だけ下罫も）
+     th { background:var(--bg); width:352px; padding:20px 25px; letter-spacing:.08rem }
+     td { background:var(--white); padding:20px 35px } */
+.ng-table tr {
+	border-top: 1px solid var(--ng-c-line);
+	line-height: var(--ng-lh-body);
+}
+.ng-table tr:last-child { border-bottom: 1px solid var(--ng-c-line); }
+.ng-table th,
+.ng-table td {
+	font-size: var(--ng-fs-body);
+	vertical-align: top;
+}
+.ng-table th {
+	width: 352px; /* 実値 */
+	padding: 20px 25px; /* 実値 */
+	background: var(--ng-c-bg-subtle); /* 実値。見出し列は地色で塗る */
+	color: inherit;
+	font-weight: 700;
+	letter-spacing: .8px; /* 実値 .08rem（1rem=10px 換算） */
+}
+.ng-table td {
+	padding: 20px 35px; /* 実値 */
+	background: var(--ng-c-bg);
+}
+@media (max-width: 767px) {
+	.ng-table th { width: 30%; padding: 20px 10px; } /* 実値 */
+	.ng-table td { padding: 10px 0 10px 10px; }      /* 実値 */
+	.ng-table th, .ng-table td { font-size: var(--ng-fs-small); }
+}
+
+.ng-flow {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+	gap: clamp(12px, 1.5vw, 16px);
+	margin-top: clamp(40px, 5vw, 64px);
+}
+.ng-flow__item {
+	position: relative;
+	padding: clamp(20px, 2.5vw, 28px);
+	background: var(--ng-c-bg-subtle);
+	border-radius: var(--ng-radius);
+}
+.ng-flow__step {
+	display: block;
+	color: var(--ng-c-accent);
+	font-family: var(--ng-font-en);
+	font-size: 12px;
+	font-weight: 400;
+	letter-spacing: var(--ng-ls-en);
+}
+.ng-flow__title { margin-top: .5em; font-size: 17px; }
+.ng-flow__text {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: var(--ng-fs-small);
+	line-height: 1.85;
+}
+
+/* --- 4-11. FAQ --------------------------------------------------------- */
+.ng-faq { border-top: 1px solid var(--ng-c-line); }
+.ng-faq__item { border-bottom: 1px solid var(--ng-c-line); }
+.ng-faq__q {
+	display: flex;
+	align-items: flex-start;
+	gap: 1em;
+	width: 100%;
+	padding: 1.5em 0;
+	background: none;
+	border: 0;
+	color: inherit;
+	font-family: inherit;
+	font-size: 17px;
+	font-weight: 700;
+	line-height: 1.7;
+	text-align: left;
+	cursor: pointer;
+}
+.ng-faq__mark {
+	flex: none;
+	color: var(--ng-c-accent);
+	font-family: var(--ng-font-en);
+	font-size: 18px;
+}
+.ng-faq__qtext { flex: 1; }
+.ng-faq__icon {
+	position: relative;
+	flex: none;
+	width: 18px; height: 18px;
+	margin-top: .35em;
+}
+.ng-faq__icon::before,
+.ng-faq__icon::after {
+	content: "";
+	position: absolute;
+	top: 50%; left: 0;
+	width: 100%; height: 2px;
+	background: var(--ng-c-brand);
+	transform: translateY(-50%);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-faq__icon::after { transform: translateY(-50%) rotate(90deg); }
+.ng-faq__q[aria-expanded="true"] .ng-faq__icon::after { transform: translateY(-50%) rotate(0); }
+
+.ng-faq__a {
+	display: grid;
+	grid-template-rows: 0fr;
+	transition: grid-template-rows var(--ng-dur) var(--ng-ease);
+}
+.ng-faq__a[data-open="true"] { grid-template-rows: 1fr; }
+.ng-faq__ainner { overflow: hidden; }
+.ng-faq__abody {
+	display: flex;
+	gap: 1em;
+	padding-bottom: 1.75em;
+	color: var(--ng-c-fg-muted);
+	font-size: 15px;
+	line-height: 1.95;
+}
+.ng-faq__abody .ng-faq__mark { color: var(--ng-c-accent); }
+
+/* --- 4-12. ENTRY CTA --------------------------------------------------- */
+.ng-cta {
+	position: relative;
+	background: var(--ng-c-brand-dark);
+	color: var(--ng-c-fg-invert);
+	border-radius: var(--ng-corner) 0 0 0; /* セクションと同じ片角丸の意匠に乗せる */
+	overflow: hidden;
+}
+.ng-cta__media { position: absolute; inset: 0; z-index: 0; }
+.ng-cta__media img { width: 100%; height: 100%; object-fit: cover; }
+.ng-cta__scrim {
+	position: absolute; inset: 0; z-index: 1;
+	background: rgba(var(--ng-c-brand-rgb), .78);
+}
+.ng-cta__inner {
+	position: relative;
+	z-index: 2;
+	padding-block: var(--ng-section-y);
+	text-align: center;
+}
+.ng-cta__title { font-size: var(--ng-fs-h2); line-height: var(--ng-lh-head); }
+.ng-cta__lead {
+	max-width: 34em;
+	margin: 1.4em auto 0;
+	font-size: var(--ng-fs-lead);
+	line-height: 1.95;
+	opacity: .92;
+}
+.ng-cta__actions { margin-top: clamp(32px, 4vw, 44px); }
+.ng-cta__sub {
+	margin-top: 2em;
+	font-size: var(--ng-fs-small);
+	opacity: .78;
+}
+.ng-cta__sub a { text-decoration: underline; text-underline-offset: .25em; }
+
+/* --- モバイル固定CTA --------------------------------------------------- */
+.ng-fixedcta {
+	position: fixed;
+	left: 0; right: 0; bottom: 0;
+	z-index: 50;
+	padding: 12px var(--ng-gutter);
+	padding-bottom: calc(12px + env(safe-area-inset-bottom));
+	background: rgba(255, 255, 255, .94);
+	backdrop-filter: blur(8px);
+	border-top: 1px solid var(--ng-c-line);
+	transform: translateY(110%);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-fixedcta[data-visible="true"] { transform: translateY(0); }
+.ng-fixedcta .ng-btn { width: 100%; justify-content: center; }
+
+
+/* ==========================================================================
+   5. ユーティリティ
+   ========================================================================== */
+.ng-visually-hidden {
+	position: absolute !important;
+	width: 1px; height: 1px;
+	margin: -1px; padding: 0;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+/* スクロール連動のフェードイン */
+.ng-reveal {
+	opacity: 0;
+	transform: translateY(20px);
+	transition: opacity .7s var(--ng-ease), transform .7s var(--ng-ease);
+}
+.ng-reveal[data-revealed="true"] { opacity: 1; transform: none; }
+
+/* アンカーリンク先が固定ヘッダーに隠れないように */
+.ng [id] { scroll-margin-top: 80px; }
+
+
+/* ==========================================================================
+   ブレークポイント
+   ========================================================================== */
+@media (min-width: 48em) { /* 768px 〜 */
+	.ng-intro__grid    { grid-template-columns: 1fr 1.15fr; align-items: center; }
+	.ng-message__grid  { grid-template-columns: .8fr 1.2fr; }
+	.ng-culture__gallery { grid-template-columns: repeat(4, 1fr); }
+	.ng-fixedcta { display: none; } /* PCではMV／CTAの導線で足りる */
+}
+
+@media (min-width: 64em) { /* 1024px 〜 */
+	/* 本家 .modHeadingLv02 は flex・gap 40px・右カラム 58%。その比率に合わせる */
+	.ng-head--split {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.38fr); /* 実値 42:58 */
+		gap: 0 40px; /* 実値 */
+		align-items: start;
+	}
+	.ng-head--split .ng-head__lead { margin-top: 0; }
+	.ng-growth__timeline { grid-template-columns: repeat(4, 1fr); gap: 0; }
+	.ng-growth__step {
+		padding: 36px 24px 0 0;
+		border-left: 0;
+		border-top: 2px solid var(--ng-c-line);
+	}
+	.ng-growth__step:last-child { border-top-color: var(--ng-c-line); }
+	.ng-growth__step::before { top: -8px; left: 0; }
+}
+
+/* 動きを減らす設定の利用者への配慮 */
+@media (prefers-reduced-motion: reduce) {
+	.ng *,
+	.ng *::before,
+	.ng *::after {
+		animation-duration: .01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: .01ms !important;
+		scroll-behavior: auto !important;
+	}
+	.ng-reveal { opacity: 1; transform: none; }
+}
+
+/* 印刷（学生が募集要項を印刷して持参することがある） */
+@media print {
+	.ng-fixedcta,
+	.ng-anchors,
+	.ng-draftbar { display: none !important; }
+	.ng-hero { min-height: auto; }
+	.ng { color: #000; }
+}
+
+</style>
+<style>
+/* ==========================================================================
+   社内共有用のレビュー帯（.rv-）と、親テーマ代役のヘッダー/フッター（.pv-）
+
+   採用ページ本体のトンマナには一切影響しない。色と書体は本体と同じ
+   genestate のトークン（黒 #19110C / 金 #C7A52D / 地色 #F5F4EE）から取り、
+   帯だけが浮いて見えないようにしている。
+   ブランドが確定した明るい世界のページなので、閲覧者のテーマに関わらず
+   同じ見え方になるよう、配色は固定して明示的に塗っている。
+   ========================================================================== */
+:root {
+	--rv-ink:    #19110C;
+	--rv-gold:   #C7A52D;
+	--rv-bone:   #F5F4EE;
+	--rv-line:   #DDDDDD;
+	--rv-muted:  #756F6B;
+	--rv-white:  #FFFFFF;
+	color-scheme: light;
+}
+body {
+	margin: 0;
+	background: var(--rv-white);
+	color: var(--rv-ink);
+	font-family: "Zen Kaku Gothic New", sans-serif;
+	font-size: 16px;
+	line-height: 2;
+}
+
+/* --- レビュー帯 --------------------------------------------------------- */
+.rv-bar {
+	background: var(--rv-bone);
+	border-bottom: 1px solid var(--rv-gold);
+	padding: 28px 40px 26px;
+}
+.rv-bar__inner {
+	max-width: 1120px;
+	margin: 0 auto;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 24px 48px;
+	align-items: start;
+}
+.rv-eyebrow {
+	font-family: "Marcellus", serif;
+	font-size: 13px;
+	letter-spacing: .18em;
+	line-height: 1;
+	color: var(--rv-muted);
+	margin: 0 0 10px;
+}
+.rv-title {
+	margin: 0;
+	font-size: 22px;
+	font-weight: 700;
+	line-height: 1.5;
+	letter-spacing: .04em;
+	text-wrap: balance;
+}
+.rv-sub {
+	margin: 8px 0 0;
+	font-size: 14px;
+	line-height: 1.9;
+	color: var(--rv-muted);
+	max-width: 46em;
+}
+.rv-facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 10px;
+	margin: 14px 0 0;
+}
+.rv-chip {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 6px;
+	padding: 5px 14px;
+	background: var(--rv-white);
+	border: 1px solid var(--rv-line);
+	border-radius: 50px;
+	font-size: 13px;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+.rv-chip b {
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+.rv-chip--draft {
+	background: var(--rv-ink);
+	border-color: var(--rv-ink);
+	color: var(--rv-white);
+}
+
+/* 読み方の凡例。デザイン担当以外が見たときに誤解しやすい2点を先に説明する */
+.rv-legend { margin: 0; }
+.rv-legend__title {
+	margin: 0 0 10px;
+	font-size: 13px;
+	font-weight: 700;
+	letter-spacing: .08em;
+}
+.rv-legend__list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	display: grid;
+	gap: 10px;
+}
+.rv-legend__item {
+	display: grid;
+	grid-template-columns: 76px minmax(0, 1fr);
+	gap: 12px;
+	align-items: center;
+	font-size: 13px;
+	line-height: 1.75;
+	color: var(--rv-muted);
+}
+/* 見本の要らない項目は1カラムで通す */
+.rv-legend__item--plain { grid-template-columns: minmax(0, 1fr); }
+.rv-swatch {
+	height: 34px;
+	border-radius: 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.rv-swatch--photo {
+	background: repeating-linear-gradient(-45deg, var(--rv-bone) 0 10px, #EBE9E0 10px 20px);
+	border: 1px dashed #484231;
+	font-family: "Marcellus", serif;
+	font-size: 11px;
+	color: var(--rv-gold);
+}
+.rv-swatch--todo {
+	background: transparent;
+	justify-content: flex-start;
+}
+.rv-swatch--todo span {
+	display: inline-block;
+	padding: .15em .6em;
+	background: #FFF3CD;
+	border: 1px solid #E0B44C;
+	border-radius: 2px;
+	color: #7A5300;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: .06em;
+	line-height: 1.6;
+}
+
+/* 本体が出す開発者向けの下書きバーは、上の帯と内容が重なるので隠す */
+.ng-draftbar { display: none !important; }
+
+@media (max-width: 767px) {
+	.rv-bar { padding: 22px 20px; }
+	.rv-bar__inner { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+	.rv-title { font-size: 19px; }
+}
+
+/* --- 親テーマ代役のヘッダー/フッター -------------------------------------
+   本番では親テーマの実物が入る。ここでは採用ページが実サイトの
+   ヘッダーとフッターに挟まれたときの見え方を確かめるための代役。
+   ---------------------------------------------------------------------- */
+.pv-header {
+	display: flex; align-items: center; justify-content: space-between; gap: 16px;
+	padding: 16px 40px; background: var(--rv-white);
+}
+.pv-header__logo { font-weight: 700; letter-spacing: .04em; }
+.pv-header__right { display: flex; align-items: center; gap: 24px; }
+.pv-header__nav { display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; }
+.pv-header__cta { display: flex; gap: 8px; }
+.pv-header__cta span {
+	display: block; min-width: 100px; padding: 8px 22px; border-radius: 50px;
+	border: 1px solid; text-align: center; color: var(--rv-white); font-size: 13px;
+}
+.pv-header__cta .is-recruit { background: var(--rv-ink); border-color: var(--rv-ink); }
+.pv-header__cta .is-contact { background: var(--rv-gold); border-color: var(--rv-gold); }
+.pv-footer {
+	padding: 46px 40px 51px; background: var(--rv-ink); color: var(--rv-white);
+	border-radius: 0 240px 0 0; font-size: 13px; line-height: 1.9;
+}
+.pv-footer small { color: rgba(255, 255, 255, .6); }
+@media (max-width: 767px) {
+	.pv-header { padding: 16px 20px; }
+	.pv-header__nav, .pv-header__cta { display: none; }
+	.pv-footer { padding: 30px 20px; border-radius: 0 120px 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+<div class="rv-bar"><div class="rv-bar__inner">
+<div>
+<p class="rv-eyebrow">GENE STATE / NEWGRAD</p>
+<h1 class="rv-title">新卒採用サイト <code>/newgrad/</code> 採用トップの案</h1>
+<p class="rv-sub">初年度（一期生）の募集ページです。配色・書体・余白はコーポレートサイトの実CSSから採取した値をそのまま使っているため、本番に載せたときの見え方とほぼ同じです。</p>
+<p class="rv-facts"><span class="rv-chip rv-chip--draft">下書き</span><span class="rv-chip">未確定の数値 <b>23</b> 件</span><span class="rv-chip">写真 <b>18</b> カット未入稿</span><span class="rv-chip">トンマナ 反映済み</span></p>
+</div>
+<div class="rv-legend">
+<p class="rv-legend__title">見るときの注意</p>
+<ul class="rv-legend__list">
+<li class="rv-legend__item"><span class="rv-swatch rv-swatch--photo">P-00</span><span>斜線のボックスは<b>写真が入る位置</b>です。撮影がまだのため、どんなカットを入れるかの指示を出しています。</span></li>
+<li class="rv-legend__item"><span class="rv-swatch rv-swatch--todo"><span>要確認</span></span><span>このバッジが付いた数値は<b>社内で確定が必要</b>な項目です。仮の値が入っています。</span></li>
+<li class="rv-legend__item rv-legend__item--plain"><span>上下のヘッダーとフッターは<b>形だけの代役</b>です。本番では既存サイトの実物がそのまま入ります。</span></li>
+</ul>
+</div>
+</div></div>
+<header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><span class="pv-header__right"><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav><span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span></span></header>
+
+<main class="ng" id="newgrad">
+
+			<div class="ng-draftbar">
+			下書きモード：社内未確認の項目が <strong>23</strong> 件あります。
+			確認が済んだら <code>NG_DRAFT_MODE</code> を <code>false</code> にしてください（このバーと noindex が外れます）。
+		</div>
+	
+
+			<section class="ng-hero" aria-labelledby="ng-hero-catch">
+		<div class="ng-hero__media"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
+		<div class="ng-hero__scrim" aria-hidden="true"></div>
+
+		<div class="ng-hero__inner ng-container">
+			<p class="ng-hero__badge">
+				20XX年卒 新卒採用（一期生）				<span class="ng-todo">要確認</span>			</p>
+			<h1 class="ng-hero__catch" id="ng-hero-catch">
+									<span class="ng-hero__catchline">「育てる」を、</span>
+									<span class="ng-hero__catchline">事業にしてきた会社です。</span>
+							</h1>
+			<p class="ng-hero__sub">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+			<p class="ng-hero__actions">
+				<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+			</p>
+		</div>
+	</section>
+
+	<nav class="ng-anchors" aria-label="ページ内の目次">
+		<div class="ng-container">
+			<ul class="ng-anchors__list">
+									<li><a href="#message">代表メッセージ</a></li>
+									<li><a href="#numbers">数字で見る</a></li>
+									<li><a href="#business">事業を知る</a></li>
+									<li><a href="#work">仕事を知る</a></li>
+									<li><a href="#growth">育成・研修</a></li>
+									<li><a href="#people">人を知る</a></li>
+									<li><a href="#culture">働く環境</a></li>
+									<li><a href="#recruit">募集要項</a></li>
+							</ul>
+		</div>
+	</nav>
+
+
+			<section class="ng-section" id="intro" aria-labelledby="ng-intro-title">
+		<div class="ng-container">
+			<div class="ng-intro__grid">
+				<div class="ng-intro__media ng-reveal"><div class="ng-ph" role="img" aria-label="イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット"><span class="ng-ph__id">P-02</span><span class="ng-ph__note">イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット</span></div></div>
+				<div class="ng-intro__body ng-reveal">
+					<p class="ng-head__en">INTRODUCTION</p>
+					<h2 class="ng-head__title" id="ng-intro-title">素質は、動き出せる。</h2>
+					<div style="margin-top:1.75em"><p>ジーンステイトという社名は、Gene（人が本来もつ可能性・素質）と State（組織）を組み合わせたものです。人の中にある、まだ名前のついていない力を見つけ、組織のかたちにして社会に還していく。創業からの約10年、私たちはそれを理念ではなく事業として続けてきました。</p><p>未経験からエンジニアを育てるプログラムを自社で開発し、はたらく人のキャリアに伴走してきました。つまり私たちにとって「人を育てること」は、新卒採用のために用意した約束ではなく、売上を生んできた本業そのものです。</p><p>だからこそ、はじめての新卒採用に踏み出します。</p></div>
+					<p class="ng-sectionfoot">
+						<a class="ng-link" href="https://genestate.co.jp/newgrad/about/">ジーンステイトを知る</a>
+					</p>
+				</div>
+			</div>
+		</div>
+	</section>
+
+
+			<section class="ng-section ng-section--subtle" id="message" aria-labelledby="ng-message-title">
+		<div class="ng-container">
+			<div class="ng-message__grid">
+				<div class="ng-message__media ng-reveal"><div class="ng-ph" role="img" aria-label="MESSAGE／縦位置。代表のポートレート。正面〜やや斜め、視線はカメラ。背景はオフィス"><span class="ng-ph__id">P-03</span><span class="ng-ph__note">MESSAGE／縦位置。代表のポートレート。正面〜やや斜め、視線はカメラ。背景はオフィス</span></div></div>
+				<div class="ng-reveal">
+					<p class="ng-head__en">MESSAGE</p>
+					<h2 class="ng-head__title" id="ng-message-title">先輩が、まだいない。</h2>
+					<p class="ng-message__lead" style="margin-top:1.25em">だから、ここからの新卒のかたちは、あなたたちが決める。</p>
+					<p>正直にお伝えします。あなたが入社しても、新卒入社の先輩は社内にいません。新卒向けに磨き上げられた制度も、まだ完成していません。それは、この会社を選ぶうえで確かにリスクです。</p><p>それでも新卒採用を始めるのは、創業から約10年をかけて、未経験の人を一人前にするための土台をつくり終えたからです。中途入社の未経験者を育ててきた仕組みは、すでに事業として動いています。あとは、そこに新しい世代を迎えるだけでした。</p><p>一期生に期待するのは、先輩の型をなぞることではありません。この会社における新卒のかたちを、一緒に決めていくことです。そして約束するのは、先輩がいない分を、経営が直接引き受けるということです。</p>
+					<div class="ng-message__sign">
+						<span class="ng-message__pos">代表取締役</span>
+						<span class="ng-message__name">小島 大知</span>
+					</div>
+					<p class="ng-sectionfoot">
+						<a class="ng-link" href="https://genestate.co.jp/newgrad/message/">メッセージ全文を読む</a>
+					</p>
+				</div>
+			</div>
+		</div>
+	</section>
+
+
+			<section class="ng-section ng-section--brand" id="numbers" aria-labelledby="ng-numbers-title">
+		<div class="ng-container">
+			<div class="ng-head">
+				<p class="ng-head__en">NUMBERS</p>
+				<h2 class="ng-head__title" id="ng-numbers-title">数字で見るジーンステイト</h2>
+			</div>
+
+			<ul class="ng-numbers__grid">
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">創業からの年数</p>
+						<p class="ng-numbers__value">
+							<span>10</span>
+							<span class="ng-numbers__unit">年目</span>
+						</p>
+						<p class="ng-numbers__desc">新卒採用ははじめてでも、会社は10年近く事業を続けています。</p>
+					</li>
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">社員数<span class="ng-todo">要確認</span></p>
+						<p class="ng-numbers__value">
+							<span>74</span>
+							<span class="ng-numbers__unit">名</span>
+						</p>
+						<p class="ng-numbers__desc">経営と現場の距離が近い規模です。</p>
+					</li>
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">平均年齢<span class="ng-todo">要確認</span></p>
+						<p class="ng-numbers__value">
+							<span>--</span>
+							<span class="ng-numbers__unit">歳</span>
+						</p>
+						<p class="ng-numbers__desc">若手が中心の組織です。</p>
+					</li>
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">未経験入社の割合<span class="ng-todo">要確認</span></p>
+						<p class="ng-numbers__value">
+							<span>--</span>
+							<span class="ng-numbers__unit">%</span>
+						</p>
+						<p class="ng-numbers__desc">専門知識がないところから始めた社員が、多数を占めます。</p>
+					</li>
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">入社後の研修期間<span class="ng-todo">要確認</span></p>
+						<p class="ng-numbers__value">
+							<span>1</span>
+							<span class="ng-numbers__unit">年</span>
+						</p>
+						<p class="ng-numbers__desc">現場に出たあとも、育成は続きます。</p>
+					</li>
+									<li class="ng-numbers__item ng-reveal">
+						<p class="ng-numbers__label">事業領域</p>
+						<p class="ng-numbers__value">
+							<span>3</span>
+							<span class="ng-numbers__unit">領域</span>
+						</p>
+						<p class="ng-numbers__desc">IT・人材・BPO。キャリアの選択肢が社内にあります。</p>
+					</li>
+							</ul>
+
+			<p class="ng-note">※ 数値は 20XX年X月時点のものです。</p>
+			<p class="ng-sectionfoot">
+				<a class="ng-btn ng-btn--onbrand" href="https://genestate.co.jp/newgrad/about/numbers/">数字で見るジーンステイト</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section" id="business" aria-labelledby="ng-business-title">
+		<div class="ng-container">
+			<div class="ng-head ng-head--split">
+				<div>
+					<p class="ng-head__en">BUSINESS</p>
+					<h2 class="ng-head__title" id="ng-business-title">3つの事業</h2>
+				</div>
+				<p class="ng-head__lead">私たちは「はたらく人」と「企業」のあいだに立っています。立ち方が3通りあり、それがそのまま3つの事業になっています。</p>
+			</div>
+
+			<ul class="ng-biz__list">
+									<li class="ng-biz__item ng-reveal">
+						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 01／横位置。PCに向かって開発している手元＋人物"><span class="ng-ph__id">P-04</span><span class="ng-ph__note">BUSINESS 01／横位置。PCに向かって開発している手元＋人物</span></div></div>
+						<div class="ng-biz__body">
+							<span class="ng-biz__no">01</span>
+							<h3 class="ng-biz__name">IT事業</h3>
+							<p class="ng-biz__catch">未経験から、現場力のあるエンジニアへ。</p>
+							<p class="ng-biz__text">自社開発の育成プログラムで未経験者をエンジニアへと育て、上場企業・官公庁・大手キャリアの案件へ送り出しています。Webシステムやアプリの開発から、サーバ・ネットワークの設計構築・運用保守まで領域は多岐にわたります。</p>
+						</div>
+					</li>
+									<li class="ng-biz__item ng-reveal">
+						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 02／横位置。面談テーブルで2名が向き合って話している場面"><span class="ng-ph__id">P-05</span><span class="ng-ph__note">BUSINESS 02／横位置。面談テーブルで2名が向き合って話している場面</span></div></div>
+						<div class="ng-biz__body">
+							<span class="ng-biz__no">02</span>
+							<h3 class="ng-biz__name">人材事業</h3>
+							<p class="ng-biz__catch">その人の「なりたい」から、仕事を考える。</p>
+							<p class="ng-biz__text">モバイル領域の販売職を中心に、人材派遣・有料職業紹介を行っています。求人に人を当てはめるのではなく、その人のキャリアプランを起点に、力が最も活きる場所を一緒に探します。</p>
+						</div>
+					</li>
+									<li class="ng-biz__item ng-reveal">
+						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 03／横位置。事務・オペレーション業務の場面。ヘッドセット着用のカットも可"><span class="ng-ph__id">P-06</span><span class="ng-ph__note">BUSINESS 03／横位置。事務・オペレーション業務の場面。ヘッドセット着用のカットも可</span></div></div>
+						<div class="ng-biz__body">
+							<span class="ng-biz__no">03</span>
+							<h3 class="ng-biz__name">BPO事業</h3>
+							<p class="ng-biz__catch">企業の「手が回らない」を引き受ける。</p>
+							<p class="ng-biz__text">バックオフィス業務やカスタマーサポートの業務プロセスを受託し、効率的かつ専門的に運用します。企業が本業に集中できる状態をつくる仕事です。</p>
+						</div>
+					</li>
+							</ul>
+
+			<p class="ng-sectionfoot">
+				<a class="ng-link" href="https://genestate.co.jp/newgrad/about/">事業をもっと知る</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section ng-section--subtle" id="work" aria-labelledby="ng-work-title">
+		<div class="ng-container">
+			<div class="ng-head">
+				<p class="ng-head__en">WORK</p>
+				<h2 class="ng-head__title" id="ng-work-title">総合職（職種一括採用）で募集します</h2>
+				<p class="ng-head__lead">入口で人生を決め切らなくていい。それが、私たちが職種を分けずに採用する理由です。3つの事業があるからこそ、入社後に自分の適性と向き合ったうえで配属を決められます。</p>
+				<p class="ng-work__note">配属先や配属時期の決まり方、本人の希望をどう反映するかは、選考のなかで具体的にご説明します。</p>
+			</div>
+
+			<ul class="ng-work__list">
+									<li class="ng-reveal">
+						<a class="ng-work__item" href="https://genestate.co.jp/newgrad/work/coordinator/">
+							<div class="ng-work__media"><div class="ng-ph" role="img" aria-label="WORK／横位置。コーディネーターが求職者と面談している場面"><span class="ng-ph__id">P-07</span><span class="ng-ph__note">WORK／横位置。コーディネーターが求職者と面談している場面</span></div></div>
+							<div class="ng-work__body">
+								<h3 class="ng-work__name">人材コーディネーター／営業</h3>
+								<p class="ng-work__catch">人のキャリアに、直接関わる。</p>
+								<p class="ng-work__text">求職者との面談から、企業への提案、就業がはじまったあとのフォローまでを一貫して担当します。「関わるすべての人に幸せを運ぶ」という理念が、最も直接的なかたちで仕事になる職種です。</p>
+								<span class="ng-link ng-work__more">この仕事を知る</span>
+							</div>
+						</a>
+					</li>
+									<li class="ng-reveal">
+						<a class="ng-work__item" href="https://genestate.co.jp/newgrad/work/engineer/">
+							<div class="ng-work__media"><div class="ng-ph" role="img" aria-label="WORK／横位置。若手エンジニアがモニタに向かっている場面。表情が見える角度で"><span class="ng-ph__id">P-08</span><span class="ng-ph__note">WORK／横位置。若手エンジニアがモニタに向かっている場面。表情が見える角度で</span></div></div>
+							<div class="ng-work__body">
+								<h3 class="ng-work__name">エンジニア</h3>
+								<p class="ng-work__catch">つくる側に立つ。未経験から。</p>
+								<p class="ng-work__text">入社後の研修プログラムで基礎から学び、Webシステム・アプリ開発やサーバ・ネットワークの設計構築、運用保守といった案件に参画します。文系・未経験から始めた社員が多数在籍しています。</p>
+								<span class="ng-link ng-work__more">この仕事を知る</span>
+							</div>
+						</a>
+					</li>
+							</ul>
+		</div>
+	</section>
+
+
+			<section class="ng-section" id="growth" aria-labelledby="ng-growth-title">
+		<div class="ng-container">
+			<div class="ng-head ng-head--split">
+				<div>
+					<p class="ng-head__en">GROWTH</p>
+					<h2 class="ng-head__title" id="ng-growth-title">育て方に、根拠があります。</h2>
+				</div>
+				<p class="ng-head__lead">「充実した研修制度があります」とは書きません。代わりに、何を、いつ、どうやって学ぶのかをお見せします。</p>
+			</div>
+
+			<div class="ng-growth__media ng-reveal"><div class="ng-ph" role="img" aria-label="GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景"><span class="ng-ph__id">P-09</span><span class="ng-ph__note">GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景</span></div></div>
+
+			<ol class="ng-growth__timeline">
+									<li class="ng-growth__step ng-reveal">
+						<span class="ng-growth__term">入社直後</span>
+						<h3 class="ng-growth__steptitle">新入社員研修</h3>
+						<p class="ng-growth__steptext">ビジネスマナー、事業理解、同期でのグループワーク。職種を問わず全員が受けます。</p>
+					</li>
+									<li class="ng-growth__step ng-reveal">
+						<span class="ng-growth__term">数ヶ月間</span>
+						<h3 class="ng-growth__steptitle">職種別の育成プログラム</h3>
+						<p class="ng-growth__steptext">エンジニア志望者は自社開発の育成プログラム「G-Tech」へ。コーディネーター志望者は同行・同席とロールプレイを重ねます。</p>
+					</li>
+									<li class="ng-growth__step ng-reveal">
+						<span class="ng-growth__term">配属後</span>
+						<h3 class="ng-growth__steptitle">現場での実践とフォロー</h3>
+						<p class="ng-growth__steptext">現場に出たあとも育成は終わりません。担当者が定期的に面談し、つまずきを早い段階で拾います。</p>
+					</li>
+									<li class="ng-growth__step ng-reveal">
+						<span class="ng-growth__term">1年目以降</span>
+						<h3 class="ng-growth__steptitle">資格取得支援</h3>
+						<p class="ng-growth__steptext">業務に必要な資格の取得を、会社として支援します。</p>
+					</li>
+							</ol>
+
+			<ul class="ng-growth__features">
+									<li class="ng-growth__feature ng-reveal">
+						<h3 class="ng-growth__featuretitle">自社開発の育成プログラム「G-Tech」</h3>
+						<p class="ng-growth__featuretext">外部の教材を買ってくるのではなく、社員の声から自社で開発したプログラムです。Javaの基礎文法から体系的に学習でき、JavaScript・SQL・Linux・PHPなど実務で使う技術を扱います。</p>
+					</li>
+									<li class="ng-growth__feature ng-reveal">
+						<h3 class="ng-growth__featuretitle">講師とチャットで常時つながる</h3>
+						<p class="ng-growth__featuretext">研修中はチャットで講師とつながっているため、分からないことをその場で質問できます。「調べても分からないまま1日が終わる」を起こさせません。</p>
+					</li>
+									<li class="ng-growth__feature ng-reveal">
+						<h3 class="ng-growth__featuretitle">同期と定期的に顔を合わせる</h3>
+						<p class="ng-growth__featuretext">一緒に研修を受けている社員同士で定期的にWebミーティングを行います。先輩からアドバイスを受ける場にもなっています。</p>
+					</li>
+									<li class="ng-growth__feature ng-reveal">
+						<h3 class="ng-growth__featuretitle">つまずいたときに、見てくれる人がいる</h3>
+						<p class="ng-growth__featuretext">研修中も配属後も、担当者が継続的にフォローします。一期生には、経営層も直接関わります。</p>
+					</li>
+							</ul>
+
+			<p class="ng-sectionfoot">
+				<a class="ng-btn ng-btn--ghost" href="https://genestate.co.jp/newgrad/growth/">育成・研修をもっと知る</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section ng-section--subtle" id="people" aria-labelledby="ng-people-title">
+		<div class="ng-container">
+			<div class="ng-head ng-head--split">
+				<div>
+					<p class="ng-head__en">PEOPLE</p>
+					<h2 class="ng-head__title" id="ng-people-title">先にはたらいている人たち</h2>
+				</div>
+				<p class="ng-head__lead">新卒採用は今年が一期生のため、ここに登場するのは中途入社の社員です。それでも、未経験から始めた人の言葉は、いちばん近い参考になるはずです。</p>
+			</div>
+
+			<ul class="ng-people__list">
+									<li class="ng-reveal">
+						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/engineer-01/">
+							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 01／縦位置。未経験から入社したエンジニア社員。3:4"><span class="ng-ph__id">P-10</span><span class="ng-ph__note">PEOPLE 01／縦位置。未経験から入社したエンジニア社員。3:4</span></div></div>
+							<span class="ng-people__cat">エンジニア</span>
+							<p class="ng-people__catch">「分からない」と言える環境だった。<span class="ng-todo">要確認</span></p>
+							<p class="ng-people__prof">（氏名）／20XX年入社／未経験からエンジニアへ</p>
+						</a>
+					</li>
+									<li class="ng-reveal">
+						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/coordinator-01/">
+							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 02／縦位置。コーディネーター・営業職の社員。3:4"><span class="ng-ph__id">P-11</span><span class="ng-ph__note">PEOPLE 02／縦位置。コーディネーター・営業職の社員。3:4</span></div></div>
+							<span class="ng-people__cat">人材コーディネーター</span>
+							<p class="ng-people__catch">人の人生に関わるということ。<span class="ng-todo">要確認</span></p>
+							<p class="ng-people__prof">（氏名）／20XX年入社／営業職</p>
+						</a>
+					</li>
+									<li class="ng-reveal">
+						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/hr-01/">
+							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 03／縦位置。人事・新卒採用の立ち上げ担当者。3:4"><span class="ng-ph__id">P-12</span><span class="ng-ph__note">PEOPLE 03／縦位置。人事・新卒採用の立ち上げ担当者。3:4</span></div></div>
+							<span class="ng-people__cat">人事・新卒採用担当</span>
+							<p class="ng-people__catch">一期生を、こう迎えたい。<span class="ng-todo">要確認</span></p>
+							<p class="ng-people__prof">（氏名）／新卒採用の立ち上げ担当</p>
+						</a>
+					</li>
+									<li class="ng-reveal">
+						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/leader-01/">
+							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 04／縦位置。現場のリーダー・管理職。3:4"><span class="ng-ph__id">P-13</span><span class="ng-ph__note">PEOPLE 04／縦位置。現場のリーダー・管理職。3:4</span></div></div>
+							<span class="ng-people__cat">マネージャー</span>
+							<p class="ng-people__catch">どんな人と働きたいか。<span class="ng-todo">要確認</span></p>
+							<p class="ng-people__prof">（氏名）／現場のリーダー</p>
+						</a>
+					</li>
+							</ul>
+
+			<p class="ng-sectionfoot">
+				<a class="ng-link" href="https://genestate.co.jp/newgrad/people/">社員インタビューを読む</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section" id="culture" aria-labelledby="ng-culture-title">
+		<div class="ng-container">
+			<div class="ng-head ng-head--split">
+				<div>
+					<p class="ng-head__en">CULTURE</p>
+					<h2 class="ng-head__title" id="ng-culture-title">はたらく環境</h2>
+				</div>
+				<p class="ng-head__lead">本社は新宿アイランドタワー。同期と顔を合わせ、先輩に相談でき、一人にならずに働きはじめられる場所です。</p>
+			</div>
+
+			<div class="ng-culture__gallery ng-reveal">
+									<div><div class="ng-ph" role="img" aria-label="CULTURE 01／横位置。新宿アイランドタワーのオフィス内観・引き"><span class="ng-ph__id">P-14</span><span class="ng-ph__note">CULTURE 01／横位置。新宿アイランドタワーのオフィス内観・引き</span></div></div>
+									<div><div class="ng-ph" role="img" aria-label="CULTURE 02／横位置。実際に人が働いている執務席"><span class="ng-ph__id">P-15</span><span class="ng-ph__note">CULTURE 02／横位置。実際に人が働いている執務席</span></div></div>
+									<div><div class="ng-ph" role="img" aria-label="CULTURE 03／横位置。休憩・談笑シーン。空気感が伝わるカット"><span class="ng-ph__id">P-16</span><span class="ng-ph__note">CULTURE 03／横位置。休憩・談笑シーン。空気感が伝わるカット</span></div></div>
+									<div><div class="ng-ph" role="img" aria-label="CULTURE 04／横位置。懇親会・表彰・勉強会などのイベント"><span class="ng-ph__id">P-17</span><span class="ng-ph__note">CULTURE 04／横位置。懇親会・表彰・勉強会などのイベント</span></div></div>
+							</div>
+
+			<ul class="ng-culture__list">
+									<li class="ng-culture__item ng-reveal">
+						<h3 class="ng-culture__itemtitle">オフィス</h3>
+						<p class="ng-culture__itemtext">東京都新宿区西新宿6-5-1 新宿アイランドタワー5階。西新宿駅直結。</p>
+					</li>
+									<li class="ng-culture__item ng-reveal">
+						<h3 class="ng-culture__itemtitle">休日休暇<span class="ng-todo">要確認</span></h3>
+						<p class="ng-culture__itemtext">（年間休日数・休暇制度を記載）</p>
+					</li>
+									<li class="ng-culture__item ng-reveal">
+						<h3 class="ng-culture__itemtitle">諸手当<span class="ng-todo">要確認</span></h3>
+						<p class="ng-culture__itemtext">（通勤手当・資格取得支援などを記載）</p>
+					</li>
+									<li class="ng-culture__item ng-reveal">
+						<h3 class="ng-culture__itemtitle">社内の行事<span class="ng-todo">要確認</span></h3>
+						<p class="ng-culture__itemtext">（懇親会・表彰・勉強会などを記載）</p>
+					</li>
+							</ul>
+
+			<p class="ng-sectionfoot">
+				<a class="ng-link" href="https://genestate.co.jp/newgrad/culture/">はたらく環境を知る</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section ng-section--subtle" id="recruit" aria-labelledby="ng-recruit-title">
+		<div class="ng-container">
+			<div class="ng-head">
+				<p class="ng-head__en">RECRUIT</p>
+				<h2 class="ng-head__title" id="ng-recruit-title">募集要項</h2>
+			</div>
+
+			<table class="ng-table">
+				<caption class="ng-visually-hidden">新卒採用の募集要項</caption>
+				<tbody>
+											<tr>
+							<th scope="row">募集職種</th>
+							<td>総合職（職種一括採用）／配属先：人材コーディネーター・営業、エンジニア ほか<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">対象</th>
+							<td>20XX年3月卒業見込みの方（既卒の方の応募可否を記載）<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">初任給</th>
+							<td>（月給 ○○○,○○○円）<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">勤務地</th>
+							<td>本社（東京都新宿区西新宿）および配属先。※配属先はお客様先となる場合があります<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">勤務時間</th>
+							<td>（実働○時間／始業・終業時刻）<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">休日休暇</th>
+							<td>（年間休日○○日／各種休暇）<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">待遇・福利厚生</th>
+							<td>各種社会保険完備、（諸手当・資格取得支援 ほか）<span class="ng-todo">要確認</span></td>
+						</tr>
+											<tr>
+							<th scope="row">採用予定人数</th>
+							<td>（○名）<span class="ng-todo">要確認</span></td>
+						</tr>
+									</tbody>
+			</table>
+
+			<h3 class="ng-head__title" style="margin-top:3em;font-size:var(--ng-fs-h3)">選考フロー</h3>
+			<ol class="ng-flow">
+									<li class="ng-flow__item ng-reveal">
+						<span class="ng-flow__step">STEP 01</span>
+						<h4 class="ng-flow__title">エントリー</h4>
+						<p class="ng-flow__text">本サイトの応募フォームからご応募ください。</p>
+					</li>
+									<li class="ng-flow__item ng-reveal">
+						<span class="ng-flow__step">STEP 02</span>
+						<h4 class="ng-flow__title">会社説明会</h4>
+						<p class="ng-flow__text">事業・仕事・育成の中身を詳しくご説明します。</p>
+					</li>
+									<li class="ng-flow__item ng-reveal">
+						<span class="ng-flow__step">STEP 03</span>
+						<h4 class="ng-flow__title">面接</h4>
+						<p class="ng-flow__text">（回数・形式を記載）<span class="ng-todo">要確認</span></p>
+					</li>
+									<li class="ng-flow__item ng-reveal">
+						<span class="ng-flow__step">STEP 04</span>
+						<h4 class="ng-flow__title">最終面接</h4>
+						<p class="ng-flow__text">代表または役員が対応します。</p>
+					</li>
+									<li class="ng-flow__item ng-reveal">
+						<span class="ng-flow__step">STEP 05</span>
+						<h4 class="ng-flow__title">内定</h4>
+						<p class="ng-flow__text">内定後のフォロー内容をご案内します。</p>
+					</li>
+							</ol>
+
+			<p class="ng-sectionfoot">
+									<a class="ng-link" style="margin-right:2em" href="https://genestate.co.jp/newgrad/requirements/">募集要項の全文</a>
+									<a class="ng-link" style="margin-right:2em" href="https://genestate.co.jp/newgrad/flow/">選考フロー</a>
+							</p>
+		</div>
+	</section>
+
+
+			<section class="ng-section" id="faq" aria-labelledby="ng-faq-title">
+		<div class="ng-container ng-container--narrow">
+			<div class="ng-head">
+				<p class="ng-head__en">FAQ</p>
+				<h2 class="ng-head__title" id="ng-faq-title">よくある質問</h2>
+			</div>
+
+			<div class="ng-faq" data-ng-faq>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-0">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">新卒の先輩がいないことが不安です。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-0" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>率直な不安だと思います。先輩がいない分は、経営と人事が直接見る体制で引き受けます。研修中も配属後も担当者が継続的に面談し、同期どうしで顔を合わせる場も定期的に設けます。詳しくは選考のなかでご説明します。</span>
+								</div>
+							</div>
+						</div>
+					</div>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-1">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">文系・未経験でもエンジニアになれますか。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-1" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>なれます。当社は未経験の方を育てることを事業にしてきた会社で、自社開発の育成プログラムを用意しています。実際に、専門知識のないところから始めた社員が多数在籍しています。</span>
+								</div>
+							</div>
+						</div>
+					</div>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-2">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">総合職とのことですが、配属はいつ、どのように決まりますか。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-2" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>本人の希望と適性をふまえて決定します。決定の時期と進め方は選考のなかで具体的にお伝えします。入社前に一方的に通知するようなことはありません。</span>
+								</div>
+							</div>
+						</div>
+					</div>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-3">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">勤務地はどこになりますか。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-3" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>本社は東京都新宿区西新宿です。事業の性質上、配属先がお客様先となる場合があります。想定される勤務地は選考のなかで具体的にご説明します。</span>
+								</div>
+							</div>
+						</div>
+					</div>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-4">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">学部・学科による制限はありますか。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-4" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>（回答を記載）<span class="ng-todo">要確認</span></span>
+								</div>
+							</div>
+						</div>
+					</div>
+														<div class="ng-faq__item">
+						<h3>
+							<button type="button" class="ng-faq__q" aria-expanded="false" aria-controls="ng-faq-a-5">
+								<span class="ng-faq__mark" aria-hidden="true">Q</span>
+								<span class="ng-faq__qtext">既卒ですが応募できますか。</span>
+								<span class="ng-faq__icon" aria-hidden="true"></span>
+							</button>
+						</h3>
+						<div class="ng-faq__a" id="ng-faq-a-5" data-open="false">
+							<div class="ng-faq__ainner">
+								<div class="ng-faq__abody">
+									<span class="ng-faq__mark" aria-hidden="true">A</span>
+									<span>（回答を記載）<span class="ng-todo">要確認</span></span>
+								</div>
+							</div>
+						</div>
+					</div>
+							</div>
+
+			<p class="ng-sectionfoot">
+				<a class="ng-link" href="https://genestate.co.jp/newgrad/faq/">よくある質問をすべて見る</a>
+			</p>
+		</div>
+	</section>
+
+
+			<section class="ng-cta" id="entry" aria-labelledby="ng-entry-title">
+		<div class="ng-cta__media"><div class="ng-ph" role="img" aria-label="ENTRY／横位置・引き。上に濃い色を重ねるため、明るく被写体が中央に寄っていないカット。P-01の別カットでも可"><span class="ng-ph__id">P-18</span><span class="ng-ph__note">ENTRY／横位置・引き。上に濃い色を重ねるため、明るく被写体が中央に寄っていないカット。P-01の別カットでも可</span></div></div>
+		<div class="ng-cta__scrim" aria-hidden="true"></div>
+
+		<div class="ng-cta__inner ng-container">
+			<p class="ng-head__en">ENTRY</p>
+			<h2 class="ng-cta__title" id="ng-entry-title">一期生を、募集します。</h2>
+			<p class="ng-cta__lead">まだ何者でもないことは、弱みではありません。その素質を、仕事のかたちにするところから一緒に始めましょう。</p>
+			<p class="ng-cta__actions">
+				<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+			</p>
+			<p class="ng-cta__sub">
+				中途採用をお探しの方は <a href="https://genestate.co.jp/recruit/">こちら</a>
+			</p>
+		</div>
+	</section>
+
+
+		<div class="ng-fixedcta" data-ng-fixedcta data-visible="false">
+		<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+	</div>
+
+</main>
+
+<footer class="pv-footer">株式会社ジーンステイト<br>東京都新宿区西新宿6-5-1 新宿アイランドタワー5階<br><small>（本番では既存サイトのフッターが入ります）</small></footer>
+<script>
+/**
+ * 新卒採用サイト（/newgrad/）のインタラクション
+ *
+ * 依存ライブラリなし。IntersectionObserver 非対応環境では
+ * すべての要素を表示済みとして扱い、内容が読めなくなることは無い。
+ *
+ * 1. FAQ アコーディオン
+ * 2. スクロール連動のフェードイン
+ * 3. モバイル固定CTAの表示制御
+ * 4. ページ内アンカーのスムーススクロールと現在地表示
+ */
+( function () {
+	'use strict';
+
+	var root = document.getElementById( 'newgrad' );
+	if ( ! root ) {
+		return;
+	}
+
+	var prefersReducedMotion = window.matchMedia( '(prefers-reduced-motion: reduce)' ).matches;
+
+	/* ---------------------------------------------------------------
+	 * 1. FAQ アコーディオン
+	 * --------------------------------------------------------------- */
+	root.querySelectorAll( '[data-ng-faq] .ng-faq__q' ).forEach( function ( button ) {
+		button.addEventListener( 'click', function () {
+			var expanded = button.getAttribute( 'aria-expanded' ) === 'true';
+			var panel    = document.getElementById( button.getAttribute( 'aria-controls' ) );
+
+			button.setAttribute( 'aria-expanded', String( ! expanded ) );
+			if ( panel ) {
+				panel.setAttribute( 'data-open', String( ! expanded ) );
+			}
+		} );
+	} );
+
+	/* ---------------------------------------------------------------
+	 * 2. スクロール連動のフェードイン
+	 * --------------------------------------------------------------- */
+	var revealTargets = root.querySelectorAll( '.ng-reveal' );
+
+	if ( ! ( 'IntersectionObserver' in window ) || prefersReducedMotion ) {
+		// 非対応環境・動きを減らす設定では、最初から表示しておく。
+		revealTargets.forEach( function ( el ) {
+			el.setAttribute( 'data-revealed', 'true' );
+		} );
+	} else {
+		var revealObserver = new IntersectionObserver(
+			function ( entries ) {
+				entries.forEach( function ( entry ) {
+					if ( ! entry.isIntersecting ) {
+						return;
+					}
+					entry.target.setAttribute( 'data-revealed', 'true' );
+					revealObserver.unobserve( entry.target );
+				} );
+			},
+			{ rootMargin: '0px 0px -12% 0px', threshold: 0.08 }
+		);
+
+		revealTargets.forEach( function ( el ) {
+			revealObserver.observe( el );
+		} );
+	}
+
+	/* ---------------------------------------------------------------
+	 * 3. モバイル固定CTA
+	 *    MVを通り過ぎたら出し、最終CTAが見えている間は引っ込める。
+	 *    （同じボタンが2つ並ぶのを避けるため）
+	 * --------------------------------------------------------------- */
+	var fixedCta = root.querySelector( '[data-ng-fixedcta]' );
+	var hero     = root.querySelector( '.ng-hero' );
+	var lastCta  = root.querySelector( '.ng-cta' );
+
+	if ( fixedCta && hero && 'IntersectionObserver' in window ) {
+		var heroPassed  = false;
+		var ctaInView   = false;
+
+		var syncFixedCta = function () {
+			fixedCta.setAttribute( 'data-visible', String( heroPassed && ! ctaInView ) );
+		};
+
+		new IntersectionObserver(
+			function ( entries ) {
+				heroPassed = ! entries[ 0 ].isIntersecting;
+				syncFixedCta();
+			},
+			{ threshold: 0 }
+		).observe( hero );
+
+		if ( lastCta ) {
+			new IntersectionObserver(
+				function ( entries ) {
+					ctaInView = entries[ 0 ].isIntersecting;
+					syncFixedCta();
+				},
+				{ threshold: 0 }
+			).observe( lastCta );
+		}
+	}
+
+	/* ---------------------------------------------------------------
+	 * 4. ページ内アンカー
+	 * --------------------------------------------------------------- */
+	var anchorLinks = Array.prototype.slice.call(
+		root.querySelectorAll( '.ng-anchors__list a[href^="#"]' )
+	);
+
+	anchorLinks.forEach( function ( link ) {
+		link.addEventListener( 'click', function ( event ) {
+			var target = document.querySelector( link.getAttribute( 'href' ) );
+			if ( ! target ) {
+				return;
+			}
+			event.preventDefault();
+			target.scrollIntoView( {
+				behavior: prefersReducedMotion ? 'auto' : 'smooth',
+				block: 'start'
+			} );
+			// フォーカスも移動させ、キーボード操作でも位置が伝わるようにする。
+			target.setAttribute( 'tabindex', '-1' );
+			target.focus( { preventScroll: true } );
+		} );
+	} );
+
+	// 現在表示中のセクションに対応するアンカーを強調する。
+	if ( anchorLinks.length && 'IntersectionObserver' in window ) {
+		var sections = anchorLinks
+			.map( function ( link ) {
+				return document.querySelector( link.getAttribute( 'href' ) );
+			} )
+			.filter( Boolean );
+
+		var setCurrent = function ( id ) {
+			anchorLinks.forEach( function ( link ) {
+				link.classList.toggle( 'is-current', link.getAttribute( 'href' ) === '#' + id );
+			} );
+		};
+
+		var currentObserver = new IntersectionObserver(
+			function ( entries ) {
+				entries.forEach( function ( entry ) {
+					if ( entry.isIntersecting ) {
+						setCurrent( entry.target.id );
+					}
+				} );
+			},
+			// 画面上部1/3を「現在地」の判定ラインとする。
+			{ rootMargin: '-20% 0px -67% 0px', threshold: 0 }
+		);
+
+		sections.forEach( function ( section ) {
+			currentObserver.observe( section );
+		} );
+	}
+} )();
+
+</script>

@@ -21,22 +21,8 @@ define( 'NG_PREVIEW', true );
 
 $theme_dir = dirname( __DIR__ ) . '/theme';
 
-/* -------------------------------------------------------------------------
- * WordPress 関数のスタブ
- * ------------------------------------------------------------------------- */
-function esc_html( $t ) { return htmlspecialchars( (string) $t, ENT_QUOTES, 'UTF-8' ); }
-function esc_attr( $t ) { return htmlspecialchars( (string) $t, ENT_QUOTES, 'UTF-8' ); }
-function esc_url( $t )  { return htmlspecialchars( (string) $t, ENT_QUOTES, 'UTF-8' ); }
-function home_url( $path = '' ) { return 'https://genestate.co.jp' . $path; }
-function get_permalink() { return home_url( '/newgrad/' ); }
-function get_the_title() { return '新卒採用'; }
-function current_time( $format ) { return date( $format ); }
-function get_stylesheet_directory() { return dirname( __DIR__ ) . '/theme'; }
-function get_stylesheet_directory_uri() { return 'assets-base'; }
-function is_page_template( $t ) { return 'page-newgrad.php' === $t; }
-function add_action() {}
-function wp_enqueue_style() {}
-function wp_enqueue_script() {}
+/* WordPress 関数のスタブ（render-artifact.php と共通） */
+require_once __DIR__ . '/wp-stubs.php';
 
 function get_header() {
 	$css = file_get_contents( dirname( __DIR__ ) . '/theme/assets/css/newgrad.css' );
