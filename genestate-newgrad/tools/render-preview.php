@@ -46,31 +46,53 @@ function get_header() {
 	echo "<title>新卒採用｜株式会社ジーンステイト（プレビュー）</title>\n";
 	echo "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n";
 	echo "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n";
-	echo "<link href=\"https://fonts.googleapis.com/css2?family=Barlow:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap\" rel=\"stylesheet\">\n";
+	/* 実サイトが読み込んでいるものと同一の指定（display=swap まで含めて同じ）。 */
+	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
 	echo "<style>\n" . $css . "\n</style>\n";
 	echo <<<'HEADCSS'
 <style>
-/* ---- プレビュー専用：親テーマのヘッダー/フッターの代役 ---- */
-body { margin: 0; font-family: "Noto Sans JP", system-ui, sans-serif; }
+/* ---- プレビュー専用：親テーマのヘッダー/フッターの代役 ----
+   本番では親テーマの実物に置き換わる。ここでは見え方を確かめられるよう、
+   実サイトのヘッダー・フッターの色と形（黒地・金のCTA・右上240pxの角丸）を写している。 */
+body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #fff; }
 .pv-note {
-	padding: .75rem 1.25rem; background: #16191D; color: #fff;
-	font-size: .8125rem; line-height: 1.7; text-align: center;
+	padding: 12px 20px; background: #19110C; color: #fff;
+	font-size: 13px; line-height: 1.7; text-align: center;
 }
 .pv-header {
-	display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-	padding: 1rem 1.25rem; border-bottom: 1px solid #DDE3E9; background: #fff;
+	display: flex; align-items: center; justify-content: space-between; gap: 16px;
+	padding: 16px 40px; background: #fff;
 }
 .pv-header__logo { font-weight: 700; letter-spacing: .04em; }
-.pv-header__nav { display: flex; flex-wrap: wrap; gap: 1.25rem; font-size: .8125rem; color: #5C6672; }
+.pv-header__right { display: flex; align-items: center; gap: 24px; }
+.pv-header__nav { display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; }
+/* 実サイトのヘッダーCTA：ピル型・黒と金の2本 */
+.pv-header__cta { display: flex; gap: 8px; }
+.pv-header__cta span {
+	display: block; min-width: 100px; padding: 8px 22px; border-radius: 50px;
+	border: 1px solid; text-align: center; color: #fff; font-size: 13px;
+}
+.pv-header__cta .is-recruit { background: #19110C; border-color: #19110C; }
+.pv-header__cta .is-contact { background: #C7A52D; border-color: #C7A52D; }
 .pv-footer {
-	padding: 2.5rem 1.25rem; background: #16191D; color: #fff;
-	font-size: .8125rem; line-height: 1.9; text-align: center;
+	padding: 46px 40px 51px; background: #19110C; color: #fff;
+	border-radius: 0 240px 0 0;
+	font-size: 13px; line-height: 1.9;
+}
+@media (max-width: 767px) {
+	.pv-header { padding: 16px 20px; }
+	.pv-header__nav, .pv-header__cta { display: none; }
+	.pv-footer { padding: 30px 20px; border-radius: 0 120px 0 0; }
 }
 </style>
 HEADCSS;
 	echo "\n</head>\n<body>\n";
 	echo '<p class="pv-note">これは確認用の静的プレビューです。ヘッダーとフッターは仮のもので、本番では親テーマの実物が入ります（トンマナはそこで自動的に揃います）。</p>' . "\n";
-	echo '<header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span><span>お問い合わせ</span></nav></header>' . "\n";
+	echo '<header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span>'
+		. '<span class="pv-header__right">'
+		. '<nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav>'
+		. '<span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span>'
+		. '</span></header>' . "\n";
 }
 
 function get_footer() {
