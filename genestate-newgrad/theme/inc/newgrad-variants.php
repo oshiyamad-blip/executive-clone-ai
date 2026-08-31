@@ -11,6 +11,8 @@
  *   define( 'NG_TONE',    'b' );  // トンマナ  a=準拠 / b=生成り＋金 / c=ダーク
  *                                 //           d=明朝 / e=丸ゴシック
  *                                 //           f=紺×ライム / g=白と朱（ゼロベース。新色）
+ *   define( 'NG_SHAPE',   'd' );  // 形        a=片角スイープ / b=四隅まるく / c=直線
+ *                                 //           d=斜めカット / e=アーチ
  *
  * 定義しなければ 'a'（現在の実装）になる。
  *
@@ -32,6 +34,7 @@ function ng_variant( $key ) {
 		'numbers' => array( 'const' => 'NG_NUMBERS', 'allow' => array( 'a', 'b' ) ),
 		'growth'  => array( 'const' => 'NG_GROWTH',  'allow' => array( 'a', 'b' ) ),
 		'tone'    => array( 'const' => 'NG_TONE',    'allow' => array( 'a', 'b', 'c', 'd', 'e', 'f', 'g' ) ),
+		'shape'   => array( 'const' => 'NG_SHAPE',   'allow' => array( 'a', 'b', 'c', 'd', 'e' ) ),
 	);
 	if ( ! isset( $map[ $key ] ) ) {
 		return 'a';

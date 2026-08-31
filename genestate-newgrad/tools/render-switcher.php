@@ -264,6 +264,17 @@ SWCSS;
 		</div>
 
 		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-shape">形</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-shape">
+				<button type="button" data-part="shape" data-value="a" aria-pressed="true">A 片角</button>
+				<button type="button" data-part="shape" data-value="b" aria-pressed="false">B 四隅丸</button>
+				<button type="button" data-part="shape" data-value="c" aria-pressed="false">C 直線</button>
+				<button type="button" data-part="shape" data-value="d" aria-pressed="false">D 斜め</button>
+				<button type="button" data-part="shape" data-value="e" aria-pressed="false">E アーチ</button>
+			</div>
+		</div>
+
+		<div class="sw-group">
 			<span class="sw-group__label" id="sw-l-view">表示</span>
 			<div class="sw-seg" role="group" aria-labelledby="sw-l-view">
 				<button type="button" data-part="view" data-value="pc" aria-pressed="true">PC</button>
@@ -295,11 +306,11 @@ function get_footer() {
    選んだ内容は端末に覚えさせ、開き直しても保たれるようにしている。 */
 (function () {
 	var STORE = 'ng-switcher';
-	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', view: 'pc' };
+	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc' };
 
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-		['mv', 'numbers', 'growth', 'tone', 'view'].forEach(function (k) {
+		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
@@ -348,7 +359,8 @@ function get_footer() {
 		return 'MV-' + state.mv.toUpperCase()
 			+ ' ／ 数字-' + state.numbers.toUpperCase()
 			+ ' ／ 育成-' + state.growth.toUpperCase()
-			+ ' ／ トンマナ-' + state.tone.toUpperCase();
+			+ ' ／ トンマナ-' + state.tone.toUpperCase()
+			+ ' ／ 形-' + state.shape.toUpperCase();
 	}
 
 	function render() {
@@ -358,7 +370,10 @@ function get_footer() {
 		applyGrowth(state.growth);
 		applyView(state.view);
 		var main = document.getElementById('newgrad');
-		if (main) { main.setAttribute('data-tone', state.tone); }
+		if (main) {
+			main.setAttribute('data-tone', state.tone);
+			main.setAttribute('data-shape', state.shape);
+		}
 
 		document.querySelectorAll('.sw-seg button').forEach(function (b) {
 			var on = state[b.dataset.part] === b.dataset.value;

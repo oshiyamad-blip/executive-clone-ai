@@ -1821,6 +1821,142 @@
 .ng[data-tone="g"] .ng-numbers--plain .ng-numbers__value { color: var(--ng-c-accent); }
 .ng[data-tone="g"] .ng-btn { padding: 14px 8px 14px 24px; }
 
+/* ==========================================================================
+   7. 形の案（data-shape）
+   --------------------------------------------------------------------------
+   これまで角の形はトンマナの案に紐づいていたが、
+   「色は A のまま、形だけ変えたい」が選べなかったので独立の軸にした。
+
+     a 片角スイープ  既存サイトの署名。片方の上角だけを240px落とす
+     b 四隅まるく    角丸32pxのカードとして面を置く
+     c 直線          角を落とさず罫線で区切る
+     d 斜めカット    セクションの上辺を斜めに切る
+     e アーチ        セクションの上辺を弧に。人物写真は丸窓
+
+   トンマナの案より後に書いてあるので、角に関する指定はこちらが勝つ。
+   本番では NG_SHAPE で選ぶ（未定義なら a）。
+   ========================================================================== */
+
+/* --- a 片角スイープ（既存サイトの署名） --- */
+.ng[data-shape="a"] {
+	--ng-corner: 240px;
+	--ng-corner-sp: 120px;
+	--ng-radius: 8px;
+	--ng-radius-pill: 50px;
+}
+.ng[data-shape="a"] .ng-section { border-radius: var(--ng-corner) 0 0 0; }
+.ng[data-shape="a"] .ng-section--subtle,
+.ng[data-shape="a"] .ng-section--brand { border-radius: 0 var(--ng-corner) 0 0; }
+
+/* --- b 四隅まるく --- */
+.ng[data-shape="b"] {
+	--ng-corner: 32px;
+	--ng-corner-sp: 24px;
+	--ng-radius: 24px;
+	--ng-radius-pill: 50px;
+}
+.ng[data-shape="b"] .ng-section,
+.ng[data-shape="b"] .ng-section--subtle,
+.ng[data-shape="b"] .ng-section--brand {
+	border-radius: var(--ng-corner);
+	clip-path: none;
+	margin-top: 0;
+}
+
+/* --- c 直線 --- */
+.ng[data-shape="c"] {
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+	--ng-radius: 0;
+	--ng-radius-pill: 0;
+}
+.ng[data-shape="c"] .ng-section,
+.ng[data-shape="c"] .ng-section--subtle,
+.ng[data-shape="c"] .ng-section--brand {
+	border-radius: 0;
+	clip-path: none;
+	margin-top: 0;
+	border-top: 1px solid var(--ng-c-line);
+}
+
+/* --- d 斜めカット ---------------------------------------------------------
+   上辺を斜めに切り、そのぶん上へ重ねる。切り取った三角から
+   前のセクションの地色が覗く。白セクションと地色セクションで傾きを逆にして、
+   ページを下るとジグザグに見えるようにしている。
+   ---------------------------------------------------------------------- */
+.ng[data-shape="d"] {
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+	--ng-radius: 0;
+	--ng-radius-pill: 50px;
+	--d-slant: 64px;
+}
+.ng[data-shape="d"] .ng-section {
+	border-radius: 0;
+	clip-path: polygon(0 var(--d-slant), 100% 0, 100% 100%, 0 100%);
+	margin-top: calc(var(--d-slant) * -1);
+	padding-top: calc(var(--ng-section-y) + var(--d-slant));
+}
+.ng[data-shape="d"] .ng-section--subtle,
+.ng[data-shape="d"] .ng-section--brand {
+	clip-path: polygon(0 0, 100% var(--d-slant), 100% 100%, 0 100%);
+}
+/* 写真も同じ角度で切る。形の言語をページ全体でそろえる */
+.ng[data-shape="d"] .ng-hero__band {
+	border-radius: 0;
+	clip-path: polygon(0 32px, 100% 0, 100% 100%, 0 100%);
+}
+@media (max-width: 767px) {
+	.ng[data-shape="d"] { --d-slant: 32px; }
+}
+
+/* --- e アーチ -------------------------------------------------------------
+   上辺をゆるい弧にする。人物写真は丸窓に切り抜く。
+   曲線でページ全体をやわらげる方向。
+   ---------------------------------------------------------------------- */
+.ng[data-shape="e"] {
+	--ng-corner: 0;
+	--ng-corner-sp: 0;
+	--ng-radius: 16px;
+	--ng-radius-pill: 50px;
+	--e-arch: 80px;
+}
+.ng[data-shape="e"] .ng-section,
+.ng[data-shape="e"] .ng-section--subtle,
+.ng[data-shape="e"] .ng-section--brand {
+	border-radius: 50% 50% 0 0 / var(--e-arch) var(--e-arch) 0 0;
+	clip-path: none;
+	margin-top: calc(var(--e-arch) * -0.5);
+	padding-top: calc(var(--ng-section-y) + var(--e-arch) * 0.5);
+	overflow: hidden;
+}
+/* MV下の写真帯は、上辺だけをアーチに */
+.ng[data-shape="e"] .ng-hero__band {
+	border-radius: 50% 50% 0 0 / 60px 60px 0 0;
+}
+/* 人物写真は丸窓。顔が主役になる */
+.ng[data-shape="e"] .ng-people__media {
+	border-radius: 100%;
+	overflow: hidden;
+	aspect-ratio: 1 / 1;
+}
+.ng[data-shape="e"] .ng-people__media img,
+.ng[data-shape="e"] .ng-people__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0;
+	border-radius: inherit;
+}
+@media (max-width: 767px) {
+	.ng[data-shape="e"] { --e-arch: 40px; }
+}
+
+/* 形を変えたときに、下敷きの継ぎ目処理が邪魔になる案では消す */
+.ng[data-shape="b"] .ng-section::before,
+.ng[data-shape="c"] .ng-section::before,
+.ng[data-shape="d"] .ng-section::before,
+.ng[data-shape="e"] .ng-section::before { content: none; }
+
 </style>
 <style>
 /* ---- プレビュー専用 ---- */
@@ -1864,7 +2000,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 <p class="pv-note">これは確認用の静的プレビューです。ヘッダーとフッターは仮のもので、本番では親テーマの実物が入ります（トンマナはそこで自動的に揃います）。</p>
 <header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><span class="pv-header__right"><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav><span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span></span></header>
 
-<main class="ng" id="newgrad" data-tone="a">
+<main class="ng" id="newgrad" data-tone="a" data-shape="a">
 
 			<div class="ng-draftbar">
 			下書きモード：社内未確認の項目が <strong>24</strong> 件あります。

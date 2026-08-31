@@ -43,6 +43,12 @@
  *                 e … 丸ゴシック（M PLUS Rounded 1c。いちばん柔らかい）
  *                 f … 紺×ライム（ゼロベース。★新しい色を使う）
  *                 g … 白と朱（ゼロベース。★新しい色を使う）
+ *   NG_SHAPE    形（トンマナとは独立して選べる）
+ *                 a … 片角スイープ（既存サイトの署名。240px）
+ *                 b … 四隅まるく（32px のカード）
+ *                 c … 直線（角を落とさず罫線で区切る）
+ *                 d … 斜めカット（上辺を斜めに。ジグザグに見える）
+ *                 e … アーチ（上辺を弧に。人物写真は丸窓）
  *               ※ d と e は和文書体が変わるため、本番でも
  *                  対応する Google Fonts の読み込みが必要
  *               → 考え方と参考サイトは docs/07-tone-references.md
@@ -54,6 +60,7 @@
 // define( 'NG_NUMBERS', 'b' );
 // define( 'NG_GROWTH',  'b' );
 // define( 'NG_TONE',    'b' );
+// define( 'NG_SHAPE',   'a' );
 
 require_once get_stylesheet_directory() . '/inc/newgrad-functions.php';
 
