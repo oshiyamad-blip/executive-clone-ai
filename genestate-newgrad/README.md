@@ -45,6 +45,10 @@ genestate-newgrad/
 │       ├── js/newgrad.js              アコーディオン・フェードイン・固定CTA
 │       └── img/                       ここに P-01.jpg 〜 P-18.jpg を置く
 │
+├── design/                            意匠の検討用
+│   ├── *.dc.html / canvas.json        MV・セクションの案（キャンバス用の元ファイル）
+│   └── options.html                   ★案を比較する社内選定ページ（Artifactへ公開する中身）
+│
 ├── tools/
 │   ├── wp-stubs.php                   WordPress関数の最小スタブ（下の2本が共通で使う）
 │   ├── render-preview.php             ローカル確認用の静的プレビュー生成
@@ -158,6 +162,18 @@ php tools/render-preview.php > preview/index.html
 
 生成された `preview/index.html` をブラウザで開く。
 CSSとJSがインライン化された1枚のHTMLなので、そのままメールで送ることもできる。
+
+### 意匠の選定（MV 4案などを比べてもらう）
+
+`design/options.html` は、MV 4案とセクション意匠2箇所×2案を並べた選定用のページ。
+生成ツールは無く、手で書いた1枚のHTMLをそのまま Artifact として公開する。
+
+モックは 1440px の設計を container query（`cqw`）で縮尺表示している。
+`1cqw` = 枠幅の1% なので、設計値の px を 14.4 で割った値を書けば、
+どの画面幅で見ても 1440px 設計の比率のまま縮む。
+
+配色・書体は採用ページ本体と同じ実サイトの値のみを使っている。
+**案を1つ選んでもらったら、`page-newgrad.php` の MV に反映する。**
 
 ### 社内共有（URLを配ってレビューしてもらう）
 
