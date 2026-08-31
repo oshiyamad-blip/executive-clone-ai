@@ -85,7 +85,7 @@
 
 	/* --- レイアウト ------------------------------------------------------ */
 	--ng-container:        1120px; /* 実値 1220px から左右 padding 50px を引いた内寸 */
-	--ng-container-narrow: 760px;
+	--ng-container-narrow: 740px; /* 実値。読み物の狭い版（.modForm / .modListNews / .newsDetail） */
 	--ng-gutter:    clamp(20px, 4vw, 50px);   /* 実値 PC 50px / SP 20px */
 	--ng-section-y: clamp(100px, 9vw, 120px); /* 実値 PC 120px / SP 100px */
 
@@ -753,11 +753,14 @@
 }
 
 /* --- 4-6. WORK --------------------------------------------------------- */
+/* 実サイトで縦罫を引いているのは記事本文の見出しだけで、その1箇所の作法が
+   `width:5px; height:100%; background:var(--gold); left:0`。
+   縦罫を使うならこの引き方に合わせる。 */
 .ng-work__note {
 	margin-top: 1.25em;
 	padding: 1em 1.25em;
 	background: var(--ng-c-brand-tint);
-	border-left: 3px solid var(--ng-c-brand);
+	border-left: 5px solid var(--ng-c-accent); /* 実値 */
 	border-radius: 0 var(--ng-radius) var(--ng-radius) 0;
 	font-size: 15px;
 	line-height: 1.9;

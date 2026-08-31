@@ -65,6 +65,7 @@ https://genestate.co.jp/cms/wp-content/themes/genestate/assets/css/main.css
 | 画像・カードの角丸 | `--ng-radius` | `8px` | `.recruitList__item__img` ほか |
 | セクションの片角 | `--ng-corner` / `-sp` | `240px` / `120px` | `.modSection` |
 | コンテンツの最大幅 | `--ng-container` | `1120px` | `1220px − padding 50px×2` |
+| 読み物の狭い幅 | `--ng-container-narrow` | `740px` | `.modForm` / `.modListNews` / `.newsDetail` |
 | セクションの上下余白 | `--ng-section-y` | `120px`（SP `100px`） | `.modSection` |
 
 **唯一「実サイトに該当が無い」値**は `--ng-c-brand-rgb: 25, 17, 12`。
@@ -96,6 +97,14 @@ https://genestate.co.jp/cms/wp-content/themes/genestate/assets/css/main.css
 | g | **セクションの片方の上角だけを 240px 落とす**（白は左上／地色は右上）。地色セクションの直後の白セクションは `::before` で上半分に地色を敷き、切り欠きから覗かせる | `.ng-section` に移植 |
 | h | **影を使わない**。奥行きは地色の面と余白で出す | `--ng-shadow` を廃止 |
 | i | 角丸を持たない要素が無い（正方形の角を避ける） | 全体を確認済み |
+| j | 縦罫を引いているのは記事本文の見出しだけで、その作法が `width:5px` の金 | `.ng-work__note` の左罫を金5pxに |
+
+### 採取値の検証
+
+採取した値は、5系統（色／タイポ／レイアウト／意匠／recruitページ）に分けて
+それぞれ別に採り直し、さらに各値を実CSSに当てて突き合わせている。
+**250件を検証して棄却はゼロ**。訂正が付いたものは出現回数の数え違いや、
+このページでは使わない箇所（フォームのプレースホルダ等）の細部だった。
 
 ---
 
