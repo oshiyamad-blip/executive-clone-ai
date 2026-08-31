@@ -1,0 +1,972 @@
+@charset "UTF-8";
+/* ==========================================================================
+   新卒採用サイト（/newgrad/）専用スタイル
+   株式会社ジーンステイト
+
+   構成
+     0. デザイントークン  ← ★既存サイトのトンマナ反映は、ここだけを書き換える
+     1. スコープ内リセット
+     2. レイアウト部品
+     3. 汎用パーツ（見出し・ボタン・写真プレースホルダ）
+     4. セクション別
+     5. ユーティリティ
+
+   すべてのセレクタを .ng 配下にスコープしている。
+   親テーマのスタイルと衝突させず、また本CSSが親テーマを汚染しないため。
+   ========================================================================== */
+
+
+/* ==========================================================================
+   0. デザイントークン
+   --------------------------------------------------------------------------
+   ★★★ ここが唯一の「トンマナ差し替えポイント」 ★★★
+
+   コーポレートサイト（genestate.co.jp）の実CSSから以下を採取して差し替える。
+     - ブランドカラー / アクセントカラー / 文字色 / 罫線色 / 背景色
+     - font-family / 見出しのウェイト・字間 / 本文の行間
+     - 角丸半径 / セクションの上下余白 / コンテンツ最大幅
+
+   採取方法：トップページで DevTools を開き、
+     getComputedStyle(document.body) の color / font-family / font-size
+     ボタン要素の background-color / border-radius
+     見出し h2 の font-weight / letter-spacing
+   を確認して、下記の値を置き換える。
+
+   現在の値は暫定のプレースホルダであり、実サイトの値ではない。
+   ========================================================================== */
+.ng {
+	/* --- 色 ------------------------------------------------------------- */
+	--ng-c-fg:          #16191D; /* 本文 */
+	--ng-c-fg-muted:    #5C6672; /* 補足文 */
+	--ng-c-fg-invert:   #FFFFFF;
+	--ng-c-bg:          #FFFFFF;
+	--ng-c-bg-subtle:   #F5F7F9; /* セクション交互の背景 */
+	--ng-c-brand:       #0B3A6F; /* ★要差し替え：ブランドカラー */
+	--ng-c-brand-dark:  #07284D; /* ★要差し替え：ブランドカラーの暗色 */
+	--ng-c-brand-tint:  #EAF0F7; /* ★要差し替え：ブランドカラーの淡色 */
+	--ng-c-accent:      #C8752B; /* ★要差し替え：アクセント（CTA・強調） */
+	--ng-c-accent-dark: #A65E1E;
+	--ng-c-line:        #DDE3E9;
+	--ng-c-line-strong: #B9C2CC;
+
+	/* --- タイポグラフィ -------------------------------------------------- */
+	/* ★要差し替え：実サイトの font-family をそのまま貼る */
+	--ng-font: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+	           "BIZ UDPGothic", Meiryo, system-ui, sans-serif;
+	--ng-font-en: "Barlow", "Helvetica Neue", Arial, sans-serif;
+
+	--ng-fs-hero:  clamp(2.25rem, 6.4vw, 4.25rem);
+	--ng-fs-h2:    clamp(1.5rem, 3.4vw, 2.375rem);
+	--ng-fs-h3:    clamp(1.125rem, 2.2vw, 1.5rem);
+	--ng-fs-lead:  clamp(0.9375rem, 1.6vw, 1.125rem);
+	--ng-fs-body:  1rem;
+	--ng-fs-small: 0.8125rem;
+
+	--ng-lh-tight: 1.35;
+	--ng-lh-body:  2;     /* 日本語本文はゆったり。読み物ページで効く */
+	--ng-ls-head:  0.04em;
+	--ng-ls-en:    0.16em; /* 英字ラベルの字間 */
+
+	/* --- レイアウト ------------------------------------------------------ */
+	--ng-container: 1120px;
+	--ng-container-narrow: 760px;
+	--ng-gutter: clamp(1.25rem, 5vw, 2.5rem);
+	--ng-section-y: clamp(3.5rem, 9vw, 7.5rem);
+
+	/* --- あしらい -------------------------------------------------------- */
+	--ng-radius:    4px;  /* ★要差し替え：実サイトの角丸に合わせる */
+	--ng-radius-lg: 8px;
+	--ng-shadow:    0 1px 2px rgba(16, 24, 40, .05),
+	                0 8px 24px -12px rgba(16, 24, 40, .18);
+	--ng-ease:      cubic-bezier(.22, .61, .36, 1);
+	--ng-dur:       .32s;
+}
+
+
+/* ==========================================================================
+   1. スコープ内リセット
+   ========================================================================== */
+.ng,
+.ng *,
+.ng *::before,
+.ng *::after { box-sizing: border-box; }
+
+.ng {
+	margin: 0;
+	color: var(--ng-c-fg);
+	background: var(--ng-c-bg);
+	font-family: var(--ng-font);
+	font-size: var(--ng-fs-body);
+	line-height: var(--ng-lh-body);
+	font-feature-settings: "palt" 1; /* 日本語の約物を詰める */
+	-webkit-font-smoothing: antialiased;
+	overflow-x: clip;
+}
+
+.ng p { margin: 0 0 1.4em; }
+.ng p:last-child { margin-bottom: 0; }
+.ng h1, .ng h2, .ng h3, .ng h4 {
+	margin: 0;
+	line-height: var(--ng-lh-tight);
+	letter-spacing: var(--ng-ls-head);
+	font-weight: 700;
+}
+.ng ul, .ng ol { margin: 0; padding: 0; list-style: none; }
+.ng img { display: block; max-width: 100%; height: auto; }
+.ng a { color: inherit; text-decoration: none; }
+.ng a:focus-visible,
+.ng button:focus-visible {
+	outline: 2px solid var(--ng-c-accent);
+	outline-offset: 3px;
+	border-radius: 2px;
+}
+
+
+/* ==========================================================================
+   2. レイアウト部品
+   ========================================================================== */
+.ng-container {
+	width: 100%;
+	max-width: var(--ng-container);
+	margin-inline: auto;
+	padding-inline: var(--ng-gutter);
+}
+.ng-container--narrow { max-width: var(--ng-container-narrow); }
+
+.ng-section { padding-block: var(--ng-section-y); }
+.ng-section--subtle { background: var(--ng-c-bg-subtle); }
+.ng-section--brand {
+	background: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+.ng-section--brand .ng-head__title,
+.ng-section--brand .ng-lead { color: inherit; }
+.ng-section--brand .ng-head__en { color: rgba(255, 255, 255, .72); }
+
+
+/* ==========================================================================
+   3. 汎用パーツ
+   ========================================================================== */
+
+/* --- セクション見出し -------------------------------------------------- */
+.ng-head { margin-bottom: clamp(2rem, 4vw, 3.5rem); }
+.ng-head__en {
+	display: block;
+	margin-bottom: .75em;
+	color: var(--ng-c-brand);
+	font-family: var(--ng-font-en);
+	font-size: var(--ng-fs-small);
+	font-weight: 600;
+	letter-spacing: var(--ng-ls-en);
+	line-height: 1;
+	text-transform: uppercase;
+}
+.ng-head__title { font-size: var(--ng-fs-h2); }
+.ng-head__lead {
+	max-width: 46em;
+	margin-top: 1.25em;
+	color: var(--ng-c-fg-muted);
+	font-size: var(--ng-fs-lead);
+}
+
+/* --- ボタン ------------------------------------------------------------ */
+.ng-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: .75em;
+	padding: 1.05em 2.25em;
+	border: 1px solid transparent;
+	border-radius: var(--ng-radius);
+	font-size: var(--ng-fs-body);
+	font-weight: 700;
+	letter-spacing: .04em;
+	line-height: 1;
+	cursor: pointer;
+	transition: background-color var(--ng-dur) var(--ng-ease),
+	            color var(--ng-dur) var(--ng-ease),
+	            border-color var(--ng-dur) var(--ng-ease),
+	            transform var(--ng-dur) var(--ng-ease);
+}
+.ng-btn::after {
+	content: "";
+	width: .5em; height: .5em;
+	border-top: 2px solid currentColor;
+	border-right: 2px solid currentColor;
+	transform: rotate(45deg);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-btn:hover::after { transform: rotate(45deg) translate(2px, -2px); }
+
+.ng-btn--primary {
+	background: var(--ng-c-accent);
+	color: var(--ng-c-fg-invert);
+}
+.ng-btn--primary:hover { background: var(--ng-c-accent-dark); }
+
+.ng-btn--ghost {
+	border-color: currentColor;
+	background: transparent;
+}
+.ng-btn--ghost:hover {
+	background: var(--ng-c-brand);
+	border-color: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+.ng-btn--onbrand {
+	background: var(--ng-c-fg-invert);
+	color: var(--ng-c-brand);
+}
+.ng-btn--onbrand:hover { background: rgba(255, 255, 255, .88); }
+
+/* --- テキストリンク ---------------------------------------------------- */
+.ng-link {
+	display: inline-flex;
+	align-items: center;
+	gap: .6em;
+	padding-bottom: .35em;
+	border-bottom: 1px solid var(--ng-c-line-strong);
+	font-weight: 700;
+	transition: border-color var(--ng-dur) var(--ng-ease),
+	            color var(--ng-dur) var(--ng-ease);
+}
+.ng-link::after {
+	content: "";
+	width: .45em; height: .45em;
+	border-top: 2px solid currentColor;
+	border-right: 2px solid currentColor;
+	transform: rotate(45deg);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-link:hover {
+	color: var(--ng-c-brand);
+	border-color: var(--ng-c-brand);
+}
+.ng-link:hover::after { transform: rotate(45deg) translateX(2px); }
+
+.ng-sectionfoot { margin-top: clamp(2rem, 4vw, 3rem); }
+
+/* --- 写真プレースホルダ ------------------------------------------------
+   写真が未入稿の間、どのカットが入るのかを画面上に明示する。
+   docs/04-photo-requirements.md の写真IDと対応。
+   実画像を登録すると自動的に <img> に置き換わる。
+   ---------------------------------------------------------------------- */
+.ng-ph {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: .5em;
+	padding: 1.5rem;
+	background:
+		repeating-linear-gradient(
+			-45deg,
+			var(--ng-c-bg-subtle) 0 10px,
+			#EDF1F5 10px 20px
+		);
+	border: 1px dashed var(--ng-c-line-strong);
+	border-radius: var(--ng-radius);
+	color: var(--ng-c-fg-muted);
+	text-align: center;
+	line-height: 1.5;
+}
+.ng-ph__id {
+	font-family: var(--ng-font-en);
+	font-size: 1.125rem;
+	font-weight: 700;
+	letter-spacing: var(--ng-ls-en);
+	color: var(--ng-c-brand);
+}
+.ng-ph__note { font-size: var(--ng-fs-small); max-width: 28em; }
+
+/* --- 未確認項目バッジ（下書きモードのみ表示） -------------------------- */
+.ng-todo {
+	display: inline-block;
+	margin-inline-start: .4em;
+	padding: .15em .6em;
+	background: #FFF3CD;
+	border: 1px solid #E0B44C;
+	border-radius: 2px;
+	color: #7A5300;
+	font-size: .6875rem;
+	font-weight: 700;
+	letter-spacing: .06em;
+	line-height: 1.6;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+.ng-draftbar {
+	position: sticky;
+	top: 0;
+	z-index: 40;
+	padding: .7em var(--ng-gutter);
+	background: #7A5300;
+	color: #fff;
+	font-size: var(--ng-fs-small);
+	line-height: 1.6;
+	text-align: center;
+}
+
+
+/* ==========================================================================
+   4. セクション別
+   ========================================================================== */
+
+/* --- 4-1. MV ----------------------------------------------------------- */
+.ng-hero {
+	position: relative;
+	display: grid;
+	align-items: end;
+	min-height: clamp(30rem, 82svh, 46rem);
+	background: var(--ng-c-brand-dark);
+	color: var(--ng-c-fg-invert);
+	overflow: hidden;
+}
+.ng-hero__media {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+}
+.ng-hero__media img {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	object-position: center 35%;
+}
+.ng-hero__media .ng-ph {
+	height: 100%;
+	border: 0;
+	border-radius: 0;
+}
+/* 写真の上に文字を載せるための可読性グラデーション */
+.ng-hero__scrim {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	background: linear-gradient(
+		to top,
+		rgba(7, 40, 77, .86) 0%,
+		rgba(7, 40, 77, .55) 38%,
+		rgba(7, 40, 77, .18) 70%,
+		rgba(7, 40, 77, .30) 100%
+	);
+}
+.ng-hero__inner {
+	position: relative;
+	z-index: 2;
+	padding-block: clamp(3rem, 8vw, 5.5rem);
+}
+.ng-hero__badge {
+	display: inline-block;
+	margin-bottom: 1.5em;
+	padding: .55em 1.2em;
+	border: 1px solid rgba(255, 255, 255, .6);
+	border-radius: 999px;
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .1em;
+	line-height: 1;
+}
+.ng-hero__catch {
+	font-size: var(--ng-fs-hero);
+	font-weight: 700;
+	letter-spacing: .02em;
+	line-height: 1.22;
+	text-shadow: 0 2px 24px rgba(7, 40, 77, .45);
+}
+.ng-hero__sub {
+	max-width: 34em;
+	margin-top: 1.4em;
+	font-size: var(--ng-fs-lead);
+	line-height: 1.9;
+	text-shadow: 0 1px 16px rgba(7, 40, 77, .5);
+}
+.ng-hero__actions { margin-top: clamp(2rem, 4vw, 2.75rem); }
+
+/* アンカーナビ：モバイルは横スクロール */
+.ng-anchors {
+	position: relative;
+	z-index: 3;
+	background: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+.ng-anchors__list {
+	display: flex;
+	gap: clamp(1rem, 3vw, 2.25rem);
+	overflow-x: auto;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
+}
+.ng-anchors__list::-webkit-scrollbar { display: none; }
+.ng-anchors__list a {
+	display: block;
+	padding: 1.15em 0;
+	border-bottom: 2px solid transparent;
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .06em;
+	white-space: nowrap;
+	transition: border-color var(--ng-dur) var(--ng-ease),
+	            opacity var(--ng-dur) var(--ng-ease);
+}
+.ng-anchors__list a:hover { border-color: var(--ng-c-fg-invert); }
+/* JS がスクロール位置に応じて付与する現在地表示 */
+.ng-anchors__list a.is-current { border-color: var(--ng-c-fg-invert); }
+
+/* --- 4-2. INTRODUCTION ------------------------------------------------- */
+.ng-intro__grid {
+	display: grid;
+	gap: clamp(2rem, 5vw, 4rem);
+}
+.ng-intro__media { aspect-ratio: 4 / 3; }
+.ng-intro__media img,
+.ng-intro__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-intro__body { max-width: 40em; }
+
+/* --- 4-3. MESSAGE ------------------------------------------------------ */
+.ng-message__grid {
+	display: grid;
+	gap: clamp(2rem, 5vw, 4rem);
+	align-items: start;
+}
+.ng-message__media { aspect-ratio: 3 / 4; }
+.ng-message__media img,
+.ng-message__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-message__lead {
+	margin-bottom: 1.6em;
+	font-size: var(--ng-fs-h3);
+	font-weight: 700;
+	line-height: 1.7;
+}
+.ng-message__sign {
+	display: flex;
+	align-items: baseline;
+	gap: .9em;
+	margin-top: 2em;
+	padding-top: 1.4em;
+	border-top: 1px solid var(--ng-c-line);
+}
+.ng-message__pos { color: var(--ng-c-fg-muted); font-size: var(--ng-fs-small); }
+.ng-message__name { font-size: var(--ng-fs-h3); font-weight: 700; }
+
+/* --- 4-4. NUMBERS ------------------------------------------------------ */
+.ng-numbers__grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+	gap: 1px;
+	background: rgba(255, 255, 255, .28); /* グリッド線として機能させる */
+	border: 1px solid rgba(255, 255, 255, .28);
+}
+.ng-numbers__item {
+	padding: clamp(1.5rem, 3vw, 2.5rem);
+	background: var(--ng-c-brand);
+}
+.ng-numbers__label {
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .08em;
+	opacity: .82;
+}
+.ng-numbers__value {
+	display: flex;
+	align-items: baseline;
+	gap: .15em;
+	margin-top: .3em;
+	font-family: var(--ng-font-en);
+	font-size: clamp(2.75rem, 7vw, 4rem);
+	font-weight: 700;
+	line-height: 1;
+	letter-spacing: -.01em;
+}
+.ng-numbers__unit { font-family: var(--ng-font); font-size: 1rem; font-weight: 700; }
+.ng-numbers__desc {
+	margin-top: .9em;
+	font-size: var(--ng-fs-small);
+	line-height: 1.85;
+	opacity: .82;
+}
+.ng-note {
+	margin-top: 1.5em;
+	font-size: var(--ng-fs-small);
+	opacity: .72;
+}
+
+/* --- 4-5. BUSINESS ----------------------------------------------------- */
+.ng-biz__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: clamp(1.5rem, 3vw, 2.5rem);
+}
+.ng-biz__item {
+	display: flex;
+	flex-direction: column;
+	background: var(--ng-c-bg);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+.ng-biz__media { aspect-ratio: 16 / 10; }
+.ng-biz__media img,
+.ng-biz__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0; border-radius: 0;
+}
+.ng-biz__body { padding: clamp(1.5rem, 3vw, 2rem); }
+.ng-biz__no {
+	display: block;
+	color: var(--ng-c-brand);
+	font-family: var(--ng-font-en);
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: var(--ng-ls-en);
+}
+.ng-biz__name { margin-top: .5em; font-size: var(--ng-fs-h3); }
+.ng-biz__catch {
+	margin-top: .7em;
+	color: var(--ng-c-brand);
+	font-weight: 700;
+	line-height: 1.7;
+}
+.ng-biz__text {
+	margin-top: .9em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+
+/* --- 4-6. WORK --------------------------------------------------------- */
+.ng-work__note {
+	margin-top: 1.25em;
+	padding: 1em 1.25em;
+	background: var(--ng-c-brand-tint);
+	border-left: 3px solid var(--ng-c-brand);
+	border-radius: 0 var(--ng-radius) var(--ng-radius) 0;
+	font-size: .9375rem;
+	line-height: 1.9;
+}
+.ng-work__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+	gap: clamp(1.5rem, 3vw, 2.5rem);
+}
+.ng-work__item {
+	display: block;
+	background: var(--ng-c-bg);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+	transition: box-shadow var(--ng-dur) var(--ng-ease),
+	            transform var(--ng-dur) var(--ng-ease),
+	            border-color var(--ng-dur) var(--ng-ease);
+}
+.ng-work__item:hover {
+	border-color: var(--ng-c-brand);
+	box-shadow: var(--ng-shadow);
+	transform: translateY(-3px);
+}
+.ng-work__media { aspect-ratio: 16 / 9; }
+.ng-work__media img,
+.ng-work__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0; border-radius: 0;
+}
+.ng-work__body { padding: clamp(1.5rem, 3vw, 2rem); }
+.ng-work__name { font-size: var(--ng-fs-h3); }
+.ng-work__catch { margin-top: .6em; color: var(--ng-c-brand); font-weight: 700; }
+.ng-work__text {
+	margin-top: .9em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+.ng-work__more { margin-top: 1.4em; }
+
+/* --- 4-7. GROWTH ------------------------------------------------------- */
+.ng-growth__timeline {
+	display: grid;
+	gap: 0;
+	margin-bottom: clamp(2.5rem, 5vw, 4rem);
+}
+.ng-growth__step {
+	position: relative;
+	padding: 0 0 2.25rem 2.25rem;
+	border-left: 2px solid var(--ng-c-line);
+}
+.ng-growth__step:last-child { padding-bottom: 0; border-left-color: transparent; }
+.ng-growth__step::before {
+	content: "";
+	position: absolute;
+	top: .45em; left: -.5rem;
+	width: .875rem; height: .875rem;
+	background: var(--ng-c-bg);
+	border: 3px solid var(--ng-c-brand);
+	border-radius: 50%;
+}
+.ng-growth__term {
+	display: inline-block;
+	margin-bottom: .5em;
+	padding: .3em .85em;
+	background: var(--ng-c-brand);
+	border-radius: 999px;
+	color: var(--ng-c-fg-invert);
+	font-size: .75rem;
+	font-weight: 700;
+	letter-spacing: .06em;
+	line-height: 1.5;
+}
+.ng-growth__steptitle { font-size: var(--ng-fs-h3); }
+.ng-growth__steptext {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+.ng-growth__features {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+	gap: 1px;
+	background: var(--ng-c-line);
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+.ng-growth__feature {
+	padding: clamp(1.5rem, 3vw, 2rem);
+	background: var(--ng-c-bg);
+}
+.ng-growth__featuretitle {
+	font-size: 1.0625rem;
+	line-height: 1.6;
+}
+.ng-growth__featuretext {
+	margin-top: .8em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+.ng-growth__media { margin-bottom: clamp(2rem, 4vw, 3rem); aspect-ratio: 21 / 9; }
+.ng-growth__media img,
+.ng-growth__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+
+/* --- 4-8. PEOPLE ------------------------------------------------------- */
+.ng-people__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+	gap: clamp(1.25rem, 2.5vw, 2rem);
+}
+.ng-people__item { display: block; }
+.ng-people__media {
+	aspect-ratio: 3 / 4;
+	overflow: hidden;
+	border-radius: var(--ng-radius);
+}
+.ng-people__media img,
+.ng-people__media .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	transition: transform .6s var(--ng-ease);
+}
+.ng-people__item:hover .ng-people__media img { transform: scale(1.04); }
+.ng-people__cat {
+	display: inline-block;
+	margin-top: 1.1em;
+	color: var(--ng-c-brand);
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .06em;
+}
+.ng-people__catch {
+	margin-top: .4em;
+	font-size: 1.0625rem;
+	font-weight: 700;
+	line-height: 1.65;
+}
+.ng-people__prof {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: var(--ng-fs-small);
+	line-height: 1.75;
+}
+
+/* --- 4-9. CULTURE ------------------------------------------------------ */
+.ng-culture__gallery {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: clamp(.75rem, 1.5vw, 1rem);
+	margin-bottom: clamp(2rem, 4vw, 3rem);
+}
+.ng-culture__gallery > * { aspect-ratio: 4 / 3; }
+.ng-culture__gallery img,
+.ng-culture__gallery .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border-radius: var(--ng-radius);
+}
+.ng-culture__list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+	gap: clamp(1.25rem, 2.5vw, 2rem);
+}
+.ng-culture__item {
+	padding-top: 1.25em;
+	border-top: 2px solid var(--ng-c-fg);
+}
+.ng-culture__itemtitle { font-size: 1.0625rem; }
+.ng-culture__itemtext {
+	margin-top: .7em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+
+/* --- 4-10. RECRUIT ----------------------------------------------------- */
+.ng-table {
+	width: 100%;
+	border-collapse: collapse;
+	border-top: 1px solid var(--ng-c-line);
+	text-align: left;
+}
+.ng-table th,
+.ng-table td {
+	padding: 1.15em 1em;
+	border-bottom: 1px solid var(--ng-c-line);
+	font-size: .9375rem;
+	line-height: 1.9;
+	vertical-align: top;
+}
+.ng-table th {
+	width: 12em;
+	color: var(--ng-c-brand);
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.ng-flow {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+	gap: clamp(.75rem, 1.5vw, 1rem);
+	margin-top: clamp(2.5rem, 5vw, 4rem);
+}
+.ng-flow__item {
+	position: relative;
+	padding: clamp(1.25rem, 2.5vw, 1.75rem);
+	background: var(--ng-c-bg-subtle);
+	border-radius: var(--ng-radius);
+}
+.ng-flow__step {
+	display: block;
+	color: var(--ng-c-brand);
+	font-family: var(--ng-font-en);
+	font-size: .75rem;
+	font-weight: 700;
+	letter-spacing: var(--ng-ls-en);
+}
+.ng-flow__title { margin-top: .5em; font-size: 1.0625rem; }
+.ng-flow__text {
+	margin-top: .6em;
+	color: var(--ng-c-fg-muted);
+	font-size: var(--ng-fs-small);
+	line-height: 1.85;
+}
+
+/* --- 4-11. FAQ --------------------------------------------------------- */
+.ng-faq { border-top: 1px solid var(--ng-c-line); }
+.ng-faq__item { border-bottom: 1px solid var(--ng-c-line); }
+.ng-faq__q {
+	display: flex;
+	align-items: flex-start;
+	gap: 1em;
+	width: 100%;
+	padding: 1.5em 0;
+	background: none;
+	border: 0;
+	color: inherit;
+	font-family: inherit;
+	font-size: 1.0625rem;
+	font-weight: 700;
+	line-height: 1.7;
+	text-align: left;
+	cursor: pointer;
+}
+.ng-faq__mark {
+	flex: none;
+	color: var(--ng-c-brand);
+	font-family: var(--ng-font-en);
+	font-size: 1.125rem;
+}
+.ng-faq__qtext { flex: 1; }
+.ng-faq__icon {
+	position: relative;
+	flex: none;
+	width: 1.125rem; height: 1.125rem;
+	margin-top: .35em;
+}
+.ng-faq__icon::before,
+.ng-faq__icon::after {
+	content: "";
+	position: absolute;
+	top: 50%; left: 0;
+	width: 100%; height: 2px;
+	background: var(--ng-c-brand);
+	transform: translateY(-50%);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-faq__icon::after { transform: translateY(-50%) rotate(90deg); }
+.ng-faq__q[aria-expanded="true"] .ng-faq__icon::after { transform: translateY(-50%) rotate(0); }
+
+.ng-faq__a {
+	display: grid;
+	grid-template-rows: 0fr;
+	transition: grid-template-rows var(--ng-dur) var(--ng-ease);
+}
+.ng-faq__a[data-open="true"] { grid-template-rows: 1fr; }
+.ng-faq__ainner { overflow: hidden; }
+.ng-faq__abody {
+	display: flex;
+	gap: 1em;
+	padding-bottom: 1.75em;
+	color: var(--ng-c-fg-muted);
+	font-size: .9375rem;
+	line-height: 1.95;
+}
+.ng-faq__abody .ng-faq__mark { color: var(--ng-c-accent); }
+
+/* --- 4-12. ENTRY CTA --------------------------------------------------- */
+.ng-cta {
+	position: relative;
+	background: var(--ng-c-brand-dark);
+	color: var(--ng-c-fg-invert);
+	overflow: hidden;
+}
+.ng-cta__media { position: absolute; inset: 0; z-index: 0; }
+.ng-cta__media img { width: 100%; height: 100%; object-fit: cover; }
+.ng-cta__media .ng-ph { height: 100%; border: 0; border-radius: 0; }
+.ng-cta__scrim {
+	position: absolute; inset: 0; z-index: 1;
+	background: rgba(7, 40, 77, .78);
+}
+.ng-cta__inner {
+	position: relative;
+	z-index: 2;
+	padding-block: var(--ng-section-y);
+	text-align: center;
+}
+.ng-cta__title { font-size: var(--ng-fs-h2); }
+.ng-cta__lead {
+	max-width: 34em;
+	margin: 1.4em auto 0;
+	font-size: var(--ng-fs-lead);
+	line-height: 1.95;
+	opacity: .92;
+}
+.ng-cta__actions { margin-top: clamp(2rem, 4vw, 2.75rem); }
+.ng-cta__sub {
+	margin-top: 2em;
+	font-size: var(--ng-fs-small);
+	opacity: .78;
+}
+.ng-cta__sub a { text-decoration: underline; text-underline-offset: .25em; }
+
+/* --- モバイル固定CTA --------------------------------------------------- */
+.ng-fixedcta {
+	position: fixed;
+	left: 0; right: 0; bottom: 0;
+	z-index: 50;
+	padding: .75rem var(--ng-gutter);
+	padding-bottom: calc(.75rem + env(safe-area-inset-bottom));
+	background: rgba(255, 255, 255, .94);
+	backdrop-filter: blur(8px);
+	border-top: 1px solid var(--ng-c-line);
+	transform: translateY(110%);
+	transition: transform var(--ng-dur) var(--ng-ease);
+}
+.ng-fixedcta[data-visible="true"] { transform: translateY(0); }
+.ng-fixedcta .ng-btn { width: 100%; justify-content: center; }
+
+
+/* ==========================================================================
+   5. ユーティリティ
+   ========================================================================== */
+.ng-visually-hidden {
+	position: absolute !important;
+	width: 1px; height: 1px;
+	margin: -1px; padding: 0;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+/* スクロール連動のフェードイン */
+.ng-reveal {
+	opacity: 0;
+	transform: translateY(1.25rem);
+	transition: opacity .7s var(--ng-ease), transform .7s var(--ng-ease);
+}
+.ng-reveal[data-revealed="true"] { opacity: 1; transform: none; }
+
+/* アンカーリンク先が固定ヘッダーに隠れないように */
+.ng [id] { scroll-margin-top: 5rem; }
+
+
+/* ==========================================================================
+   ブレークポイント
+   ========================================================================== */
+@media (min-width: 48em) { /* 768px 〜 */
+	.ng-intro__grid    { grid-template-columns: 1fr 1.15fr; align-items: center; }
+	.ng-message__grid  { grid-template-columns: .8fr 1.2fr; }
+	.ng-culture__gallery { grid-template-columns: repeat(4, 1fr); }
+	.ng-fixedcta { display: none; } /* PCではMV／CTAの導線で足りる */
+}
+
+@media (min-width: 64em) { /* 1024px 〜 */
+	.ng-head--split {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+		gap: clamp(2rem, 5vw, 4rem);
+		align-items: end;
+	}
+	.ng-head--split .ng-head__lead { margin-top: 0; }
+	.ng-growth__timeline { grid-template-columns: repeat(4, 1fr); gap: 0; }
+	.ng-growth__step {
+		padding: 2.25rem 1.5rem 0 0;
+		border-left: 0;
+		border-top: 2px solid var(--ng-c-line);
+	}
+	.ng-growth__step:last-child { border-top-color: var(--ng-c-line); }
+	.ng-growth__step::before { top: -.5rem; left: 0; }
+}
+
+/* 動きを減らす設定の利用者への配慮 */
+@media (prefers-reduced-motion: reduce) {
+	.ng *,
+	.ng *::before,
+	.ng *::after {
+		animation-duration: .01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: .01ms !important;
+		scroll-behavior: auto !important;
+	}
+	.ng-reveal { opacity: 1; transform: none; }
+}
+
+/* 印刷（学生が募集要項を印刷して持参することがある） */
+@media print {
+	.ng-fixedcta,
+	.ng-anchors,
+	.ng-draftbar { display: none !important; }
+	.ng-hero { min-height: auto; }
+	.ng { color: #000; }
+}
