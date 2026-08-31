@@ -352,12 +352,13 @@
 	position: absolute;
 	inset: 0;
 	z-index: 1;
+	/* 下部にコピーが乗るため下ほど濃く。上部は人物が来るので覆わない */
 	background: linear-gradient(
 		to top,
-		rgba(7, 40, 77, .86) 0%,
-		rgba(7, 40, 77, .55) 38%,
-		rgba(7, 40, 77, .18) 70%,
-		rgba(7, 40, 77, .30) 100%
+		rgba(7, 40, 77, .90) 0%,
+		rgba(7, 40, 77, .62) 34%,
+		rgba(7, 40, 77, .22) 62%,
+		rgba(7, 40, 77, 0) 88%
 	);
 }
 .ng-hero__inner {
@@ -1017,7 +1018,7 @@ body { margin: 0; font-family: "Noto Sans JP", system-ui, sans-serif; }
 	
 
 			<section class="ng-hero" aria-labelledby="ng-hero-catch">
-		<div class="ng-hero__media"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。上部3割は文字が乗るため余白を残す"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。上部3割は文字が乗るため余白を残す</span></div></div>
+		<div class="ng-hero__media"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
 		<div class="ng-hero__scrim" aria-hidden="true"></div>
 
 		<div class="ng-hero__inner ng-container">
