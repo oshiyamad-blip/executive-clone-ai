@@ -1438,10 +1438,24 @@
    ========================================================================== */
 
 /* --- b 新卒向け・やわらかめ ---------------------------------------------
-   狙い：コーポレートとの連続性は色で担保したまま、学生が身構える原因
-         （明朝の英字・小さすぎる和文見出し・鋭い角）だけを取り除く。
+   狙い：「白い紙の上に組む」のをやめ、「生成りの地に、白い面を浮かべる」に
+         組み替える。使う色は実サイトの3色のままだが、地と面の役割を
+         入れ替えるため、ひと目で別のサイトに見える。
+
+   Aとの主な違い
+     ・地が白 → 生成り。セクションは角丸32pxの白い面として浮く
+     ・片角だけ240px落とす切り欠きをやめ、四隅をそろえて丸める
+     ・数字セクションは黒ベタ → 金の面（金に白は読みにくいので文字は黒）
+     ・欧文の明朝をやめ、見出しの主従を戻す（和文を主役に）
+     ・ボタンの罫線を金に
    ---------------------------------------------------------------------- */
 .ng[data-tone="b"] {
+	/* 地と面の役割を入れ替える。ここがAとの最大の差 */
+	--ng-c-bg:          #F5F4EE; /* 地は生成り */
+	--ng-c-bg-subtle:   #FFFFFF; /* 面は白 */
+	--ng-c-brand-tint:  #FFFFFF;
+	--ng-c-line-strong: #C7A52D; /* ボタンの罫線を金に */
+
 	/* 欧文の明朝をやめる。明朝は格を出すが、学生には硬く映る */
 	--ng-font-en: "Zen Kaku Gothic New", sans-serif;
 	/* 本文をわずかに大きく。行間は実サイトの2のまま */
@@ -1452,11 +1466,54 @@
 	/* 英字は主役から添え物へ戻す */
 	--ng-fs-en-sec: clamp(13px, 1.2vw, 15px);
 	--ng-ls-en: .18em;
-	/* 角を丸くして当たりを柔らかくする */
-	--ng-radius: 16px;
-	--ng-corner: 120px;
-	--ng-corner-sp: 64px;
+
+	/* 角は「片方だけ大きく」ではなく、四隅をそろえて丸める */
+	--ng-radius: 20px;
+	--ng-corner: 32px;
+	--ng-corner-sp: 24px;
 }
+
+/* セクションを、生成りの地に浮かぶ白い面にする */
+.ng[data-tone="b"] .ng-section,
+.ng[data-tone="b"] .ng-section--subtle {
+	max-width: 1288px;
+	margin: 12px auto;
+	border-radius: 32px;
+	background: var(--ng-c-bg-subtle);
+}
+/* 面が独立するので、継ぎ目を隠すための下敷きは要らない */
+.ng[data-tone="b"] .ng-section::before { content: none; }
+
+/* 数字は金の面で立たせる。金に白は読みにくいので、文字は黒に置く */
+.ng[data-tone="b"] .ng-section--brand {
+	background: var(--ng-c-accent);
+	color: var(--ng-c-fg);
+	border-radius: 32px;
+}
+.ng[data-tone="b"] .ng-section--brand .ng-head__en { color: var(--ng-c-fg); }
+.ng[data-tone="b"] .ng-section--brand .ng-head__en::before { background: var(--ng-c-fg); }
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__item {
+	background: rgba(255, 255, 255, .5);
+	border-color: rgba(25, 17, 12, .14);
+}
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__value { color: var(--ng-c-fg); }
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__label,
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__desc,
+.ng[data-tone="b"] .ng-section--brand .ng-note { color: rgba(25, 17, 12, .78); }
+.ng[data-tone="b"] .ng-section--brand .ng-btn--onbrand {
+	background: var(--ng-c-fg);
+	border-color: var(--ng-c-fg);
+	color: var(--ng-c-fg-invert);
+}
+
+/* MV と CTA も、角丸をそろえた面として置く */
+.ng[data-tone="b"] .ng-hero__band { border-radius: 32px; }
+.ng[data-tone="b"] .ng-cta {
+	max-width: 1288px;
+	margin: 12px auto 0;
+	border-radius: 32px;
+}
+
 /* 見出しの主従を戻す。学生が読むのは日本語のほう */
 .ng[data-tone="b"] .ng-head__en {
 	margin-bottom: 10px;
@@ -1486,7 +1543,12 @@
 }
 @media (max-width: 767px) {
 	.ng[data-tone="b"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+	.ng[data-tone="b"] .ng-section,
+	.ng[data-tone="b"] .ng-section--subtle,
+	.ng[data-tone="b"] .ng-section--brand,
+	.ng[data-tone="b"] .ng-cta { margin-inline: 12px; border-radius: 24px; }
 }
+
 
 /* --- c 新卒向け・ダーク --------------------------------------------------
    狙い：一期生の「はじまり」を強く出す。新しく色を足さず、
@@ -3038,6 +3100,12 @@
 
 .ng[data-tone="b"] {
 	
+	--ng-c-bg:          #F5F4EE; 
+	--ng-c-bg-subtle:   #FFFFFF; 
+	--ng-c-brand-tint:  #FFFFFF;
+	--ng-c-line-strong: #C7A52D; 
+
+	
 	--ng-font-en: "Zen Kaku Gothic New", sans-serif;
 	
 	--ng-fs-body: 17px;
@@ -3047,11 +3115,65 @@
 	
 	--ng-fs-en-sec: clamp(13px, 4.5px, 15px);
 	--ng-ls-en: .18em;
+
 	
-	--ng-radius: 16px;
-	--ng-corner: 120px;
-	--ng-corner-sp: 64px;
+	--ng-radius: 20px;
+	--ng-corner: 32px;
+	--ng-corner-sp: 24px;
 }
+
+
+
+.ng[data-tone="b"] .ng-section,
+.ng[data-tone="b"] .ng-section--subtle {
+	max-width: 1288px;
+	margin: 12px auto;
+	border-radius: 32px;
+	background: var(--ng-c-bg-subtle);
+}
+
+
+.ng[data-tone="b"] .ng-section::before { content: none; }
+
+
+
+.ng[data-tone="b"] .ng-section--brand {
+	background: var(--ng-c-accent);
+	color: var(--ng-c-fg);
+	border-radius: 32px;
+}
+
+.ng[data-tone="b"] .ng-section--brand .ng-head__en { color: var(--ng-c-fg); }
+
+.ng[data-tone="b"] .ng-section--brand .ng-head__en::before { background: var(--ng-c-fg); }
+
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__item {
+	background: rgba(255, 255, 255, .5);
+	border-color: rgba(25, 17, 12, .14);
+}
+
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__value { color: var(--ng-c-fg); }
+
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__label,
+.ng[data-tone="b"] .ng-section--brand .ng-numbers__desc,
+.ng[data-tone="b"] .ng-section--brand .ng-note { color: rgba(25, 17, 12, .78); }
+
+.ng[data-tone="b"] .ng-section--brand .ng-btn--onbrand {
+	background: var(--ng-c-fg);
+	border-color: var(--ng-c-fg);
+	color: var(--ng-c-fg-invert);
+}
+
+
+
+.ng[data-tone="b"] .ng-hero__band { border-radius: 32px; }
+
+.ng[data-tone="b"] .ng-cta {
+	max-width: 1288px;
+	margin: 12px auto 0;
+	border-radius: 32px;
+}
+
 
 
 .ng[data-tone="b"] .ng-head__en {
@@ -3085,6 +3207,11 @@
 }
 
 	.ng[data-tone="b"] .ng-head__title { font-size: var(--ng-fs-h2); letter-spacing: var(--ng-ls-head); }
+	.ng[data-tone="b"] .ng-section,
+	.ng[data-tone="b"] .ng-section--subtle,
+	.ng[data-tone="b"] .ng-section--brand,
+	.ng[data-tone="b"] .ng-cta { margin-inline: 12px; border-radius: 24px; }
+
 
 
 
