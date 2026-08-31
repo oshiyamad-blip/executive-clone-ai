@@ -50,13 +50,16 @@ genestate-newgrad/
 │   └── options.html                   ★案を比較する社内選定ページ（Artifactへ公開する中身）
 │
 ├── tools/
-│   ├── wp-stubs.php                   WordPress関数の最小スタブ（下の2本が共通で使う）
+│   ├── wp-stubs.php                   WordPress関数の最小スタブ（3本が共通で使う）
+│   ├── chrome.php                     親テーマ代役のヘッダー/フッター（3本が共通で使う）
 │   ├── render-preview.php             ローカル確認用の静的プレビュー生成
-│   └── render-artifact.php            社内共有用（Artifact）HTML の生成
+│   ├── render-artifact.php            社内共有用（Artifact）HTML の生成
+│   └── render-switcher.php            ★意匠を切り替えて見比べるページの生成
 │
 └── preview/
     ├── index.html                     生成済みプレビュー（ブラウザで開ける）
-    └── artifact.html                  生成済み社内共有版（Artifact へ公開する中身）
+    ├── artifact.html                  生成済み社内共有版（Artifact へ公開する中身）
+    └── switcher.html                  生成済み意匠切替版（Artifact へ公開する中身）
 ```
 
 **★印の3ファイルだけで、掲載内容・写真・デザインのすべてが変えられる。**
@@ -151,7 +154,7 @@ assets/img/P-03.webp
 
 ## プレビュー（WordPress無しで見た目を確認する）
 
-用途に応じて2本ある。どちらも `page-newgrad.php` をそのまま実行して書き出すので、
+用途に応じて3本ある。いずれも `page-newgrad.php` をそのまま実行して書き出すので、
 中身は常に本体と一致する。
 
 ### ローカルで開く
@@ -174,6 +177,36 @@ CSSとJSがインライン化された1枚のHTMLなので、そのままメー�
 
 配色・書体は採用ページ本体と同じ実サイトの値のみを使っている。
 **案を1つ選んでもらったら、`page-newgrad.php` の MV に反映する。**
+
+### 意匠を切り替えて見比べる（本番の見え方のまま選ぶ）
+
+```bash
+php tools/render-switcher.php > preview/switcher.html
+```
+
+採用トップをそのまま出しつつ、上部のスイッチで意匠の案を切り替えられるページ。
+**選んだ組み合わせが、そのまま本番の見え方**になる。
+
+| 箇所 | 案 |
+| --- | --- |
+| MV | A 全面写真 ／ B 左右分割 ／ C 白ベース ／ D タイポ主役 |
+| 数字 | A 黒ベタ ／ B 白ベース・細罫 |
+| 育成 | A 横4ステップ ／ B 縦タイムライン |
+
+社内で決まったら、子テーマの `functions.php` に定数として書く。
+
+```php
+define( 'NG_MV',      'c' );
+define( 'NG_NUMBERS', 'b' );
+define( 'NG_GROWTH',  'b' );
+```
+
+書かなければすべて `a` になる。定義の実体は `theme/inc/newgrad-variants.php`。
+MV は案ごとに構造が違うため描画関数を持ち、数字と育成はマークアップが同じで
+CSSだけが違うのでクラスを付け替えている。
+
+> 切替ページは4案すべてをHTMLに含んでいる（表示はCSSで1案に絞る）。
+> 本番では選ばれた1案だけが描画されるので、余分なHTMLは出ない。
 
 ### 社内共有（URLを配ってレビューしてもらう）
 
@@ -250,5 +283,5 @@ URL で共有できる。**既定は非公開**で、共有相手はページの
 - `prefers-reduced-motion` に対応（アニメーションを自動で無効化）
 - 写真には代替テキストを設定（`inc/newgrad-photos.php`）
 - meta description / OGP を出力（SEOプラグイン併用時は要調整）
-- 下書きモード中は `noindex,nofollow`
+- 下書きモード中は `noindex,nofollow,noarchive,nosnippet` を meta と HTTPヘッダ（`X-Robots-Tag`）の両方で出力
 - 印刷用スタイルあり（学生が募集要項を印刷して持参する場合に対応）

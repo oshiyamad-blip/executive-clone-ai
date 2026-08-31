@@ -23,6 +23,8 @@ $theme_dir = dirname( __DIR__ ) . '/theme';
 
 /* WordPress 関数のスタブ（render-artifact.php と共通） */
 require_once __DIR__ . '/wp-stubs.php';
+/* 親テーマ代役のヘッダー/フッター（3つのツールで共通） */
+require_once __DIR__ . '/chrome.php';
 
 function get_header() {
 	$css = file_get_contents( dirname( __DIR__ ) . '/theme/assets/css/newgrad.css' );
@@ -35,43 +37,16 @@ function get_header() {
 	/* 実サイトが読み込んでいるものと同一の指定（display=swap まで含めて同じ）。 */
 	echo "<link href=\"https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap\" rel=\"stylesheet\">\n";
 	echo "<style>\n" . $css . "\n</style>\n";
+	echo "<style>\n";
 	echo <<<'HEADCSS'
-<style>
-/* ---- プレビュー専用：親テーマのヘッダー/フッターの代役 ----
-   本番では親テーマの実物に置き換わる。ここでは見え方を確かめられるよう、
-   実サイトのヘッダー・フッターの色と形（黒地・金のCTA・右上240pxの角丸）を写している。 */
+/* ---- プレビュー専用 ---- */
 body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #fff; }
 .pv-note {
 	padding: 12px 20px; background: #19110C; color: #fff;
 	font-size: 13px; line-height: 1.7; text-align: center;
 }
-.pv-header {
-	display: flex; align-items: center; justify-content: space-between; gap: 16px;
-	padding: 16px 40px; background: #fff;
-}
-.pv-header__logo { font-weight: 700; letter-spacing: .04em; }
-.pv-header__right { display: flex; align-items: center; gap: 24px; }
-.pv-header__nav { display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; }
-/* 実サイトのヘッダーCTA：ピル型・黒と金の2本 */
-.pv-header__cta { display: flex; gap: 8px; }
-.pv-header__cta span {
-	display: block; min-width: 100px; padding: 8px 22px; border-radius: 50px;
-	border: 1px solid; text-align: center; color: #fff; font-size: 13px;
-}
-.pv-header__cta .is-recruit { background: #19110C; border-color: #19110C; }
-.pv-header__cta .is-contact { background: #C7A52D; border-color: #C7A52D; }
-.pv-footer {
-	padding: 46px 40px 51px; background: #19110C; color: #fff;
-	border-radius: 0 240px 0 0;
-	font-size: 13px; line-height: 1.9;
-}
-@media (max-width: 767px) {
-	.pv-header { padding: 16px 20px; }
-	.pv-header__nav, .pv-header__cta { display: none; }
-	.pv-footer { padding: 30px 20px; border-radius: 0 120px 0 0; }
-}
-</style>
 HEADCSS;
+	echo "\n" . ng_chrome_css() . "\n</style>\n";
 	echo "\n</head>\n<body>\n";
 	echo '<p class="pv-note">これは確認用の静的プレビューです。ヘッダーとフッターは仮のもので、本番では親テーマの実物が入ります（トンマナはそこで自動的に揃います）。</p>' . "\n";
 	echo '<header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span>'

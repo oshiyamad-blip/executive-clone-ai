@@ -31,6 +31,10 @@ if ( ! defined( 'NG_ASSET_VER' ) ) {
 }
 
 
+/* 意匠のバリアント（MV / 数字 / 育成の案）の定義と描画 */
+require_once __DIR__ . '/newgrad-variants.php';
+
+
 /* =========================================================================
  * コンテンツ取得
  * ========================================================================= */
@@ -280,11 +284,36 @@ add_action( 'wp_head', 'ng_head_meta', 5 );
  * 公開前の確認用URLがインデックスされる事故を防ぐ。
  * NG_DRAFT_MODE を false にすると自動的に外れる。
  *
+ * meta と HTTPヘッダの両方で出しているのは、
+ * meta はHTMLを解釈するクローラにしか効かないため。
+ * ヘッダなら PDF や画像への直リンクにも効き、HTMLを読まない収集にも届く。
+ *
+ * 併記している値の意味
+ *   noindex   検索結果に出さない
+ *   nofollow  ページ内のリンクを辿らせない
+ *   noarchive キャッシュ（保存版）を持たせない
+ *   nosnippet 検索結果に本文の抜粋を出させない
+ *
  * @return void
  */
 function ng_noindex_while_draft() {
 	if ( ng_is_draft() && is_page_template( 'page-newgrad.php' ) ) {
-		echo '<meta name="robots" content="noindex,nofollow">' . "\n";
+		echo '<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">' . "\n";
 	}
 }
 add_action( 'wp_head', 'ng_noindex_while_draft', 1 );
+
+/**
+ * 同じ指示を HTTP ヘッダ（X-Robots-Tag）でも送る。
+ *
+ * @return void
+ */
+function ng_noindex_header() {
+	if ( headers_sent() ) {
+		return;
+	}
+	if ( ng_is_draft() && is_page_template( 'page-newgrad.php' ) ) {
+		header( 'X-Robots-Tag: noindex, nofollow, noarchive, nosnippet', true );
+	}
+}
+add_action( 'template_redirect', 'ng_noindex_header', 1 );

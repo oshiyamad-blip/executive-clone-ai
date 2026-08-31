@@ -500,21 +500,52 @@
    4. セクション別
    ========================================================================== */
 
-/* --- 4-1. MV ----------------------------------------------------------- */
+/* --- 4-1. MV -----------------------------------------------------------
+   MV は意匠の案が4つある。共通部分と案別を分けてある。
+   どの案を出すかは PHP 側（NG_MV / ng_render_mv）が決め、
+   ここでは .ng-hero--a 〜 --d のクラスで見た目だけを切り替える。
+
+     a 全面写真     写真を敷き、黒のスクリムを重ねて下部にコピー
+     b 左右分割     左にコピー面、右に写真
+     c 白ベース     言葉を主役にし、写真は下の帯（片角丸）で見せる
+     d タイポ主役   地色の面に、左コピー＋右に写真3枚
+   ---------------------------------------------------------------------- */
+
+/* --- 4案の共通部分 --- */
 .ng-hero {
 	position: relative;
-	display: grid;
-	align-items: end;
-	min-height: clamp(480px, 82svh, 736px);
-	background: var(--ng-c-brand-dark);
-	color: var(--ng-c-fg-invert);
 	overflow: hidden;
 }
-.ng-hero__media {
-	position: absolute;
-	inset: 0;
-	z-index: 0;
+.ng-hero__inner { position: relative; z-index: 2; }
+.ng-hero__badge {
+	display: inline-block;
+	margin-bottom: 1.5em;
+	padding: .55em 1.2em;
+	border: 1px solid currentColor;
+	border-radius: var(--ng-radius-pill);
+	font-size: var(--ng-fs-small);
+	font-weight: 700;
+	letter-spacing: .1em;
+	line-height: 1;
 }
+.ng-hero__catch {
+	font-size: var(--ng-fs-hero);
+	font-weight: 700;
+	letter-spacing: .02em;
+	line-height: 1.22;
+	text-wrap: balance;
+}
+/* キャッチコピーは content 側で指定した位置で折り返す */
+.ng-hero__catchline { display: block; }
+.ng-hero__sub {
+	max-width: 38em;
+	margin-top: 1.4em;
+	font-size: var(--ng-fs-lead);
+	line-height: 1.9;
+}
+.ng-hero__actions { margin-top: clamp(32px, 4vw, 44px); }
+
+.ng-hero__media { position: absolute; inset: 0; z-index: 0; }
 .ng-hero__media img {
 	width: 100%; height: 100%;
 	object-fit: cover;
@@ -522,7 +553,7 @@
 }
 /* 全面背景として使う場所では、プレースホルダの説明文がコピーと重なって
    読めなくなる。IDだけを控えめに残し、指示文は隠す（写真が入れば全て消える） */
-.ng-hero__media .ng-ph,
+.ng-hero--a .ng-hero__media .ng-ph,
 .ng-cta__media .ng-ph {
 	height: 100%;
 	border: 0;
@@ -530,10 +561,19 @@
 	justify-content: flex-start;
 	padding-top: 24px;
 }
-.ng-hero__media .ng-ph__note,
+.ng-hero--a .ng-hero__media .ng-ph__note,
 .ng-cta__media .ng-ph__note { display: none; }
-.ng-hero__media .ng-ph__id,
+.ng-hero--a .ng-hero__media .ng-ph__id,
 .ng-cta__media .ng-ph__id { opacity: .55; }
+
+/* --- a 全面写真 --- */
+.ng-hero--a {
+	display: grid;
+	align-items: end;
+	min-height: clamp(480px, 82svh, 736px);
+	background: var(--ng-c-brand-dark);
+	color: var(--ng-c-fg-invert);
+}
 /* 写真の上に文字を載せるための可読性グラデーション */
 .ng-hero__scrim {
 	position: absolute;
@@ -548,40 +588,132 @@
 		rgba(var(--ng-c-brand-rgb), 0) 88%
 	);
 }
-.ng-hero__inner {
-	position: relative;
-	z-index: 2;
-	padding-block: clamp(48px, 8vw, 88px);
-}
-.ng-hero__badge {
-	display: inline-block;
-	margin-bottom: 1.5em;
-	padding: .55em 1.2em;
-	border: 1px solid rgba(255, 255, 255, .6);
-	border-radius: 999px;
-	font-size: var(--ng-fs-small);
-	font-weight: 700;
-	letter-spacing: .1em;
-	line-height: 1;
-}
-.ng-hero__catch {
-	font-size: var(--ng-fs-hero);
-	font-weight: 700;
-	letter-spacing: .02em;
-	line-height: 1.22;
-	text-shadow: 0 2px 24px rgba(var(--ng-c-brand-rgb), .45);
-}
-/* キャッチコピーは content 側で指定した位置で折り返す */
-.ng-hero__catchline { display: block; }
+.ng-hero--a .ng-hero__inner { padding-block: clamp(48px, 8vw, 88px); }
+.ng-hero--a .ng-hero__badge { border-color: rgba(255, 255, 255, .6); }
+.ng-hero--a .ng-hero__catch { text-shadow: 0 2px 24px rgba(var(--ng-c-brand-rgb), .45); }
+.ng-hero--a .ng-hero__sub   { text-shadow: 0 1px 16px rgba(var(--ng-c-brand-rgb), .5); }
 
-.ng-hero__sub {
-	max-width: 34em;
-	margin-top: 1.4em;
-	font-size: var(--ng-fs-lead);
-	line-height: 1.9;
-	text-shadow: 0 1px 16px rgba(var(--ng-c-brand-rgb), .5);
+/* --- b 左右分割 --- */
+.ng-hero--b {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	background: var(--ng-c-bg);
+	color: var(--ng-c-fg);
 }
-.ng-hero__actions { margin-top: clamp(32px, 4vw, 44px); }
+.ng-hero--b .ng-hero__col--text {
+	display: flex;
+	align-items: center;
+	padding: clamp(56px, 8vw, 96px) var(--ng-gutter);
+}
+.ng-hero--b .ng-hero__inner { width: 100%; max-width: 560px; margin-inline: auto; }
+.ng-hero--b .ng-hero__badge {
+	border-color: transparent;
+	background: var(--ng-c-bg-subtle);
+}
+/* 面を締めるための金の短い罫。実サイトの縦罫と同じ金を使う */
+.ng-hero__rule {
+	display: block;
+	width: 64px;
+	height: 3px;
+	margin: 2em 0 1.6em;
+	background: var(--ng-c-accent);
+}
+.ng-hero--b .ng-hero__catch { font-size: clamp(26px, 3vw, 42px); }
+.ng-hero--b .ng-hero__sub { margin-top: 0; color: var(--ng-c-fg-muted); }
+.ng-hero--b .ng-hero__col--media { position: relative; min-height: 320px; }
+.ng-hero--b .ng-hero__col--media img,
+.ng-hero--b .ng-hero__col--media .ng-ph {
+	position: absolute; inset: 0;
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0;
+	border-radius: 0;
+}
+
+/* --- c 白ベース・エディトリアル --- */
+.ng-hero--c {
+	background: var(--ng-c-bg);
+	color: var(--ng-c-fg);
+}
+.ng-hero--c .ng-hero__inner { padding-block: clamp(56px, 8vw, 92px) 0; }
+/* 英字ラベル＋細い罫＋右端に短い和文、という既存サイトにある組み方 */
+.ng-hero__meta {
+	display: flex;
+	align-items: center;
+	gap: clamp(12px, 2vw, 20px);
+	margin-bottom: clamp(24px, 4vw, 40px);
+}
+.ng-hero__metaen {
+	flex: none;
+	font-family: var(--ng-font-en);
+	font-size: var(--ng-fs-small);
+	letter-spacing: .18em;
+	color: var(--ng-c-fg-muted);
+}
+.ng-hero__metarule { flex: 1; height: 1px; background: var(--ng-c-line); }
+.ng-hero__metatag {
+	flex: none;
+	font-size: var(--ng-fs-tiny);
+	font-weight: 700;
+	letter-spacing: .08em;
+}
+.ng-hero--c .ng-hero__sub { color: var(--ng-c-fg-muted); }
+/* 写真は帯。実サイトの片角丸をここで効かせる */
+.ng-hero__band {
+	position: relative;
+	margin-top: clamp(40px, 6vw, 72px);
+	aspect-ratio: 4 / 1;
+	overflow: hidden;
+	border-radius: 0 var(--ng-corner) 0 0;
+}
+.ng-hero__band img,
+.ng-hero__band .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0;
+	border-radius: inherit;
+}
+
+/* --- d タイポ主役＋写真グリッド --- */
+.ng-hero--d {
+	background: var(--ng-c-bg-subtle);
+	color: var(--ng-c-fg);
+}
+.ng-hero--d .ng-hero__inner {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(32px, 5vw, 64px);
+	align-items: center;
+	padding-block: clamp(56px, 8vw, 88px);
+}
+.ng-hero--d .ng-hero__badge {
+	border-color: var(--ng-c-brand);
+	background: var(--ng-c-brand);
+	color: var(--ng-c-fg-invert);
+}
+.ng-hero--d .ng-hero__catch { font-size: clamp(26px, 2.5vw, 36px); } /* 左カラムが約466pxなので、2行に収まる上限 */
+.ng-hero--d .ng-hero__sub { color: var(--ng-c-fg-muted); }
+.ng-hero__grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: clamp(12px, 1.5vw, 20px);
+	align-items: start;
+}
+.ng-hero__cell {
+	overflow: hidden;
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+}
+.ng-hero__cell img,
+.ng-hero__cell .ng-ph {
+	width: 100%; height: 100%;
+	object-fit: cover;
+	border: 0;
+	border-radius: inherit;
+}
+.ng-hero__cell--1 { grid-column: 1; aspect-ratio: 3 / 4; }
+.ng-hero__cell--2 { grid-column: 2; aspect-ratio: 4 / 3; }
+.ng-hero__cell--3 { grid-column: 2; aspect-ratio: 4 / 3; }
 
 /* アンカーナビ：モバイルは横スクロール */
 .ng-anchors {
@@ -747,6 +879,62 @@
 	font-size: 15px;
 	line-height: 1.95;
 }
+
+/* --- 数字セクションの案B（白地・細い罫線） ------------------------------
+   案A は黒地の面（.ng-section--brand）。案B は白地に罫線だけで区切り、
+   数字を大きく取って、最重要の1項目だけ地色を敷いて立たせる。
+   実サイトの「数字で見る」は地色の面に淡いタイルを並べる作りなので、
+   こちらのほうが既存サイトの作法に近い。
+   ---------------------------------------------------------------------- */
+.ng-numbers--plain .ng-numbers__grid {
+	gap: 0;
+	border-top: 1px solid var(--ng-c-line);
+}
+.ng-numbers--plain .ng-numbers__item {
+	background: transparent;
+	border: 0;
+	border-right: 1px solid var(--ng-c-line);
+	border-bottom: 1px solid var(--ng-c-line);
+	border-radius: 0;
+	padding: clamp(24px, 3vw, 36px) clamp(20px, 2.5vw, 32px);
+}
+.ng-numbers--plain .ng-numbers__value {
+	color: var(--ng-c-fg);
+	font-size: clamp(48px, 8vw, 72px);
+}
+.ng-numbers--plain .ng-numbers__desc { opacity: 1; color: var(--ng-c-fg-muted); }
+.ng-numbers--plain .ng-numbers__label { color: var(--ng-c-fg-muted); }
+/* 最重要の1項目を地色で立たせる。content 側で 'key' => true を付けた項目 */
+.ng-numbers--plain .ng-numbers__item--key { background: var(--ng-c-bg-subtle); }
+.ng-numbers--plain .ng-numbers__item--key .ng-numbers__value { color: var(--ng-c-accent); }
+.ng-numbers--plain .ng-note { color: var(--ng-c-fg-muted); }
+
+/* --- 育成セクションの案B（縦タイムライン） ------------------------------
+   案A は横4ステップ。案B は左に時期・右に内容を置く縦組みで、
+   書ける文字数が大きく増える（G-Tech のカリキュラムまで載せられる）。
+   ---------------------------------------------------------------------- */
+.ng-growth__timeline--vertical {
+	display: grid;
+	gap: clamp(20px, 3vw, 28px);
+	grid-template-columns: minmax(0, 1fr);
+}
+.ng-growth__timeline--vertical .ng-growth__step {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 4px 32px;
+	padding: 0 0 clamp(20px, 3vw, 28px) 20px;
+	border-left: 2px solid var(--ng-c-line);
+	border-top: 0;
+}
+.ng-growth__timeline--vertical .ng-growth__step:last-child {
+	padding-bottom: 0;
+	border-left-color: transparent;
+}
+.ng-growth__timeline--vertical .ng-growth__step::before {
+	top: .35em;
+	left: -8px;
+}
+.ng-growth__timeline--vertical .ng-growth__term { align-self: start; }
 
 /* --- 4-6. WORK --------------------------------------------------------- */
 /* 実サイトで縦罫を引いているのは記事本文の見出しだけで、その1箇所の作法が
@@ -1152,6 +1340,13 @@
    ブレークポイント
    ========================================================================== */
 @media (min-width: 48em) { /* 768px 〜 */
+	/* MV-B・MV-D は PC で2カラムに開く。SPでは縦積みのまま */
+	.ng-hero--b { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: clamp(480px, 78svh, 720px); }
+	.ng-hero--b .ng-hero__col--media { min-height: 0; }
+	.ng-hero--d .ng-hero__inner { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
+	/* 3枚に段差をつけるのが案Dの狙い。2枚目だけ下げる */
+	.ng-hero__cell--2 { margin-top: clamp(24px, 4vw, 64px); }
+
 	.ng-intro__grid    { grid-template-columns: 1fr 1.15fr; align-items: center; }
 	.ng-message__grid  { grid-template-columns: .8fr 1.2fr; }
 	.ng-culture__gallery { grid-template-columns: repeat(4, 1fr); }
@@ -1167,14 +1362,25 @@
 		align-items: start;
 	}
 	.ng-head--split .ng-head__lead { margin-top: 0; }
-	.ng-growth__timeline { grid-template-columns: repeat(4, 1fr); gap: 0; }
-	.ng-growth__step {
+	/* 案A（横4ステップ）。案Bの縦タイムラインには当てない */
+	.ng-growth__timeline:not(.ng-growth__timeline--vertical) { grid-template-columns: repeat(4, 1fr); gap: 0; }
+	.ng-growth__timeline:not(.ng-growth__timeline--vertical) .ng-growth__step {
 		padding: 36px 24px 0 0;
 		border-left: 0;
 		border-top: 2px solid var(--ng-c-line);
 	}
-	.ng-growth__step:last-child { border-top-color: var(--ng-c-line); }
-	.ng-growth__step::before { top: -8px; left: 0; }
+	.ng-growth__timeline:not(.ng-growth__timeline--vertical) .ng-growth__step:last-child { border-top-color: var(--ng-c-line); }
+	.ng-growth__timeline:not(.ng-growth__timeline--vertical) .ng-growth__step::before { top: -8px; left: 0; }
+
+	/* 案B（縦タイムライン）。左に時期、右に見出しと本文。
+	   li の子は「時期・見出し・本文」の3つなので、置き場所を明示しないと
+	   本文が左カラムへ回り込んでしまう。SP（1カラム）では自然な順序でよい。 */
+	.ng-growth__timeline--vertical .ng-growth__step {
+		grid-template-columns: 140px minmax(0, 1fr);
+	}
+	.ng-growth__timeline--vertical .ng-growth__term      { grid-column: 1; grid-row: 1 / span 2; }
+	.ng-growth__timeline--vertical .ng-growth__steptitle { grid-column: 2; grid-row: 1; }
+	.ng-growth__timeline--vertical .ng-growth__steptext  { grid-column: 2; grid-row: 2; }
 }
 
 /* 動きを減らす設定の利用者への配慮 */

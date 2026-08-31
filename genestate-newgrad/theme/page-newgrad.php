@@ -38,27 +38,20 @@ get_header();
 	<?php /* ============================================================
 	   1. MV
 	   ============================================================ */ ?>
-	<?php $hero = ng_section( 'hero' ); ?>
-	<section class="ng-hero" aria-labelledby="ng-hero-catch">
-		<div class="ng-hero__media"><?php ng_photo( $hero['photo'], array( 'lazy' => false ) ); ?></div>
-		<div class="ng-hero__scrim" aria-hidden="true"></div>
+	<?php
+	$hero      = ng_section( 'hero' );
+	$ng_badge  = $ng_meta['grad_year']['value'] . '年卒 ' . $hero['badge'];
 
-		<div class="ng-hero__inner ng-container">
-			<p class="ng-hero__badge">
-				<?php echo esc_html( $ng_meta['grad_year']['value'] ); ?>年卒 <?php echo esc_html( $hero['badge'] ); ?>
-				<?php ng_todo( $ng_meta['grad_year'] ); ?>
-			</p>
-			<h1 class="ng-hero__catch" id="ng-hero-catch">
-				<?php foreach ( (array) $hero['catch'] as $line ) : ?>
-					<span class="ng-hero__catchline"><?php echo esc_html( $line ); ?></span>
-				<?php endforeach; ?>
-			</h1>
-			<p class="ng-hero__sub"><?php echo esc_html( $hero['sub'] ); ?></p>
-			<p class="ng-hero__actions">
-				<a class="ng-btn ng-btn--primary" href="<?php echo $ng_entry_url; ?>">エントリーする</a>
-			</p>
-		</div>
-	</section>
+	/* 意匠の切替ページでは4案すべてを出し、表示はCSSで1案に絞る。
+	   本番では NG_MV で選んだ1案だけを描画する。 */
+	if ( defined( 'NG_SWITCHER' ) && NG_SWITCHER ) {
+		foreach ( array( 'a', 'b', 'c', 'd' ) as $ng_v ) {
+			ng_render_mv( $ng_v, $hero, $ng_badge, $ng_entry_url, $ng_meta['grad_year'] );
+		}
+	} else {
+		ng_render_mv( ng_variant( 'mv' ), $hero, $ng_badge, $ng_entry_url, $ng_meta['grad_year'] );
+	}
+	?>
 
 	<nav class="ng-anchors" aria-label="ページ内の目次">
 		<div class="ng-container">
@@ -123,7 +116,7 @@ get_header();
 	   4. NUMBERS
 	   ============================================================ */ ?>
 	<?php $numbers = ng_section( 'numbers' ); ?>
-	<section class="ng-section ng-section--brand" id="numbers" aria-labelledby="ng-numbers-title">
+	<section class="<?php echo esc_attr( ng_numbers_class() ); ?>" id="numbers" aria-labelledby="ng-numbers-title">
 		<div class="ng-container">
 			<div class="ng-head">
 				<p class="ng-head__en"><?php echo esc_html( $numbers['en'] ); ?></p>
@@ -132,7 +125,7 @@ get_header();
 
 			<ul class="ng-numbers__grid">
 				<?php foreach ( $numbers['items'] as $item ) : ?>
-					<li class="ng-numbers__item ng-reveal">
+					<li class="ng-numbers__item ng-reveal<?php echo empty( $item['key'] ) ? '' : ' ng-numbers__item--key'; ?>">
 						<p class="ng-numbers__label"><?php echo esc_html( $item['label'] ); ?><?php ng_todo( $item ); ?></p>
 						<p class="ng-numbers__value">
 							<span><?php echo esc_html( $item['value'] ); ?></span>
@@ -234,7 +227,7 @@ get_header();
 
 			<div class="ng-growth__media ng-reveal"><?php ng_photo( $growth['photo'] ); ?></div>
 
-			<ol class="ng-growth__timeline">
+			<ol class="<?php echo esc_attr( ng_growth_class() ); ?>">
 				<?php foreach ( $growth['timeline'] as $step ) : ?>
 					<li class="ng-growth__step ng-reveal">
 						<span class="ng-growth__term"><?php echo esc_html( $step['term'] ); ?></span>

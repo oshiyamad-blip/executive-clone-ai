@@ -29,6 +29,8 @@ $theme_dir = dirname( __DIR__ ) . '/theme';
 
 /* WordPress 関数のスタブ（render-preview.php と共通） */
 require_once __DIR__ . '/wp-stubs.php';
+/* 親テーマ代役のヘッダー/フッター（3つのツールで共通） */
+require_once __DIR__ . '/chrome.php';
 
 function get_header() {
 	$css = file_get_contents( dirname( __DIR__ ) . '/theme/assets/css/newgrad.css' );
@@ -209,40 +211,14 @@ body {
 	.rv-title { font-size: 19px; }
 }
 
-/* --- 親テーマ代役のヘッダー/フッター -------------------------------------
-   本番では親テーマの実物が入る。ここでは採用ページが実サイトの
-   ヘッダーとフッターに挟まれたときの見え方を確かめるための代役。
-   ---------------------------------------------------------------------- */
-.pv-header {
-	display: flex; align-items: center; justify-content: space-between; gap: 16px;
-	padding: 16px 40px; background: var(--rv-white);
-}
-.pv-header__logo { font-weight: 700; letter-spacing: .04em; }
-.pv-header__right { display: flex; align-items: center; gap: 24px; }
-.pv-header__nav { display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; }
-.pv-header__cta { display: flex; gap: 8px; }
-.pv-header__cta span {
-	display: block; min-width: 100px; padding: 8px 22px; border-radius: 50px;
-	border: 1px solid; text-align: center; color: var(--rv-white); font-size: 13px;
-}
-.pv-header__cta .is-recruit { background: var(--rv-ink); border-color: var(--rv-ink); }
-.pv-header__cta .is-contact { background: var(--rv-gold); border-color: var(--rv-gold); }
-.pv-footer {
-	padding: 46px 40px 51px; background: var(--rv-ink); color: var(--rv-white);
-	border-radius: 0 240px 0 0; font-size: 13px; line-height: 1.9;
-}
-.pv-footer small { color: rgba(255, 255, 255, .6); }
-@media (max-width: 767px) {
-	.pv-header { padding: 16px 20px; }
-	.pv-header__nav, .pv-header__cta { display: none; }
-	.pv-footer { padding: 30px 20px; border-radius: 0 120px 0 0; }
-}
-
 @media (prefers-reduced-motion: reduce) {
 	* { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 </style>
 REVIEWCSS;
+
+	/* 親テーマ代役のヘッダー/フッター（共通） */
+	echo "<style>\n" . ng_chrome_css() . "\n</style>\n";
 
 	echo "\n";
 

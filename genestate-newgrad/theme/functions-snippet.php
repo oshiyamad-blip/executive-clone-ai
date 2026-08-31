@@ -20,6 +20,29 @@
  */
 // define( 'NG_DRAFT_MODE', false );
 
+/*
+ * 意匠の案を選ぶ。社内で選定したものをここに書く。
+ * 書かなければ、すべて 'a'（下記の各1つ目）になる。
+ *
+ *   NG_MV       MV（トップの第一画面）
+ *                 a … 全面写真
+ *                 b … 左右分割
+ *                 c … 白ベース・エディトリアル
+ *                 d … タイポ主役＋写真グリッド
+ *   NG_NUMBERS  数字セクション
+ *                 a … 黒ベタ
+ *                 b … 白ベース・細罫（最重要の数字を1つ立たせる）
+ *   NG_GROWTH   育成セクションの年表
+ *                 a … 横4ステップ
+ *                 b … 縦タイムライン（文字数を多く載せられる）
+ *
+ * 案は preview/switcher.html で切り替えながら見比べられる。
+ * 画面で選んだ組み合わせを、そのままここに書けばよい。
+ */
+// define( 'NG_MV',      'c' );
+// define( 'NG_NUMBERS', 'b' );
+// define( 'NG_GROWTH',  'b' );
+
 require_once get_stylesheet_directory() . '/inc/newgrad-functions.php';
 
 // ▲▲▲ ここまで ▲▲▲

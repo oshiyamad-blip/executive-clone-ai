@@ -1,4 +1,4 @@
-<title>ジーンステイト 新卒採用サイト案</title>
+<title>新卒採用トップ 意匠の切替</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Zen+Kaku+Gothic+New:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -1411,168 +1411,6 @@
 
 </style>
 <style>
-/* ==========================================================================
-   社内共有用のレビュー帯（.rv-）と、親テーマ代役のヘッダー/フッター（.pv-）
-
-   採用ページ本体のトンマナには一切影響しない。色と書体は本体と同じ
-   genestate のトークン（黒 #19110C / 金 #C7A52D / 地色 #F5F4EE）から取り、
-   帯だけが浮いて見えないようにしている。
-   ブランドが確定した明るい世界のページなので、閲覧者のテーマに関わらず
-   同じ見え方になるよう、配色は固定して明示的に塗っている。
-   ========================================================================== */
-:root {
-	--rv-ink:    #19110C;
-	--rv-gold:   #C7A52D;
-	--rv-bone:   #F5F4EE;
-	--rv-line:   #DDDDDD;
-	--rv-muted:  #756F6B;
-	--rv-white:  #FFFFFF;
-	color-scheme: light;
-}
-body {
-	margin: 0;
-	background: var(--rv-white);
-	color: var(--rv-ink);
-	font-family: "Zen Kaku Gothic New", sans-serif;
-	font-size: 16px;
-	line-height: 2;
-}
-
-/* --- レビュー帯 --------------------------------------------------------- */
-.rv-bar {
-	background: var(--rv-bone);
-	border-bottom: 1px solid var(--rv-gold);
-	padding: 28px 40px 26px;
-}
-.rv-bar__inner {
-	max-width: 1120px;
-	margin: 0 auto;
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-	gap: 24px 48px;
-	align-items: start;
-}
-.rv-eyebrow {
-	font-family: "Marcellus", serif;
-	font-size: 13px;
-	letter-spacing: .18em;
-	line-height: 1;
-	color: var(--rv-muted);
-	margin: 0 0 10px;
-}
-.rv-title {
-	margin: 0;
-	font-size: 22px;
-	font-weight: 700;
-	line-height: 1.5;
-	letter-spacing: .04em;
-	text-wrap: balance;
-}
-.rv-sub {
-	margin: 8px 0 0;
-	font-size: 14px;
-	line-height: 1.9;
-	color: var(--rv-muted);
-	max-width: 46em;
-}
-.rv-facts {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px 10px;
-	margin: 14px 0 0;
-}
-.rv-chip {
-	display: inline-flex;
-	align-items: baseline;
-	gap: 6px;
-	padding: 5px 14px;
-	background: var(--rv-white);
-	border: 1px solid var(--rv-line);
-	border-radius: 50px;
-	font-size: 13px;
-	line-height: 1.6;
-	white-space: nowrap;
-}
-.rv-chip b {
-	font-weight: 700;
-	font-variant-numeric: tabular-nums;
-}
-.rv-chip--draft {
-	background: var(--rv-ink);
-	border-color: var(--rv-ink);
-	color: var(--rv-white);
-}
-
-/* 読み方の凡例。デザイン担当以外が見たときに誤解しやすい2点を先に説明する */
-.rv-legend { margin: 0; }
-.rv-legend__title {
-	margin: 0 0 10px;
-	font-size: 13px;
-	font-weight: 700;
-	letter-spacing: .08em;
-}
-.rv-legend__list {
-	margin: 0;
-	padding: 0;
-	list-style: none;
-	display: grid;
-	gap: 10px;
-}
-.rv-legend__item {
-	display: grid;
-	grid-template-columns: 76px minmax(0, 1fr);
-	gap: 12px;
-	align-items: center;
-	font-size: 13px;
-	line-height: 1.75;
-	color: var(--rv-muted);
-}
-/* 見本の要らない項目は1カラムで通す */
-.rv-legend__item--plain { grid-template-columns: minmax(0, 1fr); }
-.rv-swatch {
-	height: 34px;
-	border-radius: 4px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-}
-.rv-swatch--photo {
-	background: repeating-linear-gradient(-45deg, var(--rv-bone) 0 10px, #EBE9E0 10px 20px);
-	border: 1px dashed #484231;
-	font-family: "Marcellus", serif;
-	font-size: 11px;
-	color: var(--rv-gold);
-}
-.rv-swatch--todo {
-	background: transparent;
-	justify-content: flex-start;
-}
-.rv-swatch--todo span {
-	display: inline-block;
-	padding: .15em .6em;
-	background: #FFF3CD;
-	border: 1px solid #E0B44C;
-	border-radius: 2px;
-	color: #7A5300;
-	font-size: 11px;
-	font-weight: 700;
-	letter-spacing: .06em;
-	line-height: 1.6;
-}
-
-/* 本体が出す開発者向けの下書きバーは、上の帯と内容が重なるので隠す */
-.ng-draftbar { display: none !important; }
-
-@media (max-width: 767px) {
-	.rv-bar { padding: 22px 20px; }
-	.rv-bar__inner { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-	.rv-title { font-size: 19px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-	* { animation-duration: .01ms !important; transition-duration: .01ms !important; }
-}
-</style><style>
 /* --- 親テーマ代役のヘッダー/フッター -------------------------------------
    本番では親テーマの実物が入る。ここでは採用ページが実サイトの
    ヘッダーとフッターに挟まれたときの見え方を確かめるための代役。
@@ -1602,23 +1440,184 @@ body {
 	.pv-footer { padding: 30px 20px; border-radius: 0 120px 0 0; }
 }
 </style>
+<style>
+/* ==========================================================================
+   意匠の切替バー（.sw-）
 
-<div class="rv-bar"><div class="rv-bar__inner">
-<div>
-<p class="rv-eyebrow">GENE STATE / NEWGRAD</p>
-<h1 class="rv-title">新卒採用サイト <code>/newgrad/</code> 採用トップの案</h1>
-<p class="rv-sub">初年度（一期生）の募集ページです。配色・書体・余白はコーポレートサイトの実CSSから採取した値をそのまま使っているため、本番に載せたときの見え方とほぼ同じです。</p>
-<p class="rv-facts"><span class="rv-chip rv-chip--draft">下書き</span><span class="rv-chip">未確定の数値 <b>24</b> 件</span><span class="rv-chip">写真 <b>18</b> カット未入稿</span><span class="rv-chip">トンマナ 反映済み</span></p>
+   採用ページ本体（.ng 配下）には一切影響しない。
+   色と書体は本体と同じ genestate のトークンから取り、浮かないようにしている。
+   ブランドが確定した明るい世界のページなので、閲覧者のテーマに関わらず
+   同じ見え方になるよう配色は固定して明示的に塗っている。
+   ========================================================================== */
+:root {
+	--sw-ink:   #19110C;
+	--sw-gold:  #C7A52D;
+	--sw-bone:  #F5F4EE;
+	--sw-line:  #DDDDDD;
+	--sw-muted: #756F6B;
+	--sw-white: #FFFFFF;
+	color-scheme: light;
+}
+body {
+	margin: 0;
+	background: var(--sw-white);
+	color: var(--sw-ink);
+	font-family: "Zen Kaku Gothic New", sans-serif;
+	font-size: 16px;
+	line-height: 2;
+}
+
+/* --- 切替バー --- */
+.sw-bar {
+	position: sticky;
+	top: 0;
+	z-index: 50;
+	background: var(--sw-bone);
+	border-bottom: 1px solid var(--sw-gold);
+	padding: 14px 40px;
+}
+.sw-bar__inner {
+	max-width: 1220px;
+	margin: 0 auto;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px 28px;
+}
+.sw-lead {
+	font-size: 13px;
+	font-weight: 700;
+	letter-spacing: .08em;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+.sw-lead small {
+	display: block;
+	font-size: 11px;
+	font-weight: 400;
+	letter-spacing: 0;
+	color: var(--sw-muted);
+}
+.sw-group { display: flex; align-items: center; gap: 8px; }
+.sw-group__label {
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .08em;
+	color: var(--sw-muted);
+	white-space: nowrap;
+}
+.sw-seg {
+	display: flex;
+	background: var(--sw-white);
+	border: 1px solid var(--sw-line);
+	border-radius: 50px;
+	padding: 3px;
+	gap: 2px;
+}
+.sw-seg button {
+	appearance: none;
+	border: 0;
+	background: transparent;
+	border-radius: 50px;
+	padding: 5px 13px;
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.6;
+	color: var(--sw-ink);
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color .2s ease, color .2s ease;
+}
+.sw-seg button:hover { background: var(--sw-bone); }
+.sw-seg button[aria-pressed="true"] {
+	background: var(--sw-gold);
+	color: var(--sw-white);
+}
+.sw-seg button:focus-visible {
+	outline: 2px solid var(--sw-ink);
+	outline-offset: 2px;
+}
+.sw-now {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 16px;
+	background: var(--sw-ink);
+	border-radius: 50px;
+	color: var(--sw-white);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .04em;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+.sw-note {
+	padding: 10px 40px;
+	background: var(--sw-white);
+	border-bottom: 1px solid var(--sw-line);
+	color: var(--sw-muted);
+	font-size: 12px;
+	line-height: 1.8;
+	text-align: center;
+}
+
+/* --- MV の出し分け ---------------------------------------------------------
+   4案すべてがHTMLに入っていて、選ばれていない案を隠している。
+   本番では選ばれた1案だけが描画されるので、この指定は要らなくなる。
+   -------------------------------------------------------------------------- */
+:root[data-mv="a"] .ng-hero:not(.ng-hero--a),
+:root[data-mv="b"] .ng-hero:not(.ng-hero--b),
+:root[data-mv="c"] .ng-hero:not(.ng-hero--c),
+:root[data-mv="d"] .ng-hero:not(.ng-hero--d) { display: none !important; }
+
+/* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
+.ng-draftbar { display: none !important; }
+
+@media (max-width: 900px) {
+	.sw-bar { padding: 12px 20px; }
+	.sw-now { margin-left: 0; }
+	.sw-note { padding: 10px 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+	* { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+<div class="sw-bar">
+	<div class="sw-bar__inner">
+		<p class="sw-lead">意匠を切り替えて確認<small>選んだ組み合わせが、そのまま本番の見え方です</small></p>
+
+		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-mv">MV</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-mv">
+				<button type="button" data-part="mv" data-value="a" aria-pressed="true">A 全面写真</button>
+				<button type="button" data-part="mv" data-value="b" aria-pressed="false">B 左右分割</button>
+				<button type="button" data-part="mv" data-value="c" aria-pressed="false">C 白ベース</button>
+				<button type="button" data-part="mv" data-value="d" aria-pressed="false">D タイポ主役</button>
+			</div>
+		</div>
+
+		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-num">数字</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-num">
+				<button type="button" data-part="numbers" data-value="a" aria-pressed="true">A 黒ベタ</button>
+				<button type="button" data-part="numbers" data-value="b" aria-pressed="false">B 白ベース</button>
+			</div>
+		</div>
+
+		<div class="sw-group">
+			<span class="sw-group__label" id="sw-l-gro">育成</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-l-gro">
+				<button type="button" data-part="growth" data-value="a" aria-pressed="true">A 横4段</button>
+				<button type="button" data-part="growth" data-value="b" aria-pressed="false">B 縦</button>
+			</div>
+		</div>
+
+		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
+	</div>
 </div>
-<div class="rv-legend">
-<p class="rv-legend__title">見るときの注意</p>
-<ul class="rv-legend__list">
-<li class="rv-legend__item"><span class="rv-swatch rv-swatch--photo">P-00</span><span>斜線のボックスは<b>写真が入る位置</b>です。撮影がまだのため、どんなカットを入れるかの指示を出しています。</span></li>
-<li class="rv-legend__item"><span class="rv-swatch rv-swatch--todo"><span>要確認</span></span><span>このバッジが付いた数値は<b>社内で確定が必要</b>な項目です。仮の値が入っています。</span></li>
-<li class="rv-legend__item rv-legend__item--plain"><span>上下のヘッダーとフッターは<b>形だけの代役</b>です。本番では既存サイトの実物がそのまま入ります。</span></li>
-</ul>
-</div>
-</div></div>
+<p class="sw-note">斜線のボックスは写真が入る位置です（撮影がまだのため、指示文を表示しています）。黄色の「要確認」は社内で数値の確定が必要な箇所です。上下のヘッダーとフッターは形だけの代役で、本番では既存サイトの実物が入ります。</p>
 <header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><span class="pv-header__right"><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav><span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span></span></header>
 
 <main class="ng" id="newgrad">
@@ -1646,6 +1645,71 @@ body {
 	</p>
 				</div>
 
+		
+	</section>
+		<section class="ng-hero ng-hero--b" data-mv="b" aria-labelledby="ng-hero-catch-b">
+
+								<div class="ng-hero__col ng-hero__col--text">
+				<div class="ng-hero__inner">
+							<p class="ng-hero__badge">
+			20XX年卒 新卒採用（一期生）			<span class="ng-todo">要確認</span>		</p>
+			<h1 class="ng-hero__catch" id="ng-hero-catch-b">
+					<span class="ng-hero__catchline">「育てる」を、</span>
+					<span class="ng-hero__catchline">事業にしてきた会社です。</span>
+			</h1>
+				<span class="ng-hero__rule" aria-hidden="true"></span>
+		<p class="ng-hero__sub">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+	<p class="ng-hero__actions">
+		<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+	</p>
+					</div>
+			</div>
+			<div class="ng-hero__col ng-hero__col--media"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
+
+		
+	</section>
+		<section class="ng-hero ng-hero--c" data-mv="c" aria-labelledby="ng-hero-catch-c">
+
+								<div class="ng-hero__inner ng-container">
+				<p class="ng-hero__meta">
+					<span class="ng-hero__metaen">NEW GRADUATE RECRUITING</span>
+					<span class="ng-hero__metarule" aria-hidden="true"></span>
+					<span class="ng-hero__metatag">新卒採用（一期生）</span>
+				</p>
+					<h1 class="ng-hero__catch" id="ng-hero-catch-c">
+					<span class="ng-hero__catchline">「育てる」を、</span>
+					<span class="ng-hero__catchline">事業にしてきた会社です。</span>
+			</h1>
+			<p class="ng-hero__sub">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+	<p class="ng-hero__actions">
+		<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+	</p>
+				</div>
+			<div class="ng-hero__band"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
+
+		
+	</section>
+		<section class="ng-hero ng-hero--d" data-mv="d" aria-labelledby="ng-hero-catch-d">
+
+								<div class="ng-hero__inner ng-container">
+				<div class="ng-hero__col ng-hero__col--text">
+							<p class="ng-hero__badge">
+			20XX年卒 新卒採用（一期生）			<span class="ng-todo">要確認</span>		</p>
+			<h1 class="ng-hero__catch" id="ng-hero-catch-d">
+					<span class="ng-hero__catchline">「育てる」を、</span>
+					<span class="ng-hero__catchline">事業にしてきた会社です。</span>
+			</h1>
+			<p class="ng-hero__sub">未経験からの育成を、10年近く本業にしてきました。一期生を募集します。</p>
+	<p class="ng-hero__actions">
+		<a class="ng-btn ng-btn--primary" href="https://genestate.co.jp/newgrad/entry/">エントリーする</a>
+	</p>
+					</div>
+				<div class="ng-hero__grid">
+					<div class="ng-hero__cell ng-hero__cell--1"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
+					<div class="ng-hero__cell ng-hero__cell--2"><div class="ng-ph" role="img" aria-label="イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット"><span class="ng-ph__id">P-02</span><span class="ng-ph__note">イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット</span></div></div>
+					<div class="ng-hero__cell ng-hero__cell--3"><div class="ng-ph" role="img" aria-label="GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景"><span class="ng-ph__id">P-09</span><span class="ng-ph__note">GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景</span></div></div>
+				</div>
+			</div>
 		
 	</section>
 	
@@ -2235,7 +2299,7 @@ body {
 
 </main>
 
-<footer class="pv-footer">株式会社ジーンステイト<br>東京都新宿区西新宿1-26-2 新宿野村ビル39階<br><small>（本番では既存サイトのフッターが入ります）</small></footer>
+<footer class="pv-footer">株式会社ジーンステイト<br>〒163-0539 東京都新宿区西新宿1-26-2 新宿野村ビル39階<br><small>（本番では既存サイトのフッターが入ります）</small></footer>
 <script>
 /**
  * 新卒採用サイト（/newgrad/）のインタラクション
@@ -2394,4 +2458,72 @@ body {
 	}
 } )();
 
+</script>
+<script>
+/* 意匠の切替。
+   MV は data-mv 属性でCSSが出し分ける。
+   数字と育成はマークアップが同じなので、クラスを付け替えるだけでよい。
+   選んだ内容は端末に覚えさせ、開き直しても保たれるようにしている。 */
+(function () {
+	var STORE = 'ng-switcher';
+	var state = { mv: 'a', numbers: 'a', growth: 'a' };
+
+	try {
+		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
+		['mv', 'numbers', 'growth'].forEach(function (k) {
+			if (saved[k]) { state[k] = saved[k]; }
+		});
+	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
+
+	var root = document.documentElement;
+
+	function applyNumbers(v) {
+		var sec = document.getElementById('numbers');
+		if (!sec) { return; }
+		sec.classList.toggle('ng-section--brand', v === 'a');
+		sec.classList.toggle('ng-numbers--plain', v === 'b');
+	}
+
+	function applyGrowth(v) {
+		var list = document.querySelector('.ng-growth__timeline');
+		if (!list) { return; }
+		list.classList.toggle('ng-growth__timeline--vertical', v === 'b');
+	}
+
+	function label() {
+		var mv = state.mv.toUpperCase();
+		return 'MV-' + mv + ' ／ 数字-' + state.numbers.toUpperCase() + ' ／ 育成-' + state.growth.toUpperCase();
+	}
+
+	function render() {
+		root.setAttribute('data-mv', state.mv);
+		applyNumbers(state.numbers);
+		applyGrowth(state.growth);
+
+		document.querySelectorAll('.sw-seg button').forEach(function (b) {
+			var on = state[b.dataset.part] === b.dataset.value;
+			b.setAttribute('aria-pressed', on ? 'true' : 'false');
+		});
+
+		var now = document.getElementById('sw-now-text');
+		if (now) { now.textContent = label(); }
+
+		try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {}
+	}
+
+	document.querySelectorAll('.sw-seg button').forEach(function (b) {
+		b.addEventListener('click', function () {
+			state[b.dataset.part] = b.dataset.value;
+			render();
+
+			/* MV は画面の一番上にあるので、切り替えたら見える位置まで戻す */
+			if (b.dataset.part === 'mv') {
+				var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+				window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+			}
+		});
+	});
+
+	render();
+})();
 </script>
