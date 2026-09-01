@@ -52,6 +52,18 @@
  *               ※ d と e は和文書体が変わるため、本番でも
  *                  対応する Google Fonts の読み込みが必要
  *               → 考え方と参考サイトは docs/07-tone-references.md
+ *   NG_COMP_*   各パートの並べ方（色や形とは独立。a=既定 / b=もう1案）
+ *                 NG_COMP_INTRO     a 写真左・文章右   / b 写真を全幅の帯に
+ *                 NG_COMP_MESSAGE   a 写真左・文章右   / b 写真を上に大きく
+ *                 NG_COMP_BUSINESS  a 3枚を横並び      / b 縦に積んで左右交互
+ *                 NG_COMP_WORK      a 2枚のカード      / b 大きく1列・左右に
+ *                 NG_COMP_PEOPLE    a 4枚のカード      / b 横スクロール
+ *                 NG_COMP_CULTURE   a 写真4枚を均等に  / b 1枚を大きくモザイク
+ *                 NG_COMP_RECRUIT   a 表              / b カードの積み重ね
+ *                 NG_COMP_FAQ       a アコーディオン   / b 全文を出して2段組み
+ *                 NG_COMP_CTA       a 中央寄せ         / b 左右分割
+ *               ※ 数字と育成の構成は NG_NUMBERS / NG_GROWTH を使う
+ *               → 選ぶ目安は docs/07-tone-references.md の「5. 各パートの構成案」
  *
  * 案は preview/switcher.html で切り替えながら見比べられる。
  * 画面で選んだ組み合わせを、そのままここに書けばよい。
@@ -61,6 +73,9 @@
 // define( 'NG_GROWTH',  'b' );
 // define( 'NG_TONE',    'b' );
 // define( 'NG_SHAPE',   'a' );
+// 構成は変えたいパートだけ書けばよい（書かなければ a）
+// define( 'NG_COMP_PEOPLE',  'b' );
+// define( 'NG_COMP_RECRUIT', 'b' );
 
 require_once get_stylesheet_directory() . '/inc/newgrad-functions.php';
 

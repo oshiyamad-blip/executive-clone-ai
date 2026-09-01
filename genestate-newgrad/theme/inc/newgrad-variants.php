@@ -14,6 +14,10 @@
  *   define( 'NG_SHAPE',   'd' );  // 形        a=片角スイープ / b=四隅まるく / c=直線
  *                                 //           d=斜めカット / e=アーチ
  *
+ *   各パートの構成は NG_COMP_INTRO / NG_COMP_MESSAGE / NG_COMP_BUSINESS /
+ *   NG_COMP_WORK / NG_COMP_PEOPLE / NG_COMP_CULTURE / NG_COMP_RECRUIT /
+ *   NG_COMP_FAQ / NG_COMP_CTA でそれぞれ a / b を選ぶ（未定義なら a）。
+ *
  * 定義しなければ 'a'（現在の実装）になる。
  *
  * NUMBERS と GROWTH はマークアップが同じで CSS だけが違うため、
@@ -35,6 +39,15 @@ function ng_variant( $key ) {
 		'growth'  => array( 'const' => 'NG_GROWTH',  'allow' => array( 'a', 'b' ) ),
 		'tone'    => array( 'const' => 'NG_TONE',    'allow' => array( 'a', 'b', 'c', 'd', 'e', 'f', 'g' ) ),
 		'shape'   => array( 'const' => 'NG_SHAPE',   'allow' => array( 'a', 'b', 'c', 'd', 'e' ) ),
+		'comp_intro'  => array( 'const' => 'NG_COMP_INTRO',    'allow' => array( 'a', 'b' ) ),
+		'comp_message' => array( 'const' => 'NG_COMP_MESSAGE',  'allow' => array( 'a', 'b' ) ),
+		'comp_business' => array( 'const' => 'NG_COMP_BUSINESS', 'allow' => array( 'a', 'b' ) ),
+		'comp_work'   => array( 'const' => 'NG_COMP_WORK',     'allow' => array( 'a', 'b' ) ),
+		'comp_people' => array( 'const' => 'NG_COMP_PEOPLE',   'allow' => array( 'a', 'b' ) ),
+		'comp_culture' => array( 'const' => 'NG_COMP_CULTURE',  'allow' => array( 'a', 'b' ) ),
+		'comp_recruit' => array( 'const' => 'NG_COMP_RECRUIT',  'allow' => array( 'a', 'b' ) ),
+		'comp_faq'    => array( 'const' => 'NG_COMP_FAQ',      'allow' => array( 'a', 'b' ) ),
+		'comp_cta'    => array( 'const' => 'NG_COMP_CTA',      'allow' => array( 'a', 'b' ) ),
 	);
 	if ( ! isset( $map[ $key ] ) ) {
 		return 'a';
@@ -170,4 +183,19 @@ function ng_mv_copy( $variant, $hero, $badge, $entry, $todo = null ) {
 		<a class="ng-btn ng-btn--primary" href="<?php echo $entry; ?>">エントリーする</a>
 	</p>
 	<?php
+}
+
+/**
+ * 各パートの構成を data 属性として出力する。
+ *
+ * <main class="ng" ... <?php ng_comp_attrs(); ?>> のように使う。
+ * CSS 側は .ng[data-comp-intro="b"] のように受ける。
+ *
+ * @return void
+ */
+function ng_comp_attrs() {
+	$keys = array( 'intro', 'message', 'business', 'work', 'people', 'culture', 'recruit', 'faq', 'cta' );
+	foreach ( $keys as $key ) {
+		printf( ' data-comp-%s="%s"', esc_attr( $key ), esc_attr( ng_variant( 'comp_' . $key ) ) );
+	}
 }

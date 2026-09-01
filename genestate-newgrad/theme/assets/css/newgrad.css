@@ -1946,3 +1946,177 @@
 .ng[data-shape="c"] .ng-section::before,
 .ng[data-shape="d"] .ng-section::before,
 .ng[data-shape="e"] .ng-section::before { content: none; }
+
+/* ==========================================================================
+   8. 各パートの構成案（data-comp-*）
+   --------------------------------------------------------------------------
+   セクションごとに、並べ方の案をもう1つ持たせる。
+   マークアップは変えずCSSだけで組み替えているので、
+   本番でも定数を1つ足すだけで切り替わる。
+
+     intro     a 写真左・文章右      b 写真を全幅の帯にして文章を下に
+     message   a 写真左・文章右      b 写真を上に大きく、手紙のように下へ
+     business  a 3枚のカード横並び   b 縦に積んで写真と文章を左右交互に
+     work      a 2枚のカード         b 大きく1列。写真と文章を左右に
+     people    a 4枚のカード         b 横スクロール
+     culture   a 写真4枚を均等に     b 1枚を大きく、残りを小さく（モザイク）
+     recruit   a 表                  b カードの積み重ね
+     faq       a アコーディオン      b 全文を出して2段組み
+     cta       a 中央寄せ            b 左右分割
+
+   ★ 「a と b のどちらが正しい」ではなく、載せる分量と写真の枚数で決まる。
+     各案の使いどころは docs/07-tone-references.md にまとめてある。
+   ========================================================================== */
+
+/* --- intro：写真を全幅の帯にして、文章を下へ --- */
+.ng[data-comp-intro="b"] .ng-intro__grid { grid-template-columns: minmax(0, 1fr); }
+.ng[data-comp-intro="b"] .ng-intro__media { aspect-ratio: 21 / 9; }
+.ng[data-comp-intro="b"] .ng-intro__body { max-width: 46em; }
+
+/* --- message：代表の写真を上に大きく置き、手紙のように下へ流す --- */
+.ng[data-comp-message="b"] .ng-message__grid {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+}
+.ng[data-comp-message="b"] .ng-message__media {
+	aspect-ratio: 16 / 9;
+	width: 100%;
+	max-width: 720px;
+}
+.ng[data-comp-message="b"] .ng-message__grid > *:last-child { max-width: 46em; }
+.ng[data-comp-message="b"] .ng-message__sign { justify-content: flex-end; }
+
+/* --- business：縦に積んで、写真と文章を左右交互に --- */
+.ng[data-comp-business="b"] .ng-biz__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(40px, 5vw, 64px);
+}
+.ng[data-comp-business="b"] .ng-biz__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(20px, 3vw, 40px);
+	align-items: center;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	overflow: visible;
+}
+.ng[data-comp-business="b"] .ng-biz__media {
+	aspect-ratio: 4 / 3;
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+.ng[data-comp-business="b"] .ng-biz__body { padding: 0; }
+
+/* --- work：大きく1列にして、写真と文章を左右に --- */
+.ng[data-comp-work="b"] .ng-work__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 3vw, 40px);
+}
+.ng[data-comp-work="b"] .ng-work__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+}
+.ng[data-comp-work="b"] .ng-work__media { aspect-ratio: 16 / 10; }
+
+/* --- people：横スクロール。人数が増えても縦に伸びない --- */
+.ng[data-comp-people="b"] .ng-people__list {
+	display: flex;
+	align-items: stretch;
+	gap: clamp(16px, 2vw, 24px);
+	overflow-x: auto;
+	scroll-snap-type: x mandatory;
+	scroll-padding-left: var(--ng-gutter);
+	padding-bottom: 12px;
+	-webkit-overflow-scrolling: touch;
+	/* 右端で切れた枚数が「まだ続く」と読めるよう、余白いっぱいまで抜く */
+	margin-inline: calc(-1 * var(--ng-gutter));
+	padding-inline: var(--ng-gutter);
+}
+.ng[data-comp-people="b"] .ng-people__list > * {
+	flex: 0 0 clamp(220px, 26vw, 300px);
+	scroll-snap-align: start;
+}
+
+/* --- culture：1枚を大きく、残りを小さく（モザイク） --- */
+.ng[data-comp-culture="b"] .ng-culture__gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ng[data-comp-culture="b"] .ng-culture__gallery > * { aspect-ratio: 4 / 3; }
+/* 1枚目と最後の1枚を横いっぱいに。2列でも面が余らない */
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:first-child,
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:last-child {
+	grid-column: span 2;
+	aspect-ratio: 21 / 9;
+}
+
+/* --- recruit：表をやめ、カードの積み重ねに --------------------------------
+   1行が1枚のカードになる。スマートフォンで読みやすく、
+   項目が増えても横に潰れない。
+   ---------------------------------------------------------------------- */
+.ng[data-comp-recruit="b"] .ng-table,
+.ng[data-comp-recruit="b"] .ng-table tbody,
+.ng[data-comp-recruit="b"] .ng-table tr,
+.ng[data-comp-recruit="b"] .ng-table th,
+.ng[data-comp-recruit="b"] .ng-table td {
+	display: block;
+	width: auto;
+}
+.ng[data-comp-recruit="b"] .ng-table tr {
+	margin-bottom: 12px;
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+	background: var(--ng-c-bg);
+}
+.ng[data-comp-recruit="b"] .ng-table tr:last-child { border-bottom: 1px solid var(--ng-c-line); }
+.ng[data-comp-recruit="b"] .ng-table th {
+	padding: 12px 20px;
+	background: var(--ng-c-bg-subtle);
+	font-size: var(--ng-fs-small);
+}
+.ng[data-comp-recruit="b"] .ng-table td { padding: 16px 20px; }
+
+/* --- faq：アコーディオンをやめ、全文を出して2段組みに --------------------
+   質問の数が少ないうちは、開かせるより全部見せたほうが早い。
+   ---------------------------------------------------------------------- */
+.ng[data-comp-faq="b"] .ng-faq {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0 clamp(32px, 4vw, 56px);
+	border-top: 0;
+}
+.ng[data-comp-faq="b"] .ng-faq__a { grid-template-rows: 1fr; }
+.ng[data-comp-faq="b"] .ng-faq__icon { display: none; }
+.ng[data-comp-faq="b"] .ng-faq__q { cursor: default; }
+.ng[data-comp-faq="b"] .ng-faq__item { border-top: 1px solid var(--ng-c-line); border-bottom: 0; }
+/* 2段に開くため、この案のときだけ器を通常幅にする */
+.ng[data-comp-faq="b"] #faq .ng-container--narrow { max-width: var(--ng-container); }
+
+/* --- cta：中央寄せをやめ、左右に分ける --- */
+.ng[data-comp-cta="b"] .ng-cta__inner {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 3vw, 48px);
+	align-items: center;
+	text-align: left;
+}
+.ng[data-comp-cta="b"] .ng-cta__lead { margin-inline: 0; }
+.ng[data-comp-cta="b"] .ng-cta__actions { margin-top: 0; }
+
+/* PC では2カラムに開く案を、まとめてここで指定する */
+@media (min-width: 48em) {
+	.ng[data-comp-business="b"] .ng-biz__item { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+	/* 偶数番目は写真を右へ。ページを下ると左右が入れ替わって見える */
+	.ng[data-comp-business="b"] .ng-biz__item:nth-child(even) .ng-biz__media { order: 2; }
+	.ng[data-comp-work="b"] .ng-work__item { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+	.ng[data-comp-faq="b"] .ng-faq { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	/* culture は4列2段。1枚目だけ2列2段を占め、残り3枚で面を埋める */
+	.ng[data-comp-culture="b"] .ng-culture__gallery { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:first-child {
+		grid-column: span 2;
+		grid-row: span 2;
+		aspect-ratio: auto;
+	}
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:nth-child(2) { grid-column: span 2; }
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:last-child { grid-column: auto; aspect-ratio: 4 / 3; }
+	.ng[data-comp-cta="b"] .ng-cta__inner { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+}

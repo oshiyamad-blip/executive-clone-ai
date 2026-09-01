@@ -202,6 +202,66 @@ body {
 	transform: translateX(-50%);
 }
 
+/* --- 構成パネル ---------------------------------------------------------
+   パートごとの並べ方は数が多いので、上のバーには置かず折りたたむ。
+   -------------------------------------------------------------------------- */
+.sw-more {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 16px;
+	border: 1px solid var(--sw-line);
+	border-radius: 50px;
+	background: var(--sw-white);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.6;
+	color: var(--sw-ink);
+	cursor: pointer;
+}
+.sw-more:hover { background: var(--sw-bone); }
+.sw-more[aria-expanded="true"] { background: var(--sw-ink); border-color: var(--sw-ink); color: var(--sw-white); }
+.sw-more[aria-expanded="true"] span { transform: rotate(180deg); }
+.sw-more span { display: inline-block; transition: transform .2s ease; }
+.sw-more:focus-visible { outline: 2px solid var(--sw-ink); outline-offset: 2px; }
+
+.sw-panel {
+	background: var(--sw-white);
+	border-bottom: 1px solid var(--sw-line);
+	padding: 20px 40px 24px;
+}
+.sw-panel__lead {
+	max-width: 1220px;
+	margin: 0 auto 16px;
+	font-size: 12px;
+	line-height: 1.8;
+	color: var(--sw-muted);
+}
+.sw-panel__grid {
+	max-width: 1220px;
+	margin: 0 auto;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+	gap: 10px 32px;
+}
+.sw-row { display: flex; align-items: center; gap: 12px; }
+.sw-row__name {
+	flex: 0 0 7em;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .04em;
+}
+.sw-row .sw-seg { flex: 1; }
+.sw-row .sw-seg button { flex: 1; padding: 5px 10px; }
+
+@media (max-width: 900px) {
+	.sw-panel { padding: 16px 20px 20px; }
+	.sw-panel__grid { grid-template-columns: minmax(0, 1fr); }
+	.sw-row__name { flex-basis: 6em; }
+}
+
 /* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
 .ng-draftbar { display: none !important; }
 
@@ -231,22 +291,6 @@ SWCSS;
 				<button type="button" data-part="mv" data-value="b" aria-pressed="false">B 左右分割</button>
 				<button type="button" data-part="mv" data-value="c" aria-pressed="false">C 白ベース</button>
 				<button type="button" data-part="mv" data-value="d" aria-pressed="false">D タイポ主役</button>
-			</div>
-		</div>
-
-		<div class="sw-group">
-			<span class="sw-group__label" id="sw-l-num">数字</span>
-			<div class="sw-seg" role="group" aria-labelledby="sw-l-num">
-				<button type="button" data-part="numbers" data-value="a" aria-pressed="true">A 黒ベタ</button>
-				<button type="button" data-part="numbers" data-value="b" aria-pressed="false">B 白ベース</button>
-			</div>
-		</div>
-
-		<div class="sw-group">
-			<span class="sw-group__label" id="sw-l-gro">育成</span>
-			<div class="sw-seg" role="group" aria-labelledby="sw-l-gro">
-				<button type="button" data-part="growth" data-value="a" aria-pressed="true">A 横4段</button>
-				<button type="button" data-part="growth" data-value="b" aria-pressed="false">B 縦</button>
 			</div>
 		</div>
 
@@ -282,7 +326,91 @@ SWCSS;
 			</div>
 		</div>
 
+		<button type="button" class="sw-more" id="sw-more" aria-expanded="false" aria-controls="sw-panel">構成を変える<span aria-hidden="true">▾</span></button>
+
 		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
+	</div>
+</div>
+<div class="sw-panel" id="sw-panel" hidden>
+	<p class="sw-panel__lead">パートごとに並べ方を切り替えます。<b>どちらが正しいというより、載せる分量と写真の枚数で決まります。</b></p>
+	<div class="sw-panel__grid">
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-intro">イントロ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-intro">
+				<button type="button" data-part="intro" data-value="a" aria-pressed="true">A 写真左・文章右</button>
+				<button type="button" data-part="intro" data-value="b" aria-pressed="false">B 写真を全幅の帯に</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-message">代表メッセージ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-message">
+				<button type="button" data-part="message" data-value="a" aria-pressed="true">A 写真左・文章右</button>
+				<button type="button" data-part="message" data-value="b" aria-pressed="false">B 写真を上に大きく</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-numbers">数字</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-numbers">
+				<button type="button" data-part="numbers" data-value="a" aria-pressed="true">A 黒ベタ</button>
+				<button type="button" data-part="numbers" data-value="b" aria-pressed="false">B 白ベース・細罫</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-business">事業</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-business">
+				<button type="button" data-part="business" data-value="a" aria-pressed="true">A 3枚のカード横並び</button>
+				<button type="button" data-part="business" data-value="b" aria-pressed="false">B 縦に積んで左右交互</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-work">仕事</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-work">
+				<button type="button" data-part="work" data-value="a" aria-pressed="true">A 2枚のカード</button>
+				<button type="button" data-part="work" data-value="b" aria-pressed="false">B 大きく1列・左右に</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-growth">育成</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-growth">
+				<button type="button" data-part="growth" data-value="a" aria-pressed="true">A 横4ステップ</button>
+				<button type="button" data-part="growth" data-value="b" aria-pressed="false">B 縦タイムライン</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-people">人</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-people">
+				<button type="button" data-part="people" data-value="a" aria-pressed="true">A 4枚のカード</button>
+				<button type="button" data-part="people" data-value="b" aria-pressed="false">B 横スクロール</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-culture">はたらく環境</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-culture">
+				<button type="button" data-part="culture" data-value="a" aria-pressed="true">A 写真4枚を均等に</button>
+				<button type="button" data-part="culture" data-value="b" aria-pressed="false">B 1枚を大きくモザイク</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-recruit">募集要項</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-recruit">
+				<button type="button" data-part="recruit" data-value="a" aria-pressed="true">A 表</button>
+				<button type="button" data-part="recruit" data-value="b" aria-pressed="false">B カードの積み重ね</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-faq">FAQ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-faq">
+				<button type="button" data-part="faq" data-value="a" aria-pressed="true">A アコーディオン</button>
+				<button type="button" data-part="faq" data-value="b" aria-pressed="false">B 全文を出して2段組み</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-cta">エントリー</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-cta">
+				<button type="button" data-part="cta" data-value="a" aria-pressed="true">A 中央寄せ</button>
+				<button type="button" data-part="cta" data-value="b" aria-pressed="false">B 左右分割</button>
+			</div>
+		</div>
 	</div>
 </div>
 <p class="sw-note">斜線のボックスは写真が入る位置です（撮影がまだのため、指示文を表示しています）。黄色の「要確認」は社内で数値の確定が必要な箇所です。上下のヘッダーとフッターは形だけの代役で、本番では既存サイトの実物が入ります。</p>
@@ -306,11 +434,13 @@ function get_footer() {
    選んだ内容は端末に覚えさせ、開き直しても保たれるようにしている。 */
 (function () {
 	var STORE = 'ng-switcher';
+	var COMP = ['intro', 'message', 'business', 'work', 'people', 'culture', 'recruit', 'faq', 'cta'];
 	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc' };
+	COMP.forEach(function (k) { state[k] = 'a'; });
 
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].forEach(function (k) {
+		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].concat(COMP).forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
@@ -360,7 +490,11 @@ function get_footer() {
 			+ ' ／ 数字-' + state.numbers.toUpperCase()
 			+ ' ／ 育成-' + state.growth.toUpperCase()
 			+ ' ／ トンマナ-' + state.tone.toUpperCase()
-			+ ' ／ 形-' + state.shape.toUpperCase();
+			+ ' ／ 形-' + state.shape.toUpperCase()
+			+ ' ／ 構成' + (function () {
+				var n = COMP.concat(['numbers', 'growth']).filter(function (k) { return state[k] !== 'a'; }).length;
+				return n ? '-B×' + n : '-既定';
+			})();
 	}
 
 	function render() {
@@ -373,6 +507,7 @@ function get_footer() {
 		if (main) {
 			main.setAttribute('data-tone', state.tone);
 			main.setAttribute('data-shape', state.shape);
+			COMP.forEach(function (k) { main.setAttribute('data-comp-' + k, state[k]); });
 		}
 
 		document.querySelectorAll('.sw-seg button').forEach(function (b) {
@@ -411,6 +546,17 @@ function get_footer() {
 			}
 		});
 	});
+
+	/* 構成パネルの開閉 */
+	var more  = document.getElementById('sw-more');
+	var panel = document.getElementById('sw-panel');
+	if (more && panel) {
+		more.addEventListener('click', function () {
+			var open = more.getAttribute('aria-expanded') === 'true';
+			more.setAttribute('aria-expanded', String(!open));
+			panel.hidden = open;
+		});
+	}
 
 	render();
 })();

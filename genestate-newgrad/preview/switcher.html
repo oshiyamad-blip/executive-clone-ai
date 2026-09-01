@@ -1951,6 +1951,180 @@
 .ng[data-shape="d"] .ng-section::before,
 .ng[data-shape="e"] .ng-section::before { content: none; }
 
+/* ==========================================================================
+   8. 各パートの構成案（data-comp-*）
+   --------------------------------------------------------------------------
+   セクションごとに、並べ方の案をもう1つ持たせる。
+   マークアップは変えずCSSだけで組み替えているので、
+   本番でも定数を1つ足すだけで切り替わる。
+
+     intro     a 写真左・文章右      b 写真を全幅の帯にして文章を下に
+     message   a 写真左・文章右      b 写真を上に大きく、手紙のように下へ
+     business  a 3枚のカード横並び   b 縦に積んで写真と文章を左右交互に
+     work      a 2枚のカード         b 大きく1列。写真と文章を左右に
+     people    a 4枚のカード         b 横スクロール
+     culture   a 写真4枚を均等に     b 1枚を大きく、残りを小さく（モザイク）
+     recruit   a 表                  b カードの積み重ね
+     faq       a アコーディオン      b 全文を出して2段組み
+     cta       a 中央寄せ            b 左右分割
+
+   ★ 「a と b のどちらが正しい」ではなく、載せる分量と写真の枚数で決まる。
+     各案の使いどころは docs/07-tone-references.md にまとめてある。
+   ========================================================================== */
+
+/* --- intro：写真を全幅の帯にして、文章を下へ --- */
+.ng[data-comp-intro="b"] .ng-intro__grid { grid-template-columns: minmax(0, 1fr); }
+.ng[data-comp-intro="b"] .ng-intro__media { aspect-ratio: 21 / 9; }
+.ng[data-comp-intro="b"] .ng-intro__body { max-width: 46em; }
+
+/* --- message：代表の写真を上に大きく置き、手紙のように下へ流す --- */
+.ng[data-comp-message="b"] .ng-message__grid {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+}
+.ng[data-comp-message="b"] .ng-message__media {
+	aspect-ratio: 16 / 9;
+	width: 100%;
+	max-width: 720px;
+}
+.ng[data-comp-message="b"] .ng-message__grid > *:last-child { max-width: 46em; }
+.ng[data-comp-message="b"] .ng-message__sign { justify-content: flex-end; }
+
+/* --- business：縦に積んで、写真と文章を左右交互に --- */
+.ng[data-comp-business="b"] .ng-biz__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(40px, 5vw, 64px);
+}
+.ng[data-comp-business="b"] .ng-biz__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(20px, 3vw, 40px);
+	align-items: center;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	overflow: visible;
+}
+.ng[data-comp-business="b"] .ng-biz__media {
+	aspect-ratio: 4 / 3;
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+.ng[data-comp-business="b"] .ng-biz__body { padding: 0; }
+
+/* --- work：大きく1列にして、写真と文章を左右に --- */
+.ng[data-comp-work="b"] .ng-work__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 3vw, 40px);
+}
+.ng[data-comp-work="b"] .ng-work__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+}
+.ng[data-comp-work="b"] .ng-work__media { aspect-ratio: 16 / 10; }
+
+/* --- people：横スクロール。人数が増えても縦に伸びない --- */
+.ng[data-comp-people="b"] .ng-people__list {
+	display: flex;
+	align-items: stretch;
+	gap: clamp(16px, 2vw, 24px);
+	overflow-x: auto;
+	scroll-snap-type: x mandatory;
+	scroll-padding-left: var(--ng-gutter);
+	padding-bottom: 12px;
+	-webkit-overflow-scrolling: touch;
+	/* 右端で切れた枚数が「まだ続く」と読めるよう、余白いっぱいまで抜く */
+	margin-inline: calc(-1 * var(--ng-gutter));
+	padding-inline: var(--ng-gutter);
+}
+.ng[data-comp-people="b"] .ng-people__list > * {
+	flex: 0 0 clamp(220px, 26vw, 300px);
+	scroll-snap-align: start;
+}
+
+/* --- culture：1枚を大きく、残りを小さく（モザイク） --- */
+.ng[data-comp-culture="b"] .ng-culture__gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ng[data-comp-culture="b"] .ng-culture__gallery > * { aspect-ratio: 4 / 3; }
+/* 1枚目と最後の1枚を横いっぱいに。2列でも面が余らない */
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:first-child,
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:last-child {
+	grid-column: span 2;
+	aspect-ratio: 21 / 9;
+}
+
+/* --- recruit：表をやめ、カードの積み重ねに --------------------------------
+   1行が1枚のカードになる。スマートフォンで読みやすく、
+   項目が増えても横に潰れない。
+   ---------------------------------------------------------------------- */
+.ng[data-comp-recruit="b"] .ng-table,
+.ng[data-comp-recruit="b"] .ng-table tbody,
+.ng[data-comp-recruit="b"] .ng-table tr,
+.ng[data-comp-recruit="b"] .ng-table th,
+.ng[data-comp-recruit="b"] .ng-table td {
+	display: block;
+	width: auto;
+}
+.ng[data-comp-recruit="b"] .ng-table tr {
+	margin-bottom: 12px;
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+	background: var(--ng-c-bg);
+}
+.ng[data-comp-recruit="b"] .ng-table tr:last-child { border-bottom: 1px solid var(--ng-c-line); }
+.ng[data-comp-recruit="b"] .ng-table th {
+	padding: 12px 20px;
+	background: var(--ng-c-bg-subtle);
+	font-size: var(--ng-fs-small);
+}
+.ng[data-comp-recruit="b"] .ng-table td { padding: 16px 20px; }
+
+/* --- faq：アコーディオンをやめ、全文を出して2段組みに --------------------
+   質問の数が少ないうちは、開かせるより全部見せたほうが早い。
+   ---------------------------------------------------------------------- */
+.ng[data-comp-faq="b"] .ng-faq {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0 clamp(32px, 4vw, 56px);
+	border-top: 0;
+}
+.ng[data-comp-faq="b"] .ng-faq__a { grid-template-rows: 1fr; }
+.ng[data-comp-faq="b"] .ng-faq__icon { display: none; }
+.ng[data-comp-faq="b"] .ng-faq__q { cursor: default; }
+.ng[data-comp-faq="b"] .ng-faq__item { border-top: 1px solid var(--ng-c-line); border-bottom: 0; }
+/* 2段に開くため、この案のときだけ器を通常幅にする */
+.ng[data-comp-faq="b"] #faq .ng-container--narrow { max-width: var(--ng-container); }
+
+/* --- cta：中央寄せをやめ、左右に分ける --- */
+.ng[data-comp-cta="b"] .ng-cta__inner {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 3vw, 48px);
+	align-items: center;
+	text-align: left;
+}
+.ng[data-comp-cta="b"] .ng-cta__lead { margin-inline: 0; }
+.ng[data-comp-cta="b"] .ng-cta__actions { margin-top: 0; }
+
+/* PC では2カラムに開く案を、まとめてここで指定する */
+@media (min-width: 48em) {
+	.ng[data-comp-business="b"] .ng-biz__item { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+	/* 偶数番目は写真を右へ。ページを下ると左右が入れ替わって見える */
+	.ng[data-comp-business="b"] .ng-biz__item:nth-child(even) .ng-biz__media { order: 2; }
+	.ng[data-comp-work="b"] .ng-work__item { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+	.ng[data-comp-faq="b"] .ng-faq { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	/* culture は4列2段。1枚目だけ2列2段を占め、残り3枚で面を埋める */
+	.ng[data-comp-culture="b"] .ng-culture__gallery { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:first-child {
+		grid-column: span 2;
+		grid-row: span 2;
+		aspect-ratio: auto;
+	}
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:nth-child(2) { grid-column: span 2; }
+	.ng[data-comp-culture="b"] .ng-culture__gallery > *:last-child { grid-column: auto; aspect-ratio: 4 / 3; }
+	.ng[data-comp-cta="b"] .ng-cta__inner { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+}
+
 </style>
 <style id="ng-chrome-pc">
 /* --- 親テーマ代役のヘッダー/フッター -------------------------------------
@@ -3978,6 +4152,170 @@
 .ng[data-shape="e"] .ng-section::before { content: none; }
 
 
+
+
+
+.ng[data-comp-intro="b"] .ng-intro__grid { grid-template-columns: minmax(0, 1fr); }
+
+.ng[data-comp-intro="b"] .ng-intro__media { aspect-ratio: 21 / 9; }
+
+.ng[data-comp-intro="b"] .ng-intro__body { max-width: 46em; }
+
+
+
+.ng[data-comp-message="b"] .ng-message__grid {
+	grid-template-columns: minmax(0, 1fr);
+	justify-items: center;
+}
+
+.ng[data-comp-message="b"] .ng-message__media {
+	aspect-ratio: 16 / 9;
+	width: 100%;
+	max-width: 720px;
+}
+
+.ng[data-comp-message="b"] .ng-message__grid > *:last-child { max-width: 46em; }
+
+.ng[data-comp-message="b"] .ng-message__sign { justify-content: flex-end; }
+
+
+
+.ng[data-comp-business="b"] .ng-biz__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(40px, 18.75px, 64px);
+}
+
+.ng[data-comp-business="b"] .ng-biz__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(20px, 11.25px, 40px);
+	align-items: center;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	overflow: visible;
+}
+
+.ng[data-comp-business="b"] .ng-biz__media {
+	aspect-ratio: 4 / 3;
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+}
+
+.ng[data-comp-business="b"] .ng-biz__body { padding: 0; }
+
+
+
+.ng[data-comp-work="b"] .ng-work__list {
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 11.25px, 40px);
+}
+
+.ng[data-comp-work="b"] .ng-work__item {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.ng[data-comp-work="b"] .ng-work__media { aspect-ratio: 16 / 10; }
+
+
+
+.ng[data-comp-people="b"] .ng-people__list {
+	display: flex;
+	align-items: stretch;
+	gap: clamp(16px, 7.5px, 24px);
+	overflow-x: auto;
+	scroll-snap-type: x mandatory;
+	scroll-padding-left: var(--ng-gutter);
+	padding-bottom: 12px;
+	-webkit-overflow-scrolling: touch;
+	
+	margin-inline: calc(-1 * var(--ng-gutter));
+	padding-inline: var(--ng-gutter);
+}
+
+.ng[data-comp-people="b"] .ng-people__list > * {
+	flex: 0 0 clamp(220px, 97.5px, 300px);
+	scroll-snap-align: start;
+}
+
+
+
+.ng[data-comp-culture="b"] .ng-culture__gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+.ng[data-comp-culture="b"] .ng-culture__gallery > * { aspect-ratio: 4 / 3; }
+
+
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:first-child,
+.ng[data-comp-culture="b"] .ng-culture__gallery > *:last-child {
+	grid-column: span 2;
+	aspect-ratio: 21 / 9;
+}
+
+
+
+.ng[data-comp-recruit="b"] .ng-table,
+.ng[data-comp-recruit="b"] .ng-table tbody,
+.ng[data-comp-recruit="b"] .ng-table tr,
+.ng[data-comp-recruit="b"] .ng-table th,
+.ng[data-comp-recruit="b"] .ng-table td {
+	display: block;
+	width: auto;
+}
+
+.ng[data-comp-recruit="b"] .ng-table tr {
+	margin-bottom: 12px;
+	border: 1px solid var(--ng-c-line);
+	border-radius: var(--ng-radius);
+	overflow: hidden;
+	background: var(--ng-c-bg);
+}
+
+.ng[data-comp-recruit="b"] .ng-table tr:last-child { border-bottom: 1px solid var(--ng-c-line); }
+
+.ng[data-comp-recruit="b"] .ng-table th {
+	padding: 12px 20px;
+	background: var(--ng-c-bg-subtle);
+	font-size: var(--ng-fs-small);
+}
+
+.ng[data-comp-recruit="b"] .ng-table td { padding: 16px 20px; }
+
+
+
+.ng[data-comp-faq="b"] .ng-faq {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0 clamp(32px, 15px, 56px);
+	border-top: 0;
+}
+
+.ng[data-comp-faq="b"] .ng-faq__a { grid-template-rows: 1fr; }
+
+.ng[data-comp-faq="b"] .ng-faq__icon { display: none; }
+
+.ng[data-comp-faq="b"] .ng-faq__q { cursor: default; }
+
+.ng[data-comp-faq="b"] .ng-faq__item { border-top: 1px solid var(--ng-c-line); border-bottom: 0; }
+
+
+.ng[data-comp-faq="b"] #faq .ng-container--narrow { max-width: var(--ng-container); }
+
+
+
+.ng[data-comp-cta="b"] .ng-cta__inner {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: clamp(24px, 11.25px, 48px);
+	align-items: center;
+	text-align: left;
+}
+
+.ng[data-comp-cta="b"] .ng-cta__lead { margin-inline: 0; }
+
+.ng[data-comp-cta="b"] .ng-cta__actions { margin-top: 0; }
+
+
 .pv-header {
 	display: flex; align-items: center; justify-content: space-between; gap: 16px;
 	padding: 16px 40px; background: #FFFFFF; color: #19110C;
@@ -4170,6 +4508,66 @@ body {
 	transform: translateX(-50%);
 }
 
+/* --- 構成パネル ---------------------------------------------------------
+   パートごとの並べ方は数が多いので、上のバーには置かず折りたたむ。
+   -------------------------------------------------------------------------- */
+.sw-more {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 16px;
+	border: 1px solid var(--sw-line);
+	border-radius: 50px;
+	background: var(--sw-white);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.6;
+	color: var(--sw-ink);
+	cursor: pointer;
+}
+.sw-more:hover { background: var(--sw-bone); }
+.sw-more[aria-expanded="true"] { background: var(--sw-ink); border-color: var(--sw-ink); color: var(--sw-white); }
+.sw-more[aria-expanded="true"] span { transform: rotate(180deg); }
+.sw-more span { display: inline-block; transition: transform .2s ease; }
+.sw-more:focus-visible { outline: 2px solid var(--sw-ink); outline-offset: 2px; }
+
+.sw-panel {
+	background: var(--sw-white);
+	border-bottom: 1px solid var(--sw-line);
+	padding: 20px 40px 24px;
+}
+.sw-panel__lead {
+	max-width: 1220px;
+	margin: 0 auto 16px;
+	font-size: 12px;
+	line-height: 1.8;
+	color: var(--sw-muted);
+}
+.sw-panel__grid {
+	max-width: 1220px;
+	margin: 0 auto;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+	gap: 10px 32px;
+}
+.sw-row { display: flex; align-items: center; gap: 12px; }
+.sw-row__name {
+	flex: 0 0 7em;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .04em;
+}
+.sw-row .sw-seg { flex: 1; }
+.sw-row .sw-seg button { flex: 1; padding: 5px 10px; }
+
+@media (max-width: 900px) {
+	.sw-panel { padding: 16px 20px 20px; }
+	.sw-panel__grid { grid-template-columns: minmax(0, 1fr); }
+	.sw-row__name { flex-basis: 6em; }
+}
+
 /* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
 .ng-draftbar { display: none !important; }
 
@@ -4193,22 +4591,6 @@ body {
 				<button type="button" data-part="mv" data-value="b" aria-pressed="false">B 左右分割</button>
 				<button type="button" data-part="mv" data-value="c" aria-pressed="false">C 白ベース</button>
 				<button type="button" data-part="mv" data-value="d" aria-pressed="false">D タイポ主役</button>
-			</div>
-		</div>
-
-		<div class="sw-group">
-			<span class="sw-group__label" id="sw-l-num">数字</span>
-			<div class="sw-seg" role="group" aria-labelledby="sw-l-num">
-				<button type="button" data-part="numbers" data-value="a" aria-pressed="true">A 黒ベタ</button>
-				<button type="button" data-part="numbers" data-value="b" aria-pressed="false">B 白ベース</button>
-			</div>
-		</div>
-
-		<div class="sw-group">
-			<span class="sw-group__label" id="sw-l-gro">育成</span>
-			<div class="sw-seg" role="group" aria-labelledby="sw-l-gro">
-				<button type="button" data-part="growth" data-value="a" aria-pressed="true">A 横4段</button>
-				<button type="button" data-part="growth" data-value="b" aria-pressed="false">B 縦</button>
 			</div>
 		</div>
 
@@ -4244,14 +4626,98 @@ body {
 			</div>
 		</div>
 
+		<button type="button" class="sw-more" id="sw-more" aria-expanded="false" aria-controls="sw-panel">構成を変える<span aria-hidden="true">▾</span></button>
+
 		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
+	</div>
+</div>
+<div class="sw-panel" id="sw-panel" hidden>
+	<p class="sw-panel__lead">パートごとに並べ方を切り替えます。<b>どちらが正しいというより、載せる分量と写真の枚数で決まります。</b></p>
+	<div class="sw-panel__grid">
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-intro">イントロ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-intro">
+				<button type="button" data-part="intro" data-value="a" aria-pressed="true">A 写真左・文章右</button>
+				<button type="button" data-part="intro" data-value="b" aria-pressed="false">B 写真を全幅の帯に</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-message">代表メッセージ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-message">
+				<button type="button" data-part="message" data-value="a" aria-pressed="true">A 写真左・文章右</button>
+				<button type="button" data-part="message" data-value="b" aria-pressed="false">B 写真を上に大きく</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-numbers">数字</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-numbers">
+				<button type="button" data-part="numbers" data-value="a" aria-pressed="true">A 黒ベタ</button>
+				<button type="button" data-part="numbers" data-value="b" aria-pressed="false">B 白ベース・細罫</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-business">事業</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-business">
+				<button type="button" data-part="business" data-value="a" aria-pressed="true">A 3枚のカード横並び</button>
+				<button type="button" data-part="business" data-value="b" aria-pressed="false">B 縦に積んで左右交互</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-work">仕事</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-work">
+				<button type="button" data-part="work" data-value="a" aria-pressed="true">A 2枚のカード</button>
+				<button type="button" data-part="work" data-value="b" aria-pressed="false">B 大きく1列・左右に</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-growth">育成</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-growth">
+				<button type="button" data-part="growth" data-value="a" aria-pressed="true">A 横4ステップ</button>
+				<button type="button" data-part="growth" data-value="b" aria-pressed="false">B 縦タイムライン</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-people">人</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-people">
+				<button type="button" data-part="people" data-value="a" aria-pressed="true">A 4枚のカード</button>
+				<button type="button" data-part="people" data-value="b" aria-pressed="false">B 横スクロール</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-culture">はたらく環境</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-culture">
+				<button type="button" data-part="culture" data-value="a" aria-pressed="true">A 写真4枚を均等に</button>
+				<button type="button" data-part="culture" data-value="b" aria-pressed="false">B 1枚を大きくモザイク</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-recruit">募集要項</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-recruit">
+				<button type="button" data-part="recruit" data-value="a" aria-pressed="true">A 表</button>
+				<button type="button" data-part="recruit" data-value="b" aria-pressed="false">B カードの積み重ね</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-faq">FAQ</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-faq">
+				<button type="button" data-part="faq" data-value="a" aria-pressed="true">A アコーディオン</button>
+				<button type="button" data-part="faq" data-value="b" aria-pressed="false">B 全文を出して2段組み</button>
+			</div>
+		</div>
+		<div class="sw-row">
+			<span class="sw-row__name" id="sw-c-cta">エントリー</span>
+			<div class="sw-seg" role="group" aria-labelledby="sw-c-cta">
+				<button type="button" data-part="cta" data-value="a" aria-pressed="true">A 中央寄せ</button>
+				<button type="button" data-part="cta" data-value="b" aria-pressed="false">B 左右分割</button>
+			</div>
+		</div>
 	</div>
 </div>
 <p class="sw-note">斜線のボックスは写真が入る位置です（撮影がまだのため、指示文を表示しています）。黄色の「要確認」は社内で数値の確定が必要な箇所です。上下のヘッダーとフッターは形だけの代役で、本番では既存サイトの実物が入ります。</p>
 <div class="sw-stage">
 <header class="pv-header"><span class="pv-header__logo">株式会社ジーンステイト</span><span class="pv-header__right"><nav class="pv-header__nav"><span>ジーンステイトについて</span><span>事業紹介</span><span>会社情報</span><span>採用情報</span></nav><span class="pv-header__cta"><span class="is-recruit">採用情報</span><span class="is-contact">お問い合わせ</span></span></span></header>
 
-<main class="ng" id="newgrad" data-tone="a" data-shape="a">
+<main class="ng" id="newgrad" data-tone="a" data-shape="a" data-comp-intro="a" data-comp-message="a" data-comp-business="a" data-comp-work="a" data-comp-people="a" data-comp-culture="a" data-comp-recruit="a" data-comp-faq="a" data-comp-cta="a">
 
 			<div class="ng-draftbar">
 			下書きモード：社内未確認の項目が <strong>24</strong> 件あります。
@@ -5098,11 +5564,13 @@ body {
    選んだ内容は端末に覚えさせ、開き直しても保たれるようにしている。 */
 (function () {
 	var STORE = 'ng-switcher';
+	var COMP = ['intro', 'message', 'business', 'work', 'people', 'culture', 'recruit', 'faq', 'cta'];
 	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc' };
+	COMP.forEach(function (k) { state[k] = 'a'; });
 
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].forEach(function (k) {
+		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].concat(COMP).forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
@@ -5152,7 +5620,11 @@ body {
 			+ ' ／ 数字-' + state.numbers.toUpperCase()
 			+ ' ／ 育成-' + state.growth.toUpperCase()
 			+ ' ／ トンマナ-' + state.tone.toUpperCase()
-			+ ' ／ 形-' + state.shape.toUpperCase();
+			+ ' ／ 形-' + state.shape.toUpperCase()
+			+ ' ／ 構成' + (function () {
+				var n = COMP.concat(['numbers', 'growth']).filter(function (k) { return state[k] !== 'a'; }).length;
+				return n ? '-B×' + n : '-既定';
+			})();
 	}
 
 	function render() {
@@ -5165,6 +5637,7 @@ body {
 		if (main) {
 			main.setAttribute('data-tone', state.tone);
 			main.setAttribute('data-shape', state.shape);
+			COMP.forEach(function (k) { main.setAttribute('data-comp-' + k, state[k]); });
 		}
 
 		document.querySelectorAll('.sw-seg button').forEach(function (b) {
@@ -5203,6 +5676,17 @@ body {
 			}
 		});
 	});
+
+	/* 構成パネルの開閉 */
+	var more  = document.getElementById('sw-more');
+	var panel = document.getElementById('sw-panel');
+	if (more && panel) {
+		more.addEventListener('click', function () {
+			var open = more.getAttribute('aria-expanded') === 'true';
+			more.setAttribute('aria-expanded', String(!open));
+			panel.hidden = open;
+		});
+	}
 
 	render();
 })();
