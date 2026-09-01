@@ -4585,6 +4585,73 @@ body {
 	.sw-row__name { flex-basis: 6em; }
 }
 
+/* --- 切替UIの開閉 -------------------------------------------------------
+   意匠だけを素の状態で見たいときのため、バーとパネルごと引っ込められる。
+   PC・スマホどちらの表示でも同じように効かせたいので、
+   :root の属性で切り替えている（表示の切替とは独立した軸）。
+   -------------------------------------------------------------------------- */
+.sw-hide {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 14px;
+	border: 1px solid var(--sw-line);
+	border-radius: 50px;
+	background: var(--sw-white);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.6;
+	color: var(--sw-muted);
+	cursor: pointer;
+}
+.sw-hide:hover { background: var(--sw-bone); color: var(--sw-ink); }
+.sw-hide:focus-visible { outline: 2px solid var(--sw-ink); outline-offset: 2px; }
+
+/* 引っ込めたあとの戻し口。右下に固定する。
+   上辺はヘッダーの「お問い合わせ」ボタンと重なるため避けている。
+   下辺は本体の固定CTAとぶつかりうるので、出る条件のときだけ持ち上げる。 */
+.sw-show {
+	position: fixed;
+	bottom: 14px;
+	right: 14px;
+	z-index: 60;
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 18px;
+	border: 0;
+	border-radius: 50px;
+	background: var(--sw-ink);
+	box-shadow: 0 4px 16px rgba(25, 17, 12, .28);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.6;
+	color: var(--sw-white);
+	cursor: pointer;
+	opacity: .5;
+	transition: opacity .2s ease;
+}
+/* 意匠の邪魔をしないよう薄く置き、近づいたときだけはっきり出す */
+.sw-show:hover,
+.sw-show:focus-visible { opacity: 1; }
+.sw-show:focus-visible { outline: 2px solid var(--sw-gold); outline-offset: 2px; }
+
+/* 本体の固定CTAが下辺に出る条件では、その上へ逃がす。
+   スマホ表示のときと、PC表示でも窓が狭いときの2通りある。 */
+:root[data-view="sp"] .sw-show { bottom: 84px; }
+@media (max-width: 47.99em) {
+	.sw-show { bottom: 84px; }
+}
+
+:root[data-chrome="off"] .sw-bar,
+:root[data-chrome="off"] .sw-panel,
+:root[data-chrome="off"] .sw-note { display: none; }
+:root:not([data-chrome="off"]) .sw-show { display: none; }
+
 /* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
 .ng-draftbar { display: none !important; }
 
@@ -4646,8 +4713,11 @@ body {
 		<button type="button" class="sw-more" id="sw-more" aria-expanded="false" aria-controls="sw-panel">構成を変える<span aria-hidden="true">▾</span></button>
 
 		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
+
+		<button type="button" class="sw-hide" id="sw-hide" title="Esc キーでも引っ込められます">引っ込める<span aria-hidden="true">▴</span></button>
 	</div>
 </div>
+<button type="button" class="sw-show" id="sw-show">意匠を切り替える<span aria-hidden="true">▾</span></button>
 <div class="sw-panel" id="sw-panel" hidden>
 	<p class="sw-panel__lead">パートごとに並べ方を切り替えます。<b>どちらが正しいというより、載せる分量と写真の枚数で決まります。</b></p>
 	<div class="sw-panel__grid">
@@ -5582,12 +5652,12 @@ body {
 (function () {
 	var STORE = 'ng-switcher';
 	var COMP = ['intro', 'message', 'business', 'work', 'people', 'culture', 'recruit', 'faq', 'cta'];
-	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc' };
+	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc', chrome: 'on' };
 	COMP.forEach(function (k) { state[k] = 'a'; });
 
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
-		['mv', 'numbers', 'growth', 'tone', 'shape', 'view'].concat(COMP).forEach(function (k) {
+		['mv', 'numbers', 'growth', 'tone', 'shape', 'view', 'chrome'].concat(COMP).forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
@@ -5647,6 +5717,7 @@ body {
 	function render() {
 		root.setAttribute('data-mv', state.mv);
 		root.setAttribute('data-view', state.view);
+		root.setAttribute('data-chrome', state.chrome);
 		applyNumbers(state.numbers);
 		applyGrowth(state.growth);
 		applyView(state.view);
@@ -5702,6 +5773,42 @@ body {
 			var open = more.getAttribute('aria-expanded') === 'true';
 			more.setAttribute('aria-expanded', String(!open));
 			panel.hidden = open;
+		});
+	}
+
+	/* 切替UI全体の開閉。
+	   バーは sticky で場所を取っているため、消すとページがその分せり上がる。
+	   見ていた位置がずれないよう、表示の切替と同じやり方で補正する。 */
+	function setChrome(v, focusEl) {
+		var anchor = currentAnchor();
+		var before = anchor ? anchor.getBoundingClientRect().top : 0;
+
+		state.chrome = v;
+		render();
+
+		if (anchor) {
+			requestAnimationFrame(function () {
+				if (!document.contains(anchor)) { return; }
+				window.scrollBy({ top: anchor.getBoundingClientRect().top - before, behavior: 'auto' });
+				if (focusEl) { focusEl.focus(); }
+			});
+		} else if (focusEl) {
+			focusEl.focus();
+		}
+	}
+
+	var hideBtn = document.getElementById('sw-hide');
+	var showBtn = document.getElementById('sw-show');
+	if (hideBtn && showBtn) {
+		hideBtn.addEventListener('click', function () { setChrome('off', showBtn); });
+		showBtn.addEventListener('click', function () { setChrome('on', hideBtn); });
+
+		/* Esc でも引っ込められる。文字入力中は横取りしない */
+		document.addEventListener('keydown', function (e) {
+			if (e.key !== 'Escape' || state.chrome === 'off') { return; }
+			var t = e.target;
+			if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+			setChrome('off', showBtn);
 		});
 	}
 
