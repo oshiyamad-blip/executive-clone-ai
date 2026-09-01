@@ -122,6 +122,9 @@
 	   約物の詰めも入れない。ここを入れると本文の字面だけが本家より詰まる。 */
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale; /* 実サイトも指定あり */
+	/* 長音符・小書き仮名・句読点が行頭に落ちないようにする。
+	   既定（normal）だと「フォロ／ー」のように折れてしまう箇所が出る。 */
+	line-break: strict;
 	overflow-x: clip;
 }
 
@@ -1033,7 +1036,9 @@
 	letter-spacing: .06em;
 	line-height: 1.5;
 }
-.ng-growth__steptitle { font-size: var(--ng-fs-h3); }
+/* 2行になるとき、行の長さを揃えて折る。既定のままだと
+   「現場での実践とフォロ／ー」のように長音符だけが行頭に残る */
+.ng-growth__steptitle { font-size: var(--ng-fs-h3); text-wrap: balance; }
 .ng-growth__steptext {
 	margin-top: .6em;
 	color: var(--ng-c-fg-muted);
@@ -1042,10 +1047,15 @@
 }
 /* 数値グリッドと同じ理由で、独立したカードを並べる方式にしている。
    隙間を罫線に見せる作りだと、項目数が列数の倍数でないときに
-   空セルが灰色の塊として残ってしまう。 */
+   空セルが灰色の塊として残ってしまう。
+
+   列数は auto-fit ではなく2列で固定している。auto-fit だと器の幅しだいで
+   3列になり、4項目のときに2段目へ1枚だけ取り残されて右半分が空く。
+   2列なら 4項目がちょうど2段に収まり、1枚あたりも広くなるので
+   「G-Tech」のような語が行をまたいで折れなくなる。 */
 .ng-growth__features {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+	grid-template-columns: minmax(0, 1fr);
 	gap: clamp(16px, 2vw, 32px); /* 実値 PC 32px / SP 16px。カードの house standard */
 }
 .ng-growth__feature {
@@ -1057,6 +1067,7 @@
 .ng-growth__featuretitle {
 	font-size: 17px;
 	line-height: 1.6;
+	text-wrap: balance;
 }
 .ng-growth__featuretext {
 	margin-top: .8em;
@@ -1363,6 +1374,8 @@
 	.ng-intro__grid    { grid-template-columns: 1fr 1.15fr; align-items: center; }
 	.ng-message__grid  { grid-template-columns: .8fr 1.2fr; }
 	.ng-culture__gallery { grid-template-columns: repeat(4, 1fr); }
+	/* 4項目がちょうど2段に収まる。3列にすると1枚だけ余る */
+	.ng-growth__features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.ng-fixedcta { display: none; } /* PCではMV／CTAの導線で足りる */
 }
 
