@@ -183,11 +183,18 @@ function ng_photo( $id, $args = array() ) {
 
 	if ( $url ) {
 		$lazy = isset( $args['lazy'] ) ? $args['lazy'] : true;
+
+		/* 写真ごとの焦点。器の縦横比に合わせて object-fit: cover で切り取るため、
+		   被写体が中央にない写真は顔や主役が切れる。newgrad-photos.php の
+		   'focus' に CSS の object-position の値を書いて逃がす（未指定なら中央）。 */
+		$focus = ! empty( $meta['focus'] ) ? sprintf( ' style="object-position:%s"', esc_attr( $meta['focus'] ) ) : '';
+
 		printf(
-			'<img src="%1$s" alt="%2$s" loading="%3$s" decoding="async">',
+			'<img src="%1$s" alt="%2$s" loading="%3$s" decoding="async"%4$s>',
 			esc_url( $url ),
 			esc_attr( $meta['alt'] ),
-			$lazy ? 'lazy' : 'eager'
+			$lazy ? 'lazy' : 'eager',
+			$focus
 		);
 		return;
 	}
