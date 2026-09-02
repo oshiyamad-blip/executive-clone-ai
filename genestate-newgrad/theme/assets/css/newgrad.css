@@ -554,6 +554,10 @@
 	object-fit: cover;
 	object-position: center 35%;
 }
+/* MV-A はコピーが写真の上に直接乗る。既定の 35% だと人物の顔が
+   ちょうど見出しの帯に重なって読めなくなるため、写真を持ち上げて
+   顔をコピーより上に逃がす（実写で確認して決めた値）。 */
+.ng-hero--a .ng-hero__media img { object-position: center 75%; }
 /* 全面背景として使う場所では、プレースホルダの説明文がコピーと重なって
    読めなくなる。IDだけを控えめに残し、指示文は隠す（写真が入れば全て消える） */
 .ng-hero--a .ng-hero__media .ng-ph,

@@ -44,6 +44,13 @@ MAP = {
 
 MAXSIDE, QUALITY = 2000, 82
 
+# 上半身に寄せるスロット。値は「元画像の上から何割を使うか」。
+# PEOPLE の4枠は全身のカットで届いたが、3:4 のカードに全身を収めると
+# 顔が小さくなりすぎて誰なのか読み取れない。社員を見せる枠なので、
+# 頭〜腰までを使って顔が読める大きさにする。横は中央のまま。
+BUST = {'P-10': 0.62, 'P-11': 0.62, 'P-12': 0.62, 'P-13': 0.62}
+BUST_AR = 3 / 4   # 切り出し後の縦横比（幅 / 高さ）
+
 def find(src, stem):
     for p in sorted(glob.glob(os.path.join(src, '**', '*'), recursive=True)):
         if os.path.isfile(p) and stem.lower() in os.path.basename(p).lower():
@@ -69,13 +76,23 @@ def main():
         im = ImageOps.exif_transpose(im)          # 回転情報を画素へ反映
         im = im.convert('RGB')
         w, h = im.size
+        orig = f'{w}x{h}'
+
+        if slot in BUST:
+            ch = int(h * BUST[slot])
+            cw = int(ch * BUST_AR)
+            if cw > w:                            # 元が細い場合は幅に合わせる
+                cw, ch = w, int(w / BUST_AR)
+            left = (w - cw) // 2
+            im = im.crop((left, 0, left + cw, ch))
+            w, h = im.size
         if max(w, h) > MAXSIDE:
             r = MAXSIDE / max(w, h)
             im = im.resize((round(w * r), round(h * r)), Image.LANCZOS)
         out = os.path.join(dst, slot + '.jpg')
         im.save(out, 'JPEG', quality=QUALITY, optimize=True, progressive=True)
-        done.append((slot, os.path.basename(f), f'{w}x{h}', f'{im.size[0]}x{im.size[1]}',
-                     f'{os.path.getsize(out)/1024:.0f}KB'))
+        done.append((slot, os.path.basename(f), orig, f'{im.size[0]}x{im.size[1]}',
+                     f'{os.path.getsize(out)/1024:.0f}KB' + (' 上半身' if slot in BUST else '')))
 
     print(f'配置 {len(done)} 件')
     for d in done:

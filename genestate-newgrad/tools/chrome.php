@@ -174,3 +174,35 @@ function ng_fonts_link() {
 		. '<link href="https://fonts.googleapis.com/css2?family='
 		. implode( '&family=', $families ) . '&display=swap" rel="stylesheet">' . "\n";
 }
+
+/**
+ * 写真を data URI として HTML に埋め込む。
+ *
+ * Artifact（社内共有用）は外部の画像を読み込めない（CSPで遮断される）ため、
+ * assets-base/... を参照したままだと写真が1枚も出ない。
+ * 生成した HTML の img src を、その場で base64 に置き換える。
+ *
+ * ローカル確認用の preview/index.html は相対パスで開けるので、この処理は通さない。
+ *
+ * @param string $html 生成済みHTML。
+ * @return string
+ */
+function ng_inline_photos( $html ) {
+	$dir = dirname( __DIR__ ) . '/theme/assets/img/';
+
+	return preg_replace_callback(
+		'#src="assets-base/assets/img/([^"]+)"#',
+		function ( $m ) use ( $dir ) {
+			/* 確認用の軽量コピーがあればそちらを使う（preview/img-web/） */
+			$light = dirname( __DIR__ ) . '/preview/img-web/' . $m[1];
+			$file  = is_file( $light ) ? $light : $dir . $m[1];
+			if ( ! is_file( $file ) ) {
+				return $m[0];
+			}
+			$ext  = strtolower( pathinfo( $file, PATHINFO_EXTENSION ) );
+			$mime = 'png' === $ext ? 'image/png' : ( 'webp' === $ext ? 'image/webp' : 'image/jpeg' );
+			return 'src="data:' . $mime . ';base64,' . base64_encode( file_get_contents( $file ) ) . '"';
+		},
+		$html
+	);
+}

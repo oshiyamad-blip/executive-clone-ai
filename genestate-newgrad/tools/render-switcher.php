@@ -727,4 +727,8 @@ SWJS;
  * テンプレートを実行
  * ------------------------------------------------------------------------- */
 require_once $theme_dir . '/inc/newgrad-functions.php';
+
+/* 写真は data URI にして埋め込む（Artifact は外部画像を読めない） */
+ob_start();
 require $theme_dir . '/page-newgrad.php';
+echo ng_inline_photos( ob_get_clean() );

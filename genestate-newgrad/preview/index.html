@@ -564,6 +564,10 @@
 	object-fit: cover;
 	object-position: center 35%;
 }
+/* MV-A はコピーが写真の上に直接乗る。既定の 35% だと人物の顔が
+   ちょうど見出しの帯に重なって読めなくなるため、写真を持ち上げて
+   顔をコピーより上に逃がす（実写で確認して決めた値）。 */
+.ng-hero--a .ng-hero__media img { object-position: center 75%; }
 /* 全面背景として使う場所では、プレースホルダの説明文がコピーと重なって
    読めなくなる。IDだけを控えめに残し、指示文は隠す（写真が入れば全て消える） */
 .ng-hero--a .ng-hero__media .ng-ph,
@@ -2197,7 +2201,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 
 			<section class="ng-hero ng-hero--a" data-mv="a" aria-labelledby="ng-hero-catch-a">
 
-								<div class="ng-hero__media"><div class="ng-ph" role="img" aria-label="MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない"><span class="ng-ph__id">P-01</span><span class="ng-ph__note">MV／横位置・引き。複数名の社員が自然に会話している場面。顔が見えること。画面下部4割にコピーが乗るため、人物は上半分〜中央に配置し、下部には重要な要素を置かない</span></div></div>
+								<div class="ng-hero__media"><img src="assets-base/assets/img/P-01.jpg" alt="働く社員の様子" loading="eager" decoding="async"></div>
 			<div class="ng-hero__scrim" aria-hidden="true"></div>
 			<div class="ng-hero__inner ng-container">
 						<p class="ng-hero__badge">
@@ -2234,7 +2238,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 			<section class="ng-section" id="intro" aria-labelledby="ng-intro-title">
 		<div class="ng-container">
 			<div class="ng-intro__grid">
-				<div class="ng-intro__media ng-reveal"><div class="ng-ph" role="img" aria-label="イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット"><span class="ng-ph__id">P-02</span><span class="ng-ph__note">イントロ／横位置。先輩が若手に教えている場面。「育てる会社」を1枚で伝えるカット</span></div></div>
+				<div class="ng-intro__media ng-reveal"><img src="assets-base/assets/img/P-02.jpg" alt="先輩社員が若手に教えている様子" loading="lazy" decoding="async"></div>
 				<div class="ng-intro__body ng-reveal">
 					<p class="ng-head__en">INTRODUCTION</p>
 					<h2 class="ng-head__title" id="ng-intro-title">素質は、動き出せる。</h2>
@@ -2251,7 +2255,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 			<section class="ng-section ng-section--subtle" id="message" aria-labelledby="ng-message-title">
 		<div class="ng-container">
 			<div class="ng-message__grid">
-				<div class="ng-message__media ng-reveal"><div class="ng-ph" role="img" aria-label="MESSAGE／縦位置。代表のポートレート。正面〜やや斜め、視線はカメラ。背景はオフィス"><span class="ng-ph__id">P-03</span><span class="ng-ph__note">MESSAGE／縦位置。代表のポートレート。正面〜やや斜め、視線はカメラ。背景はオフィス</span></div></div>
+				<div class="ng-message__media ng-reveal"><img src="assets-base/assets/img/P-03.jpg" alt="代表取締役 小島 大知" loading="lazy" decoding="async"></div>
 				<div class="ng-reveal">
 					<p class="ng-head__en">MESSAGE</p>
 					<h2 class="ng-head__title" id="ng-message-title">先輩が、まだいない。</h2>
@@ -2348,7 +2352,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 
 			<ul class="ng-biz__list">
 									<li class="ng-biz__item ng-reveal">
-						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 01／横位置。PCに向かって開発している手元＋人物"><span class="ng-ph__id">P-04</span><span class="ng-ph__note">BUSINESS 01／横位置。PCに向かって開発している手元＋人物</span></div></div>
+						<div class="ng-biz__media"><img src="assets-base/assets/img/P-04.jpg" alt="IT事業の様子" loading="lazy" decoding="async"></div>
 						<div class="ng-biz__body">
 							<span class="ng-biz__no">01</span>
 							<h3 class="ng-biz__name">IT事業</h3>
@@ -2357,7 +2361,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 						</div>
 					</li>
 									<li class="ng-biz__item ng-reveal">
-						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 02／横位置。面談テーブルで2名が向き合って話している場面"><span class="ng-ph__id">P-05</span><span class="ng-ph__note">BUSINESS 02／横位置。面談テーブルで2名が向き合って話している場面</span></div></div>
+						<div class="ng-biz__media"><img src="assets-base/assets/img/P-05.jpg" alt="人材事業の様子" loading="lazy" decoding="async"></div>
 						<div class="ng-biz__body">
 							<span class="ng-biz__no">02</span>
 							<h3 class="ng-biz__name">人材事業</h3>
@@ -2366,7 +2370,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 						</div>
 					</li>
 									<li class="ng-biz__item ng-reveal">
-						<div class="ng-biz__media"><div class="ng-ph" role="img" aria-label="BUSINESS 03／横位置。事務・オペレーション業務の場面。ヘッドセット着用のカットも可"><span class="ng-ph__id">P-06</span><span class="ng-ph__note">BUSINESS 03／横位置。事務・オペレーション業務の場面。ヘッドセット着用のカットも可</span></div></div>
+						<div class="ng-biz__media"><img src="assets-base/assets/img/P-06.jpg" alt="BPO事業の様子" loading="lazy" decoding="async"></div>
 						<div class="ng-biz__body">
 							<span class="ng-biz__no">03</span>
 							<h3 class="ng-biz__name">BPO事業</h3>
@@ -2395,7 +2399,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 			<ul class="ng-work__list">
 									<li class="ng-reveal">
 						<a class="ng-work__item" href="https://genestate.co.jp/newgrad/work/coordinator/">
-							<div class="ng-work__media"><div class="ng-ph" role="img" aria-label="WORK／横位置。コーディネーターが求職者と面談している場面"><span class="ng-ph__id">P-07</span><span class="ng-ph__note">WORK／横位置。コーディネーターが求職者と面談している場面</span></div></div>
+							<div class="ng-work__media"><img src="assets-base/assets/img/P-07.jpg" alt="人材コーディネーターの仕事の様子" loading="lazy" decoding="async"></div>
 							<div class="ng-work__body">
 								<h3 class="ng-work__name">人材コーディネーター／営業</h3>
 								<p class="ng-work__catch">人のキャリアに、直接関わる。</p>
@@ -2406,7 +2410,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 					</li>
 									<li class="ng-reveal">
 						<a class="ng-work__item" href="https://genestate.co.jp/newgrad/work/engineer/">
-							<div class="ng-work__media"><div class="ng-ph" role="img" aria-label="WORK／横位置。若手エンジニアがモニタに向かっている場面。表情が見える角度で"><span class="ng-ph__id">P-08</span><span class="ng-ph__note">WORK／横位置。若手エンジニアがモニタに向かっている場面。表情が見える角度で</span></div></div>
+							<div class="ng-work__media"><img src="assets-base/assets/img/P-08.jpg" alt="エンジニアの仕事の様子" loading="lazy" decoding="async"></div>
 							<div class="ng-work__body">
 								<h3 class="ng-work__name">エンジニア</h3>
 								<p class="ng-work__catch">つくる側に立つ。未経験から。</p>
@@ -2430,7 +2434,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 				<p class="ng-head__lead">「充実した研修制度があります」とは書きません。代わりに、何を、いつ、どうやって学ぶのかをお見せします。</p>
 			</div>
 
-			<div class="ng-growth__media ng-reveal"><div class="ng-ph" role="img" aria-label="GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景"><span class="ng-ph__id">P-09</span><span class="ng-ph__note">GROWTH／横位置・かなりワイド（21:9でトリミング）。研修中の教室またはオンライン受講の風景</span></div></div>
+			<div class="ng-growth__media ng-reveal"><img src="assets-base/assets/img/P-09.jpg" alt="研修の様子" loading="lazy" decoding="async"></div>
 
 			<ol class="ng-growth__timeline">
 									<li class="ng-growth__step ng-reveal">
@@ -2494,7 +2498,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 			<ul class="ng-people__list">
 									<li class="ng-reveal">
 						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/engineer-01/">
-							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 01／縦位置。未経験から入社したエンジニア社員。3:4"><span class="ng-ph__id">P-10</span><span class="ng-ph__note">PEOPLE 01／縦位置。未経験から入社したエンジニア社員。3:4</span></div></div>
+							<div class="ng-people__media"><img src="assets-base/assets/img/P-10.jpg" alt="エンジニア社員のポートレート" loading="lazy" decoding="async"></div>
 							<span class="ng-people__cat">エンジニア</span>
 							<p class="ng-people__catch">「分からない」と言える環境だった。<span class="ng-todo">要確認</span></p>
 							<p class="ng-people__prof">（氏名）／20XX年入社／未経験からエンジニアへ</p>
@@ -2502,7 +2506,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 					</li>
 									<li class="ng-reveal">
 						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/coordinator-01/">
-							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 02／縦位置。コーディネーター・営業職の社員。3:4"><span class="ng-ph__id">P-11</span><span class="ng-ph__note">PEOPLE 02／縦位置。コーディネーター・営業職の社員。3:4</span></div></div>
+							<div class="ng-people__media"><img src="assets-base/assets/img/P-11.jpg" alt="人材コーディネーター社員のポートレート" loading="lazy" decoding="async"></div>
 							<span class="ng-people__cat">人材コーディネーター</span>
 							<p class="ng-people__catch">人の人生に関わるということ。<span class="ng-todo">要確認</span></p>
 							<p class="ng-people__prof">（氏名）／20XX年入社／営業職</p>
@@ -2510,7 +2514,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 					</li>
 									<li class="ng-reveal">
 						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/hr-01/">
-							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 03／縦位置。人事・新卒採用の立ち上げ担当者。3:4"><span class="ng-ph__id">P-12</span><span class="ng-ph__note">PEOPLE 03／縦位置。人事・新卒採用の立ち上げ担当者。3:4</span></div></div>
+							<div class="ng-people__media"><img src="assets-base/assets/img/P-12.jpg" alt="新卒採用担当者のポートレート" loading="lazy" decoding="async"></div>
 							<span class="ng-people__cat">人事・新卒採用担当</span>
 							<p class="ng-people__catch">一期生を、こう迎えたい。<span class="ng-todo">要確認</span></p>
 							<p class="ng-people__prof">（氏名）／新卒採用の立ち上げ担当</p>
@@ -2518,7 +2522,7 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 					</li>
 									<li class="ng-reveal">
 						<a class="ng-people__item" href="https://genestate.co.jp/newgrad/people/leader-01/">
-							<div class="ng-people__media"><div class="ng-ph" role="img" aria-label="PEOPLE 04／縦位置。現場のリーダー・管理職。3:4"><span class="ng-ph__id">P-13</span><span class="ng-ph__note">PEOPLE 04／縦位置。現場のリーダー・管理職。3:4</span></div></div>
+							<div class="ng-people__media"><img src="assets-base/assets/img/P-13.jpg" alt="マネージャーのポートレート" loading="lazy" decoding="async"></div>
 							<span class="ng-people__cat">マネージャー</span>
 							<p class="ng-people__catch">どんな人と働きたいか。<span class="ng-todo">要確認</span></p>
 							<p class="ng-people__prof">（氏名）／現場のリーダー</p>
@@ -2544,10 +2548,10 @@ body { margin: 0; font-family: "Zen Kaku Gothic New", sans-serif; background: #f
 			</div>
 
 			<div class="ng-culture__gallery ng-reveal">
-									<div><div class="ng-ph" role="img" aria-label="CULTURE 01／横位置。新宿野村ビル39階のオフィス内観・引き"><span class="ng-ph__id">P-14</span><span class="ng-ph__note">CULTURE 01／横位置。新宿野村ビル39階のオフィス内観・引き</span></div></div>
-									<div><div class="ng-ph" role="img" aria-label="CULTURE 02／横位置。実際に人が働いている執務席"><span class="ng-ph__id">P-15</span><span class="ng-ph__note">CULTURE 02／横位置。実際に人が働いている執務席</span></div></div>
-									<div><div class="ng-ph" role="img" aria-label="CULTURE 03／横位置。休憩・談笑シーン。空気感が伝わるカット"><span class="ng-ph__id">P-16</span><span class="ng-ph__note">CULTURE 03／横位置。休憩・談笑シーン。空気感が伝わるカット</span></div></div>
-									<div><div class="ng-ph" role="img" aria-label="CULTURE 04／横位置。懇親会・表彰・勉強会などのイベント"><span class="ng-ph__id">P-17</span><span class="ng-ph__note">CULTURE 04／横位置。懇親会・表彰・勉強会などのイベント</span></div></div>
+									<div><img src="assets-base/assets/img/P-14.jpg" alt="オフィスの様子" loading="lazy" decoding="async"></div>
+									<div><img src="assets-base/assets/img/P-15.jpg" alt="執務スペースの様子" loading="lazy" decoding="async"></div>
+									<div><img src="assets-base/assets/img/P-16.jpg" alt="休憩スペースでの談笑" loading="lazy" decoding="async"></div>
+									<div><img src="assets-base/assets/img/P-17.jpg" alt="社内イベントの様子" loading="lazy" decoding="async"></div>
 							</div>
 
 			<ul class="ng-culture__list">
