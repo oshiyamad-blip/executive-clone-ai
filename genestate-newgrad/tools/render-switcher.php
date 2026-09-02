@@ -337,6 +337,47 @@ body {
 	.sw-now { margin-left: 0; }
 	.sw-note { padding: 10px 20px; }
 }
+
+/* --- 実機のスマートフォンで開いたとき -----------------------------------
+   切替バーは横に長い部品が多く、そのままだとページ全体が横スクロールし、
+   バーだけで画面の半分近くを占めてしまう。狭い画面では折り返して詰める。
+   -------------------------------------------------------------------------- */
+@media (max-width: 640px) {
+	.sw-bar { padding: 10px 12px; }
+	.sw-bar__inner { gap: 8px 12px; }
+	.sw-lead { white-space: normal; font-size: 12px; }
+	.sw-lead small { display: none; }
+	.sw-group { flex-wrap: wrap; gap: 6px; }
+	.sw-seg { flex-wrap: wrap; }
+	.sw-seg button { padding: 5px 10px; font-size: 11px; }
+	/* 選択中の組み合わせは1行に収まらず横幅を押し広げてしまう。
+	   同じ内容は各ボタンの選択状態で読み取れるので、狭い画面では省く */
+	.sw-now { display: none; }
+	.sw-panel { padding: 12px 12px 16px; }
+	.sw-panel__lead { font-size: 11px; margin-bottom: 12px; }
+	.sw-row { flex-wrap: wrap; gap: 4px 10px; }
+	.sw-row__name { flex-basis: auto; }
+	.sw-note { padding: 10px 12px; font-size: 11px; }
+}
+
+/* 端末の枠を模した見せ方は、実機で見るときは意味がないうえに
+   375px 固定だと画面からはみ出す。枠を外して幅いっぱいに使う。 */
+@media (max-width: 430px) {
+	:root[data-view="sp"] body { background: var(--sw-white); }
+	:root[data-view="sp"] .sw-stage {
+		width: auto;
+		margin: 0;
+		border: 0;
+		border-radius: 0;
+		box-shadow: none;
+	}
+	:root[data-view="sp"] .ng-fixedcta {
+		left: 0;
+		right: 0;
+		width: auto;
+		transform: none;
+	}
+}
 @media (prefers-reduced-motion: reduce) {
 	* { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
@@ -508,12 +549,22 @@ function get_footer() {
 	var state = { mv: 'a', numbers: 'a', growth: 'a', tone: 'a', shape: 'a', view: 'pc', chrome: 'on' };
 	COMP.forEach(function (k) { state[k] = 'a'; });
 
+	var chromeChosen = false;
 	try {
 		var saved = JSON.parse(localStorage.getItem(STORE) || '{}');
 		['mv', 'numbers', 'growth', 'tone', 'shape', 'view', 'chrome'].concat(COMP).forEach(function (k) {
 			if (saved[k]) { state[k] = saved[k]; }
 		});
+		chromeChosen = !!saved.chrome;
 	} catch (e) { /* 保存が使えない環境でも既定値で動く */ }
+
+	/* 実機のスマートフォンで開くと、切替バーだけで画面の半分近くを占めてしまい、
+	   肝心の意匠がほとんど見えない。狭い画面では最初から引っ込めておき、
+	   右下の戻し口から出してもらう。一度でも自分で開閉した端末では、
+	   その選択を優先する。 */
+	if (!chromeChosen && window.matchMedia('(max-width: 640px)').matches) {
+		state.chrome = 'off';
+	}
 
 	var root = document.documentElement;
 
