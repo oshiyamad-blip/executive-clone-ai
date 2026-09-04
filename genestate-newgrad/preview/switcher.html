@@ -4659,6 +4659,90 @@ body {
 :root[data-chrome="off"] .sw-note { display: none; }
 :root:not([data-chrome="off"]) .sw-show { display: none; }
 
+/* --- チームで決める（共有パネル） -----------------------------------------
+   ここだけが端末内ではなく、閲覧者全員で共有される領域。
+   db が使えない環境（未ログイン・権限なし・読み込み失敗）では
+   ボタンごと出さないので、素の切替ページとして成立する。
+   -------------------------------------------------------------------------- */
+.sw-team-btn { display: none; }          /* db が生きたときだけ JS が出す */
+.sw-teampanel {
+	background: var(--sw-white);
+	border-bottom: 1px solid var(--sw-line);
+	padding: 20px 40px 24px;
+}
+.sw-teampanel__grid {
+	max-width: 1220px;
+	margin: 0 auto;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+	gap: 28px 40px;
+	align-items: start;
+}
+.sw-tm__h {
+	margin: 0 0 10px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .08em;
+}
+.sw-tm__note { margin: 0 0 12px; font-size: 11px; line-height: 1.8; color: var(--sw-muted); }
+.sw-tm__cur {
+	display: block;
+	padding: 10px 14px;
+	background: var(--sw-bone);
+	border-radius: 8px;
+	font-size: 12px;
+	line-height: 1.7;
+	margin-bottom: 10px;
+}
+.sw-tm__cur b { font-weight: 700; }
+.sw-tm__row { display: flex; flex-wrap: wrap; gap: 8px; }
+.sw-tm__btn {
+	appearance: none;
+	padding: 7px 16px;
+	border: 1px solid var(--sw-line);
+	border-radius: 50px;
+	background: var(--sw-white);
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--sw-ink);
+	cursor: pointer;
+}
+.sw-tm__btn:hover:not(:disabled) { background: var(--sw-bone); }
+.sw-tm__btn:disabled { opacity: .45; cursor: default; }
+.sw-tm__btn--fill { background: var(--sw-ink); border-color: var(--sw-ink); color: var(--sw-white); }
+.sw-tm__btn--fill:hover:not(:disabled) { background: #2b1f17; }
+.sw-tm__form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.sw-tm__form input {
+	flex: 1 1 8em;
+	min-width: 0;
+	padding: 7px 12px;
+	border: 1px solid var(--sw-line);
+	border-radius: 8px;
+	font-family: inherit;
+	font-size: 12px;
+	color: var(--sw-ink);
+	background: var(--sw-white);
+}
+.sw-tm__form input:focus-visible { outline: 2px solid var(--sw-gold); outline-offset: 1px; }
+.sw-tm__form input.is-name { flex: 0 0 7em; }
+.sw-tm__list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; max-height: 220px; overflow-y: auto; }
+.sw-tm__item { border-top: 1px solid var(--sw-line); padding-top: 8px; font-size: 12px; line-height: 1.7; }
+.sw-tm__who { font-weight: 700; }
+.sw-tm__combo { color: var(--sw-muted); font-size: 11px; }
+.sw-tm__cmt { margin: 2px 0 0; }
+.sw-tm__empty { font-size: 11px; color: var(--sw-muted); }
+.sw-tm__msg { margin: 8px 0 0; font-size: 11px; color: var(--sw-muted); min-height: 1.6em; }
+
+@media (max-width: 900px) {
+	.sw-teampanel { padding: 16px 20px 20px; }
+	.sw-teampanel__grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+}
+@media (max-width: 640px) {
+	.sw-teampanel { padding: 12px 12px 16px; }
+}
+:root[data-chrome="off"] .sw-teampanel { display: none; }
+
 /* 本体が出す開発者向けの下書きバーは、切替バーと役割が重なるので隠す */
 .ng-draftbar { display: none !important; }
 
@@ -4762,7 +4846,33 @@ body {
 
 		<p class="sw-now">いまの組み合わせ <span id="sw-now-text">MV-A ／ 数字-A ／ 育成-A</span></p>
 
+		<button type="button" class="sw-team-btn sw-more" id="sw-team-btn" aria-expanded="false" aria-controls="sw-teampanel">チームで決める<span aria-hidden="true">▾</span></button>
+
 		<button type="button" class="sw-hide" id="sw-hide" title="Esc キーでも引っ込められます">引っ込める<span aria-hidden="true">▴</span></button>
+	</div>
+</div>
+<div class="sw-teampanel" id="sw-teampanel" hidden>
+	<div class="sw-teampanel__grid">
+		<div>
+			<p class="sw-tm__h">チーム案</p>
+			<p class="sw-tm__note">この欄だけは全員で共有されます。誰かが更新すると、開いている人の画面にすぐ反映されます。</p>
+			<span class="sw-tm__cur" id="sw-tm-cur">まだ決まっていません</span>
+			<div class="sw-tm__row">
+				<button type="button" class="sw-tm__btn sw-tm__btn--fill" id="sw-tm-save">いまの組み合わせをチーム案にする</button>
+				<button type="button" class="sw-tm__btn" id="sw-tm-apply" disabled>チーム案を表示に反映</button>
+			</div>
+			<p class="sw-tm__msg" id="sw-tm-msg"></p>
+		</div>
+		<div>
+			<p class="sw-tm__h">みんなの意見</p>
+			<p class="sw-tm__note">いま見ている組み合わせが、そのまま記録されます。</p>
+			<div class="sw-tm__form">
+				<input type="text" id="sw-tm-name" class="is-name" placeholder="お名前" maxlength="20" autocomplete="off">
+				<input type="text" id="sw-tm-cmt" placeholder="コメント（任意）" maxlength="120" autocomplete="off">
+				<button type="button" class="sw-tm__btn" id="sw-tm-add">登録</button>
+			</div>
+			<ul class="sw-tm__list" id="sw-tm-list"><li class="sw-tm__empty">まだ意見はありません。</li></ul>
+		</div>
 	</div>
 </div>
 <button type="button" class="sw-show" id="sw-show">意匠を切り替える<span aria-hidden="true">▾</span></button>
@@ -5871,5 +5981,153 @@ body {
 	}
 
 	render();
+
+	/* ======================================================================
+	   チームで決める（閲覧者どうしで共有される部分）
+
+	   ここだけが端末内ではなく、Artifact の共有ストア（db）に載る。
+	   claude.use は「あとから」解決し、使えない場合は null が返る
+	   （未提供・権限なし・読み込み失敗の区別はつかない仕様）。
+	   そのため画面は db 無しで完成した状態で描き、
+	   使えたときにだけボタンを出して機能を足す。
+	   ====================================================================== */
+	var KEYS = ['mv', 'numbers', 'growth', 'tone', 'shape'].concat(COMP);
+
+	function currentCombo() {
+		var o = {};
+		KEYS.forEach(function (k) { o[k] = state[k]; });
+		return o;
+	}
+
+	function comboLabel(c) {
+		if (!c) { return 'まだ決まっていません'; }
+		var n = KEYS.filter(function (k) { return k !== 'mv' && k !== 'tone' && k !== 'shape' && c[k] !== 'a'; }).length;
+		return 'MV-' + String(c.mv || 'a').toUpperCase()
+			+ ' ／ トンマナ-' + String(c.tone || 'a').toUpperCase()
+			+ ' ／ 形-' + String(c.shape || 'a').toUpperCase()
+			+ ' ／ 構成' + (n ? '-B×' + n : '-既定');
+	}
+
+	function applyCombo(c) {
+		if (!c) { return; }
+		KEYS.forEach(function (k) { if (c[k]) { state[k] = c[k]; } });
+		render();
+	}
+
+	function esc(t) {
+		return String(t == null ? '' : t).replace(/[&<>"]/g, function (ch) {
+			return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch];
+		});
+	}
+
+	(async function team() {
+		var db = null;
+		try { db = await claude.use('db'); } catch (e) { db = null; }
+		if (!db) { return; }   /* 使えない環境では、この機能ごと出さない */
+
+		var btn   = document.getElementById('sw-team-btn');
+		var panel = document.getElementById('sw-teampanel');
+		var curEl = document.getElementById('sw-tm-cur');
+		var msgEl = document.getElementById('sw-tm-msg');
+		var listEl = document.getElementById('sw-tm-list');
+		var saveBtn = document.getElementById('sw-tm-save');
+		var applyBtn = document.getElementById('sw-tm-apply');
+		var addBtn = document.getElementById('sw-tm-add');
+		var nameEl = document.getElementById('sw-tm-name');
+		var cmtEl  = document.getElementById('sw-tm-cmt');
+		if (!btn || !panel) { return; }
+
+		btn.style.display = 'inline-flex';
+		btn.addEventListener('click', function () {
+			var open = btn.getAttribute('aria-expanded') === 'true';
+			btn.setAttribute('aria-expanded', String(!open));
+			panel.hidden = open;
+		});
+
+		/* 名前は本人の端末に覚えさせる。共有側には都度書き込む */
+		try { nameEl.value = localStorage.getItem('ng-team-name') || ''; } catch (e) {}
+
+		function say(t) { msgEl.textContent = t || ''; }
+
+		/* 書き込みが拒否されたら、以後は読み取り専用として振る舞う */
+		function readOnly(e) {
+			var code = e && e.code;
+			if (code === 'permission_denied' || code === 'not_writer' || code === 'not_granted') {
+				saveBtn.disabled = true; addBtn.disabled = true;
+				say('この画面は閲覧のみです（編集の権限がありません）。');
+				return true;
+			}
+			say('保存できませんでした。時間をおいて試してください。');
+			return false;
+		}
+
+		/* --- チーム案 --- */
+		var teamDoc = db.doc('team/current');
+		var latest = null;
+
+		teamDoc.onSnapshot(function (snap) {
+			var d = snap.exists ? snap.data() : null;
+			latest = d && d.combo ? d.combo : null;
+			curEl.innerHTML = latest
+				? '<b>' + esc(comboLabel(latest)) + '</b>'
+					+ (d.by ? '<br>' + esc(d.by) + ' が設定' : '')
+				: 'まだ決まっていません';
+			applyBtn.disabled = !latest;
+		}, function () { say('共有の受信が止まりました。再読み込みしてください。'); });
+
+		saveBtn.addEventListener('click', async function () {
+			saveBtn.disabled = true; say('保存しています…');
+			try {
+				await teamDoc.set({
+					combo: currentCombo(),
+					by: (nameEl.value || '').trim() || '名前未記入',
+					at: new Date().toISOString()
+				});
+				say('チーム案を更新しました。開いている全員に反映されます。');
+			} catch (e) { readOnly(e); }
+			saveBtn.disabled = false;
+		});
+
+		applyBtn.addEventListener('click', function () {
+			applyCombo(latest);
+			say('チーム案を表示に反映しました。');
+		});
+
+		/* --- みんなの意見 --- */
+		var opinions = db.collection('opinions');
+
+		opinions.orderBy('at', 'desc').limit(30).onSnapshot(function (snap) {
+			if (snap.empty) {
+				listEl.innerHTML = '<li class="sw-tm__empty">まだ意見はありません。</li>';
+				return;
+			}
+			listEl.innerHTML = snap.docs.map(function (d) {
+				var o = d.data() || {};
+				return '<li class="sw-tm__item">'
+					+ '<span class="sw-tm__who">' + esc(o.name || '名前未記入') + '</span> '
+					+ '<span class="sw-tm__combo">' + esc(comboLabel(o.combo)) + '</span>'
+					+ (o.comment ? '<p class="sw-tm__cmt">' + esc(o.comment) + '</p>' : '')
+					+ '</li>';
+			}).join('');
+		}, function () { /* 受信が止まっても、いま出ている一覧はそのまま残す */ });
+
+		addBtn.addEventListener('click', async function () {
+			var name = (nameEl.value || '').trim();
+			if (!name) { nameEl.focus(); say('お名前を入れてください。'); return; }
+			try { localStorage.setItem('ng-team-name', name); } catch (e) {}
+			addBtn.disabled = true; say('登録しています…');
+			try {
+				await opinions.add({
+					name: name,
+					comment: (cmtEl.value || '').trim(),
+					combo: currentCombo(),
+					at: new Date().toISOString()
+				});
+				cmtEl.value = '';
+				say('登録しました。');
+			} catch (e) { readOnly(e); }
+			addBtn.disabled = false;
+		});
+	})();
 })();
 </script>
