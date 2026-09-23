@@ -242,7 +242,7 @@ export type ExtractedItem =
 
 ```ts
 export function isDemo(): boolean;                 // DEMO_MODE==='true' || !process.env.ANTHROPIC_API_KEY
-export function minGrossMarginJpy(): number;       // 既定 100000
+export function minGrossMarginJpy(): number;       // SES_PRICING_POLICY_JSON → MIN_GROSS_MARGIN_* → 既定値（本番は既定値のまま動かさない）
 export function maxCandidatesPerItem(): number;    // 既定 5
 export function skillMatchThreshold(): number;     // 既定 0.6
 export function hourlyToMonthlyHours(): number;    // 既定 160
@@ -614,7 +614,7 @@ export function isDemo(): boolean {
 
 ```bash
 # ===== SESマッチング設定 =====
-MIN_GROSS_MARGIN_JPY=100000            # 粗利下限（円/月）。初期値10万円・変更可
+MIN_GROSS_MARGIN_JPY=<粗利下限>         # 粗利下限（円/月）。手元の実行用（本番は SES_PRICING_POLICY_JSON）
 SES_TARGET_GMAIL=ses@example.com       # 収集対象（Xserverからの転送先）Gmailアドレス
 SES_NOTIFY_TO=you@example.com          # サマリ通知の宛先
 MAX_CANDIDATES_PER_ITEM=5              # 1アイテムあたりLLM最終判定に回す候補上限

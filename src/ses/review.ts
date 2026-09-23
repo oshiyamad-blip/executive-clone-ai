@@ -8,7 +8,7 @@
 // 退避してから書き直す（壊れたファイルを空とみなして人のステータスを黙って消さない）。
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, copyFileSync } from 'fs';
 import { join } from 'path';
-import { reviewDataDir, demoDataDir, isDemo, matchLookbackDays } from './config.js';
+import { reviewDataDir, demoDataDir, isDemo, matchLookbackDays, retentionDays } from './config.js';
 import { updateMatchStatus } from '../database/index.js';
 import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
 import { draftRequestsEnabled } from './pendingDrafts.js';
@@ -125,10 +125,12 @@ export function writeReviewMatches(matches: MatchResult[]): void {
 
   const freshIds = new Set(fresh.map((f) => f.id));
   const keepUnconfirmedSince = Date.now() - matchLookbackDays() * 24 * 60 * 60 * 1000;
+  // 人が操作した組も、個人データの保存期間（SES_RETENTION_DAYS）を過ぎたら手元の控えから消す
+  const retainSince = Date.now() - retentionDays() * 24 * 60 * 60 * 1000;
   const carried = existing.filter((m) => {
     if (freshIds.has(m.id)) return false;
-    if (m.status !== 'unconfirmed') return true;
     const detected = m.detectedAt ? new Date(m.detectedAt).getTime() : NaN;
+    if (m.status !== 'unconfirmed') return !(Number.isFinite(detected) && detected < retainSince);
     return Number.isFinite(detected) && detected >= keepUnconfirmedSince;
   });
   writeJson('matches', [...fresh, ...carried]);

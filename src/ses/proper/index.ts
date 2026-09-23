@@ -124,10 +124,9 @@ const MAIL_LIST_MAX = 30;
 
 function candidateLine(c: ProperCandidate): string {
   const rate = c.projectRate !== null ? `${c.projectRate}万円/月` : '単価不明';
+  // 社員ごとの必要案件単価（社内の原価に近い値）はメールに載せず、案件単価との差だけにする
   const need =
-    c.requiredProjectRate !== null
-      ? `必要${c.requiredProjectRate}万円${c.rateGapMan !== null ? `・差+${c.rateGapMan}万円` : ''}`
-      : '必要案件単価未入力';
+    c.requiredProjectRate !== null ? (c.rateGapMan !== null ? `必要案件単価との差+${c.rateGapMan}万円` : '必要案件単価あり') : '必要案件単価未入力';
   const tags = `${c.band === 'tentative' ? '[参考提案]' : ''}${c.needsReview ? '[要確認]' : ''}`;
   return `・${tags}${c.properLabel} × ${c.projectTitle} — 案件${rate}（${need}）・スキル一致率${Math.round(c.skillMatchRate * 100)}%`;
 }
@@ -149,10 +148,11 @@ export function properSummaryLines(r: ProperRunResult | null, forMail: boolean):
     if (s.failed > 0) lines.push('・抽出失敗は管理表「プロパー管理」の「抽出メモ」に理由があります');
   }
   if (forMail) {
+    // ファイル名は氏名を含むことが多いため、サマリメールには件数だけを載せる（ファイルはスキルシートのフォルダで確認）
     if (s && s.unsupportedNames.length > 0) {
-      const shown = s.unsupportedNames.slice(0, 10).join('、');
-      const more = s.unsupportedNames.length > 10 ? ` ほか${s.unsupportedNames.length - 10}件` : '';
-      lines.push(`・未対応形式のため読み取っていないファイル: ${shown}${more}（PDF・Excel・Word(.docx)・Googleドキュメントで保存してください）`);
+      lines.push(
+        `・未対応形式のため読み取っていないファイル: ${s.unsupportedNames.length}件（スキルシートのフォルダで確認し、PDF・Excel・Word(.docx)・Googleドキュメントで保存してください）`,
+      );
     }
     for (const c of r.candidates.slice(0, MAIL_LIST_MAX)) lines.push(candidateLine(c));
     if (r.candidates.length > MAIL_LIST_MAX) lines.push(`  ほか${r.candidates.length - MAIL_LIST_MAX}件`);

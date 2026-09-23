@@ -2,6 +2,7 @@
 // 社外に出る文面のため、氏名ではなく提案用表記（イニシャル）だけを使い、必要案件単価（社内の採算ライン）は書かない。
 import { buildReplyRef } from '../draft.js';
 import { unsafeOutgoingText } from '../injection.js';
+import { jstDateOf } from '../dates.js';
 import type { DraftRef, Project, ProperEngineer, RemoteOption } from '../../types/index.js';
 
 // 提案用表記が未入力のときの差し込み。氏名で代用しない（送る前に営業が気付けるよう目立つ表記にする）
@@ -14,8 +15,15 @@ const REMOTE_WISH_TEXT: Record<RemoteOption, string> = {
   unknown: '',
 };
 
-function availabilityText(e: ProperEngineer): string {
-  return e.availableDate || e.availableFrom || '別途ご相談';
+// 社外に出す稼働開始の表記。管理表の「稼働可能日」は人・AIの自由記述（「産休明け」「現案件（○○銀行）終了後」等、
+// 本人の事情や今の客先が入り得る）のため文面には写さず、日付として読めた値と「即日」だけを使う
+export function availabilityText(e: Pick<ProperEngineer, 'availableDate' | 'availableFrom'>, today: Date = new Date()): string {
+  if (/^(?:即日|即稼働可|即時|随時)(?:可)?$/.test(e.availableDate.normalize('NFKC').replace(/\s/g, ''))) return '即日';
+  const m = (e.availableFrom ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '別途ご相談';
+  if (`${m[1]}-${m[2]}-${m[3]}` <= jstDateOf(today)) return '即日';
+  const day = Number(m[3]);
+  return `${m[1]}年${Number(m[2])}月${day > 1 ? `${day}日` : ''}〜`;
 }
 
 export function buildProperProposalBody(e: ProperEngineer, project: Project): string {

@@ -6,7 +6,7 @@
 // 引き継がれる）、それ以外はローカルJSON。
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { healDataDir, healMaxAttempts, durableStateInSheets } from '../config.js';
+import { healDataDir, healMaxAttempts, durableStateInSheets, COLLECT_DAYS_MAX } from '../config.js';
 import { safeErr } from '../redact.js';
 import { maskPii } from '../pii.js';
 import { addressOf, domainOfAddress } from '../mail/ownMail.js';
@@ -50,7 +50,7 @@ function toEntry(v: unknown): QuarantineEntry | null {
   const str = (x: unknown) => (typeof x === 'string' ? x : '');
   return {
     mailId: e.mailId,
-    subject: str(e.subject),
+    subject: reducedSubject(str(e.subject)), // 以前の版で伏せ字だけにして保存した件名も、読み出しの時点で縮める
     from: str(e.from),
     attempts: typeof e.attempts === 'number' && Number.isFinite(e.attempts) ? e.attempts : 0,
     lastError: str(e.lastError),
@@ -110,13 +110,39 @@ export function capQuarantine(list: QuarantineEntry[], maxChars = STATE_JSON_MAX
 
 // 隔離前（再試行中）のまま一定期間更新のない記録は捨てる（成功・窓落ちで二度と更新されないものが溜まるため）
 const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// 隔離した記録も、処理済みメールの記録と同じ期間（収集できる最大の日数＋7日）を過ぎたら捨てる
+// （メールの件名の手がかりを「_状態」タブに何年も残さない。報告は隔離した回のサマリで済んでいる）
+export const QUARANTINE_TTL_MS = (COLLECT_DAYS_MAX + 7) * 24 * 60 * 60 * 1000;
 
-function dropStalePending(list: QuarantineEntry[], now = Date.now()): QuarantineEntry[] {
-  return list.filter((e) => e.quarantinedAt !== null || now - new Date(e.lastFailedAt).getTime() < PENDING_TTL_MS);
+function ageMs(iso: string | null, now: number): number {
+  const t = iso ? new Date(iso).getTime() : NaN;
+  return Number.isFinite(t) ? now - t : Infinity;
+}
+
+// 期限を過ぎた記録を捨てる（純関数）
+export function dropStaleEntries(list: QuarantineEntry[], now = Date.now()): QuarantineEntry[] {
+  return list.filter((e) =>
+    e.quarantinedAt !== null ? ageMs(e.quarantinedAt, now) < QUARANTINE_TTL_MS : ageMs(e.lastFailedAt, now) < PENDING_TTL_MS,
+  );
+}
+
+// 隔離リストに残す件名。先頭の【案件】等の分類の見出しと長さだけにする（伏せ字処理は氏名・電話・アドレスしか隠さず、
+// 件名に多いイニシャル・年齢・国籍・最寄駅・単金が残るため、件名そのものは保存しない）
+export function reducedSubject(subject: string): string {
+  if (/^[^…]*…（\d+文字）$/.test(subject)) return subject; // 縮めた後の値
+  const tags = (subject.normalize('NFKC').match(/^(?:\s*(?:Re|RE|Fw|FW|Fwd):\s*)*((?:\s*[【\[][^】\]]{1,12}[】\]])*)/)?.[1] ?? '').trim();
+  return `${tags.slice(0, 40)}…（${subject.length}文字）`;
+}
+
+// エラー文の伏せ字（氏名・電話・アドレスに加え、年齢・イニシャル）。修復レポートでLLMへ送る前にも通す
+export function maskFailureText(text: string): string {
+  return maskPii(text)
+    .replace(/\d{1,3}\s*(?:歳|才)/g, '<年齢>')
+    .replace(/(?<![A-Za-z])[A-Z]\s?\.\s?[A-Z](?:\s?\.)?(?![A-Za-z])/g, '<イニシャル>');
 }
 
 async function save(input: QuarantineEntry[]): Promise<void> {
-  const list = dropStalePending(input);
+  const list = dropStaleEntries(input);
   if (inSheets()) {
     try {
       await writeStateJson(STATE_KEY, capQuarantine(list));
@@ -159,8 +185,7 @@ export async function recordFailure(
   if (!entry) {
     entry = {
       mailId: mail.id,
-      // 伏せ字処理は入力の長さに対して重いため、先に切り詰めてから伏せる
-      subject: maskPii(mail.subject.slice(0, 200)).slice(0, 120),
+      subject: reducedSubject(mail.subject),
       from: senderDomainOnly(mail.from),
       attempts: 0,
       lastError: '',
@@ -171,7 +196,8 @@ export async function recordFailure(
     list.push(entry);
   }
   if (opts.countTowardQuarantine) entry.attempts += 1;
-  entry.lastError = maskPii(String(err).slice(0, 1000)).slice(0, 300);
+  // 伏せ字処理は入力の長さに対して重いため、先に切り詰めてから伏せる
+  entry.lastError = maskFailureText(String(err).slice(0, 1000)).slice(0, 300);
   entry.lastFailedAt = now;
   const quarantined = entry.attempts >= healMaxAttempts() || Boolean(opts.lastChance);
   if (quarantined && !entry.quarantinedAt) entry.quarantinedAt = now;
@@ -189,7 +215,7 @@ export async function recordSuccess(mailId: string): Promise<void> {
 
 // 隔離済みの記録を新しい順に返す（修復レポートは直近の失敗を分析対象にするため）
 export async function listQuarantined(): Promise<QuarantineEntry[]> {
-  return ((await load()) ?? [])
+  return dropStaleEntries((await load()) ?? [])
     .filter((e) => e.quarantinedAt !== null)
     .sort((a, b) => (b.quarantinedAt ?? '').localeCompare(a.quarantinedAt ?? ''));
 }

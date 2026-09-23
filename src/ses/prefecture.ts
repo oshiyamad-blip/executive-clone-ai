@@ -195,3 +195,9 @@ export function isAdjacentOrSame(a: string | null, b: string | null): boolean {
   if (a === b) return true;
   return (ADJACENCY[a] ?? []).includes(b) || (ADJACENCY[b] ?? []).includes(a);
 }
+
+// 居住地を都道府県・市区町村までにする（最初の数字以降の丁目・番地・建物を落とす）。
+// 突合・文面に使うのは都道府県だけのため、メール・スキルシートに番地まで書かれていても保存しない
+export function coarseResidence(raw: string): string {
+  return raw.normalize('NFKC').replace(/\d.*$/, '').trim();
+}

@@ -230,6 +230,17 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
   紹介文面には `《要員のイニシャルを記入》` が入ります）。以前の版で保存したフルネームも、読み出しの時点でイニシャルにします
 - 「処理済みメール」タブの古い記録（67日＝設定できる最大の収集期間60日＋7日より前）は、容量の上限に近づかないようバッチが自動で削除します
   （復旧のために `SES_COLLECT_DAYS` を広げて再実行しても、処理済みのメールを読み取り直さないよう、今の設定より長く残します）
+- **保存期間（個人データの削除）**: 受信から `SES_RETENTION_DAYS`（既定 180日）を過ぎた行は、毎回の実行の最後にバッチが整理します。
+  - 案件・要員: 受信日（再送で更新した最終受信日を含む）が期間より前で、期間内のマッチ・プロパー候補から参照されない行を**削除**
+    （要員の表示名・年齢・居住地・希望単金・営業元の連絡先・返信メタが残らないように）
+  - マッチ: 検出日時が期間より前の行を削除。ステータスが `成約` の行は記録として残し、判定根拠・文面・下書きデータだけを消します
+  - プロパー候補・評価: 期間より前の行を削除
+  - 隔離したメールの記録（「_状態」タブ）: 67日で削除。件名は【案件】等の見出しと長さだけを残します
+  - 確認画面の手元の控え（`data/ses-review/`）: 人が操作した組も期間を過ぎたら消します
+  - **スプレッドシートの「変更履歴」（版の履歴）には削除前の値が残ります**。年に1回、新しいスプレッドシートに
+    切り替える（タブをコピーした新しいファイルの ID を `SHEETS_DB_SPREADSHEET_ID` に登録し、古いファイルは削除する）か、
+    Google ドライブの版の履歴を整理してください
+  - 期間は突合・再確認に使う期間（`SES_MATCH_LOOKBACK_DAYS`・`SES_STALE_DAYS` 等）より短くはなりません
 - 「_状態」タブの `batchLease` は実行中の印です（同時に2つのバッチが動かないようにします）。打ち切られた実行の印は約50分で無効になります
 - 担当者メール・状態・文面の使い方は 7章 を参照してください
 
@@ -241,7 +252,9 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
 1. スキルシート（PDF・Excel・Word(.docx)・Googleドキュメント／スプレッドシート）を置く **Google ドライブのフォルダ** を用意し、
    **「共有」→ サービスアカウントのメール →「閲覧者」**（共有ドライブの場合は、共有ドライブのメンバーに「閲覧者」で追加しても可）
 2. 管理表用の **空のスプレッドシート** を作り、**サービスアカウントのメール →「編集者」** で共有
-   （4-1 のメインのスプレッドシートと同じファイルでも構いません。「プロパー管理」タブが追加されます）
+   （**4-1 のメインのスプレッドシートとは別のファイルにしてください**。管理表には社員の氏名・必要案件単価・居住地・スキルシートのリンクが入るため、
+   編集者は人事・運用担当とサービスアカウントだけにします。同じファイルを指定すると事前確認が ❌ で止めます。
+   案件スプレッドシートの「プロパー候補」タブには、社員を提案用表記（イニシャル）でだけ書きます）
 3. フォルダの URL を Secret `PROPER_SKILLSHEET_FOLDER_ID`、管理表の URL を Secret `PROPER_MASTER_SPREADSHEET_ID` に登録
 4. 実行後、「プロパー管理」タブで各社員の **「必要案件単価」（万円/月）** と **「稼働状況」（稼働可／アサイン済／対象外）** だけを入力します
    （稼働可でなくした社員の「プロパー候補」の行は、次の回に氏名・必要案件単価・文面を消して「不要」にし、担当者メールが入っても下書きを作りません）
@@ -319,15 +332,21 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_ALLOWED_SENDER_DOMAINS` | `<自社ドメイン>` | 任意 | 「担当者メール」に書ける送信元のドメイン。未登録なら `SES_OWN_DOMAINS` と共有メールボックスのドメインだけ（どちらも無ければ下書きを作りません） |
 | `SES_ALLOWED_SENDERS` | `taro@<自社ドメイン>,hanako@<自社ドメイン>` | 任意（Gmail運用は**必須**） | 送信元にしてよいアドレスの一覧。登録するとこのアドレスだけを送信元にします |
 | `SES_DRAFT_SIGNING_KEY` | ランダムな32文字以上 | **必須**（下書きを作る場合） | 「下書きデータ」列と、案件・要員の「返信メタ」「営業元メール」（宛先の元）の署名の鍵。シート上で宛先・本文を書き換えた行・別の行から写した値からは下書きを作りません。**未登録・32文字未満の間は、担当者メールの依頼はすべて「エラー」にして下書きを作りません**（最初の実行の前に登録してください。後から登録すると、それまでに保存した案件・要員の行は宛先に使わず、未作成の下書きは作り直しが必要です） |
-| `MIN_GROSS_MARGIN_JPY` / `MIN_GROSS_MARGIN_MAN` | `100000` / `10` | 任意 | 粗利の下限（円/月・万円/月。`_MAN` が優先）。社外に知られたくない方針のため Secrets に登録 |
-| `NEGOTIATION_MAX_PROJECT_RAISE_MAN` / `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | `5` | 任意 | 交渉提案で案件単金を上げる・要員単金を下げる上限（万円/月）。同上 |
+| `SES_PRICING_POLICY_JSON` | `{"minGrossMarginMan":<粗利下限>,"projectRaiseMaxMan":<上げ幅>,"engineerCutMaxMan":<下げ幅>,"n":"<ランダムな20文字以上>"}` | **必須** | 価格の方針（粗利の下限・交渉提案で案件単金を上げる／要員単金を下げる上限。いずれも万円/月）。**1行の JSON 1つ**にまとめ、推測できない乱数 `n` を必ず含めます（下の注意）。粗利下限を円で書く場合は `minGrossMarginJpy`。`ENABLE_NEGOTIATION=false` なら交渉幅は不要。未登録・読めない値のときは事前確認が ❌ で止めます（公開されている既定値のまま動かさないため） |
 | `SHEETS_DB_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ |
 | `PROPER_SKILLSHEET_FOLDER_ID` | `https://drive.google.com/drive/folders/xxxx` | 任意 | 4-3（プロパー機能） |
 | `PROPER_MASTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（プロパー機能） |
 | `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントにあり、そのテナントのサービスアカウントを使う場合だけ（4-4 C） |
 | `PROPER_GOOGLE_IMPERSONATE` | `ops@<別テナント>` | 任意 | 4-4 C で共有できない場合だけ（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます） |
 | `SES_TARGET_GMAIL` | — | 不要 | メールを Gmail で運用する場合だけ（`MAIL_PROVIDER=gmail`） |
-| `GEMINI_API_KEY` | — | 不要 | `LLM_PROVIDER=gemini` の場合だけ（Vertex AI はこのワークフローでは使えません） |
+| `GEMINI_API_KEY` | — | 不要 | `LLM_PROVIDER=gemini` の場合だけ渡されます（Vertex AI はこのワークフローでは使えません。Google AI Studio の**無料枠では使わない**でください: Variable `SES_ALLOW_GEMINI_API=paid` の説明を参照） |
+
+**価格の方針を1つの JSON にする理由**: GitHub Actions は、Secrets に登録した文字列を**ログ全体で** `***` に置き換えます。
+`10` や `5` のような短い数値を個別の Secret にすると、ログの中の既知の文言（モデル名・件数など）の数字まで伏せ字になり、
+**伏せ字の位置から値が分かってしまいます**。以前の手順で `MIN_GROSS_MARGIN_JPY` `MIN_GROSS_MARGIN_MAN`
+`NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN` を Secrets に登録していた場合は、値を `SES_PRICING_POLICY_JSON` に移し、
+**個別の Secrets は削除**してください（ワークフローはもう参照しません。Environment に渡すと事前確認が ❌ で止めます）。
+値は、この手順書・要件定義書などに書かれた例や既定値とは違うものにしてください（公開リポジトリの文書は誰でも読めます）。
 
 鍵・パスワードは本番のステップにだけ渡され、依存パッケージのインストールやビルドには渡りません
 （プロパー用の鍵は `PROPER_SKILLSHEET_FOLDER_ID` と `PROPER_MASTER_SPREADSHEET_ID` の両方があるときだけ渡します）。
@@ -345,10 +364,13 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `PROPER_FOLLOW_SHORTCUTS` | `false` | 任意 | スキルシートのフォルダ内の「ファイルへのショートカット」の参照先も読むか（既定 false。4-3） |
 | `XSERVER_IMAP_PORT` / `XSERVER_SMTP_PORT` | `993` / `465` | 任意 | 通常は登録不要 |
 | `LLM_PROVIDER` / `GEMINI_MODEL` | `anthropic` | 任意 | 生成AIの切り替え（既定 anthropic） |
+| `SES_ALLOW_GEMINI_API` | `paid` | `gemini` を使う場合は**必須** | `LLM_PROVIDER=gemini` では、メール本文・添付・社員のスキルシートを Google AI Studio に送ります。無料枠は送った内容が品質改善や人による確認に使われ得るため、**課金を有効にしたプロジェクトで利用条件を確認したうえで** `paid` を登録します（未登録なら事前確認が ❌ で止め、バッチも始めません） |
+| `SES_NOTIFY_ALLOW_EXTERNAL` | `false` | 任意 | `true` のときだけ、`SES_NOTIFY_TO` の自社ドメイン以外の宛先にもサマリを送ります（既定では送らず、事前確認が ❌ で知らせます） |
+| `SES_RETENTION_DAYS` | `180` | 任意 | 個人データの保存期間（日。既定 180、30〜3650）。4-2 の「保存期間」を参照 |
 | その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
 
 **Secrets に移した設定**: 以前の手順で `SES_OWN_DOMAINS` `SES_ALLOWED_SENDER_DOMAINS` `SHEETS_DB_IMPERSONATE` `PROPER_GOOGLE_IMPERSONATE`
-`MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、同じ名前で Secrets に登録し直し、Variables から削除してください
+`MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、Secrets に登録し直し（価格の方針は `SES_PRICING_POLICY_JSON` にまとめる）、Variables から削除してください
 （Variables に残っていると、事前確認が ❌ で止めて知らせます。Variables の値は使いません）。
 
 **ワークフローで固定しているもの（登録不要）**: `TZ=Asia/Tokyo`、`SES_LOG_REDACT=true`（ログ秘匿）、
@@ -503,7 +525,23 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 - **【運用者の作業】メインのサービスアカウントには、このシステムのスプレッドシート（とプロパーのフォルダ・管理表）以外を共有しないでください。**
   社員が個人の Google アカウント（@gmail.com 等）で持つシートは自社ドメインで社内と判定できないため、URL を知る人がそのリンクを
   メールで送ると読み出される恐れがあります（DB・管理表の所有者と同じ人のファイルは社内とみなしますが、それ以外の人のものは見分けられません）
-- 粗利下限・交渉幅は公開ログに表示しません（Secrets の伏せ字は登録した文字列そのものにしか効かないため、円に換算した値も出しません）
+- 粗利下限・交渉幅は公開ログに表示しません（Secrets の伏せ字は登録した文字列そのものにしか効かないため、円に換算した値も出しません）。
+  解釈できない値の警告にも、値・既定値は出しません。値は `SES_PRICING_POLICY_JSON` の1つにまとめます（5章。短い数値の Secret は
+  ログ全体の同じ数字を伏せ字にするため、伏せ字の位置から値が分かってしまいます）
+- 公開ログでは、1通ごとの処理結果（AI への指示らしき記載の検知・抽出失敗・添付の扱い・隔離・AI判定の指示混入の件数）と、
+  メール本文のスプレッドシートのリンクの件数を出しません（送り主が、自分の送った文面が検知をすり抜けたか・サービスアカウントが
+  読めるファイルかを確かめられないように）。詳細はサマリメール（非公開）に載ります
+- GitHub Actions では、バッチの起動時に `::stop-commands::<乱数>` を出し、以後の出力の `::error::` `::add-mask::` 等（ワークフローコマンド）を
+  解釈させません（添付ファイルの中の文字列がライブラリの警告として行頭に出ても、偽のエラー表示・伏せ字の追加にならないように）。
+  表計算の添付は通常の xlsx（XML 形式）と旧形式の xls だけを解析し、xlsb・ods 等は読みません
+- サマリメールには社員の提案用表記・案件との単価差や、要員の情報が載ります。`SES_NOTIFY_TO` のうち自社ドメイン（`SES_OWN_DOMAINS`・
+  共有メールボックスのドメイン）以外の宛先には送りません（個人の Gmail・打ち間違えたドメインを登録していると、事前確認が ❌ で知らせます。
+  社外にも送る必要があるときだけ Variable `SES_NOTIFY_ALLOW_EXTERNAL=true`）
+- プロパーの管理表（氏名・必要案件単価・居住地・スキルシートのリンク）は、案件スプレッドシートとは別のファイルにし、編集者を人事・運用担当と
+  サービスアカウントに限ってください（4-3）。「プロパー候補」タブとサマリには社員を提案用表記でだけ書き、必要案件単価は載せません
+- 個人データは `SES_RETENTION_DAYS`（既定 180日）を過ぎたら削除します（4-2 の「保存期間」）。スプレッドシートの版の履歴は別に整理が必要です
+- `LLM_PROVIDER=gemini` は Google AI Studio の課金済みプロジェクトでだけ使い、Variable `SES_ALLOW_GEMINI_API=paid` で明示してください
+  （無料枠は送った内容が品質改善・人による確認に使われ得ます。未明示ならバッチを始めません）
 - 実行データ（`data/` フォルダ）を Actions のキャッシュや成果物（artifact）として保存しないでください（ダウンロードできる人に個人情報が渡ります）。
   現在のワークフローは保存していません
 - メール本文・添付は処理のために Anthropic の API に送られます。**ZDR（ゼロデータリテンション）** の利用を推奨します
@@ -511,6 +549,45 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
   （Anthropic: API Keys で旧キーを削除／Google Cloud: サービスアカウントの「鍵」で旧鍵を削除／Xserver: パスワード変更）
 - 4-4 B（DWD）を使うと、サービスアカウントの鍵で社内ユーザーとしてスプレッドシート・ドライブを操作できるようになります。
   可能な限り A（共有）を使ってください。別テナントへのDWDはメインの鍵では行いません（4-4 C）
+
+
+### 9-1. 公開リポジトリで運用者が行う作業（コードでは直せないもの）
+
+リポジトリと Actions のログは誰でも読めるため、次の作業は運用者（リポジトリの所有者）が GitHub・各サービスの画面で行ってください。
+**Git の履歴の書き換え（force-push）は、下の手順で所有者が判断して行うもので、このシステムは行いません。**
+
+- **リポジトリを非公開（Private）にする**のが最も効果的です（上の1つ目の項目。公開のままでは、以下の履歴・ブランチ・ログが誰でも読めます）
+- **【鍵】`SES_PRICING_POLICY_JSON` に移したら、`MIN_GROSS_MARGIN_JPY` `MIN_GROSS_MARGIN_MAN` `NEGOTIATION_MAX_PROJECT_RAISE_MAN`
+  `NEGOTIATION_MAX_ENGINEER_CUT_MAN` の Secrets を削除**してください。以前の実行ログには伏せ字の位置から値が推測できる行が残っているため、
+  Actions タブで以前の実行（Run）のログを削除し、価格の方針そのものを見直すことも検討してください
+- **【鍵】Secret scanning と Push protection を有効にする**（Settings → Code security）。鍵・パスワードを誤ってコミットしたときに
+  push を止めます。`.gitignore` で鍵・証明書（`*.pem` `*.key` `*.crt` `*.p12` `*.pfx`）・サービスアカウントの JSON 鍵・`.env.*`・`secrets/` を
+  除外していますが、**鍵ファイルはリポジトリのフォルダの外**（例: `~/.config/ses/`）に置いてください。確認画面を HTTPS で動かすときの
+  `SES_WEB_TLS_CERT` / `SES_WEB_TLS_KEY` の証明書・秘密鍵も同様です
+- **【鍵】誤ってコミット・公開した鍵は、履歴から消しても漏れたものとして作り直します**（Anthropic の API キー・サービスアカウントの鍵・
+  共有メールボックスのパスワード・`SES_DRAFT_SIGNING_KEY`。手順は上の「鍵が漏れた可能性があるとき」）
+- **【会社を特定できる情報】新卒採用ページ（`genestate-newgrad/`）を含むブランチ**（`claude/new-graduate-recruitment-page-ukb077`・
+  `claude/newgrad-design-tokens-7obgb5`）には、社員の顔写真（JPG と、HTML に埋め込んだ base64 の画像）・会社名・所在地が入っています。
+  このリポジトリの他の内容（SES の処理の仕組み・既定値・実行時刻）と結び付けて会社を特定できてしまうため、
+  1. 採用ページは別の**非公開リポジトリ**へ移し、この2つのブランチを GitHub から削除する
+  2. 履歴からも消す場合は、所有者の判断で `git filter-repo` で該当のファイルを除き force-push したうえで、GitHub サポートに
+     キャッシュと参照されないオブジェクトの削除を依頼する（既にクローン・フォークされた分は取り戻せません）
+  3. 写真は既に公開されたものとして扱い、写っている社員に説明し同意を確認する
+  4. SES の運用は、会社名の入らない（できれば非公開の）リポジトリで行う
+- **【会社を特定できる情報】コミットのメールアドレス**: GitHub の Settings → Emails で「Keep my email addresses private」と
+  「Block command line pushes that expose my email」を有効にし、`git config user.email` を GitHub の noreply アドレスにしてください
+  （過去のコミットのメタデータには個人のアドレスが残ります）
+- **【経営者の情報】経営者プロファイルの実データはソースファイルに書かない**: `src/data/executiveProfile.ts` はサンプル値のまま残し、
+  実際の内容は `data/executive-profile.json`（コミットされません）か環境変数 `EXECUTIVE_PROFILE_JSON` に置きます（`npm run doctor` が、
+  ソースファイルが書き換えられていれば ⚠️ で知らせます）。`main` などのブランチの `docs/handover.md` に書かれた Notion の親ページの URL・
+  `NOTION_SIGNAL_DB_ID`・`NOTION_STORY_DB_ID` は伏せ字に置き換え、Notion で親ページが「Web に公開」「リンクを知っている全員」に
+  なっていないことを確認してください（履歴に残った ID は、必要なら DB を複製して新しい ID に切り替えます）
+- **【他のブランチ】`claude/session-bvc8g4` の契約書・稼働データ・リードの取り込みフォルダ**（`contracts-import/` `engagements-import/`
+  `leads-import/`）はリポジトリの中にあり、取り込んだファイルが `_imported/` に残ります。そのブランチを取り込む前に、このブランチの
+  `.gitignore`（これらのフォルダを除外済み）を合わせ、取り込み済みのファイルは削除するか `data/` の下に移してください。
+  会社の請求情報（登録番号・口座）を `src/data/companyProfile.ts` に書く運用も、同じ理由で `data/` の下の JSON に移してください
+- **【デモ】実在の人物のペルソナ**: デモの既定は架空の人物です（`DEMO_PERSONA=mikitani` を指定したときだけ実在の経営者のスタイル）。
+  `docs/presentation.pptx` の4枚目の、実在の人物のペルソナの回答例は、社外に出す前に架空のペルソナの例に差し替えるか削除してください
 
 ---
 
@@ -588,7 +665,7 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | ☐ | `SES_OWN_DOMAINS` | 強く推奨 |
 | ☐ | `SES_DRAFT_SIGNING_KEY` | 必須（下書きを作る場合。最初の実行の前に） |
 | ☐ | `SES_ALLOWED_SENDER_DOMAINS` / `SES_ALLOWED_SENDERS` | 任意（Gmail 運用は `SES_ALLOWED_SENDERS` 必須） |
-| ☐ | `MIN_GROSS_MARGIN_JPY` / `MIN_GROSS_MARGIN_MAN` / `NEGOTIATION_MAX_*` | 任意（既定 100000円・5万円） |
+| ☐ | `SES_PRICING_POLICY_JSON` | 必須（粗利下限・交渉幅と乱数 `n` の1行の JSON。以前の `MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` の Secrets は削除） |
 | ☐ | `SHEETS_DB_IMPERSONATE` | 任意（DWD の場合のみ） |
 | ☐ | `PROPER_SKILLSHEET_FOLDER_ID` | 任意（プロパー） |
 | ☐ | `PROPER_MASTER_SPREADSHEET_ID` | 任意（プロパー） |
@@ -605,6 +682,8 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | ☐ | `SES_COLLECT_DAYS` | 任意（既定 7） |
 | ☐ | `SES_MAX_MAILS_PER_RUN` | 任意（既定 150） |
 | ☐ | `SES_RUN_DEADLINE_MINUTES` | 任意（既定 20） |
+| ☐ | `SES_RETENTION_DAYS` | 任意（既定 180。個人データの保存期間） |
+| ☐ | `SES_ALLOW_GEMINI_API` | `LLM_PROVIDER=gemini` の場合だけ必須（`paid`） |
 | ☐ | `XSERVER_IMAP_PORT` / `XSERVER_SMTP_PORT` | 任意（通常不要） |
 | ☐ | その他の調整値（5章の表） | 任意 |
 

@@ -1,5 +1,7 @@
 import '../env.js';
 import { existsSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { EXECUTIVE_PROFILE_SOURCE } from '../data/executiveProfile.js';
 import { generateText } from '../llm/index.js';
 import { google } from 'googleapis';
 import { fetchRecentSignals, fetchRecentStories } from '../database/index.js';
@@ -272,7 +274,8 @@ async function main(): Promise<void> {
   // 6. プロファイル・セキュリティ
   section('プロファイル・セキュリティ');
   if (envSet('EXECUTIVE_NAME')) ok(`経営者名: ${logRedact() ? '設定済み' : process.env.EXECUTIVE_NAME}`);
-  else warn('EXECUTIVE_NAME が未設定 — src/data/executiveProfile.ts のサンプル値の差し替えも忘れずに');
+  else warn('EXECUTIVE_NAME が未設定です');
+  checkExecutiveProfilePlacement();
   if (envSet('WEB_ACCESS_TOKEN')) ok('WEB_ACCESS_TOKEN 設定済み（Web UIに認証あり）');
   else warn('WEB_ACCESS_TOKEN 未設定 — Web UIはローカル(127.0.0.1)でのみ使ってください');
 
@@ -284,6 +287,24 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   } else {
     console.log('✅ 診断完了。必須項目はすべてOKです。（⚠️ は任意項目・後から設定可）');
+  }
+}
+
+// 経営者の実際の方針（権限委譲の上限・採用基準等）を、公開リポジトリで管理するソースファイルに書いていないか
+function checkExecutiveProfilePlacement(): void {
+  const source = EXECUTIVE_PROFILE_SOURCE;
+  if (source === 'sample') warn('経営者プロファイルはサンプル値です — 実際の内容は data/executive-profile.json（コミットされません）か EXECUTIVE_PROFILE_JSON に置いてください');
+  else ok(`経営者プロファイル: ${source === 'env' ? 'EXECUTIVE_PROFILE_JSON' : 'data/executive-profile.json'} から読み込み`);
+  try {
+    const changed = execFileSync('git', ['status', '--porcelain', '--', 'src/data/'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (changed) {
+      warn(
+        'src/data/ のサンプルのプロファイルが書き換えられています — 公開リポジトリにコミットすると経営者の方針が誰でも読めます。' +
+          '内容を data/executive-profile.json に移し、git checkout -- src/data/ で元に戻してください',
+      );
+    }
+  } catch {
+    /* git が無い環境では確かめない */
   }
 }
 

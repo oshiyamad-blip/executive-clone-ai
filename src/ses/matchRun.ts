@@ -30,7 +30,7 @@ import type { SuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
 import { markItemsMatched, closeDeferredMatches, markItemsInjectionSuspected } from '../database/index.js';
-import { recordHealEvent, recordFatal } from './heal/events.js';
+import { recordHealEvent, recordMailEvent, recordFatal } from './heal/events.js';
 import { pastRunDeadline, isLastChance } from './schedule.js';
 import { matchLookbackDays } from './config.js';
 import { safeErr } from './redact.js';
@@ -133,10 +133,10 @@ export async function persistInjectionFlags(): Promise<void> {
     const label = kind === 'project' ? '案件' : '要員';
     try {
       await markItemsInjectionSuspected(kind, ids);
-      recordHealEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を付けました（内容を人が確かめてください）`);
+      recordMailEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を付けました（内容を人が確かめてください）`);
     } catch (err) {
       console.error(`SESマッチング: 指示混入疑いの記録に失敗: ${safeErr(err)}`);
-      recordHealEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を記録できませんでした（この実行の残りの組は要確認にしました）`);
+      recordMailEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を記録できませんでした（この実行の残りの組は要確認にしました）`);
     }
   }
 }

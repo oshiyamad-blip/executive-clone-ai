@@ -84,7 +84,7 @@ jobs:
           SES_COLLECT_DAYS: ${{ vars.SES_COLLECT_DAYS || '7' }}
           SES_RUN_DEADLINE_MINUTES: ${{ vars.SES_RUN_DEADLINE_MINUTES || '20' }}
           # 以前は Variables だった値が Variables に残っていないか（値は出さず true/false だけ。事前確認で Secrets への移動を促す）
-          SES_SENSITIVE_VARS_PRESENT: ${{ vars.SES_OWN_DOMAINS != '' || vars.SES_ALLOWED_SENDER_DOMAINS != '' || vars.SHEETS_DB_IMPERSONATE != '' || vars.PROPER_GOOGLE_IMPERSONATE != '' || vars.MIN_GROSS_MARGIN_JPY != '' || vars.MIN_GROSS_MARGIN_MAN != '' || vars.NEGOTIATION_MAX_PROJECT_RAISE_MAN != '' || vars.NEGOTIATION_MAX_ENGINEER_CUT_MAN != '' }}
+          SES_SENSITIVE_VARS_PRESENT: ${{ vars.SES_OWN_DOMAINS != '' || vars.SES_ALLOWED_SENDER_DOMAINS != '' || vars.SHEETS_DB_IMPERSONATE != '' || vars.PROPER_GOOGLE_IMPERSONATE != '' || vars.MIN_GROSS_MARGIN_JPY != '' || vars.MIN_GROSS_MARGIN_MAN != '' || vars.NEGOTIATION_MAX_PROJECT_RAISE_MAN != '' || vars.NEGOTIATION_MAX_ENGINEER_CUT_MAN != '' || vars.SES_PRICING_POLICY_JSON != '' }}
 
           # ---- Secrets（必須）----
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -101,10 +101,10 @@ jobs:
           SES_ALLOWED_SENDERS: ${{ secrets.SES_ALLOWED_SENDERS }}
           SES_DRAFT_SIGNING_KEY: ${{ secrets.SES_DRAFT_SIGNING_KEY }}
           SHEETS_DB_IMPERSONATE: ${{ secrets.SHEETS_DB_IMPERSONATE }}
-          MIN_GROSS_MARGIN_JPY: ${{ secrets.MIN_GROSS_MARGIN_JPY }}
-          MIN_GROSS_MARGIN_MAN: ${{ secrets.MIN_GROSS_MARGIN_MAN }}
-          NEGOTIATION_MAX_PROJECT_RAISE_MAN: ${{ secrets.NEGOTIATION_MAX_PROJECT_RAISE_MAN }}
-          NEGOTIATION_MAX_ENGINEER_CUT_MAN: ${{ secrets.NEGOTIATION_MAX_ENGINEER_CUT_MAN }}
+          # 価格の方針（粗利下限・交渉幅）は1つの JSON（推測できない乱数 n を含む）で渡す。「10」「5」のような短い数値を
+          # 個別の Secret にすると、Actions がログ全体のその数字を伏せ字にするため、伏せ字の位置から値が分かってしまう。
+          # 以前の個別の Secrets（MIN_GROSS_MARGIN_* / NEGOTIATION_MAX_*）はここで参照しない（参照するだけで伏せ字の対象になる）
+          SES_PRICING_POLICY_JSON: ${{ secrets.SES_PRICING_POLICY_JSON }}
           # プロパー（自社社員のスキルシート）。フォルダと管理表の両方があるときだけ、専用の鍵・なりすまし先を渡す
           PROPER_SKILLSHEET_FOLDER_ID: ${{ secrets.PROPER_SKILLSHEET_FOLDER_ID }}
           PROPER_MASTER_SPREADSHEET_ID: ${{ secrets.PROPER_MASTER_SPREADSHEET_ID }}
@@ -112,11 +112,15 @@ jobs:
           PROPER_GOOGLE_IMPERSONATE: ${{ secrets.PROPER_SKILLSHEET_FOLDER_ID != '' && secrets.PROPER_MASTER_SPREADSHEET_ID != '' && secrets.PROPER_GOOGLE_IMPERSONATE || '' }}
           # MAIL_PROVIDER=gmail のときだけ使う
           SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
-          # LLM_PROVIDER=gemini のときだけ使う（Vertex AI はこのワークフローでは使えません）
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # LLM_PROVIDER=gemini のときだけ渡す（Vertex AI はこのワークフローでは使えません。
+          # Google AI Studio の無料枠では使わない: 課金を有効にしてデータの利用条件を確認し、Variables に SES_ALLOW_GEMINI_API=paid）
+          GEMINI_API_KEY: ${{ vars.LLM_PROVIDER == 'gemini' && secrets.GEMINI_API_KEY || '' }}
 
           # ---- Variables（ログに表示されます。公開して困らない調整値だけ。未設定なら既定値。値の意味は .env.example）----
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+          SES_ALLOW_GEMINI_API: ${{ vars.SES_ALLOW_GEMINI_API }}
+          SES_NOTIFY_ALLOW_EXTERNAL: ${{ vars.SES_NOTIFY_ALLOW_EXTERNAL }}
+          SES_RETENTION_DAYS: ${{ vars.SES_RETENTION_DAYS }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           XSERVER_IMAP_PORT: ${{ vars.XSERVER_IMAP_PORT }}
           XSERVER_SMTP_PORT: ${{ vars.XSERVER_SMTP_PORT }}

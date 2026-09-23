@@ -12,7 +12,7 @@ CEO の新端末にシステムを導入し、その場で動く状態で引き�
 | **リポジトリの持ち込み手段** | GitHub アクセス権（推奨）、または zip | zip の場合 `.env.local` は絶対に含めない |
 | **Gemini API キー** | **CEO 本人の Google アカウント**で [Google AI Studio](https://aistudio.google.com/) → 「Get API key」から無料発行 | 当日その場で発行してもOK（5分）。他人のキーを使い回さない |
 | **Notion（本番まで行う場合）** | 社内ワークスペース、Internal Integration 作成権限 | シグナルDB / ストーリーDB のプロパティ定義は `README.md` 参照 |
-| **経営者プロファイルの下書き** | 価値観 / 意思決定ルール / 成功・失敗パターン / 権限委譲ライン / 採用基準 | `src/data/executiveProfile.ts` に貼るテキストを事前にヒアリングしておくと当日が速い |
+| **経営者プロファイルの下書き** | 価値観 / 意思決定ルール / 成功・失敗パターン / 権限委譲ライン / 採用基準 | `data/executive-profile.json`（コミットされない）に入れるテキストを事前にヒアリングしておくと当日が速い。**`src/data/executiveProfile.ts`（公開リポジトリのソース）には書かない** |
 
 ---
 
@@ -69,7 +69,10 @@ npm run demo:web       # http://127.0.0.1:8787 → 即断/採用/壁打ちタブ
 
 ### 2-2. 経営者プロファイルを登録する
 
-`src/data/executiveProfile.ts` のサンプル値を CEO 本人の内容に差し替え:
+CEO 本人の内容を **`data/executive-profile.json`**（`data/` はコミットされません）に、`src/data/executiveProfile.ts` と同じ項目名の JSON で書きます
+（書いた項目だけがサンプル値を置き換えます。サーバー等でファイルを置けない場合は環境変数 `EXECUTIVE_PROFILE_JSON` に1行の JSON で登録）。
+**`src/data/executiveProfile.ts` のサンプル値は書き換えないでください**（公開リポジトリにコミットすると、値引きの上限・与信の基準・採用基準・
+失敗体験が誰でも読めるようになり、履歴からも消えません。`npm run doctor` が書き換えを ⚠️ で知らせます）:
 
 - `values`（価値観）/ `decisionRules`（意思決定ルール15個程度）
 - `successPatterns` / `failurePatterns`

@@ -403,7 +403,7 @@ export interface ProperEngineer extends OwnEngineer {
 
 // プロパー × 案件の候補（案件スプレッドシートの「プロパー候補」タブ1行に対応）
 export interface ProperCandidate extends OwnMatch {
-  properLabel: string; // 「プロパー」列の表示（氏名（提案用表記））。ログに出さない
+  properLabel: string; // 「プロパー」列の表示（提案用表記。氏名はプロパー管理表にだけ置く）。ログに出さない
   draftToProject?: DraftRef; // 案件の元メールへの全員に返信（提案文面。テンプレート生成）
 }
 

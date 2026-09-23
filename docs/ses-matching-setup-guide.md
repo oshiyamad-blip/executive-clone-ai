@@ -22,7 +22,7 @@ sales@（共有メーリス）── 収集 ─→ 抽出(Haiku) ─→ マッ�
                                              「全員に返信」下書き（営業個人アドレス）
 ```
 
-- **1日2回のバッチ**で共有メーリスを巡回し、粗利下限（既定10万円/月）を満たすペアを検出。
+- **1日2回のバッチ**で共有メーリスを巡回し、粗利下限（設定値）を満たすペアを検出。
 - 結果は **Notion** に保存され、**サマリメール**が届き、**確認UI**でレビューできます。
 - 紹介文は**「全員に返信」の下書き**として用意され、**担当営業個人の会社アドレス**から送る形になります（送信自体は人が最終確認）。
 
@@ -249,7 +249,8 @@ PROPER_SKILLSHEET_FOLDER_ID=<フォルダのID>
 PROPER_MASTER_SPREADSHEET_ID=<管理表のID>
 ```
 認証はメインの `GOOGLE_SA_KEY_JSON` をそのまま使います（追加の鍵・DWDは不要）。
-管理表は案件スプレッドシート（`SHEETS_DB_SPREADSHEET_ID`）と同じファイルでも構いません（「プロパー管理」タブが追加されます）。
+管理表は**案件スプレッドシート（`SHEETS_DB_SPREADSHEET_ID`）とは別のファイル**にし、編集者を人事・運用担当とサービスアカウントに限ってください
+（氏名・必要案件単価・居住地・スキルシートのリンクが入るため。同じファイルを指定すると事前確認が ❌ で止めます）。
 
 - 対応形式: PDF・Excel（.xlsx/.xls）・Word（.docx）・Googleドキュメント・Googleスプレッドシート（10MBまで。サブフォルダは2階層下まで）。
   .doc 等の未対応形式はサマリメールにファイル名だけ載ります
@@ -345,20 +346,20 @@ NOTION_PROJECT_DB_ID=...
 NOTION_ENGINEER_DB_ID=...
 NOTION_MATCH_DB_ID=...
 
-# --- 事業ルール（既定でOK。変更可） ---
-MIN_GROSS_MARGIN_JPY=100000     # 粗利下限（円/月）
+# --- 事業ルール（価格の方針。本番は Secret SES_PRICING_POLICY_JSON に1つの JSON で登録） ---
+MIN_GROSS_MARGIN_JPY=<粗利下限>  # 粗利下限（円/月）
 ```
 
 主なチューニング項目（付録に全件）:
 
 | 変数 | 既定 | 意味 |
 | --- | --- | --- |
-| `MIN_GROSS_MARGIN_JPY` | 100000 | 粗利下限（円/月）。未満は除外 |
+| `MIN_GROSS_MARGIN_JPY` | （本番は必須） | 粗利下限（円/月）。未満は除外。GitHub Actions では `SES_PRICING_POLICY_JSON` の `minGrossMarginMan`／`minGrossMarginJpy` |
 | `SKILL_MATCH_THRESHOLD` | 0.6 | スキル一致率の下限（未満は除外） |
 | `SKILL_MATCH_STRONG_THRESHOLD` | 0.8 | これ以上＝成立候補、下限〜これ未満＝参考提案 |
 | `ENABLE_NEGOTIATION` | true | 単金交渉で粗利を作る提案を出すか |
-| `NEGOTIATION_MAX_PROJECT_RAISE_MAN` | 5 | 交渉で案件単金を上げる上限（万円） |
-| `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | 5 | 交渉で要員単金を下げる上限（万円） |
+| `NEGOTIATION_MAX_PROJECT_RAISE_MAN` | （本番は必須） | 交渉で案件単金を上げる上限（万円）。Actions では `projectRaiseMaxMan` |
+| `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | （本番は必須） | 交渉で要員単金を下げる上限（万円）。Actions では `engineerCutMaxMan` |
 | `MAX_CANDIDATES_PER_ITEM` | 5 | 1案件あたりLLM判定に回す上限（コスト上限保証）。下の「並び順」で上から残す |
 | `MAX_PROJECTS_PER_ENGINEER` | 3 | 1回の突合で1名の要員を候補に入れる案件数の上限（単金の安い1名が多数の案件の上位を独占しないように。あふれた案件の枠は次点の要員で埋める） |
 | `SES_STALE_DAYS` | 45 | 受信からこの日数を超えた案件・要員は成立候補にせず参考提案に下げ、根拠に「要再確認（受信から45日超）」を付ける |
@@ -569,6 +570,9 @@ npm run ses:web        # http://127.0.0.1:8788（既定はこのパソコンか�
   SES_WEB_TLS_CERT=/path/to/server.crt
   SES_WEB_TLS_KEY=/path/to/server.key
   ```
+
+  証明書・秘密鍵のファイルは**リポジトリのフォルダの外**（例: `~/.config/ses/`）に置いてください（公開リポジトリに誤ってコミットしないため。
+  `.gitignore` でも `*.key` `*.crt` `*.pem` を除外しています）。
 
 - **B. HTTPS のリバースプロキシ・VPN の内側でだけ公開する**（プロキシが同じパソコンなら `SES_WEB_HOST=127.0.0.1` のままでよく、
   下の設定は不要です。別のマシンのプロキシ・VPN の内側のアドレスで待ち受ける場合だけ、そのことを明示します）

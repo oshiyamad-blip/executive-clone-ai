@@ -17,6 +17,8 @@ import {
   markItemsInjectionSuspectedSheets,
   updateMatchStatusSheets,
   pruneProcessedMailSheets,
+  pruneStalePersonalDataSheets,
+  saveMatchFeedbackSheets,
   checkSheetsTabs,
   PROPER_CANDIDATE_TAB,
   DRAFT_REQUEST_COLUMNS,
@@ -1307,9 +1309,10 @@ async function testProperCandidates(): Promise<void> {
   const textH = rowH?.['案件側文面'] ?? '';
   check(
     '提案用表記が未入力なら、氏名で代用せず記入を促す差し込みにする',
-    textH.includes('《提案用表記（イニシャル）を記入》') && !textH.includes('伊藤') && rowH?.['プロパー'] === '伊藤八郎',
+    textH.includes('《提案用表記（イニシャル）を記入》') && !textH.includes('伊藤') && (rowH?.['プロパー'] ?? '').includes('提案用表記未入力') && !(rowH?.['プロパー'] ?? '').includes('伊藤'),
   );
-  check('「プロパー」列は社内向けに氏名（提案用表記）', rowA?.['プロパー'] === '山田太郎（T.Y.）' && rowB?.['プロパー'] === '佐藤 花子（確認済）（H.S.）');
+  // 案件スプレッドシートは営業の誰もが編集できるため、氏名は編集者を絞ったプロパー管理表にだけ置く
+  check('「プロパー」列は提案用表記だけ（氏名を案件スプレッドシートに写さない）', rowA?.['プロパー'] === 'T.Y.' && rowB?.['プロパー'] === 'H.S.', `${rowA?.['プロパー']} / ${rowB?.['プロパー']}`);
   const text = rowA?.['案件側文面'] ?? '';
   check(
     '提案文面はイニシャルを使い、氏名を含めない（下書きデータも同様）',
@@ -1366,10 +1369,15 @@ async function testProperCandidates(): Promise<void> {
   check(
     '稼働可でなくなった社員の候補の行は退役させ、氏名・必要案件単価・文面・下書きデータを消す',
     r3?.retired === 2 && retiredB?.['判定'] === RETIRED_PROPER_VERDICT && retiredB?.['プロパー'] === '（対象外）' &&
-      retiredB?.['必要案件単価'] === '' && retiredB?.['案件側文面'] === '' && retiredB?.['下書きデータ'] === '' &&
+      retiredB?.['必要案件単価'] === '' && retiredB?.['根拠'] === '' && retiredB?.['案件側文面'] === '' && retiredB?.['下書きデータ'] === '' &&
       retiredB?.['案件側下書き状態'] === DRAFT_STATE.retired && STAMP.test(sheets.record(SES_BOOK, tab, 'ID', idA)?.['案件側下書き状態'] ?? ''),
     JSON.stringify({ retired: r3?.retired, retiredB }),
   );
+  // 以前の版で退役させた行は根拠（必要案件単価を含む文）が残っているため、次の実行で消す
+  sheets.setByKey(SES_BOOK, tab, 'ID', idB, '根拠', '必要案件単価62万円に対し案件単価90万円（差 +28万円）');
+  newRun();
+  await runProperFlow();
+  check('以前の版で退役させた行に残る根拠（必要案件単価）も消す', sheets.record(SES_BOOK, tab, 'ID', idB)?.['根拠'] === '');
   sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileB', '稼働状況', '稼働可');
   newRun();
   await runProperFlow();
@@ -1929,7 +1937,10 @@ async function testRedaction(): Promise<void> {
   check('秘匿モードのログにメール・案件・要員・マッチのIDを出さない（別名にする）', ids.length === 0, ids.slice(0, 5).join(' / '));
   check('秘匿モードでもエラーの種別は出す', /Error/.test(out));
   const summary = mail.sent.slice(sentBefore).find((m) => m.to === `boss@${OWN_DOMAIN}`);
-  check('詳細（案件名・プロパー氏名）は非公開のサマリメールに載せる', Boolean(summary) && summary!.body.includes(p1.title) && summary!.body.includes('山田太郎'));
+  check(
+    '詳細（案件名・プロパーの提案用表記）は非公開のサマリメールに載せ、社員の氏名・スキルシートのファイル名は載せない',
+    Boolean(summary) && summary!.body.includes(p1.title) && summary!.body.includes('T.Y.') && !summary!.body.includes('山田太郎') && !summary!.body.includes('スキルシート_'),
+  );
   const metricsRows = sheets.records(SES_BOOK, METRICS_TAB);
   const metricsText = JSON.stringify(metricsRows);
   check(
@@ -2097,6 +2108,124 @@ async function resendSkipSteps(): Promise<void> {
   check('再送の再送も最初のメールを元としてスキップ', again.skipped[0]?.rootMailId === first.id);
 }
 
+// ===== 12. セキュリティ監査（第2回）: 個人データの保存期間・サマリの宛先・公開ログの件数 =====
+
+const RETENTION_BOOK = 'fakeRetentionBook';
+
+async function testRetentionAndNotify(): Promise<void> {
+  section('個人データの保存期間（古い案件・要員・マッチ・プロパー候補・評価の行を整理）');
+  sheets.createBook(RETENTION_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = RETENTION_BOOK;
+  try {
+    await retentionSteps();
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+  await notifyRecipientSteps();
+  await linkCountSteps();
+}
+
+async function retentionSteps(): Promise<void> {
+  newRun();
+  const old = new Date(NOW.getTime() - 400 * DAY_MS);
+  const cutoff = new Date(NOW.getTime() - 180 * DAY_MS);
+  const pOld = project('proj_ret_old', { title: '古い案件', receivedAt: old });
+  const pRef = project('proj_ret_ref', { title: '古いが最近のマッチで使う案件', receivedAt: old });
+  const pNew = project('proj_ret_new', { title: '新しい案件', receivedAt: NOW });
+  const eOld = engineer('eng_ret_old', { displayName: 'K.S.', age: 34, residence: '東京都世田谷区', desiredRate: 60, receivedAt: old });
+  const eNew = engineer('eng_ret_new', { displayName: 'T.Y.', receivedAt: NOW });
+  await saveProjectsSheets([pOld, pRef, pNew]);
+  for (const e of [eOld, eNew]) await saveEngineer(e);
+  const mOld = { ...makeMatch(pOld, eOld, 'confirmed'), detectedAt: old };
+  const mWon = { ...makeMatch(pOld, eNew, 'confirmed', '成約した組の根拠'), detectedAt: old };
+  const mRecent = { ...makeMatch(pRef, eNew, 'confirmed'), detectedAt: NOW };
+  for (const m of [mOld, mWon, mRecent]) await saveMatch(m);
+  sheets.setByKey(RETENTION_BOOK, 'マッチ', 'ID', mWon.id, 'ステータス', '成約');
+  await saveProperCandidatesSheets([
+    {
+      id: 'ownmatch_proper_old_proj_ret_old', ownEngineerId: 'proper_old', ownEngineerName: 'x', projectId: pOld.id, projectTitle: pOld.title,
+      projectRate: 75, requiredProjectRate: 60, rateGapMan: 15, meetsRate: true, skillMatchRate: 1, band: 'strong', locationOk: true,
+      timingOk: true, needsReview: false, score: 100, reason: 'r', agentEmail: '', detectedAt: old, properLabel: 'A.B.',
+    },
+  ]);
+  await saveMatchFeedbackSheets({ matchId: mOld.id, matchTitle: mOld.title, verdict: 'bad', note: '古いメモ 090-1111-2222', reviewer: 'r', at: old.toISOString() });
+  await saveMatchFeedbackSheets({ matchId: mRecent.id, matchTitle: mRecent.title, verdict: 'good', note: '新しいメモ', reviewer: 'r', at: NOW.toISOString() });
+
+  newRun();
+  const r = await pruneStalePersonalDataSheets(cutoff);
+  const ids = (tab: string, key = 'ID') => sheets.records(RETENTION_BOOK, tab).map((x) => x[key]).sort().join(',');
+  check(
+    '保存期間を過ぎ、最近のマッチ・プロパー候補から参照されない案件・要員の行を削除する（参照される古い案件は残す）',
+    ids('案件') === [pNew.id, pRef.id].sort().join(',') && ids('要員') === eNew.id && r.projects === 1 && r.engineers === 1,
+    JSON.stringify({ r, p: ids('案件'), e: ids('要員') }),
+  );
+  const won = sheets.record(RETENTION_BOOK, 'マッチ', 'ID', mWon.id);
+  check(
+    '古いマッチは削除し、成約の行は記録として残して判定根拠・文面・下書きデータだけ消す',
+    ids('マッチ') === [mRecent.id, mWon.id].sort().join(',') && won?.['判定根拠'] === '' && won?.['案件側文面'] === '' &&
+      won?.['要員側文面'] === '' && won?.['下書きデータ'] === '' && r.matches === 1 && r.matchesCleared === 1,
+    JSON.stringify({ r, m: ids('マッチ'), won }),
+  );
+  check(
+    '古いプロパー候補・評価（メモ）の行を削除する',
+    sheets.records(RETENTION_BOOK, PROPER_CANDIDATE_TAB).length === 0 && ids('評価', '元マッチID') === mRecent.id && r.properCandidates === 1 && r.feedback === 1,
+    JSON.stringify(r),
+  );
+  newRun();
+  const again = await pruneStalePersonalDataSheets(cutoff);
+  check('2回目は何も消さない（冪等）', Object.values(again).every((n) => n === 0), JSON.stringify(again));
+}
+
+async function notifyRecipientSteps(): Promise<void> {
+  section('サマリの宛先（社外のドメインには送らない）');
+  process.env.SES_NOTIFY_TO = `boss@${OWN_DOMAIN}, owner.private@gmail.example, sales@yourcompnay.example.jp`;
+  const sentBefore = mail.sent.length;
+  const cap = captureConsole();
+  try {
+    newRun();
+    await persistAndNotify(allMatches(), PROJECTS, ENGINEERS, { created: 0, failed: 0 }, null);
+  } finally {
+    cap.restore();
+  }
+  const sent = mail.sent.slice(sentBefore);
+  const recipients = sent.map((m) => m.to).join(' ');
+  check(
+    'SES_NOTIFY_TO のうち社外のドメイン（個人のGmail・打ち間違えたドメイン）には、社員・要員の情報を載せたサマリを送らない',
+    sent.length === 1 && recipients.includes(`boss@${OWN_DOMAIN}`) && !recipients.includes('gmail') && !recipients.includes('yourcompnay') &&
+      cap.lines.join('\n').includes('社外のドメインの2件には送りません'),
+    `${recipients} / ${cap.lines.filter((l) => l.includes('SES通知')).join(' | ')}`,
+  );
+  process.env.SES_NOTIFY_TO = `boss@${OWN_DOMAIN}`;
+}
+
+async function linkCountSteps(): Promise<void> {
+  section('公開ログにメール本文のリンクの件数を出さない（サービスアカウントが読めるファイルの探りに使わせない）');
+  const savedOwn = process.env.SES_OWN_DOMAINS;
+  const savedFolder = process.env.PROPER_SKILLSHEET_FOLDER_ID;
+  delete process.env.SES_OWN_DOMAINS;
+  delete process.env.PROPER_SKILLSHEET_FOLDER_ID;
+  process.env.GOOGLE_SA_CLIENT_EMAIL = 'bot@proj.iam.gserviceaccount.com';
+  process.env.GOOGLE_SA_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----';
+  process.env.SES_LOG_REDACT = 'true';
+  const id = '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef';
+  const variants = ['/edit', '/edit#gid=0', '/htmlview', '/view', '/edit?usp=sharing', '/copy', '/preview'].map((v) => `https://docs.google.com/spreadsheets/d/${id}${v}`);
+  const cap = captureConsole();
+  try {
+    await parseAttachments([{ ...rawMail('sesmail_flow_links', '検証 <a@x.example.jp>', 's', 1), body: variants.join('\n'), sheetLinks: variants }]);
+  } finally {
+    cap.restore();
+    process.env.SES_LOG_REDACT = 'false';
+    process.env.SES_OWN_DOMAINS = savedOwn ?? OWN_DOMAIN;
+    if (savedFolder !== undefined) process.env.PROPER_SKILLSHEET_FOLDER_ID = savedFolder;
+    delete process.env.GOOGLE_SA_CLIENT_EMAIL;
+    delete process.env.GOOGLE_SA_PRIVATE_KEY;
+  }
+  const out = cap.lines.join('\n');
+  check('秘匿モードではリンクの読取・読めず・社内の件数をログに出さない', out.includes('スプレッドシートのリンク') && !/\d+件/.test(out), out);
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -2124,6 +2253,7 @@ async function main(): Promise<void> {
     await testResendSkip();
     await testRedaction();
     await testSecurityRegressions();
+    await testRetentionAndNotify();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

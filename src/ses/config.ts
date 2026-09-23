@@ -6,6 +6,8 @@
 // .env.example の `X=` がそのまま入っても 0 や空のモデル名にならないため）。
 // 数値は全角・桁区切りカンマを許し、解釈できない/範囲外なら既定値に戻して1回だけ警告する。
 
+import { splitNotifyRecipients } from './settingsFormat.js';
+
 // 未設定・空文字は ''（前後の空白は除く）
 function env(name: string): string {
   return (process.env[name] ?? '').trim();
@@ -42,10 +44,15 @@ export function parseNumberSetting(raw: string, def: number, range: NumberRange 
   return ok ? { value: n, valid: true } : { value: def, valid: false };
 }
 
-// 数値の設定。min/max の範囲外や数値でない値は既定値に戻す（値そのものはログに出さない）
+// 数値の設定。min/max の範囲外や数値でない値は既定値に戻す（値そのものはログに出さない）。
+// 価格の方針（粗利下限・交渉幅）は秘匿モードでは既定値・範囲も出さない（公開ログから使っている方針が分かるため）
 function envNum(name: string, def: number, range: NumberRange = {}): number {
   const { value, valid } = parseNumberSetting(env(name), def, range);
   if (!valid) {
+    if (LEGACY_PRICING_ENV.includes(name) && logRedact()) {
+      warnEnvOnce(name, 'を解釈できません（価格の方針のため、値・既定値はログに出しません）');
+      return value;
+    }
     const bounds = [range.min !== undefined ? `${range.min}以上` : '', range.max !== undefined ? `${range.max}以下` : '']
       .filter(Boolean)
       .join('・');
@@ -85,6 +92,17 @@ export function demoModeExplicit(): boolean {
 // LLMプロバイダ（anthropic | gemini）
 export function llmProviderName(): string {
   return envStr('LLM_PROVIDER', 'anthropic').toLowerCase();
+}
+
+// Gemini を Vertex AI 経由で使うか（false なら Google AI Studio の API キー）
+export function geminiUsesVertex(): boolean {
+  return env('GOOGLE_GENAI_USE_VERTEXAI') === 'true';
+}
+
+// Google AI Studio（Gemini API キー）で本番のメール・スキルシートを送ってよいことの明示（課金を有効にしたプロジェクトで、
+// データの利用条件を確認済み）。無料枠は送った内容が品質改善・人による確認に使われ得るため、'paid' のときだけ本番で使う
+export function geminiApiAcknowledged(): boolean {
+  return env('SES_ALLOW_GEMINI_API').toLowerCase() === 'paid';
 }
 
 // 使用中のLLMプロバイダの鍵（Gemini は AI Studio の鍵 または Vertex AI のプロジェクト）が揃っているか
@@ -133,15 +151,133 @@ export function liveConfigError(): string | null {
   return `LLMの鍵（${llmKeyName()}）が未設定です。CI/スケジュール実行ではdemoに切り替えず停止します（Secretsの名前と受け渡しを確認してください。意図的にdemoで動かす場合は DEMO_MODE=true）`;
 }
 
-// 粗利下限（円/月）。要望の「10万円、変更可能に」に対応。
-// 交渉幅の設定（*_MAN）に合わせて万円で書きたい場合は MIN_GROSS_MARGIN_MAN を使う（こちらを優先）
+// ===== 価格の方針（粗利下限・交渉幅） =====
+// 社外に知られたくない方針。GitHub Actions では1つの Secret（SES_PRICING_POLICY_JSON）で渡す。
+// 「10」「5」のような短い数値を個別の Secret にすると、Actions はその文字列をログ全体で伏せ字（***）にするため、
+// 公開ログの伏せ字の位置（既知の文言の中の数字）から値が分かってしまう。JSON に推測できない乱数（n）を含めて1つにする。
+// 手元の実行（.env.local）では従来の個別の設定（MIN_GROSS_MARGIN_* / NEGOTIATION_MAX_*）も使える（JSON が優先）
+export const PRICING_POLICY_ENV = 'SES_PRICING_POLICY_JSON';
+export const PRICING_POLICY_NONCE_MIN_CHARS = 16;
+export const LEGACY_PRICING_ENV: readonly string[] = [
+  'MIN_GROSS_MARGIN_JPY',
+  'MIN_GROSS_MARGIN_MAN',
+  'NEGOTIATION_MAX_PROJECT_RAISE_MAN',
+  'NEGOTIATION_MAX_ENGINEER_CUT_MAN',
+];
+
+export interface PricingPolicy {
+  minGrossMarginJpy?: number;
+  raiseMaxMan?: number;
+  cutMaxMan?: number;
+}
+
+export interface PricingPolicyParse {
+  set: boolean;
+  policy: PricingPolicy;
+  problems: string[]; // 固定の文言（値を含まない）
+  nonceOk: boolean;
+}
+
+const PRICING_KEYS = ['minGrossMarginMan', 'minGrossMarginJpy', 'projectRaiseMaxMan', 'engineerCutMaxMan', 'n'];
+
+// SES_PRICING_POLICY_JSON の解釈（純関数）。例: {"minGrossMarginMan":12,"projectRaiseMaxMan":3,"engineerCutMaxMan":4,"n":"<乱数>"}
+export function parsePricingPolicy(raw: string): PricingPolicyParse {
+  const t = raw.trim();
+  const out: PricingPolicyParse = { set: Boolean(t), policy: {}, problems: [], nonceOk: false };
+  if (!t) return out;
+  if (/[\r\n]/.test(t)) out.problems.push(`${PRICING_POLICY_ENV} は1行で登録してください（改行を含む Secret は行ごとに伏せ字になるため）`);
+  let obj: unknown;
+  try {
+    obj = JSON.parse(t);
+  } catch {
+    out.problems.push(`${PRICING_POLICY_ENV} を JSON として読めません`);
+    return out;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    out.problems.push(`${PRICING_POLICY_ENV} は {"minGrossMarginMan": …} の形の JSON にしてください`);
+    return out;
+  }
+  const rec = obj as Record<string, unknown>;
+  const unknownKeys = Object.keys(rec).filter((k) => !PRICING_KEYS.includes(k)).length;
+  if (unknownKeys > 0) out.problems.push(`${PRICING_POLICY_ENV} に知らない項目が${unknownKeys}件あります（${PRICING_KEYS.join(' / ')}）`);
+  const num = (key: string): number | undefined => {
+    const v = rec[key];
+    if (v === undefined || v === null || v === '') return undefined;
+    const parsed = parseNumberSetting(typeof v === 'number' ? String(v) : typeof v === 'string' ? v : 'x', NaN, { min: 0 });
+    if (!parsed.valid || !Number.isFinite(parsed.value)) {
+      out.problems.push(`${PRICING_POLICY_ENV} の ${key} を0以上の数値として解釈できません`);
+      return undefined;
+    }
+    return parsed.value;
+  };
+  const man = num('minGrossMarginMan');
+  const jpy = num('minGrossMarginJpy');
+  if (man !== undefined) out.policy.minGrossMarginJpy = Math.round(man * 10000);
+  else if (jpy !== undefined) {
+    if (jpy > 0 && jpy < 1000) out.problems.push(`${PRICING_POLICY_ENV} の minGrossMarginJpy は円単位です（万円なら minGrossMarginMan）`);
+    else out.policy.minGrossMarginJpy = jpy;
+  }
+  const raise = num('projectRaiseMaxMan');
+  if (raise !== undefined) out.policy.raiseMaxMan = raise;
+  const cut = num('engineerCutMaxMan');
+  if (cut !== undefined) out.policy.cutMaxMan = cut;
+  out.nonceOk = typeof rec.n === 'string' && rec.n.trim().length >= PRICING_POLICY_NONCE_MIN_CHARS;
+  return out;
+}
+
+let pricingCache: { raw: string; parsed: PricingPolicyParse } | null = null;
+
+// 現在の価格の方針（SES_PRICING_POLICY_JSON）の解釈結果。読めない場合は1回だけ固定の文言で警告し、個別の設定・既定値を使う
+export function pricingPolicyStatus(): PricingPolicyParse {
+  const raw = env(PRICING_POLICY_ENV);
+  if (pricingCache?.raw !== raw) {
+    pricingCache = { raw, parsed: parsePricingPolicy(raw) };
+    if (pricingCache.parsed.problems.length > 0) {
+      warnEnvOnce(PRICING_POLICY_ENV, `を解釈できない項目があります（${pricingCache.parsed.problems.length}件。値はログに出しません）`);
+    }
+  }
+  return pricingCache.parsed;
+}
+
+// 個別の設定（MIN_GROSS_MARGIN_* / NEGOTIATION_MAX_*）のうち値のあるもの（名前だけ。値は返さない）
+export function legacyPricingSettingsPresent(): string[] {
+  return LEGACY_PRICING_ENV.filter((n) => Boolean(env(n)));
+}
+
+// 粗利下限（円/月）。SES_PRICING_POLICY_JSON → MIN_GROSS_MARGIN_MAN（万円）→ MIN_GROSS_MARGIN_JPY（円）→ 既定値の順
 export function minGrossMarginJpy(): number {
+  const fromPolicy = pricingPolicyStatus().policy.minGrossMarginJpy;
+  if (fromPolicy !== undefined) return fromPolicy;
   if (env('MIN_GROSS_MARGIN_MAN')) return Math.round(envNum('MIN_GROSS_MARGIN_MAN', 10, { min: 0 }) * 10000);
   const jpy = envNum('MIN_GROSS_MARGIN_JPY', 100000, { min: 0 });
   if (jpy > 0 && jpy < 1000) {
-    warnEnvOnce('MIN_GROSS_MARGIN_JPY', 'は円単位です（万円で指定する場合は MIN_GROSS_MARGIN_MAN を使ってください）');
+    warnEnvOnce(
+      'MIN_GROSS_MARGIN_JPY',
+      logRedact() ? 'の値を確認してください（価格の方針のため、値はログに出しません）' : 'は円単位です（万円で指定する場合は MIN_GROSS_MARGIN_MAN を使ってください）',
+    );
   }
   return jpy;
+}
+
+// 価格の方針の設定に解釈できない値があるか（本番では既定値・誤った単位のまま動かさず止める）
+export function pricingSettingsInvalid(): boolean {
+  if (pricingPolicyStatus().problems.length > 0) return true;
+  const bad = (name: string) => Boolean(env(name)) && !parseNumberSetting(env(name), 0, { min: 0 }).valid;
+  if (LEGACY_PRICING_ENV.some(bad)) return true;
+  const jpy = parseNumberSetting(env('MIN_GROSS_MARGIN_JPY'), 0, { min: 0 }).value;
+  return !env('MIN_GROSS_MARGIN_MAN') && jpy > 0 && jpy < 1000;
+}
+
+// 粗利下限が明示されているか（本番では既定値＝公開されている値のまま動かさない）
+export function minGrossMarginConfigured(): boolean {
+  return pricingPolicyStatus().policy.minGrossMarginJpy !== undefined || Boolean(env('MIN_GROSS_MARGIN_MAN') || env('MIN_GROSS_MARGIN_JPY'));
+}
+
+// 交渉幅が明示されているか（案件単金を上げる・要員単金を下げる上限の両方）
+export function negotiationLimitsConfigured(): boolean {
+  const p = pricingPolicyStatus().policy;
+  return (p.raiseMaxMan !== undefined || Boolean(env('NEGOTIATION_MAX_PROJECT_RAISE_MAN'))) &&
+    (p.cutMaxMan !== undefined || Boolean(env('NEGOTIATION_MAX_ENGINEER_CUT_MAN')));
 }
 
 // 1アイテムあたりLLM最終判定に回す候補ペア上限（LLMコスト上限の保証）
@@ -204,12 +340,12 @@ export function enableNegotiation(): boolean {
 
 // 交渉で「案件単金を上げてもらう」上限（万円/月）
 export function maxNegotiationRaiseMan(): number {
-  return envNum('NEGOTIATION_MAX_PROJECT_RAISE_MAN', 5, { min: 0 });
+  return pricingPolicyStatus().policy.raiseMaxMan ?? envNum('NEGOTIATION_MAX_PROJECT_RAISE_MAN', 5, { min: 0 });
 }
 
 // 交渉で「要員単金を下げてもらう」上限（万円/月）
 export function maxNegotiationCutMan(): number {
-  return envNum('NEGOTIATION_MAX_ENGINEER_CUT_MAN', 5, { min: 0 });
+  return pricingPolicyStatus().policy.cutMaxMan ?? envNum('NEGOTIATION_MAX_ENGINEER_CUT_MAN', 5, { min: 0 });
 }
 
 // 通常バッチの突合で、今回の新着と組み合わせる「前回以前に保存した募集中案件・提案可要員」の遡り日数
@@ -314,9 +450,35 @@ export function collectOwnDomain(): boolean {
   return envBool('SES_COLLECT_OWN_DOMAIN', false);
 }
 
-// サマリ通知の宛先
+// サマリ通知の宛先（設定の生の値。送るときは notify の宛先の絞り込みを通す）
 export function sesNotifyTo(): string {
   return env('SES_NOTIFY_TO');
+}
+
+// サマリ・診断レポート（社員の氏名・必要案件単価、要員の情報を含む）を社外のドメインにも送るか。
+// 既定は送らない（個人のGmail・打ち間違えたドメイン等に毎回の結果が届き続けないように）
+export function notifyAllowExternal(): boolean {
+  return envBool('SES_NOTIFY_ALLOW_EXTERNAL', false);
+}
+
+// サマリ・診断レポートを実際に送る宛先（社外のドメインは SES_NOTIFY_ALLOW_EXTERNAL=true のときだけ）と、送らない社外の宛先の数
+export function notifyRecipients(): { to: string; externalSkipped: number } {
+  const { recipients, external } = splitNotifyRecipients(sesNotifyTo(), internalMailDomains(), notifyAllowExternal());
+  return { to: recipients.join(', '), externalSkipped: notifyAllowExternal() ? 0 : external };
+}
+
+// 社内とみなすメールのドメイン（自社ドメインと、使っているメール運用の共有メールボックスのドメイン）
+export function internalMailDomains(): string[] {
+  const mailbox = mailProvider() === 'gmail' ? sesTargetGmail() : xserverSharedUser();
+  const at = mailbox.lastIndexOf('@');
+  return [...new Set([...ownDomains(), at >= 0 ? mailbox.slice(at + 1).toLowerCase() : ''].filter(Boolean))];
+}
+
+// 個人データの保存期間（日）。受信からこれを超えた案件・要員・マッチ等の行は、氏名・年齢・居住地・単金・連絡先・文面を消す。
+// 突合・再確認に使う期間（SES_MATCH_LOOKBACK_DAYS・SES_STALE_DAYS 等）より短くはしない
+export function retentionDays(): number {
+  const configured = envNum('SES_RETENTION_DAYS', 180, { min: 30, max: 3650, int: true });
+  return Math.max(configured, matchLookbackDays() + 7, staleDays() + 7, properProjectLookbackDays() + 7, COLLECT_DAYS_MAX + 7);
 }
 
 // スプレッドシートの「担当者メール」で下書きの送信元に指定できるドメイン（カンマ区切り・小文字化）。

@@ -64,6 +64,17 @@ import {
   properMaxExtractPerRun,
   properProjectLookbackDays,
   statsDays,
+  pricingPolicyStatus,
+  legacyPricingSettingsPresent,
+  minGrossMarginConfigured,
+  negotiationLimitsConfigured,
+  enableNegotiation,
+  LEGACY_PRICING_ENV,
+  PRICING_POLICY_ENV,
+  geminiUsesVertex,
+  geminiApiAcknowledged,
+  internalMailDomains,
+  notifyAllowExternal,
 } from './config.js';
 import {
   isPlainEmailAddress,
@@ -73,6 +84,9 @@ import {
   looksLikeNotionId,
   invalidAddressCount,
   inspectServiceAccountJson,
+  splitNotifyRecipients,
+  pricingPolicyProblems,
+  geminiDataUseProblem,
 } from './settingsFormat.js';
 import { retirementNotice } from '../llm/modelLifecycle.js';
 
@@ -106,6 +120,7 @@ function collectNumberWarnings(): string[] {
   };
   try {
     for (const read of [
+      pricingPolicyStatus,
       minGrossMarginJpy,
       maxCandidatesPerItem,
       maxProjectsPerEngineer,
@@ -228,7 +243,8 @@ function checkRuntime(): void {
     if (settingValue('SES_SENSITIVE_VARS_PRESENT') === 'true') {
       bad(
         '公開ログに表示される Variables に、Secrets へ移した設定（SES_OWN_DOMAINS・SES_ALLOWED_SENDER_DOMAINS・SHEETS_DB_IMPERSONATE・' +
-          'PROPER_GOOGLE_IMPERSONATE・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*）が残っています。同じ名前で Secrets に登録し、Variables からは削除してください（Variables の値は使いません）',
+          'PROPER_GOOGLE_IMPERSONATE・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*・SES_PRICING_POLICY_JSON）が残っています。Secrets に登録し直し' +
+          '（価格の方針は SES_PRICING_POLICY_JSON の1つにまとめる）、Variables からは削除してください（Variables の値は使いません）',
       );
     }
   } else if (logRedact()) {
@@ -253,6 +269,8 @@ function checkLlm(): void {
   } else if (provider === 'gemini') {
     if (llmKeyConfigured()) ok('Gemini の鍵（GEMINI_API_KEY または Vertex AI の GOOGLE_CLOUD_PROJECT）: 設定済み');
     else bad('LLM_PROVIDER=gemini ですが GEMINI_API_KEY（Vertex AI の場合は GOOGLE_CLOUD_PROJECT）が未設定です');
+    const dataUse = geminiDataUseProblem({ provider, vertex: geminiUsesVertex(), acknowledged: geminiApiAcknowledged(), production: !demoModeExplicit() });
+    if (dataUse) bad(dataUse);
   } else {
     bad('LLM_PROVIDER の値が正しくありません（anthropic または gemini）');
   }
@@ -355,6 +373,15 @@ function checkNotifyAndDomains(): void {
     const { total, invalid } = invalidAddressCount(notify);
     if (invalid > 0) bad(`SES_NOTIFY_TO にメールアドレスとして解釈できない値が${invalid}件あります（カンマ区切りで複数可）`);
     else ok(`SES_NOTIFY_TO: ${total}件`);
+    const { external } = splitNotifyRecipients(notify, internalMailDomains(), false);
+    if (external > 0 && !notifyAllowExternal()) {
+      bad(
+        `SES_NOTIFY_TO のうち${external}件が自社ドメイン（SES_OWN_DOMAINS・共有メールボックスのドメイン）以外です。サマリには社員の氏名・必要案件単価や要員の情報が載るため、` +
+          'その宛先には送りません（打ち間違いでなく社外にも送る場合だけ SES_NOTIFY_ALLOW_EXTERNAL=true）',
+      );
+    } else if (external > 0) {
+      warn(`SES_NOTIFY_TO の${external}件は社外のドメインです（SES_NOTIFY_ALLOW_EXTERNAL=true のため送ります）`);
+    }
   }
   checkDomainList('SES_OWN_DOMAINS', ownDomains(), '自社から共有メールボックスに届いたメール（紹介メールのCc等）も案件・要員として取り込みます');
   if (dbProvider() === 'sheets') {
@@ -417,6 +444,12 @@ function checkProper(): void {
   else bad('PROPER_SKILLSHEET_FOLDER_ID の形式が正しくありません（フォルダのURL、またはURLの /folders/ の後ろの文字列）');
   if (looksLikeGoogleId(properMasterSpreadsheetId())) ok('PROPER_MASTER_SPREADSHEET_ID: 設定済み（IDの形式OK）');
   else bad('PROPER_MASTER_SPREADSHEET_ID の形式が正しくありません（スプレッドシートのURL、またはURLの /d/ と /edit の間の文字列）');
+  if (properMasterSpreadsheetId() === sheetsDbSpreadsheetId()) {
+    bad(
+      'PROPER_MASTER_SPREADSHEET_ID が案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）と同じです。管理表には社員の氏名・必要案件単価・居住地・スキルシートのリンクが入るため、' +
+        '編集できる人を人事・運用担当に限った別のスプレッドシートにしてください',
+    );
+  }
 
   const prefix = properServiceAccountEnvPrefix();
   const dedicated = checkServiceAccount(prefix, 'プロパー用サービスアカウント鍵', false);
@@ -444,6 +477,25 @@ function checkProper(): void {
   if (dbProvider() !== 'sheets') warn('候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです（notion では保存されません）');
 }
 
+// 価格の方針（粗利下限・交渉幅）。値は表示しない
+function checkPricing(): void {
+  section('価格の方針（粗利下限・交渉幅）— 本番では必須（Secret: SES_PRICING_POLICY_JSON）');
+  const status = pricingPolicyStatus();
+  const problems = pricingPolicyProblems({
+    onActions: onGithubActions(),
+    production: dbProvider() === 'sheets' && !demoModeExplicit(),
+    jsonSet: status.set,
+    problems: status.problems,
+    nonceOk: status.nonceOk,
+    legacyPresent: legacyPricingSettingsPresent(),
+    marginConfigured: minGrossMarginConfigured(),
+    negotiationEnabled: enableNegotiation(),
+    negotiationConfigured: negotiationLimitsConfigured(),
+  });
+  for (const p of problems) bad(p);
+  if (problems.length === 0) ok(status.set ? `${PRICING_POLICY_ENV}: 設定済み（値は表示しません）` : '価格の方針: 設定済み、または手元の実行（値は表示しません）');
+}
+
 function checkNumbers(numberWarnings: string[]): void {
   section('数値・切替の設定');
   // 粗利下限・交渉幅は社外に知られたくない方針（Secretsに登録）。Secretsの伏せ字は登録した文字列そのものにしか効かず、
@@ -455,7 +507,9 @@ function checkNumbers(numberWarnings: string[]): void {
       `収集 直近${collectDays()}日（1回${maxMailsPerRun()}件まで）`,
   );
   if (numberWarnings.length === 0) ok('数値の設定はすべて解釈できました（未設定の項目は既定値）');
-  for (const w of numberWarnings) warn(w);
+  // 価格の方針は、解釈できないまま既定値（公開されている値）・誤った単位で動かさないよう止める
+  const pricingNames = [...LEGACY_PRICING_ENV, PRICING_POLICY_ENV];
+  for (const w of numberWarnings) (pricingNames.some((n) => w.startsWith(`${n} `)) ? bad : warn)(w);
   if (matchRejectLlmScore() > 0 && matchMinLlmScore() > 0 && matchRejectLlmScore() > matchMinLlmScore()) {
     warn(
       `MATCH_REJECT_LLM_SCORE（${matchRejectLlmScore()}）が MATCH_MIN_LLM_SCORE（${matchMinLlmScore()}）より大きいため、` +
@@ -486,6 +540,7 @@ function main(): void {
   checkMail();
   checkNotifyAndDomains();
   checkProper();
+  checkPricing();
   checkNumbers(numberWarnings);
 
   console.log('');

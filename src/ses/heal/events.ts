@@ -80,6 +80,17 @@ export function recordHealEvent(severity: HealSeverity, message: string, detail?
   console.log(`SES修復: ${prefix} ${redactIdsIn(message)}${shownDetail}`);
 }
 
+// メールごとの事象（指示らしき記載・添付の扱い・隔離・AI判定の指示混入の件数等）。公開ログに1通ごとの行が出ると、
+// メールの送り主が「自分の送った文面が検知をすり抜けたか」を実行ごとに確かめられるため、秘匿モードではコンソールに出さず、
+// サマリメール・診断JSONにだけ載せる（秘匿しないときは recordHealEvent と同じ）
+export function recordMailEvent(severity: HealSeverity, message: string, detail?: string): void {
+  if (!logRedact()) {
+    recordHealEvent(severity, message, detail);
+    return;
+  }
+  events.push({ severity, message, detail });
+}
+
 // バッチを異常終了（非0の終了コード）にすべき事象を記録する。スケジュール実行の失敗通知に使う。
 // critical イベントとして積むため、診断レポート（サマリメール）にも【重大】として載る。
 // reason は固定文言＋件数のみ（秘匿モードでもそのまま出力する）

@@ -85,3 +85,68 @@ export function inspectServiceAccountJson(raw: string): ServiceAccountInspection
   }
   return result;
 }
+
+function domainOfAddress(address: string): string {
+  const at = address.lastIndexOf('@');
+  return at >= 0 ? address.slice(at + 1).toLowerCase() : '';
+}
+
+function isInternalDomain(domain: string, internalDomains: string[]): boolean {
+  return internalDomains.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+// サマリの宛先（SES_NOTIFY_TO）を社内のドメインのものと社外のものに分ける（純関数）。
+// 社外（個人のGmail・打ち間違えたドメイン等）には、allowExternal のときだけ送る
+export function splitNotifyRecipients(list: string, internalDomains: string[], allowExternal: boolean): { recipients: string[]; external: number } {
+  const addresses = list
+    .split(',')
+    .map((x) => (x.match(/<([^>]+)>/)?.[1] ?? x).trim().toLowerCase())
+    .filter((x) => isPlainEmailAddress(x));
+  const external = addresses.filter((a) => !isInternalDomain(domainOfAddress(a), internalDomains));
+  return { recipients: allowExternal ? addresses : addresses.filter((a) => !external.includes(a)), external: external.length };
+}
+
+export interface PricingPolicyCheckInput {
+  onActions: boolean;
+  production: boolean; // 本番の保存先（DB_PROVIDER=sheets）で動かす
+  jsonSet: boolean;
+  problems: string[];
+  nonceOk: boolean;
+  legacyPresent: string[]; // 値のある個別の設定の名前
+  marginConfigured: boolean;
+  negotiationEnabled: boolean;
+  negotiationConfigured: boolean;
+}
+
+// 価格の方針（粗利下限・交渉幅）の設定の問題（純関数。値を含まない固定の文言）。1件でもあれば本番を止める
+export function pricingPolicyProblems(o: PricingPolicyCheckInput): string[] {
+  const out = [...o.problems];
+  if (o.onActions && o.legacyPresent.length > 0) {
+    out.push(
+      `価格の方針が個別の設定（${o.legacyPresent.join('・')}）で渡されています。短い数値の Secret は公開ログ全体で伏せ字になり、` +
+        '伏せ字の位置から値が分かるため、SES_PRICING_POLICY_JSON の1つにまとめ、個別の Secrets は削除してください',
+    );
+  }
+  if (o.onActions && o.jsonSet && !o.nonceOk) {
+    out.push('SES_PRICING_POLICY_JSON に推測できない乱数の項目 "n"（16文字以上）を含めてください（伏せ字から値を当てられないように）');
+  }
+  if (o.production && !o.marginConfigured) {
+    out.push('粗利下限が未設定です（公開されている既定値のまま動かさないよう、SES_PRICING_POLICY_JSON の minGrossMarginMan を登録してください）');
+  }
+  if (o.production && o.negotiationEnabled && !o.negotiationConfigured) {
+    out.push(
+      '交渉幅（projectRaiseMaxMan・engineerCutMaxMan）が未設定です（公開されている既定値のまま動かさないよう登録するか、ENABLE_NEGOTIATION=false にしてください）',
+    );
+  }
+  return out;
+}
+
+// Gemini を Google AI Studio の API キーで本番に使うときの問題（純関数）。無料枠は送った内容（メール本文・スキルシート）が
+// 品質改善・人による確認に使われ得るため、課金を有効にしてデータの利用条件を確認したことの明示を求める
+export function geminiDataUseProblem(o: { provider: string; vertex: boolean; acknowledged: boolean; production: boolean }): string | null {
+  if (o.provider !== 'gemini' || o.vertex || o.acknowledged || !o.production) return null;
+  return (
+    'LLM_PROVIDER=gemini（Google AI Studio の API キー）では、メール本文・添付・社員のスキルシートを送ります。' +
+    '課金を有効にしたプロジェクトでデータの利用条件を確認したうえで SES_ALLOW_GEMINI_API=paid を設定してください（無料枠では使いません）'
+  );
+}

@@ -2,7 +2,7 @@
 // 隔離メール・直近バッチの診断結果と該当ソース（許可リストのみ）をClaudeに渡し、
 // 「原因分析＋unified diff のパッチ案」をレポートとして生成する。
 // ★コードの自動適用は絶対にしない。人がレビューして適用する（レポート止まり）。
-// PII対策: メール本文は渡さない。件名・エラーはmaskPii済みのものだけを使う。
+// PII対策: メール本文・件名は渡さない。件名は分類の見出しと長さだけ、エラーは伏せ字（氏名・連絡先・年齢・イニシャル）済みのものだけを使う。
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { generateJson } from '../../llm/index.js';
@@ -16,12 +16,12 @@ import {
   repairBudgetJpy,
   repairModel,
   mailProvider,
-  sesNotifyTo,
+  notifyRecipients,
   durableStateInSheets,
 } from '../config.js';
 import { safeErr } from '../redact.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson } from '../../database/sheets.js';
-import { listQuarantined, type QuarantineEntry } from './quarantine.js';
+import { listQuarantined, reducedSubject, maskFailureText, type QuarantineEntry } from './quarantine.js';
 import { readLastBatchDiagnosis, type LastBatchDiagnosis } from './events.js';
 
 const REPAIR_SYSTEM = `あなたはTypeScript製のSESマッチングシステムの保守エンジニアです。
@@ -93,7 +93,7 @@ function readSourceCapped(relPath: string, capChars = 12000): string {
 function buildRepairPrompt(quarantined: QuarantineEntry[], diagnosis: LastBatchDiagnosis | null): string {
   const qLines = quarantined
     .slice(0, 10)
-    .map((q) => `- mail ${q.mailId} / 件名: ${q.subject} / 失敗${q.attempts}回 / 最終エラー: ${q.lastError}`)
+    .map((q) => `- mail ${q.mailId} / 件名: ${reducedSubject(q.subject)} / 失敗${q.attempts}回 / 最終エラー: ${maskFailureText(q.lastError)}`)
     .join('\n');
   const eLines = (diagnosis?.events ?? [])
     .map((e) => `- [${e.severity}] ${e.message}`)
@@ -259,7 +259,8 @@ export async function runRepair(auto = false): Promise<void> {
     await markRan();
     console.log(`パッチ案レポートを生成しました → ${p}（コスト約${costJpy.toFixed(1)}円）`);
 
-    const to = sesNotifyTo();
+    // 診断レポートには隔離したメールの件名（伏せ字済み）等が載るため、社外のドメインの宛先には送らない
+    const { to } = notifyRecipients();
     if (to && sendMailReady()) {
       try {
         await sendPlainMailViaMail(to, REPAIR_REPORT_SUBJECT, md);

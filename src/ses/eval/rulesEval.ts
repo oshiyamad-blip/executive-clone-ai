@@ -13,6 +13,12 @@ import {
   matchModel,
   resetExtractModelFallback,
   extractModelFallbackActive,
+  parsePricingPolicy,
+  minGrossMarginJpy,
+  maxNegotiationRaiseMan,
+  maxNegotiationCutMan,
+  pricingSettingsInvalid,
+  retentionDays,
 } from '../config.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
@@ -113,7 +119,21 @@ import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { redactIdsIn } from '../redact.js';
 import { planReplyAddresses } from '../draft.js';
 import { addressOf } from '../mail/ownMail.js';
-import { zipInflatesWithin, spreadsheetBufferToText, SPREADSHEET_MAX_INFLATED_BYTES, SPREADSHEET_MAX_BYTES } from '../parse.js';
+import {
+  zipInflatesWithin,
+  spreadsheetBufferToText,
+  isPlainOoxmlWorkbook,
+  withConsoleSilenced,
+  SPREADSHEET_MAX_INFLATED_BYTES,
+  SPREADSHEET_MAX_BYTES,
+} from '../parse.js';
+import { spawnSync } from 'child_process';
+import { splitNotifyRecipients, pricingPolicyProblems, geminiDataUseProblem, type PricingPolicyCheckInput } from '../settingsFormat.js';
+import { coarseResidence } from '../prefecture.js';
+import { reducedSubject, maskFailureText, dropStaleEntries, QUARANTINE_TTL_MS, type QuarantineEntry } from '../heal/quarantine.js';
+import { recordMailEvent, hasFatal } from '../heal/events.js';
+import { availabilityText } from '../proper/proposal.js';
+import { getPersona } from '../../demo/personas.js';
 import { attachmentsWithinLimits, PDF_MAX_BYTES } from '../mail/attachmentLimits.js';
 import { capSubject, MAX_SUBJECT_CHARS } from '../../collectors/email.js';
 import { planDraftRequest, currentSenderPolicy } from '../pendingDrafts.js';
@@ -1931,7 +1951,7 @@ function reviewRound3Checks(): void {
 // 手元の .env 等で変えたしきい値に結果が左右されないよう、判定ルールの設定は既定値で検証する
 const RULE_ENV_PREFIXES = [
   'SKILL_', 'MATCH_', 'MIN_GROSS_', 'MAX_CANDIDATES', 'MAX_PROJECTS_PER_ENGINEER', 'NEGOTIATION_', 'ENABLE_NEGOTIATION', 'HOURLY_',
-  'SES_STALE_DAYS', 'SES_OWN_DOMAINS', 'ANTHROPIC_MODEL_', 'JPY_PER_USD',
+  'SES_STALE_DAYS', 'SES_OWN_DOMAINS', 'ANTHROPIC_MODEL_', 'JPY_PER_USD', 'SES_PRICING_', 'SES_RETENTION_',
 ];
 
 // ===== レビュー指摘（第4回）: 工程の範囲・略語・業種/役割の含意・選択肢・文面の表示名・判定の失敗の分類 等 =====
@@ -2361,6 +2381,224 @@ async function securityAuditChecks(): Promise<void> {
   }
 }
 
+// ===== セキュリティ監査（第2回）: 公開ログ・個人データの保存・公開リポジトリ =====
+
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of Object.keys(vars)) {
+    saved[k] = process.env[k];
+    if (vars[k] === undefined) delete process.env[k];
+    else process.env[k] = vars[k];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+function captureConsoleLines(fn: () => void): string[] {
+  const lines: string[] = [];
+  const saved = { log: console.log, warn: console.warn, error: console.error };
+  const push = (...args: unknown[]) => lines.push(args.map(String).join(' '));
+  Object.assign(console, { log: push, warn: push, error: push });
+  try {
+    fn();
+  } finally {
+    Object.assign(console, saved);
+  }
+  return lines;
+}
+
+function securityAuditRound2Checks(): void {
+  section('セキュリティ（第2回）: 添付の表計算の文字列を公開ログのワークフローコマンドにさせない');
+  const wb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(wb, xlsxUtils.aoa_to_sheet([['スキル', 'Java']]), 'S');
+  wb.Workbook = { Names: [{ Name: 'x\n::error title=pwn::injected', Ref: 'S!$A$1' }] };
+  const asType = (t: 'xlsx' | 'xlsm' | 'xlsb' | 'ods' | 'xls') => writeXlsx(wb, { type: 'buffer', bookType: t }) as Buffer;
+  const rejected = (buf: Buffer) => {
+    try {
+      spreadsheetBufferToText(buf);
+      return false;
+    } catch (err) {
+      return String(err).includes('通常のxlsx');
+    }
+  };
+  check(
+    'XLSB（xl/workbook.bin）・ODS はZIPでもSheetJSに渡さない（定義名等を console に直接書く解析器を通さない）',
+    rejected(asType('xlsb')) && rejected(asType('ods')) && !isPlainOoxmlWorkbook(asType('xlsb')),
+  );
+  check(
+    '通常の xlsx・xlsm・旧形式の xls はこれまでどおりテキストにできる',
+    isPlainOoxmlWorkbook(asType('xlsx')) && spreadsheetBufferToText(asType('xlsx')).includes('Java') &&
+      spreadsheetBufferToText(asType('xlsm')).includes('Java') && spreadsheetBufferToText(asType('xls')).includes('Java'),
+  );
+  const silenced = captureConsoleLines(() => withConsoleSilenced(() => console.error('::error title=x::y')));
+  const after = captureConsoleLines(() => console.error('after'));
+  check('表計算の解析中はライブラリの console 出力を捨て、終われば元に戻す', silenced.length === 0 && after.length === 1);
+  const withActions = spawnSync(process.execPath, [...process.execArgv, 'src/env.ts'], { env: { ...process.env, GITHUB_ACTIONS: 'true' }, encoding: 'utf-8' });
+  const withoutActions = spawnSync(process.execPath, [...process.execArgv, 'src/env.ts'], { env: { ...process.env, GITHUB_ACTIONS: '' }, encoding: 'utf-8' });
+  check(
+    'GitHub Actions では起動時に ::stop-commands::<乱数> を出し、以後のワークフローコマンドを解釈させない（手元では出さない）',
+    /^::stop-commands::[0-9a-f-]{36}\n$/.test(withActions.stdout) && withoutActions.stdout === '',
+    JSON.stringify({ a: withActions.stdout, b: withoutActions.stdout, e: withActions.stderr?.slice(0, 200) }),
+  );
+
+  section('セキュリティ（第2回）: 価格の方針を短い数値の Secret にしない・既定値や値をログに出さない');
+  const nonce = 'q'.repeat(20);
+  const good = parsePricingPolicy(JSON.stringify({ minGrossMarginMan: 12, projectRaiseMaxMan: '３', engineerCutMaxMan: 4, n: nonce }));
+  check(
+    'SES_PRICING_POLICY_JSON を解釈する（万円→円、全角数字可、乱数 n の有無）',
+    good.problems.length === 0 && good.policy.minGrossMarginJpy === 120000 && good.policy.raiseMaxMan === 3 && good.policy.cutMaxMan === 4 && good.nonceOk,
+    show(good),
+  );
+  const badPolicies = [
+    '{not json',
+    '[1]',
+    JSON.stringify({ minGrossMarginMan: '12万' }),
+    JSON.stringify({ minGrossMarginJpy: 15 }),
+    JSON.stringify({ minGrossMarginMan: 10, typo: 1 }),
+  ].map((raw) => parsePricingPolicy(raw));
+  check(
+    '読めない JSON・数値でない値・円単位の誤り・知らない項目は問題として返す（文言に値を含めない）',
+    badPolicies.every((r) => r.problems.length > 0) && badPolicies.every((r) => r.problems.every((m) => !/12|15/.test(m))),
+    show(badPolicies.map((r) => r.problems)),
+  );
+  check('乱数 n が短い・無いときは nonceOk=false', !parsePricingPolicy('{"minGrossMarginMan":10,"n":"short"}').nonceOk && !parsePricingPolicy('{"minGrossMarginMan":10}').nonceOk);
+  const base: PricingPolicyCheckInput = {
+    onActions: true, production: true, jsonSet: true, problems: [], nonceOk: true, legacyPresent: [], marginConfigured: true,
+    negotiationEnabled: true, negotiationConfigured: true,
+  };
+  check(
+    '事前確認: Actions で個別の Secret（MIN_GROSS_MARGIN_* 等）・乱数の無い JSON・本番で粗利下限や交渉幅が未設定なら止める',
+    pricingPolicyProblems(base).length === 0 &&
+      pricingPolicyProblems({ ...base, legacyPresent: ['MIN_GROSS_MARGIN_MAN'] }).length === 1 &&
+      pricingPolicyProblems({ ...base, nonceOk: false }).length === 1 &&
+      pricingPolicyProblems({ ...base, jsonSet: false, marginConfigured: false }).length === 1 &&
+      pricingPolicyProblems({ ...base, negotiationConfigured: false }).length === 1 &&
+      pricingPolicyProblems({ ...base, negotiationConfigured: false, negotiationEnabled: false }).length === 0 &&
+      pricingPolicyProblems({ ...base, onActions: false, production: false, legacyPresent: ['MIN_GROSS_MARGIN_JPY'], nonceOk: false, marginConfigured: false }).length === 0,
+  );
+  const fromJson = withEnv(
+    { SES_PRICING_POLICY_JSON: JSON.stringify({ minGrossMarginMan: 12, projectRaiseMaxMan: 3, engineerCutMaxMan: 4, n: nonce }), MIN_GROSS_MARGIN_MAN: '8' },
+    () => [minGrossMarginJpy(), maxNegotiationRaiseMan(), maxNegotiationCutMan(), pricingSettingsInvalid()],
+  );
+  check('JSON の方針が個別の設定より優先される', show(fromJson) === show([120000, 3, 4, false]), show(fromJson));
+  const warned = withEnv({ SES_LOG_REDACT: 'true', NEGOTIATION_MAX_PROJECT_RAISE_MAN: '３万円', SES_PRICING_POLICY_JSON: undefined }, () => {
+    let invalid = false;
+    const lines = captureConsoleLines(() => {
+      maxNegotiationRaiseMan();
+      invalid = pricingSettingsInvalid();
+    });
+    return { lines, invalid };
+  });
+  check(
+    '秘匿モードでは、価格の方針を解釈できない警告に既定値・範囲を出さず、本番を止める印を立てる',
+    warned.invalid && warned.lines.length === 1 && warned.lines[0].includes('NEGOTIATION_MAX_PROJECT_RAISE_MAN') && !/既定値 \d|\d以上/.test(warned.lines[0]),
+    show(warned),
+  );
+  const unitSlip = withEnv({ MIN_GROSS_MARGIN_JPY: '15', MIN_GROSS_MARGIN_MAN: undefined, SES_PRICING_POLICY_JSON: undefined }, () => pricingSettingsInvalid());
+  check('粗利下限の円単位の誤り（1000円未満）も本番を止める印になる', unitSlip);
+
+  section('セキュリティ（第2回）: 公開ログに1通ごとの判定結果を出さない');
+  const redactedLines = withEnv({ SES_LOG_REDACT: 'true' }, () => {
+    resetHealEvents();
+    return captureConsoleLines(() => recordMailEvent('critical', 'mail sesmail_x: AIへの指示らしき記載'));
+  });
+  const recordedCritical = hasFatal();
+  const plainLines = withEnv({ SES_LOG_REDACT: 'false' }, () => captureConsoleLines(() => recordMailEvent('warn', 'mail sesmail_x: AIへの指示らしき記載')));
+  resetHealEvents();
+  check(
+    '秘匿モードではメールごとの事象をコンソールに出さず、サマリ用の記録にだけ残す（秘匿しないときは出す）',
+    redactedLines.length === 0 && recordedCritical && plainLines.length === 1,
+    show({ redactedLines, plainLines }),
+  );
+
+  section('セキュリティ（第2回）: サマリの宛先・LLMの送り先');
+  const split = splitNotifyRecipients('boss@ourco.example, 社長 <ceo@ourco.example>, me@gmail.com, typo@ourco-example.com, x@mail.ourco.example', ['ourco.example'], false);
+  check(
+    'SES_NOTIFY_TO の社外のドメイン（個人のGmail・打ち間違い）には送らない（サブドメインは社内）',
+    show(split.recipients) === show(['boss@ourco.example', 'ceo@ourco.example', 'x@mail.ourco.example']) && split.external === 2,
+    show(split),
+  );
+  check('SES_NOTIFY_ALLOW_EXTERNAL の明示があれば社外にも送る', splitNotifyRecipients('me@gmail.com', ['ourco.example'], true).recipients.length === 1);
+  check(
+    'Gemini を AI Studio の API キーで本番に使うには、課金・データ利用条件の確認の明示が必要（Vertex AI・手元のデモは除く）',
+    geminiDataUseProblem({ provider: 'gemini', vertex: false, acknowledged: false, production: true }) !== null &&
+      geminiDataUseProblem({ provider: 'gemini', vertex: false, acknowledged: true, production: true }) === null &&
+      geminiDataUseProblem({ provider: 'gemini', vertex: true, acknowledged: false, production: true }) === null &&
+      geminiDataUseProblem({ provider: 'anthropic', vertex: false, acknowledged: false, production: true }) === null &&
+      geminiDataUseProblem({ provider: 'gemini', vertex: false, acknowledged: false, production: false }) === null,
+  );
+
+  section('セキュリティ（第2回）: 保存する個人データを必要な粒度・期間に絞る');
+  const full = buildEngineer(rawEngineer({ residence: '東京都世田谷区上馬1-2-3 ○○ハイツ101' }), rawMail(), 0, null);
+  check(
+    'メールから抽出した要員の居住地は市区町村までにする（番地・建物を保存しない）',
+    full.residence === '東京都世田谷区上馬' && full.prefecture === '東京都' && coarseResidence('神奈川県横浜市港北区') === '神奈川県横浜市港北区',
+    full.residence,
+  );
+  const subject = reducedSubject('【要員】K.S 28歳 男性 Java/Spring 5年 東急田園都市線 三軒茶屋駅 即日可');
+  check(
+    '隔離リストの件名は分類の見出しと長さだけ（イニシャル・年齢・駅名を残さない）',
+    subject.startsWith('【要員】') && !/K\.S|28歳|三軒茶屋/.test(subject) && reducedSubject(subject) === subject,
+    subject,
+  );
+  const maskedErr = maskFailureText('extract failed: K.S. 28歳 tel 090-1234-5678 ASP.NET');
+  check('隔離リストのエラー文は年齢・イニシャルも伏せる（ASP.NET 等は残す）', !/K\.S|28歳|090-1234/.test(maskedErr) && maskedErr.includes('ASP.NET'), maskedErr);
+  const now = Date.parse('2026-09-23T00:00:00Z');
+  const entry = (id: string, quarantinedAgoMs: number | null, failedAgoMs: number): QuarantineEntry => ({
+    mailId: id, subject: '', from: '', attempts: 3, lastError: '', firstFailedAt: '',
+    lastFailedAt: new Date(now - failedAgoMs).toISOString(),
+    quarantinedAt: quarantinedAgoMs === null ? null : new Date(now - quarantinedAgoMs).toISOString(),
+  });
+  const kept = dropStaleEntries([entry('old_q', QUARANTINE_TTL_MS + 1000, QUARANTINE_TTL_MS + 1000), entry('new_q', 1000, 1000), entry('pending', null, 1000)], now);
+  check('隔離した記録も期限（処理済みメールの記録と同じ）を過ぎたら捨てる', kept.map((e) => e.mailId).join() === 'new_q,pending', show(kept.map((e) => e.mailId)));
+  check(
+    '保存期間は突合・再確認に使う期間より短くしない',
+    withEnv({ SES_RETENTION_DAYS: '30', SES_MATCH_LOOKBACK_DAYS: '90' }, () => retentionDays()) >= 97 &&
+      withEnv({ SES_RETENTION_DAYS: undefined }, () => retentionDays()) === 180,
+  );
+  const today = new Date('2026-09-23T03:00:00Z');
+  check(
+    'プロパーの提案文面の稼働開始は日付・即日だけ（管理表の自由記述＝本人の事情・今の客先を社外に出さない）',
+    availabilityText({ availableDate: '現案件（○○銀行 勘定系更改）終了後', availableFrom: null }, today) === '別途ご相談' &&
+      availabilityText({ availableDate: '産休明け（2027年春頃）', availableFrom: null }, today) === '別途ご相談' &&
+      availabilityText({ availableDate: '2026年11月〜（現案件終了後）', availableFrom: '2026-11-01' }, today) === '2026年11月〜' &&
+      availabilityText({ availableDate: '', availableFrom: '2026-12-15' }, today) === '2026年12月15日〜' &&
+      availabilityText({ availableDate: '', availableFrom: '2026-09-01' }, today) === '即日' &&
+      availabilityText({ availableDate: '即日', availableFrom: null }, today) === '即日',
+  );
+
+  section('セキュリティ（第2回）: 公開リポジトリに実データ・鍵を入れない');
+  const profile = spawnSync(
+    process.execPath,
+    [...process.execArgv, '--input-type=module', '-e', "const m = await import('./src/data/executiveProfile.ts'); console.log(JSON.stringify({ s: m.EXECUTIVE_PROFILE_SOURCE, n: m.EXECUTIVE_PROFILE.name, r: m.EXECUTIVE_PROFILE.decisionRules.length }))"],
+    { env: { ...process.env, EXECUTIVE_PROFILE_JSON: '{"name":"検証社長"}' }, encoding: 'utf-8' },
+  );
+  check(
+    '経営者プロファイルの実データは追跡されないファイル・環境変数から読み、書いた項目だけをサンプルに重ねる',
+    profile.stdout.trim().startsWith('{"s":"env","n":"検証社長","r":'),
+    `${profile.stdout} ${profile.stderr?.slice(0, 200)}`,
+  );
+  const ignored = ['ses-matching-123456-a1b2c3d4e5f6.json', 'my-service-account.json', 'server.key', 'server.crt', 'cert.pem', 'sa.p12', '.env.production', 'secrets/a', 'contracts-import/a.pdf'];
+  const notIgnored = ['.env.example', 'package.json', 'src/ses/config.ts'];
+  const gitIgnored = (path: string) => spawnSync('git', ['check-ignore', '-q', '--no-index', path]).status === 0;
+  check(
+    '.gitignore が鍵・証明書・環境ごとの設定・取り込みフォルダを除外する（.env.example 等は除外しない）',
+    ignored.every(gitIgnored) && !notIgnored.some(gitIgnored),
+    show({ missed: ignored.filter((x) => !gitIgnored(x)), wrong: notIgnored.filter(gitIgnored) }),
+  );
+  check(
+    'デモの既定のペルソナは架空の人物（実在の人物のペルソナは名前を指定したときだけ）',
+    getPersona(undefined).profile.name === getPersona('sample').profile.name && getPersona('Sample').profile.name === getPersona('sample').profile.name &&
+      !/三木谷/.test(getPersona(undefined).profile.name),
+  );
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -2393,6 +2631,7 @@ async function main(): Promise<void> {
     await reviewRound4Checks();
     resendChecks();
     await securityAuditChecks();
+    securityAuditRound2Checks();
   } finally {
     setDemoOverride(null);
   }

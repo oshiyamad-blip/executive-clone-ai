@@ -23,3 +23,23 @@ logs/*
 # 生成された成果物（機微情報を含むためコミットしない）
 briefings/
 digests/
+
+# 鍵・証明書・環境ごとの設定（公開リポジトリに絶対にコミットしない。置き場はリポジトリの外を推奨）
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*service-account*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+secrets/
+
+# 契約書・稼働の書き出し・リード等の取り込み用ドロップフォルダ（個人情報・単価を含む）
+contracts-import/
+engagements-import/
+leads-import/
+
+# 検証の作業用フォルダ
+tmp/

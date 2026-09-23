@@ -7,7 +7,7 @@ import { isDemo, extractModel, configuredExtractModel } from '../config.js';
 import { withExtractModelFallback } from '../extractModelFallback.js';
 import { normalizeSkills } from '../skillDict.js';
 import { tallySkillTokens } from '../skillStats.js';
-import { normalizePrefecture } from '../prefecture.js';
+import { normalizePrefecture, coarseResidence } from '../prefecture.js';
 import { SafeLogError } from '../redact.js';
 import { callLimits } from '../schedule.js';
 import type { RemoteOption } from '../../types/index.js';
@@ -97,10 +97,6 @@ export function sanitizeInitials(raw: string, displayName: string): string {
   return value;
 }
 
-// 指示に反して番地まで返された場合に備え、最初の数字以降（丁目・番地・建物）を落とす
-function coarseResidence(raw: string): string {
-  return raw.normalize('NFKC').replace(/\d.*$/, '').trim();
-}
 
 // attempt は自動修復（heal/retry.ts）の再試行・上位モデル昇格用（出力上限の拡大・SDK再試行の抑止を含む）
 export async function extractSkillSheet(content: SkillSheetContent, attempt?: HealAttempt): Promise<SkillSheetProfile> {

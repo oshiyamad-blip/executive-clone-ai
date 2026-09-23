@@ -365,9 +365,10 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
 
 // ===== 突合用の読み出し =====
 
-export function properLabelOf(e: Pick<ProperEngineer, 'fullName' | 'proposalLabel'>): string {
-  if (e.fullName && e.proposalLabel) return `${e.fullName}（${e.proposalLabel}）`;
-  return e.fullName || e.proposalLabel || '（氏名未入力）';
+// 案件スプレッドシート（営業の誰もが編集できる）の「プロパー」列とサマリメールに出す社員の表記。
+// 氏名は編集者を人事・運用担当に限ったプロパー管理表にだけ置き、ここでは提案用表記（イニシャル）だけにする
+export function properLabelOf(e: Pick<ProperEngineer, 'proposalLabel'>): string {
+  return e.proposalLabel || '（提案用表記未入力。プロパー管理表で確認）';
 }
 
 // 管理表の1行 → 突合対象の自社社員。稼働状況が「稼働可」でスキルのある行だけ（それ以外は null）

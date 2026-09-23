@@ -37,6 +37,7 @@ import {
   checkSheetsTabs,
   sheetsCellCount,
   pruneProcessedMailSheets,
+  pruneStalePersonalDataSheets,
   sheetsDbConfigured,
   countUnmatchedBeyondPoolSheets,
   acquireBatchLeaseSheets,
@@ -57,7 +58,13 @@ import {
   logRedact,
   resetExtractModelFallback,
   COLLECT_DAYS_MAX,
+  llmProviderName,
+  geminiUsesVertex,
+  geminiApiAcknowledged,
+  pricingSettingsInvalid,
+  retentionDays,
 } from './config.js';
+import { geminiDataUseProblem } from './settingsFormat.js';
 import { setMetricsMode, recordBatchMetrics, collectBatchMetrics } from './batchMetrics.js';
 import { startHealBatch } from './heal/budget.js';
 import { persistUnknownSkillTokens, resetSkillTokenTally } from './skillStats.js';
@@ -99,6 +106,20 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
     console.error(`SESバッチ: 🚨 ${configError}`);
     process.exitCode = 1;
     return;
+  }
+  if (!isDemo()) {
+    const geminiProblem = geminiDataUseProblem({ provider: llmProviderName(), vertex: geminiUsesVertex(), acknowledged: geminiApiAcknowledged(), production: true });
+    if (geminiProblem) {
+      console.error(`SESバッチ: 🚨 ${geminiProblem}`);
+      process.exitCode = 1;
+      return;
+    }
+    // 価格の方針を解釈できないまま既定値（公開されている値）・誤った単位で動かさない（値はログに出さない）
+    if (pricingSettingsInvalid()) {
+      console.error('SESバッチ: 🚨 価格の方針（SES_PRICING_POLICY_JSON・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*）に解釈できない値があるため停止します（npm run ses:preflight で確認）');
+      process.exitCode = 1;
+      return;
+    }
   }
   // 粗利下限は社外に知られたくない方針（Secretsに登録）のため、公開ログ（秘匿モード）には値を出さない
   const margin = logRedact() ? '設定済み（値は表示しません）' : `${minGrossMarginJpy()}円/月`;
@@ -229,6 +250,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   }
   console.log(`=== SESバッチ完了: マッチ候補 計${saved.length}件 ===`);
   await pruneProcessedMails();
+  await pruneStalePersonalData();
   await maybeRepair();
 }
 
@@ -557,6 +579,24 @@ async function pruneProcessedMails(): Promise<void> {
     if (removed > 0) console.log(`SES: 収集期間を過ぎた処理済みメールの記録${removed}行を削除しました`);
   } catch (err) {
     console.warn(`SES: 処理済みメールの記録の整理に失敗: ${safeErr(err)}`);
+  }
+}
+
+// 個人データの保存期間（SES_RETENTION_DAYS）を過ぎた案件・要員・マッチ・プロパー候補・評価の行を整理する
+// （突合・再確認に使うのは直近の行だけのため。失敗しても次回に回すだけ）
+async function pruneStalePersonalData(): Promise<void> {
+  if (dbProvider() !== 'sheets' || !sheetsDbConfigured()) return;
+  try {
+    const r = await pruneStalePersonalDataSheets(new Date(Date.now() - retentionDays() * DAY_MS));
+    const total = r.projects + r.engineers + r.matches + r.matchesCleared + r.properCandidates + r.feedback;
+    if (total > 0) {
+      console.log(
+        `SES: 保存期間（${retentionDays()}日）を過ぎた行を整理しました（案件${r.projects}行・要員${r.engineers}行・マッチ${r.matches}行を削除、` +
+          `成約のマッチ${r.matchesCleared}行の文面を消去、プロパー候補${r.properCandidates}行・評価${r.feedback}行を削除）`,
+      );
+    }
+  } catch (err) {
+    console.warn(`SES: 保存期間を過ぎた行の整理に失敗: ${safeErr(err)}`);
   }
 }
 

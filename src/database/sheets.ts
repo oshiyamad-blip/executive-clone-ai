@@ -11,7 +11,7 @@ import { google } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
 import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
-import { normalizePrefecture } from '../ses/prefecture.js';
+import { normalizePrefecture, coarseResidence } from '../ses/prefecture.js';
 import { toInitials } from '../ses/pii.js';
 import { SafeLogError, logId } from '../ses/redact.js';
 import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
@@ -381,7 +381,8 @@ export async function saveEngineerSheets(engineer: Engineer): Promise<string> {
 function rowToEngineer(cells: string[]): Engineer {
   const c = (name: string) => cellStr(cells, colIndex('要員', name));
   const n = (name: string) => cellNum(cells, colIndex('要員', name));
-  const residence = c('居住地');
+  // 以前の版で番地まで保存した行も、読み出し（と次の保存）では市区町村までにする
+  const residence = coarseResidence(c('居住地'));
   const reply = trustedReply('要員', cells);
   return {
     id: c('ID'),
@@ -977,7 +978,7 @@ export async function saveProperCandidatesSheets(candidates: ProperCandidate[]):
 export const RETIRED_PROPER_VERDICT = '対象外（稼働可の社員ではなくなりました）';
 
 // 稼働可でなくなった（対象外・アサイン済・スキルシートの削除等）社員のプロパー候補の行を退役させる。
-// 氏名と必要案件単価・提案文面・下書きデータを消し、まだ作っていない側の下書き状態を「不要」にする
+// 氏名と必要案件単価（根拠の文にも含まれる）・提案文面・下書きデータを消し、まだ作っていない側の下書き状態を「不要」にする
 // （古いサマリを見た営業が担当者メールを入れても、提案をやめた社員を社外に紹介しないため）。退役させた行数を返す
 export async function retireProperCandidatesSheets(activeEngineerIds: Set<string>): Promise<number> {
   if (!configured()) return 0;
@@ -988,10 +989,11 @@ export async function retireProperCandidatesSheets(activeEngineerIds: Set<string
   for (const r of await readRows(tab)) {
     const id = c(r.cells, 'ID');
     if (!id || activeEngineerIds.has(properEngineerIdOfCandidate(id))) continue;
-    if (c(r.cells, '判定') === RETIRED_PROPER_VERDICT) continue;
+    // 以前の版で退役させた行は根拠（必要案件単価を含む）が残っているため、消し終えるまで対象にする
+    if (c(r.cells, '判定') === RETIRED_PROPER_VERDICT && c(r.cells, '根拠') === '') continue;
     const cells: Array<[string, Cell]> = [
       ['プロパー', '（対象外）'], ['必要案件単価', ''], ['単価差', ''], ['判定', RETIRED_PROPER_VERDICT],
-      ['案件側文面', ''], ['下書きデータ', ''],
+      ['根拠', ''], ['案件側文面', ''], ['下書きデータ', ''],
     ];
     if (!isDraftStateLocked(c(r.cells, '案件側下書き状態'))) cells.push(['案件側下書き状態', DRAFT_STATE.retired]);
     updates.push({ key: id, cells });
@@ -1140,6 +1142,69 @@ export async function pruneProcessedMailSheets(before: Date, minRows = 200): Pro
   };
   if ((await readRows(tab)).filter(isOld).length < minRows) return 0;
   return book.deleteRowsWhere(tab, isOld); // 消す直前に読み直した行番号で消す
+}
+
+export interface RetentionResult {
+  projects: number;
+  engineers: number;
+  matches: number;
+  matchesCleared: number;
+  properCandidates: number;
+  feedback: number;
+}
+
+async function deleteRowsIfAny(tab: string, match: (row: CachedRow) => boolean): Promise<number> {
+  if (!(await readRows(tab)).some(match)) return 0;
+  return book.deleteRowsWhere(tab, match);
+}
+
+// 個人データの保存期間を過ぎた行の整理（要員の表示名・年齢・居住地・希望単金・営業元の連絡先・返信メタ、紹介文面・下書きデータ等）。
+// - マッチ・プロパー候補: 検出日時が before より前の行を削除（成約の行は記録として残し、判定根拠・文面・下書きデータだけ消す）
+// - 案件・要員: 受信日（再送で更新した最終受信日を含む）が before より前で、残したマッチ・プロパー候補の行から参照されない行を削除
+// - 評価: 日時が before より前の行（メモを含む）を削除
+// 日時の読めない行は消さない。消した・消去した行数を返す
+export async function pruneStalePersonalDataSheets(before: Date): Promise<RetentionResult> {
+  const out: RetentionResult = { projects: 0, engineers: 0, matches: 0, matchesCleared: 0, properCandidates: 0, feedback: 0 };
+  if (!configured()) return out;
+  const cutoff = before.getTime();
+  const olderThan = (raw: string) => {
+    const t = Date.parse(raw);
+    return Number.isFinite(t) && t < cutoff;
+  };
+  const c = (tab: string, cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+
+  const mTab = 'マッチ';
+  const won = MATCH_STATUS_LABEL.closed_won;
+  const referenced = new Set<string>();
+  const matchRows = await readRows(mTab);
+  for (const r of matchRows) {
+    if (olderThan(c(mTab, r.cells, '検出日時'))) continue;
+    referenced.add(c(mTab, r.cells, '案件ID'));
+    referenced.add(c(mTab, r.cells, '要員ID'));
+  }
+  const pTab = PROPER_CANDIDATE_TAB;
+  for (const r of await readRows(pTab)) {
+    if (!olderThan(c(pTab, r.cells, '検出日時'))) referenced.add(c(pTab, r.cells, '案件ID'));
+  }
+
+  const textColumns = ['判定根拠', '案件側文面', '要員側文面', '下書きデータ'];
+  const clears = matchRows
+    .filter((r) => olderThan(c(mTab, r.cells, '検出日時')) && c(mTab, r.cells, 'ステータス') === won && textColumns.some((n) => c(mTab, r.cells, n) !== ''))
+    .map((r) => ({ key: c(mTab, r.cells, 'ID'), cells: textColumns.map((n): [string, Cell] => [n, '']) }))
+    .filter((u) => u.key);
+  if (clears.length > 0) out.matchesCleared = await book.writeCellsByKey(mTab, 'ID', clears);
+  out.matches = await deleteRowsIfAny(mTab, (r) => olderThan(c(mTab, r.cells, '検出日時')) && c(mTab, r.cells, 'ステータス') !== won);
+  out.properCandidates = await deleteRowsIfAny(pTab, (r) => olderThan(c(pTab, r.cells, '検出日時')));
+
+  const staleItem = (tab: string) => (r: CachedRow) => {
+    if (referenced.has(c(tab, r.cells, 'ID'))) return false;
+    const t = latestReceivedAt(c(tab, r.cells, '受信日'), c(tab, r.cells, LAST_SEEN_COLUMN)).getTime();
+    return t !== UNKNOWN_RECEIVED_AT && t < cutoff;
+  };
+  out.projects = await deleteRowsIfAny('案件', staleItem('案件'));
+  out.engineers = await deleteRowsIfAny('要員', staleItem('要員'));
+  out.feedback = await deleteRowsIfAny('評価', (r) => olderThan(c('評価', r.cells, '日時')));
+  return out;
 }
 
 // スプレッドシート全体のセル数（直近のタブ確認時点）

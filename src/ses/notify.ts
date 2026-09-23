@@ -8,7 +8,7 @@ import { saveMatches } from '../database/index.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, fetchMatchSummariesSheets, type MatchSummaryRow } from '../database/sheets.js';
 import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
 import { SUMMARY_SUBJECT } from './mail/ownMail.js';
-import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive, dbProvider } from './config.js';
+import { isDemo, sesNotifyTo, notifyRecipients, logRedact, mailProvider, requireLive, dbProvider } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
@@ -327,10 +327,18 @@ async function notifySummary(summary: string, consoleSummary: string, counts: st
   if (metricsLines.length > 0) console.log(`${metricsLines.join('\n')}\n`);
   if (isDemo()) return 'skipped'; // demoはコンソール出力のみ
 
-  const to = sesNotifyTo();
-  if (!to) {
+  if (!sesNotifyTo()) {
     console.warn('SES通知: SES_NOTIFY_TO が未設定のためサマリメール送信をスキップ');
     return 'skipped';
+  }
+  // サマリには社員・要員の個人データが載るため、社外のドメインの宛先には送らない（明示の許可がある場合を除く）
+  const { to, externalSkipped } = notifyRecipients();
+  if (externalSkipped > 0) {
+    console.warn(`SES通知: SES_NOTIFY_TO のうち社外のドメインの${externalSkipped}件には送りません（社外にも送る場合は SES_NOTIFY_ALLOW_EXTERNAL=true）`);
+  }
+  if (!to) {
+    recordFatal('SES_NOTIFY_TO に社内のドメインの宛先が無いため、サマリメールを送れません（SES_OWN_DOMAINS と宛先を確認してください）');
+    return 'failed';
   }
   if (!sendMailReady()) {
     // 宛先があるのに送れない設定は、スケジュール実行では結果が誰にも届かないため異常終了扱いにする
