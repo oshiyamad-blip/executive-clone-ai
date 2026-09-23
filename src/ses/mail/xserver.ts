@@ -2,10 +2,10 @@
 // 共有メーリス(sales@)を IMAP で収集し、全員に返信の下書きを下書きフォルダに APPEND、
 // サマリは SMTP で送信する。Google Workspace 不要。
 // 設定不足時の扱い（CIでは異常終了・手元ではスキップ）は呼び出し側（collect.ts / notify.ts）が決める。
-import { ImapFlow } from 'imapflow';
+import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
-import { extractSheetLinks, isSupportedAttachment } from '../../collectors/email.js';
+import { extractSheetLinks, isSupportedAttachment, attachmentKind } from '../../collectors/email.js';
 import { buildReplyMime } from './mime.js';
 import { safeErr, SafeLogError } from '../redact.js';
 import {
@@ -18,7 +18,7 @@ import {
   xserverDraftsMailbox,
   collectDays,
 } from '../config.js';
-import type { SesRawMail, DraftRef, SesAttachment } from '../../types/index.js';
+import type { SesRawMail, DraftRef, SesAttachment, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
 
 function imapConfigured(): boolean {
   return Boolean(xserverImapHost() && xserverSharedUser() && xserverSharedPass());
@@ -139,6 +139,60 @@ export async function collect(isProcessed: (mailId: string) => boolean): Promise
   }
   console.log(`Xserver収集: ${mails.length}件を収集`);
   return mails;
+}
+
+// メール量の測定（npm run ses:mail-stats）用。受信箱を EXAMINE（読み取り専用）で開き、
+// ENVELOPE・BODYSTRUCTURE・INTERNALDATE・サイズだけを取得する（本文・添付は取得せず、既読などのフラグも変えない）
+export async function scanMeta(since: Date): Promise<SesMailMeta[]> {
+  if (!imapConfigured()) {
+    throw new SafeLogError('Xserver測定: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了です');
+  }
+  const client = imapClient();
+  const metas: SesMailMeta[] = [];
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX', { readOnly: true });
+    try {
+      const uids = await client.search({ since }, { uid: true });
+      if (uids && uids.length > 0) {
+        const query = { envelope: true, bodyStructure: true, internalDate: true, size: true };
+        for await (const msg of client.fetch(uids, query, { uid: true })) {
+          const internal = msg.internalDate ? new Date(msg.internalDate) : msg.envelope?.date;
+          metas.push({
+            receivedAt: internal && !Number.isNaN(internal.getTime()) ? internal : new Date(0),
+            subject: msg.envelope?.subject ?? '',
+            fromAddress: (msg.envelope?.from?.[0]?.address ?? '').toLowerCase(),
+            sizeBytes: msg.size ?? 0,
+            attachmentKinds: msg.bodyStructure ? attachmentKindsOf(msg.bodyStructure) : [],
+          });
+        }
+      }
+    } finally {
+      lock.release();
+    }
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      /* noop */
+    }
+  }
+  return metas;
+}
+
+// 添付として数える部分: Content-Disposition が attachment、またはファイル名付きで inline でないもの
+// （本文中の署名画像など inline の部分は数えない）
+function attachmentKindsOf(node: MessageStructureObject, out: SesAttachmentKind[] = []): SesAttachmentKind[] {
+  if (node.childNodes?.length) {
+    for (const child of node.childNodes) attachmentKindsOf(child, out);
+    return out;
+  }
+  const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? '';
+  const disposition = (node.disposition ?? '').toLowerCase();
+  if (disposition === 'attachment' || (filename && disposition !== 'inline')) {
+    out.push(attachmentKind(filename, node.type ?? ''));
+  }
+  return out;
 }
 
 function mailId(uidValidity: string, uid: number): string {

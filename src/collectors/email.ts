@@ -1,7 +1,7 @@
 import { google, gmail_v1 } from 'googleapis';
 import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
-import type { RawLog, SesRawMail, SesAttachment } from '../types/index.js';
+import type { RawLog, SesRawMail, SesAttachment, SesAttachmentKind } from '../types/index.js';
 
 // Gmail 収集 — 対象経営者の送受信メールを取得する（gmail.readonly）
 export async function collectFromEmail(): Promise<RawLog[]> {
@@ -211,6 +211,20 @@ export function isSupportedAttachment(filename: string, mimeType: string): boole
     mimeType.includes('spreadsheet') ||
     mimeType === 'application/vnd.ms-excel'
   );
+}
+
+// メール量の測定用の添付の種類。拡張子で判定し、拡張子で決まらない（octet-stream 等）ときはMIMEタイプで補う
+const KIND_BY_EXT: Record<string, SesAttachmentKind> = { pdf: 'pdf', xlsx: 'xlsx', xlsm: 'xlsx', xls: 'xls', docx: 'docx' };
+
+export function attachmentKind(filename: string, mimeType: string): SesAttachmentKind {
+  const ext = (filename.match(/\.([A-Za-z0-9]+)$/)?.[1] ?? '').toLowerCase();
+  if (KIND_BY_EXT[ext]) return KIND_BY_EXT[ext];
+  const mime = mimeType.toLowerCase();
+  if (mime === 'application/pdf') return 'pdf';
+  if (mime.includes('spreadsheetml')) return 'xlsx';
+  if (mime === 'application/vnd.ms-excel') return 'xls';
+  if (mime.includes('wordprocessingml')) return 'docx';
+  return 'other';
 }
 
 // Gmail添付APIはbase64url形式で返すため、標準base64（xlsx解析・Claude documentブロック用）に変換する

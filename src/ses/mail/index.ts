@@ -4,7 +4,7 @@
 import { mailProvider } from '../config.js';
 import * as gmail from './gmail.js';
 import * as xserver from './xserver.js';
-import type { SesRawMail, DraftRef } from '../../types/index.js';
+import type { SesRawMail, DraftRef, SesMailMeta } from '../../types/index.js';
 
 export interface MailTransport {
   // 収集に必要な設定が揃っているか
@@ -20,6 +20,8 @@ export interface MailTransport {
   sendReady(): boolean;
   // サマリ等のプレーンメールを送信する。送れなければ例外
   sendPlainMail(to: string, subject: string, body: string): Promise<void>;
+  // メール量の測定用に、since 以降の受信メールのメタ情報だけを読み取り専用で取得する（本文・添付は取得しない）
+  scanMeta(since: Date): Promise<SesMailMeta[]>;
 }
 
 function transport(): MailTransport {
@@ -48,4 +50,8 @@ export function sendMailReady(): boolean {
 
 export function sendPlainMailViaMail(to: string, subject: string, body: string): Promise<void> {
   return transport().sendPlainMail(to, subject, body);
+}
+
+export function scanMailMetaViaMail(since: Date): Promise<SesMailMeta[]> {
+  return transport().scanMeta(since);
 }

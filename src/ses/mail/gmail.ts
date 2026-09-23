@@ -14,7 +14,8 @@ import { google } from 'googleapis';
 import { SafeLogError } from '../redact.js';
 import { sesTargetGmail, collectDays } from '../config.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
-import type { SesRawMail, DraftRef } from '../../types/index.js';
+import { addressOf } from './ownMail.js';
+import type { SesRawMail, DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
 
 function mailboxReady(): boolean {
   return Boolean(sesTargetGmail()) && loadServiceAccountCredentials() !== null;
@@ -70,6 +71,79 @@ export async function sendPlainMail(to: string, subject: string, body: string): 
   const gmail = google.gmail({ version: 'v1', auth });
   const raw = (await buildPlainMime(to, subject, body)).toString('base64url');
   await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+}
+
+// メール量の測定（npm run ses:mail-stats）用。本文・添付を取得せず、一覧（ID）と件名・送信元ヘッダ・受信日時・サイズだけを読む。
+// 添付の種類はメール単位で検索クエリ（filename:pdf 等）の該当有無から求める（添付ごとの個数は数えない）
+export async function scanMeta(since: Date): Promise<SesMailMeta[]> {
+  const auth = getGoogleAuthAs(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
+  if (!auth) throw new SafeLogError('Gmail測定: SES_TARGET_GMAIL または Google認証（サービスアカウント）が未設定です');
+  const gmail = google.gmail({ version: 'v1', auth });
+  const base = `after:${Math.floor(since.getTime() / 1000)} -in:sent -in:drafts -in:spam -in:trash`;
+
+  const listIds = async (q: string): Promise<Set<string>> => {
+    const ids = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      const res = await gmail.users.messages.list({ userId: 'me', q, maxResults: 500, pageToken });
+      for (const m of res.data.messages ?? []) if (m.id) ids.add(m.id);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+    return ids;
+  };
+
+  const all = await listIds(base);
+  const withAttachment = await listIds(`${base} has:attachment`);
+  const kindQueries: Array<[Exclude<SesAttachmentKind, 'other'>, string]> = [
+    ['pdf', 'filename:pdf'],
+    ['xlsx', 'filename:xlsx'],
+    ['xls', 'filename:xls'],
+    ['docx', 'filename:docx'],
+  ];
+  const kindIds = new Map<SesAttachmentKind, Set<string>>();
+  for (const [kind, q] of kindQueries) kindIds.set(kind, await listIds(`${base} ${q}`));
+
+  const ids = [...all];
+  const metas: SesMailMeta[] = [];
+  let failed = 0;
+  // 利用上限（ユーザーあたり毎秒250単位・get=5単位）に収まるよう、同時10件ずつ取得する
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const settled = await Promise.allSettled(
+      chunk.map((id) =>
+        gmail.users.messages.get({
+          userId: 'me',
+          id,
+          format: 'metadata',
+          metadataHeaders: ['Subject', 'From'],
+          fields: 'id,internalDate,sizeEstimate,payload/headers',
+        }),
+      ),
+    );
+    for (const r of settled) {
+      if (r.status === 'rejected') {
+        failed += 1;
+        continue;
+      }
+      const res = r.value;
+      const id = res.data.id ?? '';
+      const header = (name: string) => res.data.payload?.headers?.find((h) => h.name?.toLowerCase() === name)?.value ?? '';
+      const kinds: SesAttachmentKind[] = [];
+      for (const [kind, set] of kindIds) if (set.has(id)) kinds.push(kind);
+      // xls の検索は xlsx にも当たり得るため、xlsx と重なる分は数えない
+      if (kinds.includes('xls') && kinds.includes('xlsx')) kinds.splice(kinds.indexOf('xls'), 1);
+      if (kinds.length === 0 && withAttachment.has(id)) kinds.push('other');
+      metas.push({
+        receivedAt: new Date(Number(res.data.internalDate ?? 0)),
+        subject: header('subject'),
+        fromAddress: addressOf(header('from')),
+        sizeBytes: res.data.sizeEstimate ?? 0,
+        attachmentKinds: kinds,
+      });
+    }
+  }
+  if (failed > 0) console.warn(`Gmail測定: ${failed}件はメタ情報を取得できなかったため集計から除外しました`);
+  return metas;
 }
 
 // 診断（npm run doctor）用: SES専用メールボックスとして収集・送信のトークンが取れるか（DWDのスコープ登録の確認）。

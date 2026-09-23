@@ -5,6 +5,8 @@
 
 - 設計の詳細: `docs/ses-matching-requirements.md` / `ses-matching-basic-design.md` / `ses-matching-detailed-design.md`
 - 追加機能（交渉提案・バンド分け・全員に返信・メーラー切替）: `docs/ses-matching-addendum.md`
+- **GitHub Actions で平日10:00／14:00に自動実行する本番導入（サーバー不要・非エンジニア向け）: `docs/ses-deploy-github-actions.md`**
+  （必要なアカウント、スプレッドシートの共有、Secrets／Variables の一覧、メール量の測定、導入チェックリスト）
 
 ---
 
@@ -352,7 +354,12 @@ npm run ses:match      # マッチのみ
 
 ## 8. 定期実行（1日2回バッチ）
 
-cron 例（毎日 9:00 と 18:00）:
+**推奨: GitHub Actions**（`.github/workflows/ses-batch.yml`。平日 10:00／14:00 JST・サーバー不要）。
+手順は `docs/ses-deploy-github-actions.md` を参照してください。本番の直前に `npm run ses:preflight`（接続なし・値を表示しない設定確認）が
+自動で動き、Secrets の登録漏れや貼り付け誤りがあればバッチを始めずに失敗します。
+導入前のメール量・費用の見込みは `npm run ses:mail-stats`（Actions の「SESメール量の測定」）で測れます。
+
+自前のサーバーで動かす場合の cron 例（毎日 9:00 と 18:00）:
 
 ```cron
 0 9,18 * * *  cd /path/to/executive-clone-ai && /usr/bin/npm run ses >> /var/log/ses.log 2>&1
@@ -459,6 +466,7 @@ UIでできること:
 | プロパー候補が0件 | 管理表の稼働状況が `稼働可` か、スキル列が埋まっているか（「抽出メモ」を確認）、直近の案件があるか |
 | プロパーのフォルダ・管理表を読めない | フォルダ（閲覧者）と管理表（編集者）をサービスアカウントのメールに共有したか。共有ドライブの場合はメンバー追加でも可 |
 | GWSへ移行した | `MAIL_PROVIDER=gmail` に変更し `SES_TARGET_GMAIL`（SES専用メールボックス）＋`GOOGLE_SA_*` を設定（他は不要） |
+| GitHub Actions の「設定の事前確認」が赤い | ❌ の行に Secret／Variable の名前と理由が出ます（値は表示しません）。`docs/ses-deploy-github-actions.md` 5章・8章 |
 
 ---
 
@@ -474,6 +482,7 @@ UIでできること:
 - スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
 - プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
+- メール量の測定: `SES_STATS_DAYS`（`npm run ses:mail-stats` の遡り日数。既定30）
 - 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MATCH_MIN_LLM_SCORE` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`

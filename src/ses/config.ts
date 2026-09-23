@@ -62,6 +62,12 @@ function envBool(name: string, def: boolean): boolean {
   return def;
 }
 
+// 設定の生の値（前後の空白を除く・未設定は ''）。事前確認（npm run ses:preflight）が渡し漏れと書式を
+// 検査するためだけに使う（値そのものは表示しない）。通常の処理は用途別のゲッターを使うこと
+export function settingValue(name: string): string {
+  return env(name);
+}
+
 // ===== 実行モード（demo / 本番） =====
 
 // スケジュール実行（CI/GitHub Actions）など、demoに倒れては困る環境か。SES_REQUIRE_LIVE で明示上書き可
@@ -238,6 +244,11 @@ export function xserverDraftsMailbox(): string {
 export function collectDays(): number {
   const name = env('SES_COLLECT_DAYS') ? 'SES_COLLECT_DAYS' : 'XSERVER_COLLECT_DAYS';
   return envNum(name, 7, { min: 1, max: 60 });
+}
+
+// メール量の測定（npm run ses:mail-stats）で遡る日数
+export function statsDays(): number {
+  return envNum('SES_STATS_DAYS', 30, { min: 1, max: 365, int: true });
 }
 
 // 1回の実行で抽出する未処理メールの上限（新しい順。超過分は次回以降に回す）。

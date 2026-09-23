@@ -35,6 +35,9 @@
     "ses:web:demo": "DEMO_MODE=true tsx src/ses/web.ts",
     "ses:repair": "tsx src/ses/repair.ts",
     "ses:repair:demo": "DEMO_MODE=true tsx src/ses/repair.ts",
+    "ses:preflight": "tsx src/ses/preflight.ts",
+    "ses:mail-stats": "tsx src/ses/mailStats.ts",
+    "ses:mail-stats:demo": "DEMO_MODE=true tsx src/ses/mailStats.ts",
     "ses:heal:check": "DEMO_MODE=true SES_HEAL_DATA_DIR=data/ses-heal-selftest tsx src/ses/heal/selftest.ts"
   },
   "dependencies": {

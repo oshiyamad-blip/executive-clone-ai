@@ -8,6 +8,7 @@ import { materializeReplyDraft } from './draft.js';
 import { replyDraftReady } from './mail/index.js';
 import { recordHealEvent } from './heal/events.js';
 import { safeErr, errKind, SafeLogError } from './redact.js';
+import { isPlainEmailAddress } from './settingsFormat.js';
 import {
   sheetsDbConfigured,
   draftRequestTabs,
@@ -47,12 +48,8 @@ export function normalizeSenderEmail(raw: string): string {
   return at < 0 ? s : `${s.slice(0, at)}@${s.slice(at + 1).toLowerCase()}`;
 }
 
-// 表示名付き・複数アドレス・空白や改行を含む値は受け付けない（メールヘッダへの混入を防ぐため厳しめ）
-const SENDER_EMAIL_RE =
-  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
-
 export function isValidSenderEmail(email: string): boolean {
-  return email.length <= 254 && SENDER_EMAIL_RE.test(email);
+  return isPlainEmailAddress(email);
 }
 
 // 許可ドメインは完全一致（サブドメインは別途列挙が必要）。未設定なら制限しない

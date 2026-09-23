@@ -15,8 +15,13 @@ import {
   sheetsDbImpersonate,
   ownDomains,
   collectDays,
+  properMasterSpreadsheetId,
 } from '../ses/config.js';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
+import { inspectServiceAccountJson } from '../ses/settingsFormat.js';
+import { SafeLogError } from '../ses/redact.js';
+import { listSkillSheetFiles } from '../ses/proper/drive.js';
+import { properGoogleAuth, properAccessHint } from '../ses/proper/auth.js';
 import { probeImap, probeSmtp } from '../ses/mail/xserver.js';
 import { probeGmail } from '../ses/mail/gmail.js';
 
@@ -41,6 +46,14 @@ function envSet(...names: string[]): boolean {
 // サービスアカウント鍵は JSON丸ごと（GOOGLE_SA_KEY_JSON）か、client_email/private_key の個別指定のどちらでもよい
 function serviceAccountSet(): boolean {
   return envSet('GOOGLE_SA_KEY_JSON') || envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY');
+}
+
+// スプレッドシート・スキルシートのフォルダを共有する相手（サービスアカウントのメール）。公開ログでは表示しない
+function serviceAccountEmail(): string {
+  const json = process.env.GOOGLE_SA_KEY_JSON?.trim();
+  const email = json ? inspectServiceAccountJson(json).clientEmail : process.env.GOOGLE_SA_CLIENT_EMAIL?.trim() ?? '';
+  if (!email) return '';
+  return logRedact() ? 'ログ秘匿のため非表示（JSON鍵の client_email）' : email;
 }
 
 async function main(): Promise<void> {
@@ -115,6 +128,14 @@ async function main(): Promise<void> {
     (n) => envSet(n),
   );
   const need = (msg: string) => (sesInUse ? bad(msg) : warn(msg));
+  console.log('  ・接続なしで設定の渡し漏れ・書式だけを確かめる場合は npm run ses:preflight（GitHub Actions では本番の直前に自動実行）');
+  const saJson = process.env.GOOGLE_SA_KEY_JSON?.trim();
+  if (saJson) {
+    const problems = inspectServiceAccountJson(saJson).problems;
+    if (problems.length > 0) bad(`GOOGLE_SA_KEY_JSON: ${problems.join(' / ')}`);
+  }
+  const saEmail = serviceAccountEmail();
+  if (saEmail && sesInUse) console.log(`  ・サービスアカウント: ${saEmail} — 案件スプレッドシート・「プロパー管理」・スキルシートのフォルダをこのアドレスに共有します`);
   // バッチが実際に使う判定（isDemo）で実行モードを示す。本番のつもりで demo（fixture）が動く状態を見逃さない
   const liveError = liveConfigError();
   if (liveError) bad(`実行モード: 停止（${liveError}）`);
@@ -166,7 +187,12 @@ async function main(): Promise<void> {
         });
         ok('データ保存先: sheets（スプレッドシートに接続できました）');
       } catch {
-        bad('データ保存先: sheets — スプレッドシートを開けません（IDと、サービスアカウントのメールへの編集者共有を確認）');
+        bad(
+          sheetsDbImpersonate()
+            ? 'データ保存先: sheets — スプレッドシートを開けません（ID、SHEETS_DB_IMPERSONATE のユーザーの編集権限、DWDの spreadsheets スコープ登録を確認）'
+            : 'データ保存先: sheets — スプレッドシートを開けません（IDと、サービスアカウントのメールへの「編集者」共有を確認。' +
+                '組織外への共有が禁止されている場合は、管理コンソールで許可するか SHEETS_DB_IMPERSONATE を使います）',
+        );
       }
     }
     if (!envSet('SES_ALLOWED_SENDER_DOMAINS')) {
@@ -185,6 +211,25 @@ async function main(): Promise<void> {
       `  ・プロパー候補:    有効（${account}${envSet('PROPER_GOOGLE_IMPERSONATE') ? '・なりすましあり' : ''}。フォルダと「プロパー管理」をそのアカウントに共有してください）`,
     );
     if (!dedicated && !serviceAccountSet()) warn('プロパー候補: Google認証（GOOGLE_SA_KEY_JSON 等）が未設定のためスキップされます');
+    else {
+      // 読み取りだけの疎通確認（ファイル名・氏名は表示しない）
+      try {
+        const files = await listSkillSheetFiles();
+        ok(`プロパー候補: スキルシートのフォルダを読めました（ファイル${files.length}件）`);
+      } catch (err) {
+        bad(err instanceof SafeLogError ? err.message : `プロパー: スキルシートのフォルダを読めません（${properAccessHint()}）`);
+      }
+      try {
+        const auth = properGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
+        await google.sheets({ version: 'v4', auth: auth! }).spreadsheets.get({
+          spreadsheetId: properMasterSpreadsheetId(),
+          fields: 'properties.title',
+        });
+        ok('プロパー候補: 管理表（「プロパー管理」を置くスプレッドシート）を開けました');
+      } catch {
+        bad(`プロパー候補: 管理表のスプレッドシートを開けません（IDと「編集者」での共有を確認。${properAccessHint()}）`);
+      }
+    }
     if (dbProvider !== 'sheets') warn('プロパー候補: 候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです');
   } else {
     console.log('  ・プロパー候補:    無効（PROPER_SKILLSHEET_FOLDER_ID / PROPER_MASTER_SPREADSHEET_ID 未設定）');
@@ -216,6 +261,7 @@ async function main(): Promise<void> {
   console.log('');
   if (hasError) {
     console.log('❌ 未完了の必須項目があります。上記の ❌ を解消してから再度 npm run doctor を実行してください。');
+    console.log('   GitHub Actions での定時実行の設定は docs/ses-deploy-github-actions.md を参照してください。');
     process.exitCode = 1;
   } else {
     console.log('✅ 診断完了。必須項目はすべてOKです。（⚠️ は任意項目・後から設定可）');

@@ -271,6 +271,18 @@ export interface SesAttachment {
   text?: string; // parseでテキスト化した結果（xlsx/Sheets）
 }
 
+// メール量の測定（npm run ses:mail-stats）用に、本文を取得せずに得るメタ情報。
+// 件名・送信元は集計（キーワード分類・ドメイン数・自己メール判定）にだけ使い、表示・保存しない
+export type SesAttachmentKind = 'pdf' | 'xlsx' | 'xls' | 'docx' | 'other';
+
+export interface SesMailMeta {
+  receivedAt: Date; // サーバーの受信日時（IMAP INTERNALDATE / Gmail internalDate）
+  subject: string;
+  fromAddress: string;
+  sizeBytes: number;
+  attachmentKinds: SesAttachmentKind[]; // 添付ファイルごとの種類（Gmailはメール単位で種類の有無のみ）
+}
+
 // extract の出力（1メールから0件以上）。種別で判別可能なユニオン
 export type ExtractedItem =
   | { kind: 'project'; project: Project }

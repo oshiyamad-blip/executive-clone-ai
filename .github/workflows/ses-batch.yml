@@ -1,0 +1,128 @@
+# SESマッチングの定時バッチ（共有メールボックスの収集 → 抽出 → マッチング → スプレッドシート保存 → サマリメール）。
+# 手順書: docs/ses-deploy-github-actions.md
+#
+# 注意（公開リポジトリ）:
+# - Actions のログは誰でも読めます。バッチは SES_LOG_REDACT=true で氏名・メールアドレス・件名・本文をログに出しません。
+# - data/ をキャッシュや成果物（actions/cache・upload-artifact）として保存しないでください（個人情報が公開されます）。
+#   毎回まっさらな環境で動き、処理済みメール・隔離リスト等の状態はスプレッドシートに保存されます。
+# - 値はすべて Settings → Secrets and variables → Actions に登録します（このファイルに値を書かない）。
+
+name: SESマッチング定時バッチ
+
+on:
+  schedule:
+    # 時刻はUTCで書きます。平日（月〜金）の 01:00 / 05:00 UTC = 日本時間 10:00 / 14:00。
+    # GitHub の混雑状況により数分〜数十分遅れることがあります。祝日も動きます。
+    # 定時実行はデフォルトブランチ（main）にあるこのファイルだけが対象です。
+    - cron: '0 1,5 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '実行モード（デモ = 外部に接続せず、デモ用のメールで動作確認）'
+        type: choice
+        options:
+          - 本番
+          - デモ
+        default: 本番
+
+permissions:
+  contents: read
+
+# 手動実行と定時実行が重なっても同時には動かさない（下書きの二重作成・処理済み記録の競合を防ぐ）。
+# 実行中の回は止めずに、終わってから次を始める
+concurrency:
+  group: ses-batch
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    name: SESバッチ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Tokyo
+      # 公開ログ対策（必ず true のまま）
+      SES_LOG_REDACT: 'true'
+      # LLMの鍵が渡っていないときに、デモ用のメールで「成功」させずに失敗にする
+      SES_REQUIRE_LIVE: 'true'
+      DB_PROVIDER: sheets
+      MAIL_PROVIDER: ${{ vars.MAIL_PROVIDER || 'xserver' }}
+      # 週末（金曜14:00〜月曜10:00）をまたぐ月曜の回も取りこぼさない日数
+      SES_COLLECT_DAYS: ${{ vars.SES_COLLECT_DAYS || '4' }}
+
+      # ---- Secrets（必須）----
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY_JSON }}
+      SHEETS_DB_SPREADSHEET_ID: ${{ secrets.SHEETS_DB_SPREADSHEET_ID }}
+      XSERVER_IMAP_HOST: ${{ secrets.XSERVER_IMAP_HOST }}
+      XSERVER_SMTP_HOST: ${{ secrets.XSERVER_SMTP_HOST }}
+      XSERVER_SHARED_USER: ${{ secrets.XSERVER_SHARED_USER }}
+      XSERVER_SHARED_PASS: ${{ secrets.XSERVER_SHARED_PASS }}
+      # ---- Secrets（推奨・任意）----
+      SES_NOTIFY_TO: ${{ secrets.SES_NOTIFY_TO }}
+      PROPER_SKILLSHEET_FOLDER_ID: ${{ secrets.PROPER_SKILLSHEET_FOLDER_ID }}
+      PROPER_MASTER_SPREADSHEET_ID: ${{ secrets.PROPER_MASTER_SPREADSHEET_ID }}
+      PROPER_GOOGLE_SA_KEY_JSON: ${{ secrets.PROPER_GOOGLE_SA_KEY_JSON }}
+      # MAIL_PROVIDER=gmail のときだけ使う
+      SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
+
+      # ---- Variables（未設定なら既定値。値の意味は .env.example）----
+      XSERVER_IMAP_PORT: ${{ vars.XSERVER_IMAP_PORT }}
+      XSERVER_SMTP_PORT: ${{ vars.XSERVER_SMTP_PORT }}
+      XSERVER_DRAFTS_MAILBOX: ${{ vars.XSERVER_DRAFTS_MAILBOX }}
+      SES_OWN_DOMAINS: ${{ vars.SES_OWN_DOMAINS }}
+      SES_ALLOWED_SENDER_DOMAINS: ${{ vars.SES_ALLOWED_SENDER_DOMAINS }}
+      SES_COLLECT_OWN_DOMAIN: ${{ vars.SES_COLLECT_OWN_DOMAIN }}
+      SHEETS_DB_IMPERSONATE: ${{ vars.SHEETS_DB_IMPERSONATE }}
+      PROPER_GOOGLE_IMPERSONATE: ${{ vars.PROPER_GOOGLE_IMPERSONATE }}
+      PROPER_MAX_EXTRACT_PER_RUN: ${{ vars.PROPER_MAX_EXTRACT_PER_RUN }}
+      PROPER_PROJECT_LOOKBACK_DAYS: ${{ vars.PROPER_PROJECT_LOOKBACK_DAYS }}
+      MIN_GROSS_MARGIN_JPY: ${{ vars.MIN_GROSS_MARGIN_JPY }}
+      SKILL_MATCH_THRESHOLD: ${{ vars.SKILL_MATCH_THRESHOLD }}
+      SKILL_MATCH_STRONG_THRESHOLD: ${{ vars.SKILL_MATCH_STRONG_THRESHOLD }}
+      MAX_CANDIDATES_PER_ITEM: ${{ vars.MAX_CANDIDATES_PER_ITEM }}
+      MATCH_MIN_LLM_SCORE: ${{ vars.MATCH_MIN_LLM_SCORE }}
+      MATCH_TIMING_GRACE_DAYS: ${{ vars.MATCH_TIMING_GRACE_DAYS }}
+      HOURLY_TO_MONTHLY_HOURS: ${{ vars.HOURLY_TO_MONTHLY_HOURS }}
+      ENABLE_NEGOTIATION: ${{ vars.ENABLE_NEGOTIATION }}
+      NEGOTIATION_MAX_PROJECT_RAISE_MAN: ${{ vars.NEGOTIATION_MAX_PROJECT_RAISE_MAN }}
+      NEGOTIATION_MAX_ENGINEER_CUT_MAN: ${{ vars.NEGOTIATION_MAX_ENGINEER_CUT_MAN }}
+      SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
+      SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
+      SES_MATCH_POOL_LIMIT: ${{ vars.SES_MATCH_POOL_LIMIT }}
+      SES_HEAL_ENABLED: ${{ vars.SES_HEAL_ENABLED }}
+      SES_HEAL_BUDGET_JPY: ${{ vars.SES_HEAL_BUDGET_JPY }}
+      SES_HEAL_MAX_ATTEMPTS: ${{ vars.SES_HEAL_MAX_ATTEMPTS }}
+      SES_REPAIR_ENABLED: ${{ vars.SES_REPAIR_ENABLED }}
+      ANTHROPIC_MODEL_EXTRACT: ${{ vars.ANTHROPIC_MODEL_EXTRACT }}
+      ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
+      JPY_PER_USD: ${{ vars.JPY_PER_USD }}
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Node.js を用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 依存パッケージをインストール
+        run: npm ci
+
+      - name: ビルド確認
+        run: npm run build
+
+      - name: 設定の事前確認（接続なし・値は表示しません）
+        if: ${{ inputs.mode != 'デモ' }}
+        run: npm run ses:preflight
+
+      - name: 本番バッチ
+        if: ${{ inputs.mode != 'デモ' }}
+        run: npm run ses
+
+      - name: デモ（外部に接続しません）
+        if: ${{ inputs.mode == 'デモ' }}
+        run: npm run ses:demo

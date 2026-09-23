@@ -251,6 +251,23 @@ Notionのチーム課金回避と、営業のスプシ文化（ソート・フ�
 - ログは件数のみ（氏名・ファイル名・案件名はサマリメールとスプレッドシートだけ）。失敗しても外部要員のマッチング・通知は続行し、
   診断レポートに警告として載る。demoは fixture の自社社員で突合と文面作成だけを行う
 
+## 12. GitHub Actions での定時実行・事前確認・メール量の測定
+
+**背景**: 常駐サーバーを持たずに平日10:00／14:00に動かすため、GitHub Actions（毎回まっさらな環境）で実行する。
+状態（処理済みメール・隔離リスト）はスプレッドシートに置き（第10節）、ログは公開リポジトリでも読まれる前提で秘匿する。
+
+- `.github/workflows/ses-batch.yml`: `cron: '0 1,5 * * 1-5'`（UTC）＋手動実行（本番／デモ）。`concurrency` で同時実行を防ぎ、
+  `SES_LOG_REDACT=true`・`SES_REQUIRE_LIVE=true`・`DB_PROVIDER=sheets`・`TZ=Asia/Tokyo` を固定。値は Secrets／Variables からだけ渡す。
+  `data/` はキャッシュ・成果物として保存しない（個人情報の流出防止）
+- `npm run ses:preflight`（`src/ses/preflight.ts`）: 接続なしの設定確認。JSON鍵の解釈・ID／ホスト名／アドレスの書式・
+  数値設定の解釈・公開ログでの秘匿を ✅／⚠️／❌ で示し、❌ があれば終了コード1で本番を始めない。値そのものは表示しない。
+  書式の判定は `src/ses/settingsFormat.ts` に集約（`npm run doctor` と担当者メールの検証も共用）
+- `npm run ses:mail-stats`（`src/ses/mailStats.ts`・集計は `mailStatsReport.ts`）と `.github/workflows/ses-mail-stats.yml`: 共有メールボックスを
+  読み取り専用（IMAP EXAMINE。本文・添付は取得しない）で走査し、日別・曜日別・時間帯別の件数、添付の種類、件名のキーワード分類、
+  送信元ドメインの種類数、定時バッチ1回あたりの件数、LLM費用の月額概算（要件定義 §8 の係数）だけを表示する。LLMの鍵は不要
+- `npm run doctor`: サービスアカウントのメール（手元のみ表示）・共有先の案内、プロパーのフォルダ／管理表の疎通、事前確認の案内を追加
+- 導入手順・アカウント一覧・Secrets／Variables 一覧・チェックリストは `docs/ses-deploy-github-actions.md`
+
 ## 動作確認（demo・外部呼び出しなし）
 
 - `npm run build` … 通過（strict/noUnused/fallthrough クリーン）

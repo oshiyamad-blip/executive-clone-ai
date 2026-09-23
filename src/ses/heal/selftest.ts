@@ -3,7 +3,8 @@
 // ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定・
 // プロパー（スキルシート）管理表の行の組み立てと提案文面、
 // 設定値の解釈・実行モード判定・自己メール除外・抽出値の検証・添付の形式判定・突合範囲・Web UIの要求拒否、
-// 勤務地の正規化・突合ルール（勤務地不明・単金下限・候補上限・交渉額の丸め・必須スキル空）・名寄せ・返信宛先・紹介文面の開示検査を検証する。
+// 勤務地の正規化・突合ルール（勤務地不明・単金下限・候補上限・交渉額の丸め・必須スキル空）・名寄せ・返信宛先・紹介文面の開示検査、
+// 事前確認（preflight）の書式検査・メール量の測定の集計（集計値だけを表示すること）を検証する。
 import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { LlmOutputError, isTruncationError } from '../../llm/errors.js';
@@ -56,6 +57,15 @@ import {
 import { skillSheetFormat, type SkillSheetFile } from '../proper/drive.js';
 import { buildProperProposalBody, buildProperProposalDraft, MISSING_INITIALS_PLACEHOLDER } from '../proper/proposal.js';
 import { properSummaryLines, type ProperRunResult } from '../proper/index.js';
+import {
+  inspectServiceAccountJson,
+  looksLikeHostname,
+  looksLikeGoogleId,
+  looksLikeDomain,
+  invalidAddressCount,
+} from '../settingsFormat.js';
+import { nextRunAt, aggregateMailStats, formatMailStats } from '../mailStatsReport.js';
+import { attachmentKind } from '../../collectors/email.js';
 import type {
   SesRawMail,
   DraftRef,
@@ -634,6 +644,67 @@ function matchingAndDraftChecks(base: Project): void {
   const leaked = disclosureIssues('田中様\nベータ所属の鈴木 花子様の要員（希望７０万円）です。粗利8万円。https://evil.example', 'project', dp, de, match);
   check('紹介文面: 相手方の社名・単金・粗利・URLを検出', ['相手方の社名・担当者名', '相手方の単金', '粗利', 'URL'].every((x) => leaked.includes(x)), leaked.join(','));
   check('紹介文面: 要員側宛に案件の単金（上限）を書いたら検出', disclosureIssues('鈴木花子様\n単価780,000円の案件です', 'engineer', dp, de, match).includes('相手方の単金'));
+
+  // 33. 事前確認（preflight）の書式検査: 値を表示せずに貼り付け誤りを見分ける
+  const saOk = inspectServiceAccountJson(
+    JSON.stringify({ type: 'service_account', client_email: 'bot@proj.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n' }),
+  );
+  check('事前確認: 正しいJSON鍵は問題なし', saOk.problems.length === 0 && saOk.notes.length === 0 && saOk.clientEmail.endsWith('gserviceaccount.com'));
+  const saB64 = inspectServiceAccountJson(Buffer.from('{"client_email":"a"}').toString('base64'));
+  check('事前確認: base64にしたJSON鍵を見分ける', saB64.problems.length === 1 && saB64.problems[0].includes('base64'));
+  const saNoKey = inspectServiceAccountJson('{"type":"service_account","client_email":"bot@proj.iam.gserviceaccount.com"}');
+  check('事前確認: private_key の欠けたJSON鍵は問題あり', saNoKey.problems.some((p) => p.includes('private_key')));
+  check('事前確認: 問題の文言に鍵の中身を含めない', !JSON.stringify([saOk, saB64, saNoKey].map((r) => r.problems)).includes('BEGIN'));
+  check(
+    '事前確認: ホスト名はスキーム・ポートなしだけを通す',
+    looksLikeHostname('imap.example.jp') && !looksLikeHostname('https://imap.example.jp') && !looksLikeHostname('imap.example.jp:993'),
+  );
+  check('事前確認: ドメイン名の判定', looksLikeDomain('example.co.jp') && !looksLikeDomain('@example.co.jp') && !looksLikeDomain('example'));
+  check('事前確認: ドライブIDの判定（共有ドライブの短いIDも可）', looksLikeGoogleId('0AFxyz123456789ABCDE') && !looksLikeGoogleId('short') && !looksLikeGoogleId('https://x/y'));
+  const addr = invalidAddressCount('a@example.co.jp, 営業 <b@example.co.jp>, foo');
+  check('事前確認: 通知先のうち不正なアドレスの件数', addr.total === 3 && addr.invalid === 1, JSON.stringify(addr));
+
+  // 34. メール量の測定: 添付の種類・定時バッチへの割り当て・集計（件名・アドレス・ドメイン名を出さない）
+  check(
+    '測定: 添付の種類（拡張子を優先し、拡張子で決まらないときはMIMEタイプで判定）',
+    attachmentKind('スキル.PDF', 'application/octet-stream') === 'pdf' &&
+      attachmentKind('noext', 'application/pdf') === 'pdf' &&
+      attachmentKind('a.xlsx', 'application/octet-stream') === 'xlsx' &&
+      attachmentKind('a.doc', 'application/msword') === 'other',
+  );
+  const jst = (iso: string) => new Date(`${iso}+09:00`).getTime();
+  check('測定: 金曜15時の受信は月曜10時の回', nextRunAt(jst('2026-09-18T15:00:00')) === jst('2026-09-21T10:00:00'));
+  check('測定: 火曜12時の受信は同日14時の回', nextRunAt(jst('2026-09-22T12:00:00')) === jst('2026-09-22T14:00:00'));
+  check('測定: 実行時刻ちょうどの受信はその回', nextRunAt(jst('2026-09-22T10:00:00')) === jst('2026-09-22T10:00:00'));
+  check('測定: 土曜の受信は月曜10時の回', nextRunAt(jst('2026-09-19T09:00:00')) === jst('2026-09-21T10:00:00'));
+  const metas = [
+    { receivedAt: new Date(jst('2026-09-21T09:00:00')), subject: '【案件】Java 田中太郎', fromAddress: 'tanaka@partner-secret.example', sizeBytes: 2048, attachmentKinds: ['pdf' as const, 'pdf' as const] },
+    { receivedAt: new Date(jst('2026-09-20T11:00:00')), subject: '要員のご紹介', fromAddress: 'suzuki@other-secret.example', sizeBytes: 1024, attachmentKinds: ['xlsx' as const] },
+    { receivedAt: new Date(jst('2026-09-22T09:30:00')), subject: 'SES案件・要員マッチング バッチ実行結果', fromAddress: 'sales@ours.example', sizeBytes: 1024, attachmentKinds: [] },
+    { receivedAt: new Date(jst('2026-08-01T09:00:00')), subject: '期間外', fromAddress: 'x@old.example', sizeBytes: 1, attachmentKinds: [] },
+  ];
+  const statsResult = aggregateMailStats(metas, {
+    since: new Date(jst('2026-09-15T00:00:00')),
+    until: new Date(jst('2026-09-23T00:00:00')),
+    policy: { selfAddresses: ['sales@ours.example'], ownDomains: ['ours.example'], collectOwnDomain: false },
+    cap: 1,
+  });
+  check(
+    '測定: 期間外を除き、自分たちのメールを収集対象外に数える',
+    statsResult.total === 3 && statsResult.ownExcluded === 1 && statsResult.target === 2,
+    JSON.stringify({ t: statsResult.total, o: statsResult.ownExcluded, g: statsResult.target }),
+  );
+  check(
+    '測定: 添付はメール数とファイル数を分けて数える',
+    statsResult.kindMails.pdf === 1 && statsResult.kindFiles.pdf === 2 && statsResult.kindMails.xlsx === 1 && statsResult.withAttachment === 2,
+  );
+  check('測定: 送信元ドメインは種類数だけ', statsResult.senderDomains === 2);
+  check('測定: 月曜10時の回に2通がまとまり、上限超過として数える', statsResult.runMax === 2 && statsResult.runsOverCap === 1, JSON.stringify(statsResult.runSlots));
+  const statsText = formatMailStats(statsResult, 8, 1).join('\n');
+  check(
+    '測定: 表示に件名・アドレス・ドメイン名・氏名を含めない',
+    !['田中', 'tanaka', 'partner-secret', 'other-secret', 'ours.example', '要員のご紹介'].some((x) => statsText.includes(x)),
+  );
 }
 
 main().catch((err) => {
