@@ -9,7 +9,10 @@
 #   毎回まっさらな環境で動き、処理済みメール・隔離リスト等の状態はスプレッドシートに保存されます。
 # - 鍵・パスワードは本番のステップにだけ渡します（依存パッケージのインストールやビルドには渡さない）。
 #   依存パッケージのインストールスクリプトは実行しません（--ignore-scripts）。
-# - 値はすべて Settings → Secrets and variables → Actions に登録します（このファイルに値を書かない）。
+# - 値は Secrets を Environment「production」、Variables を Settings → Secrets and variables → Actions に登録します（このファイルに値を書かない）。
+# - Secrets は Environment「production」（Settings → Environments。Deployment branches を main だけに制限）に登録し、
+#   リポジトリの Secrets には置きません。main 以外のブランチで書き換えたワークフロー・コードを手動実行されても、
+#   鍵（別テナントの鍵・メールボックスのパスワードを含む）が渡らないようにするためです（手順書 5章・9章）。
 
 name: SESマッチング定時バッチ
 
@@ -43,6 +46,8 @@ jobs:
   batch:
     name: SESバッチ
     runs-on: ubuntu-latest
+    # Secrets は main ブランチだけが使える Environment から受け取る（Deployment branches を main に制限しておく）
+    environment: production
     # バッチは開始から SES_RUN_DEADLINE_MINUTES（既定20分）を過ぎると新しい抽出・判定を始めず、済んだ分を保存して
     # サマリを送る（残りは次回の実行で続きから）。実行中のLLM呼び出しの待ち時間と準備の時間を見込んで長めに取る
     timeout-minutes: 40
@@ -119,6 +124,7 @@ jobs:
           SES_COLLECT_OWN_DOMAIN: ${{ vars.SES_COLLECT_OWN_DOMAIN }}
           PROPER_MAX_EXTRACT_PER_RUN: ${{ vars.PROPER_MAX_EXTRACT_PER_RUN }}
           PROPER_PROJECT_LOOKBACK_DAYS: ${{ vars.PROPER_PROJECT_LOOKBACK_DAYS }}
+          PROPER_FOLLOW_SHORTCUTS: ${{ vars.PROPER_FOLLOW_SHORTCUTS }}
           SKILL_MATCH_THRESHOLD: ${{ vars.SKILL_MATCH_THRESHOLD }}
           SKILL_MATCH_STRONG_THRESHOLD: ${{ vars.SKILL_MATCH_STRONG_THRESHOLD }}
           MAX_CANDIDATES_PER_ITEM: ${{ vars.MAX_CANDIDATES_PER_ITEM }}

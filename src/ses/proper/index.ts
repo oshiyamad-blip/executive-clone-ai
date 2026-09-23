@@ -10,8 +10,13 @@ import { writeDemoArtifact } from '../store.js';
 import { recordHealEvent } from '../heal/events.js';
 import { loadFixtureProperEngineers } from '../fixtures/ownEngineers.js';
 import { fetchOpenProjects } from '../../database/index.js';
-import { saveProperCandidatesSheets, sheetsDbConfigured, PROPER_CANDIDATE_TAB } from '../../database/sheets.js';
-import { syncProperMaster, loadProperEngineers, properLabelOf, type ProperSyncResult } from './master.js';
+import {
+  saveProperCandidatesSheets,
+  retireProperCandidatesSheets,
+  sheetsDbConfigured,
+  PROPER_CANDIDATE_TAB,
+} from '../../database/sheets.js';
+import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
 import type { Project, ProperEngineer, ProperCandidate } from '../../types/index.js';
 
@@ -22,6 +27,7 @@ export interface ProperRunResult {
   projects: number; // 突合対象の案件数
   candidates: ProperCandidate[];
   saved: number; // 「プロパー候補」タブに追加・更新した行数
+  retired: number; // 稼働可でなくなった社員の候補として退役させた行数
 }
 
 // Sheetsの案件タブは全行を読むため、直近の遡り期間に絞った上での上限は大きめでよい（Notionは100件で頭打ち）
@@ -54,7 +60,9 @@ function runProperDemo(projects: Project[]): ProperRunResult {
   const engineers = loadFixtureProperEngineers();
   const candidates = buildProperCandidates(engineers, projects);
   writeDemoArtifact('proper-candidates', candidates);
-  const result: ProperRunResult = { demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0 };
+  const result: ProperRunResult = {
+    demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0, retired: 0,
+  };
   logCounts('プロパー候補(DEMO・fixture社員)', result);
   return result;
 }
@@ -87,14 +95,25 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const candidates = buildProperCandidates(engineers, projects);
 
   let saved = 0;
+  let retired = 0;
   if (sheetsDbConfigured()) {
     saved = await saveProperCandidatesSheets(candidates);
+    // 管理表を読めたとき（未設定で空に見えているのではないとき）だけ、稼働可でなくなった社員の候補を退役させる
+    if (properMasterConfigured()) retired = await retireProperCandidatesSheets(new Set(engineers.map((e) => e.id)));
+    if (retired > 0) console.log(`プロパー候補: 稼働可でなくなった社員の候補${retired}行を退役させました（氏名・必要案件単価・文面を消去）`);
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
-  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved };
+  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, retired };
   logCounts('プロパー候補', result);
   return result;
+}
+
+// 担当者メールによるプロパー候補の下書き依頼を受けてよい社員（管理表で稼働可の社員）のID。確かめられなければ null
+// （依頼は作らずに次回へ回す）
+export async function activeProperEngineerIds(): Promise<Set<string> | null> {
+  if (isDemo() || !properEnabled() || !properMasterConfigured()) return null;
+  return new Set((await loadProperEngineers(null)).map((e) => e.id));
 }
 
 // ===== サマリメール =====

@@ -59,29 +59,42 @@ export async function collectFromEmail(): Promise<RawLog[]> {
   return logs;
 }
 
-// MIMEツリーから text/plain 本文を再帰的に抽出する（base64url デコード）
+// MIMEツリーから text/plain 本文を再帰的に抽出する（base64url デコード）。
+// Gmail API は転送エンコーディングだけを外し、本文はそのパートの charset のまま返すため、Content-Type の charset で
+// 文字に戻す（日本語メールに多い ISO-2022-JP・Shift_JIS を UTF-8 として読むと文字化けする）
 function extractBody(payload: unknown): string {
   const p = payload as {
     mimeType?: string;
+    headers?: Array<{ name?: string | null; value?: string | null }>;
     body?: { data?: string };
     parts?: unknown[];
   } | undefined;
   if (!p) return '';
 
   if (p.mimeType === 'text/plain' && p.body?.data) {
-    return decodeBase64Url(p.body.data);
+    return decodeBase64Url(p.body.data, charsetOf(p.headers));
   }
   for (const part of p.parts ?? []) {
     const text = extractBody(part);
     if (text) return text;
   }
   // text/plain が無ければ最初の body を返す
-  if (p.body?.data) return decodeBase64Url(p.body.data);
+  if (p.body?.data) return decodeBase64Url(p.body.data, charsetOf(p.headers));
   return '';
 }
 
-function decodeBase64Url(data: string): string {
-  return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
+function charsetOf(headers: Array<{ name?: string | null; value?: string | null }> | undefined): string {
+  const contentType = (headers ?? []).find((h) => h.name?.toLowerCase() === 'content-type')?.value ?? '';
+  return contentType.match(/charset\s*=\s*"?([^";\s]+)"?/i)?.[1] ?? 'utf-8';
+}
+
+function decodeBase64Url(data: string, charset = 'utf-8'): string {
+  const bytes = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  try {
+    return new TextDecoder(charset.toLowerCase()).decode(bytes);
+  } catch {
+    return bytes.toString('utf-8'); // 知らない charset 名は UTF-8 として読む
+  }
 }
 
 // ===== SESマッチング機能向けの拡張 =====

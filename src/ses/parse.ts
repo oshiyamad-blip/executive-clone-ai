@@ -8,6 +8,7 @@ import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains } from './config.js';
 import { redactable, safeErr, SafeLogError } from './redact.js';
+import { GOOGLE_REQUEST_TIMEOUT_MS } from '../database/sheetBook.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
 
 export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[]> {
@@ -129,37 +130,64 @@ function domainOf(address: string | null | undefined): string {
 
 let warnedDriveCheck = false;
 
-// 社内のファイル（自社ドメインの人が所有する・プロパーのスキルシートのフォルダ配下にある）か。
+type FileOrigin = 'internal' | 'external' | 'unreadable';
+
+function statusOf(err: unknown): number {
+  const e = err as { status?: unknown; code?: unknown; response?: { status?: unknown } };
+  return Number(e.response?.status ?? e.status ?? (typeof e.code === 'number' ? e.code : NaN));
+}
+
+function reasonOf(err: unknown): string {
+  const e = err as { errors?: Array<{ reason?: unknown }>; response?: { data?: { error?: { errors?: Array<{ reason?: unknown }> } } } };
+  const r = e.response?.data?.error?.errors?.[0]?.reason ?? e.errors?.[0]?.reason;
+  return typeof r === 'string' ? r : '';
+}
+
+// 社内のファイル（自社ドメインの人が所有する・共有ドライブにある・プロパーのスキルシートのフォルダ配下にある）か。
 // サービスアカウントは社内の共有物（スキルシート等）も読めるため、社外から届いたメールにリンクを貼られただけで
-// 社内の個人情報を抽出・保存しないよう、確かめられない場合も社内とみなして読まない
-async function isInternalFile(drive: drive_v3.Drive, fileId: string): Promise<boolean> {
+// 社内の個人情報を抽出・保存しないよう、確かめられない場合も社内とみなして読まない。
+// - 共有ドライブのファイルは所有者（owners）が空で返るため、社外のドメインの人が明示的に共有したもの以外は社内とみなす
+// - サービスアカウントに共有されていないファイル（404・権限なし）は読めないだけなので「読めない」として数える
+async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOrigin> {
   const own = ownDomains();
   const folder = properFolderId();
+  let f: drive_v3.Schema$File;
   try {
-    const f = (await drive.files.get({ fileId, fields: 'owners(emailAddress), parents', supportsAllDrives: true })).data;
-    if ((f.owners ?? []).some((o) => own.includes(domainOf(o.emailAddress)))) return true;
-    let parents = f.parents ?? [];
-    for (let depth = 0; depth < PARENT_DEPTH && parents.length > 0 && folder; depth++) {
-      if (parents.includes(folder)) return true;
-      const next: string[] = [];
-      for (const parent of parents) {
-        try {
-          const r = await drive.files.get({ fileId: parent, fields: 'parents', supportsAllDrives: true });
-          next.push(...(r.data.parents ?? []));
-        } catch {
-          // 親フォルダを見られない（社外の共有ファイルでは普通）
-        }
-      }
-      parents = next;
-    }
-    return Boolean(folder) && parents.includes(folder);
+    f = (
+      await drive.files.get({ fileId, fields: 'owners(emailAddress), sharingUser(emailAddress), driveId, parents', supportsAllDrives: true })
+    ).data;
   } catch (err) {
+    const status = statusOf(err);
+    if (status === 404 || (status === 403 && ['notFound', 'insufficientPermissions', 'insufficientFilePermissions'].includes(reasonOf(err)))) {
+      return 'unreadable';
+    }
     if (!warnedDriveCheck) {
       warnedDriveCheck = true;
       console.warn(`SES展開: リンク先のファイルの所有者を確かめられないため読みません（Drive APIの有効化を確認）: ${safeErr(err)}`);
     }
-    return true;
+    return 'internal';
   }
+  const ownerDomains = (f.owners ?? []).map((o) => domainOf(o.emailAddress)).filter(Boolean);
+  if (ownerDomains.some((d) => own.includes(d))) return 'internal';
+  const sharer = domainOf(f.sharingUser?.emailAddress);
+  const sharedByOutsider = sharer !== '' && own.length > 0 && !own.includes(sharer);
+  if (f.driveId) return sharedByOutsider ? 'external' : 'internal';
+  if (ownerDomains.length === 0 && !sharer) return 'internal'; // 誰のファイルか分からない
+  let parents = f.parents ?? [];
+  for (let depth = 0; depth < PARENT_DEPTH && parents.length > 0 && folder; depth++) {
+    if (parents.includes(folder)) return 'internal';
+    const next: string[] = [];
+    for (const parent of parents) {
+      try {
+        const r = await drive.files.get({ fileId: parent, fields: 'parents', supportsAllDrives: true });
+        next.push(...(r.data.parents ?? []));
+      } catch {
+        // 親フォルダを見られない（社外の共有ファイルでは普通）
+      }
+    }
+    parents = next;
+  }
+  return Boolean(folder) && parents.includes(folder) ? 'internal' : 'external';
 }
 
 // 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す。
@@ -176,11 +204,11 @@ async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise
   }
 
   const ownSheets = new Set([sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean));
-  const sheetsApi = google.sheets({ version: 'v4', auth });
+  const sheetsApi = google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
   // 自社ドメイン・プロパーのフォルダが分からなければ社内かどうかを判定できないため、確かめない
   const checkInternal = ownDomains().length > 0 || Boolean(properFolderId());
   const driveAuth = checkInternal ? getServiceAccountAuth(DRIVE_METADATA_SCOPES) : null;
-  const driveApi = driveAuth ? google.drive({ version: 'v3', auth: driveAuth }) : null;
+  const driveApi = driveAuth ? google.drive({ version: 'v3', auth: driveAuth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
   const results: SesAttachment[] = [];
   for (const link of mail.sheetLinks) {
     const spreadsheetId = extractSpreadsheetId(link);
@@ -188,9 +216,10 @@ async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise
       stats.skipped += 1;
       continue;
     }
-    if (driveApi && (await isInternalFile(driveApi, spreadsheetId))) {
+    const origin = driveApi ? await fileOrigin(driveApi, spreadsheetId) : 'external';
+    if (origin !== 'external') {
       stats.skipped += 1;
-      stats.internal += 1;
+      if (origin === 'internal') stats.internal += 1;
       continue;
     }
     try {

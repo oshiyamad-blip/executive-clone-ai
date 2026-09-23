@@ -1,13 +1,13 @@
 import '../env.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
-import { extractItems, type ExtractFlush } from './extract.js';
+import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
 import { matchAll, type PairScope } from './match.js';
 import { matchIncrementally } from './matchRun.js';
 import { createDrafts } from './draft.js';
-import { persistAndNotify, notifyResults } from './notify.js';
+import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
 import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
-import { runProperFlow, type ProperRunResult } from './proper/index.js';
+import { runProperFlow, activeProperEngineerIds, type ProperRunResult } from './proper/index.js';
 import { resetProperMasterCache } from './proper/master.js';
 import {
   markMailProcessed,
@@ -17,6 +17,7 @@ import {
   dedupeEngineers,
   withoutResentProjects,
   withoutResentEngineers,
+  reconcileReextractedIds,
 } from './store.js';
 import {
   saveProjects,
@@ -24,8 +25,18 @@ import {
   fetchOpenProjects,
   fetchAvailableEngineers,
   fetchJudgedMatchIds,
+  fetchSavedItemsForMails,
 } from '../database/index.js';
-import { resetSheetsCache, checkSheetsTabs, sheetsCellCount, pruneProcessedMailSheets, sheetsDbConfigured } from '../database/sheets.js';
+import {
+  resetSheetsCache,
+  checkSheetsTabs,
+  sheetsCellCount,
+  pruneProcessedMailSheets,
+  sheetsDbConfigured,
+  countUnmatchedBeyondPoolSheets,
+  acquireBatchLeaseSheets,
+  releaseBatchLeaseSheets,
+} from '../database/sheets.js';
 import {
   isDemo,
   liveConfigError,
@@ -35,8 +46,9 @@ import {
   matchLookbackDays,
   matchPoolLimit,
   dbProvider,
-  collectDays,
   runDeadlineMinutes,
+  logRedact,
+  COLLECT_DAYS_MAX,
 } from './config.js';
 import { startHealBatch } from './heal/budget.js';
 import {
@@ -76,9 +88,9 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  console.log(
-    `モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'} / 粗利下限: ${minGrossMarginJpy()}円/月 / 候補上限: ${maxCandidatesPerItem()}件`,
-  );
+  // 粗利下限は社外に知られたくない方針（Secretsに登録）のため、公開ログ（秘匿モード）には値を出さない
+  const margin = logRedact() ? '設定済み（値は表示しません）' : `${minGrossMarginJpy()}円/月`;
+  console.log(`モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'} / 粗利下限: ${margin} / 候補上限: ${maxCandidatesPerItem()}件`);
 
   // 自動検証・修復レイヤーの初期化（コストメーターとイベント収集。demoでは実質no-op）
   startHealBatch();
@@ -87,9 +99,12 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   resetProperMasterCache();
   if (!isDemo()) startRunClock();
 
+  let lease: string | null = null;
   try {
-    await runStages(opts);
+    lease = await acquireLease();
+    if (lease !== null) await runStages(opts);
   } finally {
+    if (lease) await releaseLease(lease);
     stopRunClock();
     if (hasFatal()) {
       console.error(`=== SESバッチ: 異常終了扱い（要因${fatalReasons().length}件）: ${fatalReasons().join(' / ')} ===`);
@@ -98,11 +113,40 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   }
 }
 
+// 実行中の印の期限。ジョブの制限時間（40分）を含む長さにする（打ち切られた実行の印は期限で無効になる）
+const LEASE_EXTRA_MINUTES = 30;
+
+// 同時に動くバッチを1つに限る（定時実行と手元・自前の定期実行が重なると、同じ依頼の下書き・同じメールの行を二重に作るため）。
+// 実行してよければ印の識別子、だめなら null（異常終了として知らせる）。Sheets運用の本番以外は印を使わない（''）
+async function acquireLease(): Promise<string | null> {
+  if (isDemo() || dbProvider() !== 'sheets' || !sheetsDbConfigured()) return '';
+  try {
+    const r = await acquireBatchLeaseSheets((runDeadlineMinutes() + LEASE_EXTRA_MINUTES) * 60_000);
+    if (r.ok) return r.token;
+    recordFatal(
+      `別のバッチが実行中のため、この実行では何もしませんでした（その実行の印の期限: ${r.until}）。` +
+        '前回の実行が打ち切られた場合は、期限を過ぎれば次の実行から動きます（急ぐ場合はスプレッドシート「_状態」タブの batchLease の行を消してください）',
+    );
+  } catch (err) {
+    console.error(`SES: 実行中の印を確かめられません: ${safeErr(err)}`);
+    recordFatal('実行中の印（スプレッドシート「_状態」タブ）を確かめられないため、この実行では何もしませんでした（共有・見出しを確認してください）');
+  }
+  return null;
+}
+
+async function releaseLease(token: string): Promise<void> {
+  try {
+    await releaseBatchLeaseSheets(token);
+  } catch (err) {
+    console.warn(`SES: 実行中の印を消せませんでした（期限を過ぎれば無効になります）: ${safeErr(err)}`);
+  }
+}
+
 async function runStages(opts: SesBatchOptions): Promise<void> {
   // 前回バッチ以降にスプレッドシートの「担当者メール」で依頼された下書きを、収集より先に作成する
   let requestedDrafts: PendingDraftResult = { created: 0, failed: 0 };
   try {
-    requestedDrafts = await materializePendingDrafts();
+    requestedDrafts = await materializePendingDrafts(undefined, activeProperEngineerIds);
   } catch (err) {
     console.error(`SES下書き依頼: 失敗: ${safeErr(err)}`);
     recordFatal('担当者指定の下書き作成段が例外で停止しました');
@@ -124,7 +168,10 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
     }
   }
 
-  let saved: MatchResult[] = [];
+  // 前回までの実行で保存したがサマリで知らせ損ねたマッチ（今回のサマリに載せる）
+  const carried = await loadUnnotifiedMatches();
+  const saved: MatchResult[] = [];
+  const remember = () => rememberUnnotified(carried.ids, saved);
   if (pool) {
     try {
       const { projects, engineers, scope } = matchScope(pool, stored);
@@ -132,16 +179,22 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
         `SESマッチング: 新着 案件${stored.projects.length}件・要員${stored.engineers.length}件を、直近${matchLookbackDays()}日の` +
           `案件${projects.length - stored.projects.length}件・要員${engineers.length - stored.engineers.length}件とも突合します（判定済み${pool.judged.size}組は除外）`,
       );
-      ({ saved } = await matchIncrementally(projects, engineers, scope));
+      await matchIncrementally(projects, engineers, scope, { saved, checkpoint: remember });
     } catch (err) {
       console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
       recordFatal('マッチング段が例外で停止しました（突合済でない案件・要員は次回の実行で突合します）');
     }
   }
+  try {
+    await remember();
+  } catch (err) {
+    console.warn(`SES通知: 知らせていないマッチの控えを書けません: ${safeErr(err)}`);
+  }
 
   const proper = pastRunDeadline() ? skipProperForDeadline() : await runProperStage([]);
   try {
-    await notifyResults(saved, requestedDrafts, proper);
+    // 送れた（または送る先が無い）ときだけ控えを消す。送れなければ次の回のサマリに持ち越す
+    if ((await notifyResults(saved, requestedDrafts, proper, carried.rows)) !== 'failed') await clearUnnotified();
   } catch (err) {
     console.error(`SES通知: 失敗: ${safeErr(err)}`);
     recordFatal('通知段が例外で停止しました');
@@ -170,8 +223,13 @@ async function runWholeBatch(opts: SesBatchOptions, requestedDrafts: PendingDraf
 }
 
 async function maybeRepair(): Promise<void> {
-  // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）
+  // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）。
+  // 生成には時間がかかるため、実行時間の期限を過ぎていれば次の回に回す（手動の npm run ses:repair はいつでも可）
   if (!isDemo() && repairEnabled() && getStats().quarantinedNew > 0) {
+    if (pastRunDeadline()) {
+      console.log('SES修復: 実行時間の上限を過ぎたため、修正パッチ案の自動生成は次の回に回します（手動: npm run ses:repair）');
+      return;
+    }
     try {
       await runRepair(true);
     } catch (err) {
@@ -208,7 +266,8 @@ async function loadStorePool(): Promise<StorePool | null> {
   const since = new Date(Date.now() - matchLookbackDays() * DAY_MS);
   try {
     if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
-      await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール']);
+      // _状態（隔離リスト等）も先に確かめる（読めないまま抽出すると、失敗したメールを隔離できずに取りこぼすため）
+      await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール', '_状態']);
       const cells = sheetsCellCount();
       if (cells > SHEETS_CELL_LIMIT * 0.8) {
         recordHealEvent(
@@ -222,6 +281,16 @@ async function loadStorePool(): Promise<StorePool | null> {
       fetchAvailableEngineers(matchPoolLimit(), { receivedSince: since }),
       fetchJudgedMatchIds(since),
     ]);
+    if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
+      const beyond = await countUnmatchedBeyondPoolSheets(matchPoolLimit(), since);
+      if (beyond.projects + beyond.engineers > 0) {
+        recordHealEvent(
+          'critical',
+          `突合前の案件${beyond.projects}件・要員${beyond.engineers}件が、突合の対象の上限（SES_MATCH_POOL_LIMIT=${matchPoolLimit()}件）を超えて` +
+            '対象から外れています（判定されないまま残ります。SES_MATCH_POOL_LIMIT を上げてください）',
+        );
+      }
+    }
     return { projects, engineers, judged };
   } catch (err) {
     console.error(`SES: 保存先を読み込めません: ${safeErr(err)}`);
@@ -245,8 +314,12 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   let markFailed = false;
 
   const flush: ExtractFlush = async ({ items, processedMailIds }) => {
-    const projects = withoutResentProjects(knownProjects, dedupeProjects(items.filter(isProjectItem).map((i) => i.project)));
-    const engineers = withoutResentEngineers(knownEngineers, dedupeEngineers(items.filter(isEngineerItem).map((i) => i.engineer)));
+    const extracted = await withStableIds(
+      items.filter(isProjectItem).map((i) => i.project),
+      items.filter(isEngineerItem).map((i) => i.engineer),
+    );
+    const projects = withoutResentProjects(knownProjects, dedupeProjects(extracted.projects));
+    const engineers = withoutResentEngineers(knownEngineers, dedupeEngineers(extracted.engineers));
     const failedMailIds = new Set<string>();
     const [pr, er] = [await saveProjects(projects), await saveEngineers(engineers)];
     for (const p of projects) {
@@ -256,7 +329,10 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
         failedMailIds.add(p.sourceMailId);
         continue;
       }
-      const saved = { ...p, notionPageId: pr.pageIds.get(p.id), matched: matchedById.get(p.id) ?? false };
+      // 保存済みの行を抽出し直した場合は、人が付けた「終了」と突合済の印をシートの値のまま引き継ぐ
+      // （抽出し直した値で「募集中・突合前」として扱うと、終了した案件を紹介し直してしまう）
+      const kept = pr.saved?.get(p.id) ?? { ...p, matched: matchedById.get(p.id) ?? false };
+      const saved = { ...kept, notionPageId: pr.pageIds.get(p.id) };
       stored.projects.push(saved);
       knownProjects.push(saved);
     }
@@ -267,7 +343,8 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
         failedMailIds.add(e.sourceMailId);
         continue;
       }
-      const saved = { ...e, notionPageId: er.pageIds.get(e.id), matched: matchedById.get(e.id) ?? false };
+      const kept = er.saved?.get(e.id) ?? { ...e, matched: matchedById.get(e.id) ?? false };
+      const saved = { ...kept, notionPageId: er.pageIds.get(e.id) };
       stored.engineers.push(saved);
       knownEngineers.push(saved);
     }
@@ -297,6 +374,23 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
   return stored;
+}
+
+// 同じメールを抽出し直した（前回は一部の保存に失敗して処理済みにしなかった等）とき、IDを保存済みの行と内容で対応付ける。
+// IDはメール内の出現順から作るため、LLMが項目の順番・件数を変えて返すと、別の案件・要員の行を上書きしてしまう
+async function withStableIds(projects: Project[], engineers: Engineer[]): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  const mailIds = new Set([...projects.map((p) => p.sourceMailId), ...engineers.map((e) => e.sourceMailId)]);
+  let savedItems: { projects: Project[]; engineers: Engineer[] };
+  try {
+    savedItems = await fetchSavedItemsForMails(mailIds);
+  } catch (err) {
+    console.warn(`SES保存: 保存済みの行を確かめられないため、抽出した順のIDで保存します: ${safeErr(err)}`);
+    return { projects, engineers };
+  }
+  return {
+    projects: reconcileReextractedIds('project', projects, savedItems.projects, (mailId, i) => itemIdOf('proj', mailId, i)),
+    engineers: reconcileReextractedIds('engineer', engineers, savedItems.engineers, (mailId, i) => itemIdOf('eng', mailId, i)),
+  };
 }
 
 async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[] }> {
@@ -346,11 +440,13 @@ function matchScope(pool: StorePool, stored: StoredItems): { projects: Project[]
   };
 }
 
-// 収集期間を十分過ぎた処理済みメールの記録を消す（スプレッドシートの容量対策。失敗しても次回に回すだけ）
+// 収集期間を十分過ぎた処理済みメールの記録を消す（スプレッドシートの容量対策。失敗しても次回に回すだけ）。
+// 取りこぼしの復旧で SES_COLLECT_DAYS を広げて再実行しても処理済みのメールを抽出し直さないよう、
+// 今の設定ではなく設定できる最大の日数（60日）より古い記録だけを消す
 async function pruneProcessedMails(): Promise<void> {
   if (dbProvider() !== 'sheets' || !sheetsDbConfigured()) return;
   try {
-    const removed = await pruneProcessedMailSheets(new Date(Date.now() - (collectDays() + 7) * DAY_MS));
+    const removed = await pruneProcessedMailSheets(new Date(Date.now() - (COLLECT_DAYS_MAX + 7) * DAY_MS));
     if (removed > 0) console.log(`SES: 収集期間を過ぎた処理済みメールの記録${removed}行を削除しました`);
   } catch (err) {
     console.warn(`SES: 処理済みメールの記録の整理に失敗: ${safeErr(err)}`);

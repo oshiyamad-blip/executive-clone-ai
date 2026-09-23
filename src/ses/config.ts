@@ -242,9 +242,11 @@ export function xserverDraftsMailbox(): string {
 // 広めに取る: 週末をまたぐ月曜の実行や、抽出に失敗したメールの次回以降の再試行（最大 SES_HEAL_MAX_ATTEMPTS 回）が
 // 窓から外れて取りこぼされないように既定7日（窓の中のメールは本文を取得する前に処理済みかを確かめるため、
 // 広げても取得量は増えない）。旧名 XSERVER_COLLECT_DAYS も受け付ける
+export const COLLECT_DAYS_MAX = 60;
+
 export function collectDays(): number {
   const name = env('SES_COLLECT_DAYS') ? 'SES_COLLECT_DAYS' : 'XSERVER_COLLECT_DAYS';
-  return envNum(name, 7, { min: 1, max: 60 });
+  return envNum(name, 7, { min: 1, max: COLLECT_DAYS_MAX });
 }
 
 // メール量の測定（npm run ses:mail-stats）で遡る日数
@@ -302,8 +304,8 @@ export function allowedSenders(): string[] {
     .filter(Boolean);
 }
 
-// スプレッドシートの「下書きデータ」列に付ける署名の鍵（HMAC-SHA256）。設定すると、人が書き換えた
-// 下書きデータ（宛先・本文）からは下書きを作らない。空なら署名しない
+// スプレッドシートの「下書きデータ」列と、案件・要員タブの「返信メタ」・営業元メール（下書きの宛先の元）に付ける署名の鍵
+// （HMAC-SHA256。行のタブ・IDも含めて署名する）。設定すると、人が書き換えた・別の行から写した値からは下書きを作らない。空なら署名しない
 export function draftSigningKey(): string {
   return env('SES_DRAFT_SIGNING_KEY');
 }
@@ -419,6 +421,12 @@ export function properImpersonate(): string {
 // 1回の実行でLLM抽出するスキルシートの上限（初回の大量取り込みでもコストと実行時間を抑えるため。残りは次回以降）
 export function properMaxExtractPerRun(): number {
   return envNum('PROPER_MAX_EXTRACT_PER_RUN', 20, { min: 0, int: true });
+}
+
+// スキルシートのフォルダ内の「ファイルへのショートカット」の参照先も読むか（既定 false）。有効にすると、フォルダに
+// ファイルを追加できる人は、プロパーの認証で読める任意のファイルを読み取らせられる（フォルダへのショートカットは常にたどらない）
+export function properFollowShortcuts(): boolean {
+  return envBool('PROPER_FOLLOW_SHORTCUTS', false);
 }
 
 // プロパー候補の突合対象にする案件の受信日の遡り日数

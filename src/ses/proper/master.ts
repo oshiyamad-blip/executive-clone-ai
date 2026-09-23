@@ -5,7 +5,8 @@
 // ログにはファイルIDと件数だけを出す（氏名・ファイル名・抽出内容は出さない）。
 import { createHash } from 'crypto';
 import { google } from 'googleapis';
-import { SheetBook, googleTransientKind, type Cell, type CachedRow } from '../../database/sheetBook.js';
+import { SheetBook, googleTransientKind, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from '../../database/sheetBook.js';
+import { properEngineerIdOf } from '../../database/sheets.js';
 import { joinList, splitList, remoteLabel, labelToRemote } from '../../database/mapping.js';
 import { properMasterSpreadsheetId, properMaxExtractPerRun } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
@@ -49,7 +50,7 @@ const book = new SheetBook({
   spreadsheetId: properMasterSpreadsheetId,
   createApi: () => {
     const auth = properGoogleAuth(SHEETS_SCOPES);
-    return auth ? google.sheets({ version: 'v4', auth }) : null;
+    return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
   },
   missingIdMessage: 'PROPER_MASTER_SPREADSHEET_ID が未設定',
   missingAuthMessage:
@@ -300,7 +301,8 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
     return result;
   }
   const supported = files.filter((f) => skillSheetFormat(f) !== null);
-  result.unsupportedNames = files.filter((f) => skillSheetFormat(f) === null).map((f) => f.name);
+  // ショートカットの参照先はフォルダの外のファイルのため、名前をサマリに載せない
+  result.unsupportedNames = files.filter((f) => skillSheetFormat(f) === null && !f.viaShortcut).map((f) => f.name);
   result.listed = supported.length;
   result.presentFileIds = new Set(supported.map((f) => f.id));
 
@@ -381,7 +383,7 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   // 人が手で入れた値も含め、イニシャルの形でなければ使わない（社外に出る提案文面に氏名が載らないように）
   const proposalLabel = sanitizeInitials(c('提案用表記'), fullName);
   return {
-    id: `proper_${fileId}`,
+    id: properEngineerIdOf(fileId),
     displayName: fullName || proposalLabel,
     fullName,
     proposalLabel,

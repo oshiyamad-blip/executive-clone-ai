@@ -224,3 +224,63 @@ export function withoutResentProjects(existing: Project[], fresh: Project[]): Pr
 export function withoutResentEngineers(existing: Engineer[], fresh: Engineer[]): Engineer[] {
   return withoutResends(existing, fresh, engineerKey, engineersCompatible, '要員');
 }
+
+// ===== 同じメールを抽出し直したときのID =====
+
+// 保存済みの行と「同じ項目」とみなす内容の類似度（名前＋スキル＋営業元の文字bigram）
+const REEXTRACT_MATCH_THRESHOLD = 0.6;
+
+// 同じメールを抽出し直したときのIDの対応付け。IDはメール内の出現順から作るため、LLMが項目の順番・件数を変えて返すと
+// 別の項目の行を上書きし、その行の突合済・判定済みのペアを別の内容に引き継いでしまう。保存済みの同じメールの行と
+// 内容の似ている順に対応付けてその行のIDを使い、対応しない項目は保存済みの行と重ならない新しいIDにする
+// （内容が言い換えられただけで出現順が同じなら、従来どおり出現順のIDを使う）
+export function reconcileReextractedIds<T extends Project | Engineer>(
+  kind: 'project' | 'engineer',
+  fresh: T[],
+  saved: T[],
+  newId: (mailId: string, index: number) => string,
+): T[] {
+  const keyOf = (item: T) => (kind === 'project' ? projectKey(item as Project) : engineerKey(item as Engineer));
+  const out = [...fresh];
+  for (const mailId of new Set(fresh.map((f) => f.sourceMailId))) {
+    const existing = saved.filter((x) => x.sourceMailId === mailId);
+    if (existing.length === 0) continue;
+    const indexes = fresh.map((f, i) => (f.sourceMailId === mailId ? i : -1)).filter((i) => i >= 0);
+    const assigned = new Map<number, string>(); // fresh の添字 → ID
+    const used = new Set<string>();
+    const pairs = indexes
+      .flatMap((i) => existing.map((x) => ({ i, id: x.id, sim: bigramSimilarity(keyOf(fresh[i]), keyOf(x)) })))
+      .filter((p) => p.sim >= REEXTRACT_MATCH_THRESHOLD)
+      .sort((a, b) => b.sim - a.sim);
+    for (const p of pairs) {
+      if (assigned.has(p.i) || used.has(p.id)) continue;
+      assigned.set(p.i, p.id);
+      used.add(p.id);
+    }
+    const existingIds = new Set(existing.map((x) => x.id));
+    for (const i of indexes) {
+      if (assigned.has(i)) continue;
+      const positional = fresh[i].id;
+      if (existingIds.has(positional) && !used.has(positional)) {
+        assigned.set(i, positional); // 似ている行が無く、同じ位置の行がまだ対応していない（言い換え）
+        used.add(positional);
+      }
+    }
+    let n = indexes.length + existing.length;
+    for (const i of indexes) {
+      if (assigned.has(i)) continue;
+      let id = fresh[i].id;
+      while (existingIds.has(id) || used.has(id)) id = newId(mailId, n++);
+      assigned.set(i, id);
+      used.add(id);
+    }
+    let changed = 0;
+    for (const [i, id] of assigned) {
+      if (out[i].id === id) continue;
+      out[i] = { ...out[i], id };
+      changed += 1;
+    }
+    if (changed > 0) console.log(`SES保存: 抽出し直したメールの${kind === 'project' ? '案件' : '要員'}${changed}件のIDを保存済みの行に合わせました`);
+  }
+  return out;
+}

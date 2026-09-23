@@ -7,6 +7,7 @@ import { isDemo, extractModel } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { SafeLogError } from '../redact.js';
+import { callLimits } from '../schedule.js';
 import type { RemoteOption } from '../../types/index.js';
 import type { SkillSheetContent } from './drive.js';
 
@@ -101,10 +102,12 @@ function coarseResidence(raw: string): string {
 // attempt は自動修復（heal/retry.ts）の再試行・上位モデル昇格用（出力上限の拡大・SDK再試行の抑止を含む）
 export async function extractSkillSheet(content: SkillSheetContent, attempt?: HealAttempt): Promise<SkillSheetProfile> {
   if (isDemo()) throw new SafeLogError('プロパー: demoではスキルシートの抽出を行いません');
+  const maxTokens = 4000 * (attempt?.maxTokensFactor ?? 1);
+  // 出力量に応じた待ち時間（SDKの既定の10分×再試行で、実行の期限・ジョブの制限時間を越えないように）
   const opts = {
     model: attempt?.model ?? extractModel(),
-    maxTokens: 4000 * (attempt?.maxTokensFactor ?? 1),
-    ...(attempt ? { maxRetries: attempt.sdkRetries } : {}),
+    maxTokens,
+    ...callLimits(60_000 + maxTokens * 15, attempt ? attempt.sdkRetries : 1),
   };
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const system = systemPrompt(todayJst);

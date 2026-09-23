@@ -115,14 +115,15 @@ export function senderDomainOnly(from: string): string {
 // lastChance=true は「次回の実行ではもう収集の窓から外れる」メール。回数に達していなくても隔離して
 // サマリに載せる（黙って窓から落ちて消えるのを防ぐ）。基盤障害中は呼び出し側が lastChance を渡さない
 // （メールの問題ではないため隔離せず、処理済みにもしないで異常終了として知らせる）。
-// 履歴を読めなかった場合は記録も隔離もしない（次回バッチで再試行される）。
+// 履歴を読めなかった場合は記録も隔離もしない（recorded=false。呼び出し側は、次回の実行で窓を外れるメールなら
+// 取りこぼしとして異常終了で知らせる）。
 export async function recordFailure(
   mail: SesRawMail,
   err: unknown,
   opts: { countTowardQuarantine: boolean; lastChance?: boolean } = { countTowardQuarantine: true },
-): Promise<{ attempts: number; quarantined: boolean }> {
+): Promise<{ attempts: number; quarantined: boolean; recorded: boolean }> {
   const list = await load();
-  if (!list) return { attempts: 0, quarantined: false };
+  if (!list) return { attempts: 0, quarantined: false, recorded: false };
   const now = new Date().toISOString();
   let entry = list.find((e) => e.mailId === mail.id);
   if (!entry) {
@@ -144,7 +145,7 @@ export async function recordFailure(
   const quarantined = entry.attempts >= healMaxAttempts() || Boolean(opts.lastChance);
   if (quarantined && !entry.quarantinedAt) entry.quarantinedAt = now;
   await save(list);
-  return { attempts: entry.attempts, quarantined };
+  return { attempts: entry.attempts, quarantined, recorded: true };
 }
 
 // 成功したら失敗履歴を消す（一時障害からの回復）

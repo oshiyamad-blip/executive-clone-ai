@@ -14,7 +14,7 @@ import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
 import { redactable, safeErr } from './redact.js';
 import { recordHealEvent } from './heal/events.js';
-import { callTimeoutMs } from './schedule.js';
+import { callLimits, pastRunDeadline } from './schedule.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
@@ -221,6 +221,10 @@ export async function materializeReplyDraft(ref: DraftRef, fromEmail: string): P
   return createReplyDraftViaMail(finalized, fromEmail);
 }
 
+// 本番で同時に作る紹介文面の組の数（1組は案件側・要員側の2通を並行に生成する。1件ずつだと候補の多い回で
+// 実行時間の上限に届くため。APIのレート制限の内に収める）
+const DRAFT_CONCURRENCY = 2;
+
 export async function createDrafts(
   matches: MatchResult[],
   projects: Project[],
@@ -229,47 +233,55 @@ export async function createDrafts(
   const projectMap = new Map(projects.map((p) => [p.id, p]));
   const engineerMap = new Map(engineers.map((e) => [e.id, e]));
 
-  const results: MatchResult[] = [];
   const demoRecords: Array<{ matchId: string; title: string; draftToProject: DraftRef; draftToEngineer: DraftRef }> =
     [];
-  let templated = 0;
-  let failed = 0;
+  const counts = { templated: 0, deadline: 0, failed: 0 };
 
-  for (const match of matches) {
+  const draftOne = async (match: MatchResult): Promise<MatchResult> => {
     // 要確認枠(情報不足)・参考提案枠(スキルが許容範囲)は自動下書き対象外。
     // 人が内容を確認・確定してから紹介する（誤提案を防ぐ）。
-    if (match.needsReview || match.category === 'tentative') {
-      results.push(match);
-      continue;
-    }
+    if (match.needsReview || match.category === 'tentative') return match;
     const project = projectMap.get(match.projectId);
     const engineer = engineerMap.get(match.engineerId);
     // 文面を用意できなかった成立候補・交渉提案は、下書き状態を「文面を用意できませんでした」にして次回作り直す
     // （「不要」にすると判定済みのまま二度と文面が作られない）
     if (!project || !engineer) {
       console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${match.id} ${redactable(match.title)})`);
-      results.push({ ...match, draftFailed: true });
-      failed += 1;
-      continue;
+      counts.failed += 1;
+      return { ...match, draftFailed: true };
     }
     try {
       const [draftToProject, draftToEngineer] = isDemo()
         ? createDemoDraftPair(project, engineer, match)
-        : await createProdDraftPair(project, engineer, match, () => (templated += 1));
-      results.push({ ...match, draftToProject, draftToEngineer });
+        : await createProdDraftPair(project, engineer, match, counts);
       if (isDemo()) demoRecords.push({ matchId: match.id, title: match.title, draftToProject, draftToEngineer });
+      return { ...match, draftToProject, draftToEngineer };
     } catch (err) {
       console.error(`SES下書き: 生成に失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
-      results.push({ ...match, draftFailed: true });
-      failed += 1;
+      counts.failed += 1;
+      return { ...match, draftFailed: true };
     }
-  }
+  };
 
-  if (templated > 0) {
-    recordHealEvent('warn', `紹介文面${templated}通は生成AIで作れなかったため定型文で用意しました（送信前に内容をご確認ください）`);
+  // demoは文面の番号（demo_draft_N）を入力の順に振るため1件ずつ
+  const results: MatchResult[] = new Array(matches.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < matches.length) {
+      const i = next++;
+      results[i] = await draftOne(matches[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(isDemo() ? 1 : DRAFT_CONCURRENCY, matches.length) }, worker));
+
+  if (counts.templated > 0) {
+    recordHealEvent('warn', `紹介文面${counts.templated}通は生成AIで作れなかったため定型文で用意しました（送信前に内容をご確認ください）`);
   }
-  if (failed > 0) {
-    recordHealEvent('warn', `成立候補・交渉提案${failed}件の紹介文面を用意できませんでした（次回のバッチで作り直します）`);
+  if (counts.deadline > 0) {
+    recordHealEvent('warn', `実行時間の上限を過ぎたため、紹介文面${counts.deadline}通は生成AIを使わず定型文で用意しました（送信前に内容をご確認ください）`);
+  }
+  if (counts.failed > 0) {
+    recordHealEvent('warn', `成立候補・交渉提案${counts.failed}件の紹介文面を用意できませんでした（次回のバッチで作り直します）`);
   }
   if (isDemo()) writeDemoArtifact('drafts', demoRecords);
   return results;
@@ -400,20 +412,26 @@ async function createProdDraftPair(
   project: Project,
   engineer: Engineer,
   match: MatchResult,
-  onTemplate: () => void,
+  counts: { templated: number; deadline: number },
 ): Promise<[DraftRef, DraftRef]> {
   // strict: 出力上限での打ち切り・拒否・空応答を例外にする（途中で切れた文面や案内文を紹介メールの本文にしない）。
   // 上位モデルは adaptive thinking の思考も出力上限に数えるため、本文の長さより大きめに取る
-  const opts = { model: matchModel(), maxTokens: 8000, strict: true, timeoutMs: callTimeoutMs(180_000), maxRetries: 1 };
+  const opts = { model: matchModel(), maxTokens: 8000, strict: true, ...callLimits(180_000, 1) };
+  // 実行時間の期限を過ぎたら生成AIを呼ばず定型文にする（判定・保存まで済ませ、ジョブの制限時間の内に終えるため）
+  const useTemplate = pastRunDeadline();
   const generate = async (side: Side): Promise<string> => {
     const view = recipientView(side, project, engineer, match);
+    if (useTemplate) {
+      counts.deadline += 1;
+      return buildTemplate(view);
+    }
     let body: string;
     try {
       body = await generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt(side, view) }], opts);
     } catch (err) {
       // 生成できなくても、相手に出してよい事実だけで組んだ定型文で下書きを用意する（成立候補を文面なしにしない）
       console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の文面を生成できないため定型文にしました (${match.id}): ${safeErr(err)}`);
-      onTemplate();
+      counts.templated += 1;
       return buildTemplate(view);
     }
     const issues = disclosureIssues(body, side, project, engineer, match);

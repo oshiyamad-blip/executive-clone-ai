@@ -4,7 +4,7 @@
 // ファイル名・本文は個人情報を含むためログに出さない（ファイルIDと件数のみ）。
 import { google, type drive_v3 } from 'googleapis';
 import mammoth from 'mammoth';
-import { properFolderId } from '../config.js';
+import { properFolderId, properFollowShortcuts } from '../config.js';
 import { spreadsheetBufferToText } from '../parse.js';
 import { SafeLogError } from '../redact.js';
 import { withGoogleRetry } from '../../database/sheetBook.js';
@@ -36,6 +36,7 @@ export interface SkillSheetFile {
   modifiedTime: string; // RFC 3339（変更検知のキー）
   webViewLink: string;
   size: number | null; // Googleドキュメント等は null
+  viaShortcut?: boolean; // フォルダ内のショートカットからたどったファイル（名前をサマリに載せない）
 }
 
 export type SkillSheetFormat = 'pdf' | 'excel' | 'docx' | 'gdoc' | 'gsheet';
@@ -68,7 +69,8 @@ function driveApi(): drive_v3.Drive {
   if (!auth) {
     throw new SafeLogError('プロパー: Google認証（GOOGLE_SA_KEY_JSON 等）が未設定のためスキルシートを読めません');
   }
-  client = google.drive({ version: 'v3', auth });
+  // スキルシートのダウンロード・書き出し（最大10MB）に足りる待ち時間。応答の無い接続で実行全体を止めない
+  client = google.drive({ version: 'v3', auth, timeout: 120_000 });
   return client;
 }
 
@@ -85,16 +87,20 @@ async function shortcutTarget(drive: drive_v3.Drive, targetId: string): Promise<
 }
 
 // フォルダ配下のファイル（フォルダ以外。ゴミ箱は除く）を列挙する。共有ドライブ上のフォルダにも対応。
-// ショートカットは参照先をたどる（社員ごとのフォルダの原本をショートカットで集める運用があるため）
+// ショートカットは既定ではたどらない（フォルダにファイルを追加できる人が、プロパーの認証で読める任意のファイル・フォルダ
+// （人事の資料等）へのショートカットを置くと、それを読み取って管理表・案件スプレッドシート・サマリへ書き出してしまうため）。
+// PROPER_FOLLOW_SHORTCUTS=true のときだけ、ファイルへのショートカットの参照先を読む（フォルダへのショートカットはたどらない）
 export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
   const root = properFolderId();
   if (!/^[A-Za-z0-9_-]+$/.test(root)) {
     throw new SafeLogError('プロパー: PROPER_SKILLSHEET_FOLDER_ID の形式が正しくありません（フォルダのURLまたはID）');
   }
   const drive = driveApi();
+  const followShortcuts = properFollowShortcuts();
   const files: SkillSheetFile[] = [];
   const seenFolders = new Set<string>([root]);
   const seenFiles = new Set<string>();
+  let skippedShortcuts = 0;
   let level = [root];
   for (let depth = 0; depth <= MAX_FOLDER_DEPTH && level.length > 0; depth++) {
     const next: string[] = [];
@@ -122,17 +128,17 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
         }
         for (const listed of res.data.files ?? []) {
           let f: drive_v3.Schema$File = listed;
+          let viaShortcut = false;
           if (listed.mimeType === MIME.shortcut) {
             const targetId = listed.shortcutDetails?.targetId;
-            if (!targetId) continue;
-            if (listed.shortcutDetails?.targetMimeType === MIME.folder) {
-              if (!seenFolders.has(targetId)) next.push(targetId);
-              seenFolders.add(targetId);
+            if (!followShortcuts || !targetId || listed.shortcutDetails?.targetMimeType === MIME.folder) {
+              skippedShortcuts += 1;
               continue;
             }
             const target = await shortcutTarget(drive, targetId);
-            if (!target?.id) continue;
+            if (!target?.id || target.mimeType === MIME.folder) continue;
             f = target;
+            viaShortcut = true;
           }
           if (!f.id) continue;
           if (f.mimeType === MIME.folder) {
@@ -149,12 +155,19 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
             modifiedTime: f.modifiedTime ?? '',
             webViewLink: f.webViewLink ?? '',
             size: f.size ? Number(f.size) : null,
+            ...(viaShortcut ? { viaShortcut } : {}),
           });
         }
         pageToken = res.data.nextPageToken ?? undefined;
       } while (pageToken);
     }
     level = next;
+  }
+  if (skippedShortcuts > 0) {
+    console.log(
+      `プロパー: スキルシートのフォルダ内のショートカット${skippedShortcuts}件は読みません（` +
+        `${followShortcuts ? 'フォルダへのショートカットはたどりません' : '原本をフォルダに置くか、PROPER_FOLLOW_SHORTCUTS=true でファイルへのショートカットを読みます'}）`,
+    );
   }
   return files;
 }

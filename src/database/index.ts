@@ -415,13 +415,15 @@ export async function saveMatch(
 
 // ===== まとめ保存（Sheetsは新しい行をまとめて追記。Notionは1件ずつ） =====
 
-export interface BatchSaveResult {
+export interface BatchSaveResult<T = unknown> {
   failed: Map<string, unknown>; // 保存できなかった ID → エラー
   pageIds: Map<string, string>; // 保存できた ID → 参照ID（NotionのページID。Sheetsは自ID）
+  // 保存後の状態（Sheetsのみ。人が進めたステータス・突合済の印を引き継いだ値）。無ければ渡した値のまま
+  saved?: Map<string, T>;
 }
 
-async function saveEach<T extends { id: string }>(items: T[], save: (item: T) => Promise<string>): Promise<BatchSaveResult> {
-  const result: BatchSaveResult = { failed: new Map(), pageIds: new Map() };
+async function saveEach<T extends { id: string }>(items: T[], save: (item: T) => Promise<string>): Promise<BatchSaveResult<T>> {
+  const result: BatchSaveResult<T> = { failed: new Map(), pageIds: new Map() };
   for (const item of items) {
     try {
       result.pageIds.set(item.id, await save(item));
@@ -432,18 +434,30 @@ async function saveEach<T extends { id: string }>(items: T[], save: (item: T) =>
   return result;
 }
 
-function sheetsResult<T extends { id: string }>(items: T[], failed: Map<string, unknown>): BatchSaveResult {
-  return { failed, pageIds: new Map(items.filter((i) => !failed.has(i.id)).map((i) => [i.id, i.id])) };
+function sheetsResult<T extends { id: string }>(items: T[], failed: Map<string, unknown>, saved?: Map<string, T>): BatchSaveResult<T> {
+  return { failed, pageIds: new Map(items.filter((i) => !failed.has(i.id)).map((i) => [i.id, i.id])), ...(saved ? { saved } : {}) };
 }
 
-export async function saveProjects(projects: Project[]): Promise<BatchSaveResult> {
-  if (dbProvider() === 'sheets') return sheetsResult(projects, await sheetsDb.saveProjectsSheets(projects));
+export async function saveProjects(projects: Project[]): Promise<BatchSaveResult<Project>> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.saveProjectsSheets(projects);
+    return sheetsResult(projects, r.failed, r.saved);
+  }
   return saveEach(projects, saveProject);
 }
 
-export async function saveEngineers(engineers: Engineer[]): Promise<BatchSaveResult> {
-  if (dbProvider() === 'sheets') return sheetsResult(engineers, await sheetsDb.saveEngineersSheets(engineers));
+export async function saveEngineers(engineers: Engineer[]): Promise<BatchSaveResult<Engineer>> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.saveEngineersSheets(engineers);
+    return sheetsResult(engineers, r.failed, r.saved);
+  }
   return saveEach(engineers, saveEngineer);
+}
+
+// 指定のメールから保存済みの案件・要員（同じメールを抽出し直したときのIDの対応付け用。Sheetsのみ）
+export async function fetchSavedItemsForMails(mailIds: Set<string>): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchItemsByMailSheets(mailIds);
+  return { projects: [], engineers: [] };
 }
 
 export async function saveMatches(

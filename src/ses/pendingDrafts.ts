@@ -4,7 +4,9 @@
 // 常駐の確認UIを置かずに定期実行だけで「本人のアドレスで下書き」を実現するための経路。自動送信はしない。
 // 結果は状態列にだけ書き戻す（作成済 日時 / エラー: 理由）。担当者メール・文面はログに出さない。
 // シートの編集者なら誰でも担当者メールを書けるため、送信元は許可したドメイン・アドレスに限る（未設定なら作らない）。
-import { createHash } from 'crypto';
+// 作成の前に「作成中 日時 #照合用の記号」を書いてから読み直し、自分の記号が残っているときだけ作る（同時に動いた別の実行と
+// 二重に作らないため）。下書きには記号から作った識別子（X-SES-Draft-Key）を付け、応答が失われた作成を後から確かめる。
+import { createHash, randomBytes } from 'crypto';
 import {
   isDemo,
   dbProvider,
@@ -24,9 +26,12 @@ import { isPlainEmailAddress } from './settingsFormat.js';
 import {
   sheetsDbConfigured,
   draftRequestTabs,
+  draftBinding,
   listDraftRequestRowsSheets,
   reloadDraftRequestRowSheets,
   writeDraftStatesSheets,
+  properEngineerIdOfCandidate,
+  PROPER_CANDIDATE_TAB,
   type DraftRequestRow,
 } from '../database/sheets.js';
 import {
@@ -131,9 +136,30 @@ function inProgressSides(row: DraftRequestRow): DraftSide[] {
   return SIDES.filter((side) => stateOf(row, side).trim().startsWith(DRAFT_STATE.inProgress));
 }
 
-// 下書きの識別子（下書きの X-SES-Draft-Key ヘッダ）。タブ・ID・側から決まり、中身を推測できない値にする
-export function draftKeyOf(tab: string, id: string, side: DraftSide): string {
-  return createHash('sha256').update(`${tab}\u0000${id}\u0000${side}`).digest('base64url').slice(0, 24);
+// 下書きの識別子（下書きの X-SES-Draft-Key ヘッダ）。タブ・ID・側と、作成の試み1回ごとの照合用の記号（nonce）から決まり、
+// 中身を推測できない値にする。記号が違えば別の試み（前に別の担当者で作った下書き等）とみなす。
+// 記号の無い識別子は以前の版の「作成中」の行を確かめるためだけに使う
+export function draftKeyOf(tab: string, id: string, side: DraftSide, nonce = ''): string {
+  const parts = [tab, id, side, ...(nonce ? [nonce] : [])];
+  return createHash('sha256').update(parts.join('\u0000')).digest('base64url').slice(0, 24);
+}
+
+// 状態列に添える照合用の記号（「作成中 日時 #記号」「エラー: 理由 #記号」）
+function newNonce(): string {
+  return randomBytes(6).toString('base64url');
+}
+
+export function nonceOf(state: string): string {
+  return state.trim().match(/ #([A-Za-z0-9_-]{6,})$/)?.[1] ?? '';
+}
+
+function inProgressState(nonce: string): string {
+  return `${DRAFT_STATE.inProgress} ${jstStamp()} #${nonce}`;
+}
+
+// 作成を試みて失敗した側のエラー（作成自体は済んで応答だけ失われた可能性があるため、記号を残して次回に確かめる）
+function attemptErrorState(reason: string, nonce: string): string {
+  return `${errorState(reason).slice(0, 110)} #${nonce}`;
 }
 
 // 依頼の検証結果。作成に進む側と、作成せずエラーを書く側に分ける
@@ -141,18 +167,25 @@ export function planDraftRequest(
   row: DraftRequestRow,
   policy: SenderPolicy,
   signingKey = '',
+  activeProperEngineers: Set<string> | null = null,
 ): { sender: string; data: StoredDraftData; create: DraftSide[]; errors: SideStates } {
   const sender = normalizeSenderEmail(row.senderEmail);
   const data = parseDraftData(row.draftData);
   const invalid = !isValidSenderEmail(sender)
     ? '担当者メールの形式が正しくありません（ご自身の会社アドレスを1件だけ入力してください）'
     : senderRejection(sender, policy);
-  const tampered = !verifyDraftData(row.draftData, signingKey);
+  const tampered = !verifyDraftData(row.draftData, signingKey, draftBinding(row.tab, row.id));
+  // プロパー候補は、今も稼働可の社員のものだけ作る（管理表で対象外・アサイン済にした社員を社外に紹介しない）
+  const retired = row.tab === PROPER_CANDIDATE_TAB && !activeProperEngineers?.has(properEngineerIdOfCandidate(row.id));
   const create: DraftSide[] = [];
   const errors: SideStates = {};
   for (const side of pendingSides(row)) {
     if (invalid) errors[side] = errorState(invalid);
-    else if (tampered) errors[side] = errorState('下書きデータが書き換えられているため作成しません');
+    else if (retired) {
+      errors[side] = errorState(
+        activeProperEngineers ? 'この社員は稼働可ではないため作成しません（プロパー管理表の稼働状況）' : 'プロパー管理表を確認できないため作成しません（次回のバッチで再試行します）',
+      );
+    } else if (tampered) errors[side] = errorState('下書きデータが書き換えられているため作成しません');
     else if (!data[side]) errors[side] = errorState('下書きの文面データがありません');
     else create.push(side);
   }
@@ -184,7 +217,14 @@ function rowLabel(tab: string, id: string): string {
   return id.includes('proper_') ? `${tab} #${createHash('sha256').update(id).digest('hex').slice(0, 8)}` : `${tab} ${id}`;
 }
 
-async function processRequest(listed: DraftRequestRow, policy: SenderPolicy): Promise<PendingDraftResult> {
+// プロパー候補の依頼を受けてよい社員（稼働可）の一覧。必要になったときに1回だけ読む（読めなければ null）
+export type ProperActiveLoader = () => Promise<Set<string> | null>;
+
+async function processRequest(
+  listed: DraftRequestRow,
+  policy: SenderPolicy,
+  properActive: () => Promise<Set<string> | null>,
+): Promise<PendingDraftResult> {
   const out: PendingDraftResult = { created: 0, failed: 0 };
   const label = rowLabel(listed.tab, listed.id);
   let row: DraftRequestRow | null;
@@ -197,15 +237,22 @@ async function processRequest(listed: DraftRequestRow, policy: SenderPolicy): Pr
   }
   if (!row || !row.senderEmail.trim()) return out; // 行の削除・担当者メールの取り消し
 
-  const { sender, data, create, errors } = planDraftRequest(row, policy, draftSigningKey());
+  const active = row.tab === PROPER_CANDIDATE_TAB ? await properActive() : null;
+  const { sender, data, create, errors } = planDraftRequest(row, policy, draftSigningKey(), active);
   out.failed += Object.keys(errors).length;
   if (create.length === 0 && Object.keys(errors).length === 0) return out;
 
-  // 作成前に「作成中 日時」を書いておく。作成後の書き戻しに失敗しても次回に同じ下書きを二重作成しないため
+  // 作成前に「作成中 日時 #記号」を書いておく。作成後の書き戻しに失敗しても次回に同じ下書きを二重作成しないため。
+  // 読み直した行の状態が変わっていれば（別の実行・人が先に進めた）書かずにやめる
   const before: SideStates = { ...errors };
-  for (const side of create) before[side] = `${DRAFT_STATE.inProgress} ${jstStamp()}`;
+  const nonces: Partial<Record<DraftSide, string>> = {};
+  for (const side of create) {
+    nonces[side] = newNonce();
+    before[side] = inProgressState(nonces[side]!);
+  }
   try {
-    if (!(await writeDraftStatesSheets(row, changedStates(row, before)))) return out;
+    const changed = changedStates(row, before);
+    if (Object.keys(changed).length > 0 && !(await writeDraftStatesSheets(row, changed, row))) return out;
   } catch (err) {
     console.error(`SES下書き依頼: 状態を書き込めないため作成を見送ります (${label}): ${safeErr(err)}`);
     out.failed += create.length;
@@ -213,25 +260,41 @@ async function processRequest(listed: DraftRequestRow, policy: SenderPolicy): Pr
   }
   if (create.length === 0) return out;
 
+  // 書いた「作成中」が残っている側だけを作る（ほぼ同時に同じ行を処理した別の実行がいれば、後から書いた方だけが作る）
+  let confirmed: DraftRequestRow | null;
+  try {
+    confirmed = await reloadDraftRequestRowSheets(row);
+  } catch (err) {
+    console.error(`SES下書き依頼: 「作成中」の確認に失敗したため作成を見送ります (${label}): ${safeErr(err)}`);
+    return out;
+  }
+  const mine = create.filter((side) => confirmed !== null && stateOf(confirmed, side) === before[side]);
+  if (mine.length < create.length) {
+    console.warn(`SES下書き依頼: 別の実行が同じ依頼を処理しているため作成を見送りました (${label})`);
+  }
+
   const after: SideStates = {};
-  for (const side of create) {
-    const key = draftKeyOf(row.tab, row.id, side);
-    // 前回「エラー」になった側は、作成自体は済んでいて応答だけ失敗した可能性があるため、先に下書きフォルダを確かめる
-    if (stateOf(row, side).trim().startsWith(DRAFT_STATE.error) && (await draftAlreadyExists(key)) === true) {
+  for (const side of mine) {
+    const nonce = nonces[side]!;
+    const prevNonce = nonceOf(stateOf(row, side));
+    // 前回の作成の試みが「エラー」になった側は、作成自体は済んでいて応答だけ失敗した可能性があるため、
+    // その試みの識別子の下書きが下書きフォルダに無いかを先に確かめる（入力の誤り等で作成を試みていないエラーは確かめない）
+    if (prevNonce && stateOf(row, side).trim().startsWith(DRAFT_STATE.error) && (await draftAlreadyExists(draftKeyOf(row.tab, row.id, side, prevNonce))) === true) {
       after[side] = `${DRAFT_STATE.created} ${jstStamp()}`;
       out.created += 1;
       continue;
     }
     try {
-      await materializeReplyDraft({ ...storedToDraftRef(data[side]!), draftKey: key }, sender);
+      await materializeReplyDraft({ ...storedToDraftRef(data[side]!), draftKey: draftKeyOf(row.tab, row.id, side, nonce) }, sender);
       after[side] = `${DRAFT_STATE.created} ${jstStamp()}`;
       out.created += 1;
     } catch (err) {
       console.error(`SES下書き依頼: 下書き作成に失敗 (${label} ${SIDE_LABEL[side]}): ${safeErr(err)}`);
-      after[side] = errorState(failureReason(err));
+      after[side] = attemptErrorState(failureReason(err), nonce);
       out.failed += 1;
     }
   }
+  if (Object.keys(after).length === 0) return out;
   try {
     if (!(await writeDraftStatesSheets(row, after))) {
       console.error(`SES下書き依頼: 行が見つからず結果を書き戻せません（「作成中」のまま） (${label})`);
@@ -250,13 +313,14 @@ async function resolveInProgress(listed: DraftRequestRow): Promise<number> {
   if (sides.length === 0) return 0;
   const found: SideStates = {};
   for (const side of sides) {
-    if ((await draftAlreadyExists(draftKeyOf(listed.tab, listed.id, side))) === true) {
+    const key = draftKeyOf(listed.tab, listed.id, side, nonceOf(stateOf(listed, side)));
+    if ((await draftAlreadyExists(key)) === true) {
       found[side] = `${DRAFT_STATE.created} ${jstStamp()}（作成を確認）`;
     }
   }
   if (Object.keys(found).length > 0) {
     try {
-      await writeDraftStatesSheets(listed, found);
+      await writeDraftStatesSheets(listed, found, listed);
     } catch (err) {
       console.error(`SES下書き依頼: 「作成中」の行を更新できません (${rowLabel(listed.tab, listed.id)}): ${safeErr(err)}`);
       return sides.length;
@@ -267,7 +331,11 @@ async function resolveInProgress(listed: DraftRequestRow): Promise<number> {
 
 // スプレッドシートで担当者メールが入った行のうち、状態が 空欄・未作成・エラー の側の下書きを作成する。
 // tabs は DRAFT_REQUEST_COLUMNS を持つタブ（既定はマッチ等の全登録タブ）
-export async function materializePendingDrafts(tabs: string[] = draftRequestTabs()): Promise<PendingDraftResult> {
+// properActive はプロパー候補の依頼があったときだけ呼ぶ（稼働可の社員IDの一覧。確かめられなければ null）
+export async function materializePendingDrafts(
+  tabs: string[] = draftRequestTabs(),
+  properActive: ProperActiveLoader = async () => null,
+): Promise<PendingDraftResult> {
   const result: PendingDraftResult = { created: 0, failed: 0, stale: 0 };
   if (!draftRequestsEnabled()) {
     console.log('SES下書き依頼: 担当者メールによる下書き作成は DB_PROVIDER=sheets の本番実行でのみ行います（スキップ）');
@@ -285,6 +353,14 @@ export async function materializePendingDrafts(tabs: string[] = draftRequestTabs
     );
   }
 
+  let activeProper: Promise<Set<string> | null> | null = null;
+  const loadActive = (): Promise<Set<string> | null> => {
+    activeProper ??= properActive().catch((err) => {
+      console.error(`SES下書き依頼: プロパー管理表を読めません: ${safeErr(err)}`);
+      return null;
+    });
+    return activeProper;
+  };
   let stale = 0;
   for (const tab of tabs) {
     let rows: DraftRequestRow[];
@@ -297,7 +373,7 @@ export async function materializePendingDrafts(tabs: string[] = draftRequestTabs
     }
     for (const row of rows) stale += await resolveInProgress(row);
     for (const request of rows.filter((r) => pendingSides(r).length > 0)) {
-      const r = await processRequest(request, policy);
+      const r = await processRequest(request, policy, loadActive);
       result.created += r.created;
       result.failed += r.failed;
     }

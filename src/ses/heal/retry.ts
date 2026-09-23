@@ -7,6 +7,7 @@
 import { isDemo, healEnabled, matchModel } from '../config.js';
 import { isTruncationError } from '../../llm/index.js';
 import { healRemainingJpy, inHealScope } from './budget.js';
+import { pastRunDeadline } from '../schedule.js';
 import { recordHealEvent, recordStat } from './events.js';
 import { maskPii } from './quarantine.js';
 
@@ -51,6 +52,11 @@ export async function healLlmCall<T>(
   estimate?: HealEstimate,
 ): Promise<T | null> {
   if (isDemo() || !healEnabled()) return null;
+  if (pastRunDeadline()) {
+    // 修復の再試行・昇格は時間がかかるため、実行時間の期限を過ぎたら行わない（ジョブの制限時間を越えないように）
+    recordHealEvent('warn', `${label}: 実行時間の上限を過ぎたため修復を省き、次回バッチに繰り越します`);
+    return null;
+  }
 
   if (!isRetryableLlmError(firstError)) {
     recordHealEvent(

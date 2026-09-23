@@ -55,7 +55,7 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
     if (lost > 0) {
       recordFatal(
         `上限を超えて次回以降に回したメールのうち${lost}件は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れて処理されません` +
-          '（SES_MAX_MAILS_PER_RUN を上げるか、SES_COLLECT_DAYS を広げて手動で再実行してください）',
+          '（SES_MAX_MAILS_PER_RUN を上げるか、SES_COLLECT_DAYS をそのメールが収まる日数まで広げて手動で再実行してください）',
       );
     }
   }

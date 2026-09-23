@@ -10,7 +10,7 @@ import { isDemo, extractModel, collectDays, healMaxAttempts } from './config.js'
 import { healLlmCall, type HealAttempt } from './heal/retry.js';
 import { recordFailure, recordSuccess } from './heal/quarantine.js';
 import { recordHealEvent, recordStat, recordFatal, getStats } from './heal/events.js';
-import { isLastChance, pastRunDeadline, callTimeoutMs } from './schedule.js';
+import { isLastChance, pastExtractDeadline, callLimits } from './schedule.js';
 import { normalizeSkills } from './skillDict.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
@@ -256,7 +256,7 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       stopReason = 'circuit';
       break;
     }
-    if (pastRunDeadline()) {
+    if (pastExtractDeadline()) {
       stopReason = 'deadline';
       break;
     }
@@ -268,8 +268,8 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       extracted = await extractFromMail(mail);
     } catch (err) {
       firstErr = err;
-      if (pastRunDeadline()) {
-        unfair = true; // 自動修復の再試行は時間がかかるため、期限後は次回の実行に回す
+      if (pastExtractDeadline()) {
+        unfair = true; // 自動修復の再試行は時間がかかるため、抽出の持ち時間を過ぎたら次回の実行に回す
       } else {
         // 自動修復: 予算内でバックオフ再試行（打ち切りなら出力上限を拡大）→ 上位モデルへ昇格
         const budgetSkipsBefore = getStats().budgetExhausted;
@@ -307,7 +307,7 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       stopReason === 'circuit'
         ? `抽出が基盤起因で${CIRCUIT_BREAK_CONSECUTIVE}件連続して失敗したため、残り${notAttempted.length}件の抽出を中止しました（次回実行で再処理します。APIキー・残高・Anthropic側の障害情報を確認してください）`
         : stopReason === 'deadline'
-          ? `1回の実行時間の上限（SES_RUN_DEADLINE_MINUTES）に達したため、残り${notAttempted.length}件の抽出は次回の実行に回しました`
+          ? `1回の実行で抽出に使える時間（SES_RUN_DEADLINE_MINUTES の約半分。残りは突合・通知に使います）に達したため、残り${notAttempted.length}件の抽出は次回の実行に回しました`
           : `抽出結果を保存できないため、残り${notAttempted.length}件の抽出を中止しました（次回実行で再処理します）`;
     recordHealEvent(stopReason === 'deadline' ? 'warn' : 'critical', message);
   }
@@ -336,10 +336,12 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
         await recordFailure(f.mail, f.err, { countTowardQuarantine: false });
         continue;
       }
-      const { attempts, quarantined } = await recordFailure(f.mail, f.err, {
+      const { attempts, quarantined, recorded } = await recordFailure(f.mail, f.err, {
         countTowardQuarantine: !f.unfair,
         lastChance,
       });
+      // 隔離リストを読めず隔離できなかった最後の機会のメールは、処理済みにもならないまま窓を外れて消えるため取りこぼしに数える
+      if (!recorded && lastChance) lost += 1;
       if (quarantined) {
         // 隔離 = 再試行を打ち切る（処理済み扱いにして次回以降スキップ。メタ情報は隔離リストに残る）
         quarantinedMailIds.push(f.mail.id);
@@ -356,7 +358,7 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
   if (lost > 0) {
     recordFatal(
       `抽出できなかったメールのうち${lost}件は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れます` +
-        '（原因を解消したうえで SES_COLLECT_DAYS を広げて手動で再実行すると処理できます）',
+        '（原因を解消したうえで、SES_COLLECT_DAYS をそのメールが収まる日数まで広げて手動で再実行すると処理できます）',
     );
   }
 
@@ -490,9 +492,8 @@ function genOptions(attempt: HealAttempt | undefined): GenOptions {
   return {
     model: attempt?.model ?? extractModel(),
     maxTokens,
-    // 出力量に応じたタイムアウト（通信の詰まりで1通に10分以上かけない。実行の期限が近ければさらに短く）
-    timeoutMs: callTimeoutMs(Math.min(600_000, 60_000 + maxTokens * 15)),
-    ...(attempt ? { maxRetries: attempt.sdkRetries } : {}),
+    // 出力量に応じたタイムアウト（通信の詰まりで1通に10分以上かけない。実行の期限が近ければ再試行込みでさらに短く）
+    ...callLimits(Math.min(600_000, 60_000 + maxTokens * 15), attempt ? attempt.sdkRetries : 1),
   };
 }
 

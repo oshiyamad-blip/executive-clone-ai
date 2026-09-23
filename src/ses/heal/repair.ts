@@ -6,6 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { generateJson } from '../../llm/index.js';
+import { callLimits } from '../schedule.js';
 import { totalLlmCostJpy } from '../../llm/pricing.js';
 import { sendPlainMailViaMail, sendMailReady } from '../mail/index.js';
 import { REPAIR_REPORT_SUBJECT } from '../mail/ownMail.js';
@@ -244,7 +245,8 @@ export async function runRepair(auto = false): Promise<void> {
       REPAIR_SYSTEM,
       buildRepairPrompt(quarantined, diagnosis),
       REPAIR_SCHEMA,
-      { model: repairModel(), maxTokens: 16000 },
+      // バッチ末尾からの自動生成でもジョブの制限時間を越えないよう、実行の期限までの残り時間で待ち時間・再試行を抑える
+      { model: repairModel(), maxTokens: 16000, ...callLimits(600_000, 1) },
     );
     const costJpy = totalLlmCostJpy() - before;
     if (costJpy > repairBudgetJpy()) {

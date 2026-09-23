@@ -39,12 +39,21 @@ import {
 import { resetHealEvents, recordStat, getStats, recordHealEvent, recordFatal, hasFatal } from './events.js';
 import { formatErr, SafeLogError } from '../redact.js';
 import { columnLetter, quoteTab, planHeaderMigration, googleTransientKind } from '../../database/sheetBook.js';
-import { draftRequestTabs, parseReceivedAt } from '../../database/sheets.js';
-import { mergeDraftColumns, parseDraftData, isDraftStateActionable, verifyDraftData, DRAFT_STATE } from '../../database/mapping.js';
+import { draftRequestTabs, parseReceivedAt, properEngineerIdOf, properEngineerIdOfCandidate } from '../../database/sheets.js';
+import {
+  mergeDraftColumns,
+  parseDraftData,
+  isDraftStateActionable,
+  verifyDraftData,
+  replyMetaJson,
+  parseReplyMeta,
+  verifyReplyMeta,
+  DRAFT_STATE,
+} from '../../database/mapping.js';
 import { buildReplyMime } from '../mail/mime.js';
 import { isInfraError, itemIdOf } from '../extract.js';
-import { withoutResentProjects } from '../store.js';
-import { orderForRun, pickForRun, followingRunAt } from '../schedule.js';
+import { withoutResentProjects, reconcileReextractedIds } from '../store.js';
+import { orderForRun, pickForRun, followingRunAt, callLimits, startRunClock, stopRunClock, pastExtractDeadline } from '../schedule.js';
 import { sanitizeInitials } from '../proper/extractSkillSheet.js';
 import { fileRef } from '../proper/master.js';
 import { parseServiceAccountJson } from '../../collectors/googleAuth.js';
@@ -309,6 +318,11 @@ async function main(): Promise<void> {
     genFailed.projectState === DRAFT_STATE.genFailed && !isDraftStateActionable(genFailed.projectState) &&
       mergeDraftColumns(genFailed, draft('v2'), draft('e2')).projectState === '未作成',
   );
+  const regenToTentative = mergeDraftColumns(genFailed, undefined, undefined);
+  check(
+    '下書き列: 作り直し待ちの側は、判定し直しで下書きを作らない区分になれば「不要」に戻す（判定済みに含める）',
+    regenToTentative.projectState === DRAFT_STATE.notNeeded && regenToTentative.engineerState === DRAFT_STATE.notNeeded,
+  );
   check(
     '下書き状態: 空欄・未作成・エラーのみ作成対象',
     ['', '未作成', 'エラー: x'].every(isDraftStateActionable) &&
@@ -358,12 +372,47 @@ async function main(): Promise<void> {
   );
   check('依頼判定: 署名の合わない下書きデータからは作らない', plan3.create.length === 0 && Boolean(plan3.errors.project?.includes('書き換え')));
   check('依頼対象タブ: マッチ・プロパー候補を含む', draftRequestTabs().includes('マッチ') && draftRequestTabs().includes('プロパー候補'));
-  const properPlan = planDraftRequest(
-    { tab: 'プロパー候補', id: 'p1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: created.data },
+  const properId = `ownmatch_${properEngineerIdOf('fileX')}_proj_0123456789ab`;
+  const properRow = { tab: 'プロパー候補', id: properId, rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: created.data };
+  const properPlan = planDraftRequest(properRow, domainPolicy, '', new Set([properEngineerIdOf('fileX')]));
+  const retiredPlan = planDraftRequest(properRow, domainPolicy, '', new Set());
+  const unknownPlan = planDraftRequest(properRow, domainPolicy, '', null);
+  check('依頼判定: 案件側だけのタブは要員側に触らない', properPlan.create.join(',') === 'project' && Object.keys(properPlan.errors).length === 0);
+  check(
+    '依頼判定: 稼働可でなくなった社員・管理表を確かめられないときのプロパー候補は作らない',
+    retiredPlan.create.length === 0 && Boolean(retiredPlan.errors.project?.includes('稼働可ではない')) &&
+      unknownPlan.create.length === 0 && Boolean(unknownPlan.errors.project?.includes('確認できない')),
+  );
+  check(
+    'プロパー候補ID: DriveのファイルIDを含めず、社員IDを取り出せる',
+    !properId.includes('fileX') && properEngineerIdOfCandidate(properId) === properEngineerIdOf('fileX') &&
+      properEngineerIdOfCandidate('ownmatch_proper_fileA_proj_flow_1') === 'proper_fileA',
+  );
+  const boundKey = 'k'.repeat(32);
+  const bound = mergeDraftColumns(null, draft('v1'), draft('e1'), { signingKey: boundKey, bind: ['マッチ', 'm1'] });
+  const copied = planDraftRequest(
+    { tab: 'マッチ', id: 'm2', rowNumber: 3, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '', draftData: bound.data },
     domainPolicy,
+    boundKey,
+  );
+  check(
+    '下書き列: 署名は行（タブ・ID）に結び付け、別の行へ写した下書きデータからは作らない',
+    verifyDraftData(bound.data, boundKey, ['マッチ', 'm1']) && !verifyDraftData(bound.data, boundKey, ['マッチ', 'm2']) &&
+      copied.create.length === 0 && Boolean(copied.errors.project?.includes('書き換え')),
+  );
+  const noTo = mergeDraftColumns(null, { ...draft('v1'), to: '' }, draft('e1'), { signingKey: boundKey, bind: ['マッチ', 'm1'] });
+  const noToPlan = planDraftRequest(
+    { tab: 'マッチ', id: 'm1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: noTo.projectState, engineerState: noTo.engineerState, draftData: noTo.data },
+    domainPolicy,
+    boundKey,
+  );
+  check(
+    '下書き列: 宛先の無い側は依頼を受けない状態にし、もう片側は署名どおり作れる',
+    noTo.projectState === DRAFT_STATE.noRecipient && !isDraftStateActionable(noTo.projectState) &&
+      noToPlan.create.join(',') === 'engineer' && Object.keys(noToPlan.errors).length === 0,
+    JSON.stringify(noToPlan),
   );
   setDemoOverride(null);
-  check('依頼判定: 案件側だけのタブは要員側に触らない', properPlan.create.join(',') === 'project' && Object.keys(properPlan.errors).length === 0);
 
   // 13. プロパー（スキルシート）: 人が入力する列の解釈
   check(
@@ -439,8 +488,8 @@ async function main(): Promise<void> {
   masterRow[col('ファイルID')] = 'f1';
   const eng = rowToProperEngineer(masterRow);
   check(
-    'プロパー管理: 稼働可の行 → 突合用の社員（IDはファイルIDから・必要案件単価を数値化）',
-    eng?.id === 'proper_f1' && eng.requiredProjectRate === 65 && eng.skills.length === 2,
+    'プロパー管理: 稼働可の行 → 突合用の社員（IDはファイルIDのハッシュ・必要案件単価を数値化）',
+    eng?.id === properEngineerIdOf('f1') && !eng.id.includes('f1') && eng.fileId === 'f1' && eng.requiredProjectRate === 65 && eng.skills.length === 2,
   );
   const assigned = [...masterRow];
   assigned[col('稼働状況')] = 'アサイン済';
@@ -465,12 +514,13 @@ async function main(): Promise<void> {
   check('プロパー提案文面: 元メールへの全員に返信', proposal?.to === 'sato@partner.jp' && proposal.subject === 'Re: 案件のご紹介' && proposal.inReplyTo === '<a@b>');
 
   const candidate = { properLabel: '山田太郎（T.Y.）', projectTitle: 'Java案件' } as ProperCandidate;
-  const run: ProperRunResult = { demo: false, sync: null, engineers: 1, projects: 1, candidates: [candidate], saved: 1 };
+  const run: ProperRunResult = { demo: false, sync: null, engineers: 1, projects: 1, candidates: [candidate], saved: 1, retired: 0 };
   const consoleLines = properSummaryLines(run, false).join('\n');
   check('プロパー: コンソール用のサマリは件数のみ（氏名・案件名なし）', consoleLines.includes('1件') && !consoleLines.includes('山田') && !consoleLines.includes('Java案件'));
 
   await reviewFindingChecks(project);
   matchingAndDraftChecks(project);
+  robustnessChecks(project);
 
   console.log('');
   if (failures > 0) {
@@ -865,3 +915,45 @@ main().catch((err) => {
   console.error(err);
   process.exitCode = 1;
 });
+
+// 返信メタの署名・LLM呼び出しの待ち時間・抽出の持ち時間・抽出し直したときのID
+function robustnessChecks(project: Project): void {
+  const key = 'k'.repeat(32);
+  const rt = { from: 'a@partner.jp', to: 'sales@own.jp', cc: '', subject: 's', messageId: '<m@p>', references: '' };
+  const bind = { key, tab: '案件', id: 'proj_1', agentEmail: 'a@partner.jp' };
+  const json = replyMetaJson(rt, bind);
+  const edited = json.replace('a@partner.jp', 'evil@attacker.example');
+  check(
+    '返信メタ: 署名つきで保存し、宛先の書き換え・別の行への写し・営業元メールの書き換え・署名なしを検知する',
+    verifyReplyMeta(json, bind) && parseReplyMeta(json)?.from === 'a@partner.jp' && !('sig' in (parseReplyMeta(json) ?? {})) &&
+      !verifyReplyMeta(edited, bind) && !verifyReplyMeta(json, { ...bind, id: 'proj_2' }) &&
+      !verifyReplyMeta(json, { ...bind, agentEmail: 'evil@attacker.example' }) && !verifyReplyMeta(JSON.stringify(rt), bind) &&
+      verifyReplyMeta(JSON.stringify(rt), { ...bind, key: '' }),
+  );
+  const t0 = Date.now();
+  startRunClock(t0);
+  try {
+    const early = callLimits(300_000, 1, t0);
+    const late = callLimits(300_000, 1, t0 + 25 * 60_000);
+    check(
+      '実行時間: 期限前は再試行ありで残り時間に収め、期限後は再試行なし・短い待ち時間にする',
+      early.maxRetries === 1 && early.timeoutMs === 300_000 && late.maxRetries === 0 && late.timeoutMs <= 3 * 60_000,
+      JSON.stringify({ early, late }),
+    );
+    check(
+      '実行時間: 抽出は持ち時間の約半分で打ち切り、残りを突合・通知に回す',
+      !pastExtractDeadline(t0 + 5 * 60_000) && pastExtractDeadline(t0 + 12 * 60_000),
+    );
+  } finally {
+    stopRunClock();
+  }
+  const mk = (id: string, title: string, skills: string[]): Project => ({ ...project, id, title, requiredSkills: skills, sourceMailId: 'mailR' });
+  const saved = [mk(itemIdOf('proj', 'mailR', 0), 'Java基幹システム開発', ['Java']), mk(itemIdOf('proj', 'mailR', 1), 'Pythonデータ分析基盤', ['Python'])];
+  const reordered = [mk(itemIdOf('proj', 'mailR', 0), 'Pythonデータ分析基盤', ['Python']), mk(itemIdOf('proj', 'mailR', 1), 'Java基幹システム開発', ['Java']), mk(itemIdOf('proj', 'mailR', 2), 'Go API開発', ['Go'])];
+  const ids = reconcileReextractedIds('project', reordered, saved, (m, i) => itemIdOf('proj', m, i)).map((p) => p.id);
+  check(
+    '抽出し直し: 順番が変わっても内容の同じ行のIDを使い、増えた項目は保存済みの行と重ならないIDにする',
+    ids[0] === saved[1].id && ids[1] === saved[0].id && !saved.some((x) => x.id === ids[2]) && new Set(ids).size === 3,
+    ids.join(','),
+  );
+}

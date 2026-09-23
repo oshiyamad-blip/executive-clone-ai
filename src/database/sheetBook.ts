@@ -7,7 +7,8 @@
 // - 見出しはタブを読み直すたび・行を更新する直前に確かめ、実行中に人が列を挿入しても別の列に書かない
 // - タブ単位の行キャッシュ（更新前に対象行を1回読み直し、人の並べ替え・手入力とのズレを防ぐ）
 // - 全呼び出しを直列化して書き込みクォータ（ユーザーあたり60回/分）を守り、429/5xxは待って再試行する。
-//   追記（values.append）は冪等でないため、5xx・通信断の後は「既に書けていないか」を読み直して確かめてから再試行する
+//   追記（values.append）・行の削除・タブの作成は冪等でないため、5xx・通信断の後は同じ要求を再送せず、
+//   読み直して「既に反映されていないか」を確かめてから（削除は消す行を選び直して）再試行する
 // - 書き込みは常に valueInputOption=RAW（メール件名・LLM出力・氏名など外部由来の文字列が '=' '+' '-' '@' で
 //   始まっても数式として解釈させない。USER_ENTERED に変える場合はセル先頭のエスケープが必要）
 import type { sheets_v4 } from 'googleapis';
@@ -43,6 +44,13 @@ const RETRY_DELAYS_MS = [2000, 8000, 30000];
 
 const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
 
+// Google APIクライアントの1リクエストの待ち時間の上限。未設定だと応答の無い接続で全呼び出しが止まる
+// （呼び出しは直列化しているため、1件の詰まりで以降のSheets操作がすべて待たされる）
+export const GOOGLE_REQUEST_TIMEOUT_MS = 60_000;
+
+// 処理されたか分からない通信の失敗（接続断・タイムアウト。gaxios はタイムアウトを TimeoutError/AbortError の code で返す）
+const AMBIGUOUS_NETWORK_CODES = ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNABORTED', 'TimeoutError', 'AbortError'];
+
 function statusOf(err: unknown): number {
   const e = err as { status?: unknown; code?: unknown; response?: { status?: unknown } };
   return Number(e.response?.status ?? e.status ?? (typeof e.code === 'number' ? e.code : NaN));
@@ -65,7 +73,7 @@ export function googleTransientKind(err: unknown): 'rate' | 'ambiguous' | null {
   if (status === 429 || (status === 403 && RATE_LIMIT_REASONS.has(reasonOf(err)))) return 'rate';
   if (status >= 500 && status < 600) return 'ambiguous';
   const code = (err as { code?: unknown }).code;
-  if (typeof code === 'string' && ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNABORTED'].includes(code)) return 'ambiguous';
+  if (typeof code === 'string' && AMBIGUOUS_NETWORK_CODES.includes(code)) return 'ambiguous';
   return null;
 }
 
@@ -112,15 +120,18 @@ export function columnLetter(index: number): string {
 export type HeaderPlan =
   | { kind: 'ok'; defToLive: number[] }
   | { kind: 'append'; fromIndex: number; cells: string[]; defToLive: number[] }
-  | { kind: 'conflict'; index: number; reason: 'missing' | 'duplicate' };
+  | { kind: 'conflict'; index: number; reason: 'missing' | 'duplicate' | 'blankFirst' };
 
 // 既存タブのヘッダー行と現行定義の突き合わせ（列は見出しの名前で対応付ける）。
 // - 定義の列がすべて見出しにあれば ok（並べ替え・途中へのメモ列の挿入は可）
 // - 足りないのが定義の末尾の列だけ（＝定義が増えた）なら、見出しの右端の後ろに追記する
 // - 定義の途中の列が見当たらない（改名・削除）・同じ見出しが2つある場合は、どの列に読み書きすべきか
 //   決められないため自動修正しない（conflict）
+// - A列の見出しが空（先頭に見出しの無い列を挿入した等）も conflict。追記（values.append）は表の先頭の列から
+//   書き込むため、A列が空だと表がB列から始まると判定され、追記した行の値が右にずれる
 export function planHeaderMigration(existing: string[], definition: string[]): HeaderPlan {
   const header = existing.map((c) => String(c ?? '').trim());
+  if (header.length > 0 && header[0] === '' && header.some(Boolean)) return { kind: 'conflict', index: 0, reason: 'blankFirst' };
   const first = new Map<string, number>();
   const duplicated = new Set<string>();
   header.forEach((h, i) => {
@@ -170,6 +181,10 @@ const NEW_TAB_ROWS = 100;
 
 // 1回の呼び出しで書き込むセル範囲の上限（リクエストサイズの手前で区切る）
 const CELL_WRITE_CHUNK = 500;
+
+// データ行は書式を通さない値で読む（人が単金の列に「0"万円"」等の表示形式を付けたり、ロケールが小数点にカンマを
+// 使ったりしても、数値の列を読み違えない）。日付として入力されたセルは表示どおりの文字列で受け取る
+const DATA_READ = { valueRenderOption: 'UNFORMATTED_VALUE', dateTimeRenderOption: 'FORMATTED_STRING' } as const;
 
 export interface SheetBookOptions {
   label: string; // ログの接頭辞（例: 'SheetsDB'）
@@ -235,8 +250,6 @@ export class SheetBook {
   private readonly tabCache = new Map<string, TabCache>();
   private readonly tabLoading = new Map<string, Promise<TabCache>>();
   private readonly warnedDuplicates = new Set<string>();
-  // このプロセスで既存のタブの見出しに追記した列（新しい列の既存行に初期値を入れるため）
-  private readonly addedColumns = new Map<string, string[]>();
   private totalCells = 0;
 
   constructor(private readonly opts: SheetBookOptions) {}
@@ -282,11 +295,6 @@ export class SheetBook {
     return this.totalCells;
   }
 
-  // 既存のタブ（データ行があり得るタブ）の見出しにこのプロセスで追記した列
-  columnsAddedTo(tab: string): string[] {
-    return this.addedColumns.get(tab) ?? [];
-  }
-
   private conflictError(tab: string): SafeLogError {
     return new SafeLogError(
       `${this.opts.label}: 「${tab}」タブのヘッダー行から列を特定できないため読み書きしません（${this.headerConflicts.get(tab) ?? ''}。` +
@@ -309,6 +317,7 @@ export class SheetBook {
 
   private conflictProblem(tab: string, plan: HeaderPlan): string {
     if (plan.kind !== 'conflict') return '実行中に見出しが消されました';
+    if (plan.reason === 'blankFirst') return 'A列の見出しが空です。先頭に列を挿入した場合は見出しを入れてください';
     return `「${this.columns(tab)[plan.index]}」列の見出しが${plan.reason === 'duplicate' ? '2つあります' : '見つかりません'}`;
   }
 
@@ -321,7 +330,6 @@ export class SheetBook {
     this.layouts.clear();
     this.sheetIds.clear();
     this.warnedDuplicates.clear();
-    this.addedColumns.clear();
     this.totalCells = 0;
   }
 
@@ -332,14 +340,14 @@ export class SheetBook {
 
   // タブとヘッダー行を必要に応じて自動生成・追記する（プロセス内で初回のみ実行）
   ensureTabs(): Promise<void> {
-    this.tabsEnsured ??= this.ensureTabsOnce().catch((err) => {
+    this.tabsEnsured ??= this.ensureTabsOnce(0).catch((err) => {
       this.tabsEnsured = null; // 失敗時は次回呼び出しで再試行
       throw err;
     });
     return this.tabsEnsured;
   }
 
-  private async ensureTabsOnce(): Promise<void> {
+  private async ensureTabsOnce(attempt: number): Promise<void> {
     const sheetsApi = this.api();
     const spreadsheetId = this.id();
     const label = this.opts.label;
@@ -374,19 +382,32 @@ export class SheetBook {
     const headerWrites: sheets_v4.Schema$ValueRange[] = [];
     const now = Date.now();
 
+    const created: string[] = [];
     if (missing.length > 0) {
-      const res = await throttle(() =>
-        sheetsApi.spreadsheets.batchUpdate({
-          spreadsheetId,
-          requestBody: {
-            requests: missing.map((title) => ({
-              addSheet: {
-                properties: { title, gridProperties: { rowCount: NEW_TAB_ROWS, columnCount: this.columns(title).length } },
+      let res: { data: sheets_v4.Schema$BatchUpdateSpreadsheetResponse };
+      try {
+        res = await throttle(
+          () =>
+            sheetsApi.spreadsheets.batchUpdate({
+              spreadsheetId,
+              requestBody: {
+                requests: missing.map((title) => ({
+                  addSheet: {
+                    properties: { title, gridProperties: { rowCount: NEW_TAB_ROWS, columnCount: this.columns(title).length } },
+                  },
+                })),
               },
-            })),
-          },
-        }),
-      );
+            }),
+          false,
+        );
+      } catch (err) {
+        // タブの作成は冪等でない（作成済みのタブをもう一度作ると 400 で失敗する）。処理されたか分からない失敗の後は
+        // 同じ要求を再送せず、タブの一覧を読み直してから続ける（作成されていれば空のタブとして見出しを書き込む）
+        if (!googleTransientKind(err) || attempt >= RETRY_DELAYS_MS.length) throw err;
+        await sleep(testApi ? 0 : RETRY_DELAYS_MS[attempt]);
+        return this.ensureTabsOnce(attempt + 1);
+      }
+      created.push(...missing);
       missing.forEach((title, i) => {
         const sheetId = res.data.replies?.[i]?.addSheet?.properties?.sheetId;
         if (typeof sheetId === 'number') this.sheetIds.set(title, sheetId);
@@ -394,7 +415,6 @@ export class SheetBook {
         this.layouts.set(title, { header: [...this.columns(title)], defToLive: this.columns(title).map((_, j) => j), checkedAt: now });
         this.totalCells += NEW_TAB_ROWS * this.columns(title).length;
       });
-      await this.addDropdowns(missing, res.data.replies ?? []);
     }
 
     if (present.length > 0) {
@@ -415,10 +435,8 @@ export class SheetBook {
           return;
         }
         headerWrites.push({ range: `${quoteTab(tab)}!${columnLetter(plan.fromIndex)}1`, values: [plan.cells] });
-        if (plan.fromIndex > 0) {
-          console.log(`${label}: 「${tab}」タブに列を追加します（${plan.cells.join(', ')}）`);
-          this.addedColumns.set(tab, plan.cells);
-        }
+        if (header.length === 0) created.push(tab); // 空のタブ（前回の作成の応答が失われた等）は新規と同じ扱い
+        if (plan.fromIndex > 0) console.log(`${label}: 「${tab}」タブに列を追加します（${plan.cells.join(', ')}）`);
         // 見出しの右端がシートの列数いっぱいなら、書き込む前に列を足す（範囲外への書き込みはAPIが拒否する）
         const needed = plan.fromIndex + plan.cells.length;
         const have = gridColumns.get(tab) ?? 0;
@@ -443,14 +461,15 @@ export class SheetBook {
         }),
       );
     }
-    if (missing.length > 0) console.log(`${label}: タブを自動生成しました（${missing.join(', ')}）`);
+    await this.addDropdowns(created);
+    if (created.length > 0) console.log(`${label}: タブを自動生成しました（${created.join(', ')}）`);
   }
 
   // 新規作成したタブの指定列に選択肢のプルダウンを付ける（人の入力ゆれで判定を外さないため。失敗しても続行）
-  private async addDropdowns(created: string[], replies: sheets_v4.Schema$Response[]): Promise<void> {
+  private async addDropdowns(created: string[]): Promise<void> {
     const requests: sheets_v4.Schema$Request[] = [];
-    created.forEach((tab, i) => {
-      const sheetId = replies[i]?.addSheet?.properties?.sheetId;
+    created.forEach((tab) => {
+      const sheetId = this.sheetIds.get(tab);
       const rules = this.opts.dropdowns?.[tab];
       if (sheetId === undefined || sheetId === null || !rules) return;
       for (const [colName, options] of Object.entries(rules)) {
@@ -525,7 +544,9 @@ export class SheetBook {
   private async fetchTab(tab: string): Promise<TabCache> {
     await this.ensureTabs();
     this.assertHeaderMatches(tab);
-    const res = await throttle(() => this.api().spreadsheets.values.get({ spreadsheetId: this.id(), range: quoteTab(tab) }));
+    const res = await throttle(() =>
+      this.api().spreadsheets.values.get({ spreadsheetId: this.id(), range: quoteTab(tab), ...DATA_READ }),
+    );
     const values = (res.data.values ?? []) as unknown[][];
     const layout = this.applyHeader(tab, values[0] ?? []);
     const rows = values
@@ -655,6 +676,7 @@ export class SheetBook {
       this.api().spreadsheets.values.batchGet({
         spreadsheetId: this.id(),
         ranges: [`${q}!1:1`, `${q}!A${row.rowNumber}:${columnLetter(width - 1)}${row.rowNumber}`],
+        ...DATA_READ,
       }),
     );
     const ranges = res.data.valueRanges ?? [];
@@ -754,12 +776,11 @@ export class SheetBook {
     this.tabCache.get(tab)?.indexes.clear();
   }
 
-  // キー列で見つけた複数の行の指定列を、タブを読み直した直後にまとめて書き込む（行ごとに位置を確かめる読み出しを省き、
-  // 大量の行の印付けを少ない呼び出しで済ませる）。書き込んだ行数を返す（見つからないキーは飛ばす）
+  // キー列で見つけた複数の行の指定列をまとめて書き込む（行ごとに位置を確かめる読み出しを省き、大量の行の印付けを
+  // 少ない呼び出しで済ませる）。書き込んだ行数を返す（見つからないキーは飛ばす）
   async writeCellsByKey(tab: string, keyCol: string, updates: Array<{ key: string; cells: Array<[string, Cell]> }>): Promise<number> {
     if (updates.length === 0) return 0;
-    this.tabCache.delete(tab);
-    const cache = await this.loadTab(tab);
+    const cache = await this.keyVerifiedCache(tab, keyCol);
     const idx = this.indexFor(tab, cache, this.colIndex(tab, keyCol));
     const items: Array<{ target: CachedRow; updates: Array<[string, Cell]> }> = [];
     for (const u of updates) {
@@ -770,28 +791,65 @@ export class SheetBook {
     return items.length;
   }
 
-  // 行を削除する（読み直した直後の行番号で。下の行から消すので番号はずれない）
-  async deleteRows(tab: string, rowNumbers: number[]): Promise<void> {
-    const sheetId = this.sheetIds.get(tab);
-    if (rowNumbers.length === 0 || sheetId === undefined) return;
-    const sorted = [...new Set(rowNumbers)].filter((n) => n >= 2).sort((a, b) => b - a);
-    const ranges: Array<{ start: number; end: number }> = [];
-    for (const n of sorted) {
-      const last = ranges[ranges.length - 1];
-      if (last && last.start === n + 1) last.start = n;
-      else ranges.push({ start: n, end: n + 1 });
+  // キー列で行を特定するための行キャッシュ。キャッシュがあれば見出しとキー列だけを読み直し、どの行も同じ位置にあれば
+  // そのまま使う（大きなタブを毎回すべて読み直さない）。人の並べ替え・行の挿入・削除・列の挿入でずれていればタブを読み直す
+  private async keyVerifiedCache(tab: string, keyCol: string): Promise<TabCache> {
+    const cached = this.tabCache.get(tab);
+    const layout = this.layouts.get(tab);
+    const col = this.colIndex(tab, keyCol);
+    if (cached && layout && col >= 0) {
+      await this.ensureTabs();
+      this.assertHeaderMatches(tab);
+      const q = quoteTab(tab);
+      const letter = columnLetter(layout.defToLive[col]);
+      const res = await throttle(() =>
+        this.api().spreadsheets.values.batchGet({ spreadsheetId: this.id(), ranges: [`${q}!1:1`, `${q}!${letter}:${letter}`], ...DATA_READ }),
+      );
+      const ranges = res.data.valueRanges ?? [];
+      if (sameHeader((ranges[0]?.values?.[0] ?? []) as string[], layout.header)) {
+        const live = (ranges[1]?.values ?? []).map((r) => String((r as unknown[] | undefined)?.[0] ?? '').trim());
+        const keyed = cached.rows.filter((r) => (r.cells[col] ?? '').trim() !== '');
+        const liveKeys = live.slice(1).filter(Boolean).length;
+        const inPlace = keyed.every((r) => live[r.rowNumber - 1] === (r.cells[col] ?? '').trim());
+        if (inPlace && liveKeys === keyed.length) return cached;
+      }
     }
-    await throttle(() =>
-      this.api().spreadsheets.batchUpdate({
-        spreadsheetId: this.id(),
-        requestBody: {
-          requests: ranges.map((r) => ({
-            deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: r.start - 1, endIndex: r.end - 1 } },
-          })),
-        },
-      }),
-    );
     this.tabCache.delete(tab);
+    return this.loadTab(tab);
+  }
+
+  // 条件に合う行を削除する（消す直前に読み直した行番号で。下の行から消すので番号はずれない）。削除した行数を返す。
+  // 削除は冪等でない（同じ行番号の再送は、繰り上がった別の行を消す）ため自動では再送しない。処理されたか分からない
+  // 失敗の後は読み直し、まだ残っている対象の行だけを選び直して消す
+  async deleteRowsWhere(tab: string, match: (row: CachedRow) => boolean): Promise<number> {
+    let initial: number | null = null;
+    for (let attempt = 0; ; attempt++) {
+      this.tabCache.delete(tab);
+      const targets = (await this.readRows(tab)).filter(match).map((r) => r.rowNumber);
+      initial ??= targets.length;
+      const sheetId = this.sheetIds.get(tab);
+      if (targets.length === 0 || sheetId === undefined) return initial - targets.length;
+      try {
+        await throttle(
+          () =>
+            this.api().spreadsheets.batchUpdate({
+              spreadsheetId: this.id(),
+              requestBody: {
+                requests: rowRangesDescending(targets).map((r) => ({
+                  deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: r.start - 1, endIndex: r.end - 1 } },
+                })),
+              },
+            }),
+          false,
+        );
+        this.tabCache.delete(tab);
+        return initial;
+      } catch (err) {
+        this.tabCache.delete(tab);
+        if (!googleTransientKind(err) || attempt >= RETRY_DELAYS_MS.length) throw err;
+        await sleep(testApi ? 0 : RETRY_DELAYS_MS[attempt]);
+      }
+    }
   }
 
   // キー列で一致する行があれば更新、無ければ追記（build には既存行の最新セルが渡る）
@@ -802,6 +860,18 @@ export class SheetBook {
     else await this.appendRows(tab, [row]);
     return row;
   }
+}
+
+// 行番号（2以上）を、下の行から消すための連続した範囲 [start, end) にまとめる
+function rowRangesDescending(rowNumbers: number[]): Array<{ start: number; end: number }> {
+  const sorted = [...new Set(rowNumbers)].filter((n) => n >= 2).sort((a, b) => b - a);
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const n of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && last.start === n + 1) last.start = n;
+    else ranges.push({ start: n, end: n + 1 });
+  }
+  return ranges;
 }
 
 // 行の値が既存セルと同じか（同じなら書き込みを省く。数値は文字列化して比べる）

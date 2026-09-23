@@ -21,6 +21,8 @@ jobs:
   stats:
     name: メール量の測定
     runs-on: ubuntu-latest
+    # Secrets は main ブランチだけが使える Environment「production」から受け取る（ses-batch.yml と同じ）
+    environment: production
     timeout-minutes: 20
     env:
       TZ: Asia/Tokyo

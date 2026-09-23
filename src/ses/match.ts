@@ -19,7 +19,7 @@ import {
   matchMinLlmScore,
 } from './config.js';
 import { redactable, safeErr } from './redact.js';
-import { callTimeoutMs } from './schedule.js';
+import { callLimits, pastRunDeadline } from './schedule.js';
 import type {
   Project,
   Engineer,
@@ -248,18 +248,20 @@ export async function prepareJudging(): Promise<string> {
   return isDemo() ? '' : buildFeedbackFewShot();
 }
 
-// 一次選抜を通ったペアの最終判定（本番=Sonnet / demo・要確認枠・交渉提案枠=ヒューリスティック）。入力の順に返す
-export async function judgePairs(pairs: MatchPair[], fewShot: string): Promise<MatchResult[]> {
-  const results: MatchResult[] = new Array(pairs.length);
+// 一次選抜を通ったペアの最終判定（本番=Sonnet / demo・要確認枠・交渉提案枠=ヒューリスティック）。入力の順に返す。
+// stopAtDeadline のときは実行時間の期限を過ぎたら新しい判定を始めず、判定し終えたペアだけを返す（残りは次回の実行で判定する）
+export async function judgePairs(pairs: MatchPair[], fewShot: string, opts: { stopAtDeadline?: boolean } = {}): Promise<MatchResult[]> {
+  const results: Array<MatchResult | undefined> = new Array(pairs.length);
   let next = 0;
   const worker = async () => {
     while (next < pairs.length) {
+      if (opts.stopAtDeadline && pastRunDeadline()) return;
       const i = next++;
       results[i] = await judgeOne(pairs[i], fewShot);
     }
   };
   await Promise.all(Array.from({ length: Math.min(JUDGE_CONCURRENCY, pairs.length) }, worker));
-  return results;
+  return results.filter((r): r is MatchResult => r !== undefined);
 }
 
 async function judgeOne(pair: MatchPair, fewShot: string): Promise<MatchResult> {
@@ -347,7 +349,7 @@ async function judgeWithLlm(pair: MatchPair, fewShot: string): Promise<MatchResu
     MATCH_SCHEMA,
     // adaptive thinking の思考トークンも出力上限に数えるため余裕を持たせる（出力が短ければ課金も短い分だけ）。
     // 1件の詰まりで実行時間の上限を使い切らないよう、待ち時間を明示する
-    { model: matchModel(), maxTokens: 4000, timeoutMs: callTimeoutMs(120_000), maxRetries: 1 },
+    { model: matchModel(), maxTokens: 4000, ...callLimits(120_000, 1) },
   );
   const score = Math.max(0, Math.min(100, Math.round(parsed.score)));
   const result = buildMatchResult(pair, score, parsed.reason);

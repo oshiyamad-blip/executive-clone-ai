@@ -84,9 +84,21 @@ export function pastRunDeadline(now = Date.now()): boolean {
   return now >= softDeadline();
 }
 
-// LLM呼び出し1回の待ち時間の上限（既定の値を、期限＋猶予までの残り時間で頭打ちにする）
-export function callTimeoutMs(defaultMs: number, now = Date.now()): number {
+// メールの抽出に使ってよいのは持ち時間のこの割合まで。未処理のメールが多い日に抽出だけで持ち時間を使い切り、
+// 突合・プロパー・通知が毎回後回しになって、突合前の案件・要員が突合の対象期間を外れてしまわないように
+const EXTRACT_SHARE = 0.55;
+
+// 新しいメールの抽出を始めてよい期限を過ぎたか（残りの時間は突合以降に回す）
+export function pastExtractDeadline(now = Date.now()): boolean {
+  return runStartedAt !== null && now >= runStartedAt + runDeadlineMinutes() * 60_000 * EXTRACT_SHARE;
+}
+
+// LLM呼び出し1回の待ち時間の上限とSDKの自動再試行の回数。既定の値を、期限＋猶予までの残り時間に収まるよう頭打ちにする
+// （待ち時間は試行ごとにかかるため、残り時間を試行の回数で割る。期限を過ぎてから始める呼び出しは再試行しない）
+export function callLimits(defaultMs: number, defaultRetries = 1, now = Date.now()): { timeoutMs: number; maxRetries: number } {
   const hardLimit = softDeadline() + CALL_GRACE_MS;
-  if (!Number.isFinite(hardLimit)) return defaultMs;
-  return Math.max(MIN_CALL_TIMEOUT_MS, Math.min(defaultMs, hardLimit - now));
+  if (!Number.isFinite(hardLimit)) return { timeoutMs: defaultMs, maxRetries: defaultRetries };
+  const maxRetries = now >= softDeadline() ? 0 : defaultRetries;
+  const perAttempt = Math.floor((hardLimit - now) / (maxRetries + 1));
+  return { timeoutMs: Math.max(MIN_CALL_TIMEOUT_MS, Math.min(defaultMs, perAttempt)), maxRetries };
 }

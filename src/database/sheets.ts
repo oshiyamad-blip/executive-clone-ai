@@ -5,13 +5,14 @@
 // 認証は既定でサービスアカウント自身（シートをSAのメールアドレスに編集者として共有するだけでよい）。
 // SHEETS_DB_IMPERSONATE 指定時のみDWDでそのユーザーになりすます。
 // 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
+import { createHash, randomUUID } from 'crypto';
 import { google } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
 import { normalizeSkills } from '../ses/skillDict.js';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { SafeLogError } from '../ses/redact.js';
-import { SheetBook, sameCells, type Cell, type CachedRow } from './sheetBook.js';
+import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
 import {
   remoteLabel,
   labelToRemote,
@@ -19,10 +20,12 @@ import {
   FB_VERDICT_LABEL,
   replyMetaJson,
   parseReplyMeta,
+  verifyReplyMeta,
   joinList,
   splitList,
   mergeDraftColumns,
   isDraftRegenerationPending,
+  isDraftStateLocked,
   MATCH_STATUS_LABEL,
   DRAFT_STATE,
   type DraftColumns,
@@ -87,7 +90,7 @@ const book = new SheetBook({
   spreadsheetId: sheetsDbSpreadsheetId,
   createApi: () => {
     const auth = getServiceAccountAuth(SHEETS_RW_SCOPES, sheetsDbImpersonate() || undefined);
-    return auth ? google.sheets({ version: 'v4', auth }) : null;
+    return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
   },
   missingIdMessage: 'SHEETS_DB_SPREADSHEET_ID が未設定',
   missingAuthMessage: 'Google認証（GOOGLE_SA_KEY_JSON または GOOGLE_SA_CLIENT_EMAIL/GOOGLE_SA_PRIVATE_KEY）が未設定',
@@ -120,11 +123,16 @@ const appendRows = (tab: string, rows: Cell[][]) => book.appendRows(tab, rows);
 const upsertRow = (tab: string, keyCol: string, key: string, build: (existing: string[] | null) => Cell[]) =>
   book.upsertRow(tab, keyCol, key, build);
 
+// 数値の列。人が手で「65万」「５年」「1,000」のように入れても読めるよう、全角・桁区切り・末尾の単位（万円・年）を許す
+// （「円」は単位が変わるため読まない）
 function cellNum(cells: string[], idx: number): number | null {
-  const v = (cells[idx] ?? '').trim();
+  const v = (cells[idx] ?? '')
+    .normalize('NFKC')
+    .replace(/\s/g, '')
+    .replace(/(\d),(?=\d{3}(?!\d))/g, '$1');
   if (!v) return null;
-  const n = Number(v);
-  return Number.isNaN(n) ? null : n;
+  const m = v.match(/^(-?\d+(?:\.\d+)?)(?:万円|万|年)?$/);
+  return m ? Number(m[1]) : null;
 }
 
 function cellStr(cells: string[], idx: number): string {
@@ -195,11 +203,44 @@ function warnUnknownReceivedAt(tab: string, items: Array<{ receivedAt: Date }>):
 
 // ===== 案件 =====
 
+// 返信メタの署名の対象（タブ・ID・営業元メール）
+function replyBinding(tab: string, id: string, agentEmail: string) {
+  return { key: draftSigningKey(), tab, id, agentEmail };
+}
+
+// 返信メタ・営業元メールが署名どおりのときだけ、下書きの宛先の元として使う（鍵が無ければ検証しない）。
+// 書き換えられた・署名の無い行は宛先を空にする（その行の下書きは「宛先が不明」になり作られない）
+const untrustedReplyRows = new Map<string, number>();
+
+function trustedReply(tab: string, cells: string[]): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string } {
+  const c = (name: string) => cellStr(cells, colIndex(tab, name));
+  const meta = c('返信メタ');
+  if (verifyReplyMeta(meta, replyBinding(tab, c('ID'), c('営業元メール')))) {
+    return { replyTarget: parseReplyMeta(meta), agentEmail: c('営業元メール') };
+  }
+  untrustedReplyRows.set(tab, (untrustedReplyRows.get(tab) ?? 0) + 1);
+  return { replyTarget: undefined, agentEmail: '' };
+}
+
+const warnedUntrustedReply = new Set<string>();
+
+function warnUntrustedReply(tab: string): void {
+  const n = untrustedReplyRows.get(tab) ?? 0;
+  untrustedReplyRows.delete(tab);
+  if (n === 0 || warnedUntrustedReply.has(tab)) return;
+  warnedUntrustedReply.add(tab);
+  console.warn(
+    `SheetsDB: 「${tab}」タブに返信メタ・営業元メールの署名が無い・合わない行が${n}件あります（書き換えられた可能性があるため、` +
+      'これらの行の下書きの宛先には使いません。SES_DRAFT_SIGNING_KEY を登録する前に保存した行も含みます）',
+  );
+}
+
 function projectToRow(p: Project): Cell[] {
   return [
     p.id, p.title, joinList(p.requiredSkills), joinList(p.preferredSkills), p.rateMin, p.rateMax,
     p.location, remoteLabel(p.remote), p.startPeriod, p.startDate ?? '', p.duration, p.businessFlow,
-    p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId, replyMetaJson(p.replyTarget),
+    p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId,
+    replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail)),
     p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '',
   ];
 }
@@ -214,6 +255,7 @@ function rowToProject(cells: string[]): Project {
   const c = (name: string) => cellStr(cells, colIndex('案件', name));
   const n = (name: string) => cellNum(cells, colIndex('案件', name));
   const location = c('勤務地');
+  const reply = trustedReply('案件', cells);
   return {
     id: c('ID'),
     title: c('案件名'),
@@ -230,9 +272,9 @@ function rowToProject(cells: string[]): Project {
     businessFlow: c('商流メモ'),
     agentCompany: c('営業元会社'),
     agentContact: c('営業元担当'),
-    agentEmail: c('営業元メール'),
+    agentEmail: reply.agentEmail,
     sourceMailId: c('元メールID'),
-    replyTarget: parseReplyMeta(c('返信メタ')),
+    replyTarget: reply.replyTarget,
     receivedAt: receivedAtOf(c('受信日')),
     status: c('ステータス') === '終了' ? 'closed' : 'open',
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
@@ -242,12 +284,13 @@ function rowToProject(cells: string[]): Project {
 
 // 新しい順に並べ、受信日時が since 以降のものに絞って limit 件まで返す（追記順＝古い順のタブから最新を取るため）
 function newestFirst<T extends { receivedAt: Date }>(items: T[], limit: number, since?: Date): T[] {
+  return newestSince(items, since).slice(0, limit);
+}
+
+function newestSince<T extends { receivedAt: Date }>(items: T[], since?: Date): T[] {
   const sinceMs = since ? since.getTime() : -Infinity;
   const time = (x: T) => (Number.isFinite(x.receivedAt.getTime()) ? x.receivedAt.getTime() : UNKNOWN_RECEIVED_AT);
-  return items
-    .filter((x) => time(x) >= sinceMs)
-    .sort((a, b) => time(b) - time(a))
-    .slice(0, limit);
+  return items.filter((x) => time(x) >= sinceMs).sort((a, b) => time(b) - time(a));
 }
 
 // 募集中の案件を新しい順に limit 件まで返す。receivedSince 指定時はその日時以降に受信した案件に絞る
@@ -256,11 +299,17 @@ export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date)
     console.warn('SheetsDB: 案件なしで継続します');
     return [];
   }
+  const open = await openProjects();
+  return newestFirst(open, limit, receivedSince);
+}
+
+async function openProjects(): Promise<Project[]> {
   const rows = await readRows('案件');
   const stCol = colIndex('案件', 'ステータス');
   const open = rows.filter((r) => cellStr(r.cells, stCol) !== '終了').map((r) => rowToProject(r.cells));
   warnUnknownReceivedAt('案件', open);
-  return newestFirst(open, limit, receivedSince);
+  warnUntrustedReply('案件');
+  return open;
 }
 
 // ===== 要員 =====
@@ -269,7 +318,7 @@ function engineerToRow(e: Engineer): Cell[] {
   return [
     e.id, e.displayName, joinList(e.skills), e.experienceYears, e.desiredRate, e.residence,
     remoteLabel(e.remoteWish), e.availableFrom ?? '', e.agentCompany, e.agentContact, e.agentEmail,
-    e.sourceMailId, replyMetaJson(e.replyTarget), e.receivedAt.toISOString(),
+    e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail)), e.receivedAt.toISOString(),
     e.status === 'assigned' ? '決定済' : '提案可', '',
   ];
 }
@@ -284,6 +333,7 @@ function rowToEngineer(cells: string[]): Engineer {
   const c = (name: string) => cellStr(cells, colIndex('要員', name));
   const n = (name: string) => cellNum(cells, colIndex('要員', name));
   const residence = c('居住地');
+  const reply = trustedReply('要員', cells);
   return {
     id: c('ID'),
     displayName: c('表示名'),
@@ -300,9 +350,9 @@ function rowToEngineer(cells: string[]): Engineer {
     remoteWish: labelToRemote(c('リモート希望')),
     agentCompany: c('営業元会社'),
     agentContact: c('営業元担当'),
-    agentEmail: c('営業元メール'),
+    agentEmail: reply.agentEmail,
     sourceMailId: c('元メールID'),
-    replyTarget: parseReplyMeta(c('返信メタ')),
+    replyTarget: reply.replyTarget,
     receivedAt: receivedAtOf(c('受信日')),
     status: c('ステータス') === '決定済' ? 'assigned' : 'available',
     notionPageId: c('ID'),
@@ -316,29 +366,62 @@ export async function fetchAvailableEngineersSheets(limit = 100, receivedSince?:
     console.warn('SheetsDB: 要員なしで継続します');
     return [];
   }
+  const available = await availableEngineers();
+  return newestFirst(available, limit, receivedSince);
+}
+
+async function availableEngineers(): Promise<Engineer[]> {
   const rows = await readRows('要員');
   const stCol = colIndex('要員', 'ステータス');
   const available = rows.filter((r) => cellStr(r.cells, stCol) !== '決定済').map((r) => rowToEngineer(r.cells));
   warnUnknownReceivedAt('要員', available);
-  return newestFirst(available, limit, receivedSince);
+  warnUntrustedReply('要員');
+  return available;
+}
+
+// 突合前（突合済が空欄）なのに、直近の新しい順 limit 件の突合の対象から押し出された募集中の案件・提案可の要員の数
+// （SES_MATCH_POOL_LIMIT を超えて新しいものが届くと、古い突合前のものは判定されないまま残るため知らせる）
+export async function countUnmatchedBeyondPoolSheets(limit: number, since: Date): Promise<{ projects: number; engineers: number }> {
+  if (!configured()) return { projects: 0, engineers: 0 };
+  const beyond = <T extends { receivedAt: Date; matched?: boolean }>(items: T[]) =>
+    newestSince(items, since).slice(limit).filter((x) => x.matched === false).length;
+  return { projects: beyond(await openProjects()), engineers: beyond(await availableEngineers()) };
+}
+
+// 指定のメールから保存した案件・要員（ステータスによらず）。同じメールを抽出し直したときに、保存済みの行と内容で
+// 対応付けてIDを決めるために使う
+export async function fetchItemsByMailSheets(mailIds: Set<string>): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (!configured() || mailIds.size === 0) return { projects: [], engineers: [] };
+  const pick = async <T>(tab: string, toItem: (cells: string[]) => T): Promise<T[]> => {
+    const col = colIndex(tab, '元メールID');
+    const items = (await readRows(tab)).filter((r) => mailIds.has(cellStr(r.cells, col))).map((r) => toItem(r.cells));
+    untrustedReplyRows.delete(tab);
+    return items;
+  };
+  return { projects: await pick('案件', rowToProject), engineers: await pick('要員', rowToEngineer) };
 }
 
 // ===== 案件・要員・マッチのまとめ保存（1行ずつの追記で API 呼び出しと実行時間が膨らまないように） =====
 
-// 既存の行は1行ずつ更新し、新しい行はまとめて追記する。保存できなかった ID → エラー を返す
+interface RowsSaveResult {
+  failed: Map<string, unknown>; // 保存できなかった ID → エラー
+  rows: Map<string, Cell[]>; // 保存できた ID → 書き込んだ行（人が進めたステータス・突合済を引き継いだ値）
+}
+
+// 既存の行は1行ずつ更新し、新しい行はまとめて追記する
 // （タブを読めない・見出しが食い違う場合は全件が失敗）
 async function saveRowsBatch<T extends { id: string }>(
   tab: string,
   items: T[],
   build: (item: T, existing: string[] | null) => Cell[],
-): Promise<Map<string, unknown>> {
-  const failed = new Map<string, unknown>();
-  if (!configured() || items.length === 0) return failed;
+): Promise<RowsSaveResult> {
+  const out: RowsSaveResult = { failed: new Map(), rows: new Map() };
+  if (!configured() || items.length === 0) return out;
   try {
     await readRows(tab); // タブの自動生成とヘッダー検証（食い違いは例外）
   } catch (err) {
-    for (const item of items) failed.set(item.id, err);
-    return failed;
+    for (const item of items) out.failed.set(item.id, err);
+    return out;
   }
   const fresh: Array<{ id: string; row: Cell[] }> = [];
   const seen = new Set<string>();
@@ -350,32 +433,66 @@ async function saveRowsBatch<T extends { id: string }>(
         fresh.push({ id: item.id, row: build(item, null) });
         continue;
       }
-      await upsertRow(tab, 'ID', item.id, (existing) => build(item, existing));
+      out.rows.set(item.id, await upsertRow(tab, 'ID', item.id, (existing) => build(item, existing)));
     } catch (err) {
-      failed.set(item.id, err);
+      out.failed.set(item.id, err);
     }
   }
   for (let i = 0; i < fresh.length; i += APPEND_CHUNK) {
     const chunk = fresh.slice(i, i + APPEND_CHUNK);
     try {
       await appendRows(tab, chunk.map((f) => f.row));
+      for (const f of chunk) out.rows.set(f.id, f.row);
     } catch (err) {
-      for (const f of chunk) failed.set(f.id, err);
+      for (const f of chunk) out.failed.set(f.id, err);
     }
   }
-  return failed;
+  return out;
 }
 
-export function saveProjectsSheets(projects: Project[]): Promise<Map<string, unknown>> {
-  return saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(p), existing));
+export interface SheetsSaveResult<T> {
+  failed: Map<string, unknown>;
+  // 保存できたものの、保存後の状態（人が付けた「終了」「決定済」と突合済の印は、抽出し直した値でなくシートの値）
+  saved: Map<string, T>;
 }
 
-export function saveEngineersSheets(engineers: Engineer[]): Promise<Map<string, unknown>> {
-  return saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(e), existing));
+function rowCell(tab: string, row: Cell[], name: string): string {
+  const col = colIndex(tab, name);
+  return col < 0 ? '' : String(row[col] ?? '').trim();
 }
 
-export function saveMatchesSheets(matches: MatchResult[]): Promise<Map<string, unknown>> {
-  return saveRowsBatch('マッチ', matches, (m, existing) => matchRow(m, existing));
+export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSaveResult<Project>> {
+  const { failed, rows } = await saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(p), existing));
+  const saved = new Map<string, Project>();
+  for (const p of projects) {
+    const row = rows.get(p.id);
+    if (!row) continue;
+    saved.set(p.id, {
+      ...p,
+      status: rowCell('案件', row, 'ステータス') === '終了' ? 'closed' : 'open',
+      matched: rowCell('案件', row, MATCHED_COLUMN) !== '',
+    });
+  }
+  return { failed, saved };
+}
+
+export async function saveEngineersSheets(engineers: Engineer[]): Promise<SheetsSaveResult<Engineer>> {
+  const { failed, rows } = await saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(e), existing));
+  const saved = new Map<string, Engineer>();
+  for (const e of engineers) {
+    const row = rows.get(e.id);
+    if (!row) continue;
+    saved.set(e.id, {
+      ...e,
+      status: rowCell('要員', row, 'ステータス') === '決定済' ? 'assigned' : 'available',
+      matched: rowCell('要員', row, MATCHED_COLUMN) !== '',
+    });
+  }
+  return { failed, saved };
+}
+
+export async function saveMatchesSheets(matches: MatchResult[]): Promise<Map<string, unknown>> {
+  return (await saveRowsBatch('マッチ', matches, (m, existing) => matchRow(m, existing))).failed;
 }
 
 // 候補ペアの判定・保存まで済んだ案件・要員に「突合済」を付ける。付けた行数を返す
@@ -408,14 +525,15 @@ function readDraftColumns(tab: string, cells: string[]): DraftColumns {
 function matchRow(match: MatchResult, existing: string[] | null): Cell[] {
   const keep = (name: string) => (existing ? cellStr(existing, colIndex('マッチ', name)) : '');
   const senderEmail = existing?.[colIndex('マッチ', '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
+  const id = keep('ID') || match.id;
   const drafts = mergeDraftColumns(
     existing ? readDraftColumns('マッチ', existing) : null,
     match.draftToProject,
     match.draftToEngineer,
-    { failed: match.draftFailed, signingKey: draftSigningKey() },
+    { failed: match.draftFailed, signingKey: draftSigningKey(), bind: draftBinding('マッチ', id) },
   );
   return [
-    keep('ID') || match.id, match.title, match.grossMarginJpy, match.score, match.reason, match.projectId,
+    id, match.title, match.grossMarginJpy, match.score, match.reason, match.projectId,
     match.engineerId, match.draftToProject?.url ?? '', match.draftToEngineer?.url ?? '',
     keep('ステータス') || matchStatusLabel(match.status), match.detectedAt.toISOString(),
     senderEmail, drafts.projectState, drafts.engineerState, drafts.projectText, drafts.engineerText, drafts.data,
@@ -440,6 +558,36 @@ export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
   return new Set(rows.filter((r) => !regenerate(r.cells)).map((r) => c(r.cells, 'ID')).filter(Boolean));
 }
 
+// サマリで知らせ損ねたマッチを次の回のサマリに載せるための要約（保存済みの行から）
+export interface MatchSummaryRow {
+  id: string;
+  title: string;
+  grossMarginJpy: number | null;
+  score: number | null;
+  reason: string;
+}
+
+export async function fetchMatchSummariesSheets(ids: string[]): Promise<MatchSummaryRow[]> {
+  if (!configured() || ids.length === 0) return [];
+  const want = new Set(ids);
+  const seen = new Set<string>();
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const out: MatchSummaryRow[] = [];
+  for (const r of await readRows('マッチ')) {
+    const id = c(r.cells, 'ID');
+    if (!want.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: c(r.cells, 'マッチ名'),
+      grossMarginJpy: cellNum(r.cells, colIndex('マッチ', '粗利額')),
+      score: cellNum(r.cells, colIndex('マッチ', '適合スコア')),
+      reason: c(r.cells, '判定根拠'),
+    });
+  }
+  return out;
+}
+
 export async function updateMatchStatusSheets(id: string, status: MatchStatus): Promise<void> {
   if (!configured()) return;
   const hit = await locateRow('マッチ', 'ID', id);
@@ -453,6 +601,11 @@ export async function updateMatchStatusSheets(id: string, status: MatchStatus): 
 // ===== 担当者メール列による下書き依頼（マッチ・プロパー候補等、下書き依頼の列を持つタブ共通） =====
 
 const DRAFT_STATE_COLUMNS: Record<DraftSide, string> = { project: '案件側下書き状態', engineer: '要員側下書き状態' };
+
+// 下書きデータの署名に含める行の識別（署名つきの下書きデータを別の行へ写しても通らないように）
+export function draftBinding(tab: string, id: string): string[] {
+  return [tab, id.trim()];
+}
 
 // ID・担当者メール・下書きデータと、少なくとも片側の状態列を持つタブ（プロパー候補は案件側のみ）
 export function draftRequestTabs(): string[] {
@@ -529,19 +682,27 @@ export async function reloadDraftRequestRowSheets(
   return hit ? toDraftRequestRow(listed.tab, hit) : null;
 }
 
-// 下書き状態列だけを書き込む（他の列は人の編集と競合させないため触らない）。対象行が無ければ false
+function draftStateOf(row: DraftRequestRow, side: DraftSide): string {
+  return side === 'project' ? row.projectState : row.engineerState;
+}
+
+// 下書き状態列だけを書き込む（他の列は人の編集と競合させないため触らない）。対象行が無ければ false。
+// expect を渡すと、書き込む側の状態が読み直した行で expect と同じときだけ書く（別の実行・人が先に状態を変えていたら
+// 書かずに false。同時に動いた実行が同じ依頼を二重に作らないための確認）
 export async function writeDraftStatesSheets(
   row: Pick<DraftRequestRow, 'tab' | 'id' | 'rowNumber' | 'senderEmail'>,
   states: Partial<Record<DraftSide, string>>,
+  expect?: DraftRequestRow,
 ): Promise<boolean> {
   const tab = row.tab;
   const hit = await locateRequestRow(row);
   if (!hit) return false;
-  const updates: Array<[string, Cell]> = [];
-  for (const side of Object.keys(DRAFT_STATE_COLUMNS) as DraftSide[]) {
-    const value = states[side];
-    if (value !== undefined) updates.push([DRAFT_STATE_COLUMNS[side], value]);
+  const sides = (Object.keys(DRAFT_STATE_COLUMNS) as DraftSide[]).filter((side) => states[side] !== undefined);
+  if (expect) {
+    const current = toDraftRequestRow(tab, hit);
+    if (sides.some((side) => draftStateOf(current, side) !== draftStateOf(expect, side))) return false;
   }
+  const updates: Array<[string, Cell]> = sides.map((side) => [DRAFT_STATE_COLUMNS[side], states[side]!]);
   await book.writeCells(tab, hit, updates);
   return true;
 }
@@ -563,6 +724,7 @@ function properCandidateRow(c: ProperCandidate, existing: string[] | null): Cell
   const senderEmail = existing?.[colIndex(tab, '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
   const drafts = mergeDraftColumns(existing ? readDraftColumns(tab, existing) : null, c.draftToProject, undefined, {
     signingKey: draftSigningKey(),
+    bind: draftBinding(tab, c.id),
   });
   return [
     c.id, c.properLabel, c.projectTitle, round1(c.projectRate), round1(c.requiredProjectRate), round1(c.rateGapMan),
@@ -574,6 +736,36 @@ function properCandidateRow(c: ProperCandidate, existing: string[] | null): Cell
   ];
 }
 
+// プロパー候補のID（ownmatch_<社員ID>_<案件ID>）から社員IDを取り出す（案件IDは proj_ で始まる）
+export function properEngineerIdOfCandidate(candidateId: string): string {
+  const rest = candidateId.startsWith('ownmatch_') ? candidateId.slice('ownmatch_'.length) : '';
+  const at = rest.lastIndexOf('_proj_');
+  return at > 0 ? rest.slice(0, at) : '';
+}
+
+// プロパーの社員ID。スキルシートのDriveのファイルIDはそのままファイルのURLになり、リンク共有のスキルシートを
+// 案件スプレッドシートの閲覧者が開けてしまうため、一方向のハッシュにする（元のIDはプロパー管理表にだけ置く）
+export function properEngineerIdOf(fileId: string): string {
+  return `proper_${createHash('sha256').update(fileId).digest('hex').slice(0, 16)}`;
+}
+
+// 以前の版はプロパー候補のIDにDriveのファイルIDをそのまま入れていたため、ハッシュのIDに書き換える
+async function migrateLegacyProperIds(): Promise<void> {
+  const tab = PROPER_CANDIDATE_TAB;
+  const idCol = colIndex(tab, 'ID');
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  for (const r of await readRows(tab)) {
+    const id = cellStr(r.cells, idCol);
+    const engineerId = properEngineerIdOfCandidate(id);
+    if (!engineerId.startsWith('proper_') || /^proper_[0-9a-f]{16}$/.test(engineerId)) continue;
+    const fileId = engineerId.slice('proper_'.length);
+    updates.push({ key: id, cells: [['ID', `ownmatch_${properEngineerIdOf(fileId)}${id.slice(`ownmatch_${engineerId}`.length)}`]] });
+  }
+  if (updates.length === 0) return;
+  const n = await book.writeCellsByKey(tab, 'ID', updates);
+  console.log(`SheetsDB: 「${tab}」タブの${n}行のIDを、スキルシートのファイルIDを含まない形に書き換えました`);
+}
+
 // 候補を ID で upsert する。人の列（ステータス・担当者メール・案件側下書き状態）は保持し、
 // 内容が変わらない行は書き込まない（毎回の実行で候補数ぶんのAPI呼び出しをしないため）。新規行はまとめて追記。
 // 保存（追記・更新）した行数を返す
@@ -581,6 +773,7 @@ export async function saveProperCandidatesSheets(candidates: ProperCandidate[]):
   if (!configured() || candidates.length === 0) return 0;
   const tab = PROPER_CANDIDATE_TAB;
   await readRows(tab); // タブの自動生成とヘッダー検証（食い違いは例外）を先に済ませる
+  await migrateLegacyProperIds();
   const fresh: Cell[][] = [];
   let written = 0;
   for (const c of candidates) {
@@ -595,6 +788,32 @@ export async function saveProperCandidatesSheets(candidates: ProperCandidate[]):
   }
   for (let i = 0; i < fresh.length; i += APPEND_CHUNK) await appendRows(tab, fresh.slice(i, i + APPEND_CHUNK));
   return written + fresh.length;
+}
+
+export const RETIRED_PROPER_VERDICT = '対象外（稼働可の社員ではなくなりました）';
+
+// 稼働可でなくなった（対象外・アサイン済・スキルシートの削除等）社員のプロパー候補の行を退役させる。
+// 氏名と必要案件単価・提案文面・下書きデータを消し、まだ作っていない側の下書き状態を「不要」にする
+// （古いサマリを見た営業が担当者メールを入れても、提案をやめた社員を社外に紹介しないため）。退役させた行数を返す
+export async function retireProperCandidatesSheets(activeEngineerIds: Set<string>): Promise<number> {
+  if (!configured()) return 0;
+  const tab = PROPER_CANDIDATE_TAB;
+  await migrateLegacyProperIds();
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  for (const r of await readRows(tab)) {
+    const id = c(r.cells, 'ID');
+    if (!id || activeEngineerIds.has(properEngineerIdOfCandidate(id))) continue;
+    if (c(r.cells, '判定') === RETIRED_PROPER_VERDICT) continue;
+    const cells: Array<[string, Cell]> = [
+      ['プロパー', '（対象外）'], ['必要案件単価', ''], ['単価差', ''], ['判定', RETIRED_PROPER_VERDICT],
+      ['案件側文面', ''], ['下書きデータ', ''],
+    ];
+    if (!isDraftStateLocked(c(r.cells, '案件側下書き状態'))) cells.push(['案件側下書き状態', DRAFT_STATE.retired]);
+    updates.push({ key: id, cells });
+  }
+  if (updates.length === 0) return 0;
+  return book.writeCellsByKey(tab, 'ID', updates);
 }
 
 // ===== 自社社員 =====
@@ -721,10 +940,7 @@ export async function pruneProcessedMailSheets(before: Date, minRows = 200): Pro
     return Number.isFinite(t) && t < before.getTime();
   };
   if ((await readRows(tab)).filter(isOld).length < minRows) return 0;
-  book.invalidate(tab); // 消す直前に読み直した行番号で消す
-  const targets = (await readRows(tab)).filter(isOld).map((r) => r.rowNumber);
-  await book.deleteRows(tab, targets);
-  return targets.length;
+  return book.deleteRowsWhere(tab, isOld); // 消す直前に読み直した行番号で消す
 }
 
 // スプレッドシート全体のセル数（直近のタブ確認時点）
@@ -733,16 +949,40 @@ export function sheetsCellCount(): number {
 }
 
 // バッチの開始時に、保存先のタブを読めること（共有・見出し）を確かめる。問題があれば例外。
-// 「突合済」列を既存のタブに追加した直後は、それまでの行を突合済みとして扱う（新しい仕組みに切り替えた最初の実行で、
-// 保存済みの全案件・要員の組を判定し直して費用がかさまないように）
+// あわせて「突合済」列の導入前からある案件・要員の行を突合済みにする（migrateMatchedColumn）
 export async function checkSheetsTabs(tabs: string[]): Promise<void> {
   for (const tab of tabs) await readRows(tab);
   for (const tab of ['案件', '要員']) {
-    if (!tabs.includes(tab) || !book.columnsAddedTo(tab).includes(MATCHED_COLUMN)) continue;
-    const ids = (await readRows(tab)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))).filter(Boolean);
-    const marked = await book.writeCellsByKey(tab, 'ID', ids.map((id) => ({ key: id, cells: [[MATCHED_COLUMN, `移行 ${new Date().toISOString()}`]] })));
-    if (marked > 0) console.log(`SheetsDB: 「${tab}」タブの既存${marked}行を突合済みにしました（${MATCHED_COLUMN}列の追加に伴う移行）`);
+    if (tabs.includes(tab)) await migrateMatchedColumn(tab);
   }
+}
+
+const MIGRATED_MARK = '移行';
+
+interface MigrationState {
+  state: 'started' | 'done';
+  at: string;
+}
+
+// 「突合済」列の導入前からある行を突合済みにする（新しい仕組みに切り替えた最初の実行で、保存済みの全案件・要員の組を
+// 判定し直して費用がかさまないように）。列をどのプロセスが追加したか（確認UI・自社社員探し等でも追加される）に依らず、
+// _状態タブの印で1回だけ行う。印は書き込みがすべて済んでから「完了」にするため、途中で失敗しても次の実行でやり直す
+async function migrateMatchedColumn(tab: string): Promise<void> {
+  const key = `migration:${MATCHED_COLUMN}:${tab}`;
+  const state = await readStateJson<MigrationState>(key);
+  if (state?.state === 'done') return;
+  const col = colIndex(tab, MATCHED_COLUMN);
+  const rows = await readRows(tab);
+  // 以前の版（列を追加したプロセスだけが移行した）で移行済みのタブは、その後に保存した突合前の行（空欄）を触らない
+  const migratedBefore = !state && rows.some((r) => cellStr(r.cells, col).startsWith(MIGRATED_MARK));
+  const ids = migratedBefore ? [] : rows.filter((r) => !cellStr(r.cells, col)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))).filter(Boolean);
+  const at = new Date().toISOString();
+  if (ids.length > 0) {
+    await writeStateJson(key, { state: 'started', at } satisfies MigrationState);
+    const marked = await book.writeCellsByKey(tab, 'ID', ids.map((id) => ({ key: id, cells: [[MATCHED_COLUMN, `${MIGRATED_MARK} ${at}`]] })));
+    if (marked > 0) console.log(`SheetsDB: 「${tab}」タブの既存${marked}行を突合済みにしました（${MATCHED_COLUMN}列の導入に伴う移行）`);
+  }
+  await writeStateJson(key, { state: 'done', at } satisfies MigrationState);
 }
 
 export async function markMailProcessedSheets(ids: string[], result: ProcessedMailResult): Promise<void> {
@@ -781,4 +1021,40 @@ export async function writeStateJson(key: string, value: unknown): Promise<void>
     throw new SafeLogError(`SheetsDB: 状態「${key}」が大きすぎます（${json.length}文字 > ${STATE_JSON_MAX_CHARS}）`);
   }
   await upsertRow('_状態', 'キー', key, () => [key, json, new Date().toISOString()]);
+}
+
+// ===== 同時実行の防止（バッチの実行中の印） =====
+
+const LEASE_KEY = 'batchLease';
+
+interface LeaseState {
+  token: string;
+  until: string; // ISO日時。これを過ぎた印は無効（打ち切られた実行の印が残っても、次の定時実行を止めない）
+}
+
+export type LeaseResult = { ok: true; token: string } | { ok: false; until: string };
+
+async function readStateFresh<T>(key: string): Promise<T | null> {
+  book.invalidate('_状態');
+  return readStateJson<T>(key);
+}
+
+// 同時に動くバッチ（定時実行と手元の実行・自前の定期実行など）を1つに限る。_状態タブに期限つきの印を書き、少し待ってから
+// 読み直して自分の印が残っていれば実行してよい（ほぼ同時に書いた相手がいれば、後から書いた方だけが残る）
+export async function acquireBatchLeaseSheets(ttlMs: number, confirmDelayMs = 5000): Promise<LeaseResult> {
+  const now = Date.now();
+  const current = await readStateFresh<LeaseState>(LEASE_KEY);
+  if (current?.token && Date.parse(current.until) > now) return { ok: false, until: current.until };
+  const token = randomUUID();
+  await writeStateJson(LEASE_KEY, { token, until: new Date(now + ttlMs).toISOString() } satisfies LeaseState);
+  if (confirmDelayMs > 0) await new Promise((res) => setTimeout(res, confirmDelayMs));
+  const confirmed = await readStateFresh<LeaseState>(LEASE_KEY);
+  return confirmed?.token === token ? { ok: true, token } : { ok: false, until: confirmed?.until ?? '' };
+}
+
+// 自分の印のときだけ消す（期限切れの後に別の実行が取った印は消さない）
+export async function releaseBatchLeaseSheets(token: string): Promise<void> {
+  const current = await readStateFresh<LeaseState>(LEASE_KEY);
+  if (current?.token !== token) return;
+  await writeStateJson(LEASE_KEY, { token: '', until: new Date(0).toISOString() } satisfies LeaseState);
 }

@@ -49,18 +49,54 @@ export function parseAgentInfo(combined: string): { company: string; contact: st
 
 // 全員に返信のメタ情報（ReplyTarget）をJSONで永続化・復元する。
 // これが無いと --match-only（DB読み出し）経路の下書きがスレッド返信にならない。
-export function replyMetaJson(rt: ReplyTarget | undefined): string {
-  return rt ? JSON.stringify(rt) : '';
+// binding（署名鍵つき）を渡すと、行のタブ・ID・営業元メールと合わせて署名する（下書きの宛先はこの列と営業元メールから
+// 作り直されるため。シート上で宛先を書き換えた行・別の行から写した返信メタを宛先に使わないように）
+export interface ReplyMetaBinding {
+  key: string; // SES_DRAFT_SIGNING_KEY（空なら署名しない）
+  tab: string;
+  id: string;
+  agentEmail: string;
+}
+
+const REPLY_META_FIELDS = ['from', 'replyTo', 'to', 'cc', 'subject', 'messageId', 'references'] as const;
+
+function replyMetaSignature(rt: ReplyTarget | undefined, b: ReplyMetaBinding): string {
+  const fields = rt ? REPLY_META_FIELDS.map((f) => rt[f] ?? '') : null;
+  const canonical = JSON.stringify([b.tab, b.id.trim(), b.agentEmail.trim(), fields]);
+  return createHmac('sha256', b.key).update(canonical).digest('base64url');
+}
+
+export function replyMetaJson(rt: ReplyTarget | undefined, binding?: ReplyMetaBinding): string {
+  if (!binding?.key) return rt ? JSON.stringify(rt) : '';
+  return JSON.stringify({ ...(rt ?? {}), sig: replyMetaSignature(rt, binding) });
+}
+
+function parseReplyMetaObject(json: string): Record<string, unknown> | null {
+  if (!json) return null;
+  try {
+    const o = JSON.parse(json) as unknown;
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function parseReplyMeta(json: string): ReplyTarget | undefined {
-  if (!json) return undefined;
-  try {
-    const o = JSON.parse(json) as ReplyTarget;
-    return o && typeof o.from === 'string' && o.from ? o : undefined;
-  } catch {
-    return undefined;
-  }
+  const o = parseReplyMetaObject(json);
+  if (!o || typeof o.from !== 'string' || !o.from) return undefined;
+  const { sig: _sig, ...rest } = o;
+  return rest as unknown as ReplyTarget;
+}
+
+// 返信メタ（と営業元メール）がこの行のものとして署名どおりか。鍵が無ければ検証しない（true）
+export function verifyReplyMeta(json: string, binding: ReplyMetaBinding): boolean {
+  if (!binding.key) return true;
+  const o = parseReplyMetaObject(json);
+  const sig = o && typeof o.sig === 'string' ? o.sig : '';
+  if (!sig) return false;
+  const expected = Buffer.from(replyMetaSignature(parseReplyMeta(json), binding));
+  const actual = Buffer.from(sig);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 // スキル等の1要素から区切り文字（カンマ・全角カンマ・読点）を除く。'Java(Spring, MyBatis)' のような値が
@@ -98,6 +134,10 @@ export const DRAFT_STATE = {
   sent: '送信済',
   error: 'エラー',
   genFailed: 'エラー: 文面を用意できませんでした（次回のバッチで作り直します）',
+  // 宛先（元メールの差出人・営業元メール）が分からない、または署名の合わない返信メタから作った側。依頼を受けない
+  noRecipient: '不要（宛先が不明なため作成できません）',
+  // 稼働可でなくなった社員のプロパー候補（再び稼働可になって候補に戻れば「未作成」に戻す）
+  retired: '不要（稼働可の社員ではなくなりました）',
 } as const;
 
 // 作成済・送信済・作成中は機械が上書きしない（文面・下書きデータも固定する）
@@ -177,32 +217,37 @@ export function parseDraftData(json: string): StoredDraftData {
   return out;
 }
 
-// 署名の対象（項目の順序を固定した正規形）
-function canonicalDraftData(data: StoredDraftData): string {
+// 署名の対象（項目の順序を固定した正規形）。bind（タブ・ID）を含めると、署名つきの下書きデータを別の行へ写しても通らない
+function canonicalDraftData(data: StoredDraftData, bind: string[]): string {
   const side = (d: StoredDraft | undefined) =>
     d ? [d.to, d.subject, ...OPTIONAL_TEXT_FIELDS.map((f) => d[f] ?? null)] : null;
-  return JSON.stringify([side(data.project), side(data.engineer)]);
+  const body = [side(data.project), side(data.engineer)];
+  return JSON.stringify(bind.length > 0 ? [bind, ...body] : body);
 }
 
-function draftSignature(data: StoredDraftData, key: string): string {
-  return createHmac('sha256', key).update(canonicalDraftData(data)).digest('base64url');
+function draftSignature(data: StoredDraftData, key: string, bind: string[]): string {
+  return createHmac('sha256', key).update(canonicalDraftData(data, bind)).digest('base64url');
 }
 
-// 下書きデータ列の署名を確かめる。鍵が無ければ検証しない（true）。鍵があるのに署名が無い・合わない（人が書き換えた）なら false
-export function verifyDraftData(json: string, key: string): boolean {
+// 下書きデータ列の署名を確かめる。鍵が無ければ検証しない（true）。鍵があるのに署名が無い・合わない（人が書き換えた・
+// 別の行から写した）なら false。bind は署名したときと同じ行の識別（タブ・ID）
+export function verifyDraftData(json: string, key: string, bind: string[] = []): boolean {
   if (!key) return true;
   const o = parseDraftJson(json);
   if (!o) return !json.trim();
   const sig = typeof o.sig === 'string' ? o.sig : '';
-  const expected = draftSignature(parseDraftData(json), key);
+  const expected = draftSignature(parseDraftData(json), key, bind);
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function serializeDraftData(data: StoredDraftData, key: string): string {
-  if (!data.project && !data.engineer) return '';
-  return JSON.stringify(key ? { ...data, sig: draftSignature(data, key) } : data);
+// 署名は読み戻したときと同じ正規形（parseDraftData が捨てる側＝宛先の無い側などを除いたもの）に付ける。
+// 片側の宛先が空でも、もう片側の署名が合わなくなって両側とも作れなくなることがないように
+function serializeDraftData(data: StoredDraftData, key: string, bind: string[]): string {
+  const clean = parseDraftData(JSON.stringify(data));
+  if (!clean.project && !clean.engineer) return '';
+  return JSON.stringify(key ? { ...clean, sig: draftSignature(clean, key, bind) } : clean);
 }
 
 // 文面列（人が読む用）。宛先・件名を本文の前に付ける
@@ -226,6 +271,8 @@ export interface DraftMergeOptions {
   failed?: boolean;
   // 下書きデータ列の署名鍵（SES_DRAFT_SIGNING_KEY）。空なら署名しない
   signingKey?: string;
+  // 署名に含める行の識別（タブ・ID）
+  bind?: string[];
 }
 
 // 再実行で同じマッチを保存し直すときの下書き列の決め方。状態列は人も編集するため空欄を埋める以外は
@@ -238,8 +285,9 @@ export function mergeDraftColumns(
   opts: DraftMergeOptions = {},
 ): DraftColumns {
   const key = opts.signingKey ?? '';
+  const bind = opts.bind ?? [];
   const prevJson = existing?.data ?? '';
-  const prev = verifyDraftData(prevJson, key) ? parseDraftData(prevJson) : {};
+  const prev = verifyDraftData(prevJson, key, bind) ? parseDraftData(prevJson) : {};
   const failed = Boolean(opts.failed);
   const p = mergeDraftSide(existing?.projectState ?? '', existing?.projectText ?? '', prev.project, project, failed);
   const e = mergeDraftSide(existing?.engineerState ?? '', existing?.engineerText ?? '', prev.engineer, engineer, failed);
@@ -251,7 +299,7 @@ export function mergeDraftColumns(
     engineerState: e.state,
     projectText: p.text,
     engineerText: e.text,
-    data: serializeDraftData(data, key),
+    data: serializeDraftData(data, key, bind),
   };
 }
 
@@ -264,13 +312,20 @@ function mergeDraftSide(
 ): { state: string; text: string; stored: StoredDraft | undefined } {
   const s = state.trim();
   if (isDraftStateLocked(s)) return { state, text, stored: prevStored };
+  const machineState = s === '' || isDraftRegenerationPending(s) || s === DRAFT_STATE.noRecipient || s === DRAFT_STATE.retired;
   if (fresh) {
-    const stored = toStoredDraft(fresh);
-    const nextState = s === '' || isDraftRegenerationPending(s) ? DRAFT_STATE.pending : state;
-    return { state: nextState, text: draftDisplayText(stored), stored };
+    // 読み戻せない側（宛先が空等）は下書きデータに入れず、依頼を受けない状態にする（文面は人が読めるよう残す）
+    const stored = cleanStoredDraft(toStoredDraft(fresh));
+    const display = draftDisplayText(toStoredDraft(fresh));
+    if (!stored) return { state: machineState ? DRAFT_STATE.noRecipient : state, text: display, stored: undefined };
+    return { state: machineState ? DRAFT_STATE.pending : state, text: draftDisplayText(stored), stored };
   }
   if (failed && (s === '' || isDraftRegenerationPending(s)) && !prevStored) {
     return { state: DRAFT_STATE.genFailed, text, stored: undefined };
+  }
+  // 作り直し待ちだった側が、判定し直しで下書きを作らない区分（参考提案・要確認）になった
+  if (isDraftRegenerationPending(s)) {
+    return { state: prevStored ? DRAFT_STATE.pending : DRAFT_STATE.notNeeded, text, stored: prevStored };
   }
   if (s) return { state, text, stored: prevStored };
   return { state: prevStored ? DRAFT_STATE.pending : DRAFT_STATE.notNeeded, text, stored: prevStored };

@@ -9,6 +9,7 @@ import {
   requireLive,
   demoModeExplicit,
   logRedact,
+  properFollowShortcuts,
   llmProviderName,
   llmKeyConfigured,
   extractModel,
@@ -366,11 +367,11 @@ function checkSenders(): void {
 function checkDraftSigning(): void {
   const key = draftSigningKey();
   if (!key) {
-    warn('SES_DRAFT_SIGNING_KEY が未設定です — スプレッドシートの「下書きデータ」列を書き換えられても、その内容で下書きを作ります（ランダムな32文字以上を Secrets に登録すると、書き換えを検知して作成しません）');
+    warn('SES_DRAFT_SIGNING_KEY が未設定です — スプレッドシートの「下書きデータ」列や案件・要員の「返信メタ」「営業元メール」（宛先の元）を書き換えられても、その内容で下書きを作ります（ランダムな32文字以上を Secrets に登録すると、書き換えを検知して作成しません）');
   } else if (key.length < 32) {
     warn('SES_DRAFT_SIGNING_KEY が短すぎます（ランダムな32文字以上を推奨）');
   } else {
-    ok('SES_DRAFT_SIGNING_KEY: 設定済み（下書きデータの書き換えを検知します）');
+    ok('SES_DRAFT_SIGNING_KEY: 設定済み（下書きデータ・返信メタ・営業元メールの書き換えと、別の行からの写しを検知します）');
   }
 }
 
@@ -408,13 +409,22 @@ function checkProper(): void {
       info('フォルダ・管理表はDWDでこのユーザーとして読みます（そのテナントで drive.readonly と spreadsheets の委任が必要）');
     }
   }
+  if (properFollowShortcuts()) {
+    warn(
+      'PROPER_FOLLOW_SHORTCUTS=true: フォルダにファイルを追加できる人は、ショートカットを置くだけでプロパーの認証が読める任意のファイルを' +
+        '読み取らせられます（フォルダへの追加の権限を最小限にしてください。フォルダへのショートカットはたどりません）',
+    );
+  }
   if (dbProvider() !== 'sheets') warn('候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです（notion では保存されません）');
 }
 
 function checkNumbers(numberWarnings: string[]): void {
   section('数値・切替の設定');
+  // 粗利下限・交渉幅は社外に知られたくない方針（Secretsに登録）。Secretsの伏せ字は登録した文字列そのものにしか効かず、
+  // 円への換算・桁区切りをした値は公開ログにそのまま出るため、秘匿モードでは値を表示しない
+  const margin = logRedact() ? '粗利下限 設定済み（値は表示しません）' : `粗利下限 ${minGrossMarginJpy().toLocaleString('ja-JP')}円/月`;
   info(
-    `粗利下限 ${minGrossMarginJpy().toLocaleString('ja-JP')}円/月・スキル一致率 ${skillMatchThreshold()}（強マッチ ${skillMatchStrongThreshold()}）・` +
+    `${margin}・スキル一致率 ${skillMatchThreshold()}（強マッチ ${skillMatchStrongThreshold()}）・` +
       `収集 直近${collectDays()}日（1回${maxMailsPerRun()}件まで）`,
   );
   if (numberWarnings.length === 0) ok('数値の設定はすべて解釈できました（未設定の項目は既定値）');
@@ -425,7 +435,10 @@ function checkNumbers(numberWarnings: string[]): void {
   if (collectDays() < 4) {
     warn('SES_COLLECT_DAYS が4日未満です — 金曜14:00〜月曜10:00（約3日）をまたぐ月曜の回で取りこぼしたり、失敗したメールを再試行できずに隔離したりする恐れがあります（既定 7）');
   }
-  info(`1回の実行で新しい抽出・判定を始める期限: 開始から${runDeadlineMinutes()}分（残りは次回の実行で続きから処理します。ワークフローの制限時間より短くしてください）`);
+  info(
+    `1回の実行で新しい抽出・判定を始める期限: 開始から${runDeadlineMinutes()}分（メールの抽出はその約半分まで。残りは次回の実行で続きから処理します。` +
+      'ワークフローの制限時間より短くしてください）',
+  );
   if (repairEnabled()) info('修正パッチ案の自動生成: 有効（隔離が増えた回にソースコードの一部をAPIへ送ります）');
 }
 
@@ -445,7 +458,7 @@ function main(): void {
   console.log('');
   if (errors > 0) {
     console.log(
-      `❌ 必須の設定に不足・誤りが${errors}件あります。GitHub の Settings → Secrets and variables → Actions で名前と値を確認してください（⚠️ ${warnings}件）`,
+      `❌ 必須の設定に不足・誤りが${errors}件あります。GitHub の Settings → Environments → production（Secrets）と Settings → Secrets and variables → Actions（Variables）で名前と値を確認してください（⚠️ ${warnings}件）`,
     );
     process.exitCode = 1;
   } else {

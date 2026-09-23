@@ -1,6 +1,7 @@
 // オフライン自己検証（npm run ses:flow:check）用の、Google Sheets v4 / Drive v3 のインメモリ偽物と偽のメール送受信。
 // 本番コードが使う範囲だけを、実APIと同じ振る舞いで再現する:
-// - 値の読み出しは末尾の空セル・末尾の空行を返さない（途中の空行は []）。範囲が空なら values 自体が無い
+// - 値の読み出しは末尾の空セル・末尾の空行を返さない（途中の空行は []）。範囲が空なら values 自体が無い。
+//   既定（FORMATTED_VALUE）は人が付けた表示形式（formatColumn）を通した文字列、UNFORMATTED_VALUE は数値を数値のまま返す
 // - 書き込みは valueInputOption=RAW 以外を拒否し、null のセルは「変更しない」、'' は「消去」として扱う
 // - append は範囲の先頭行から続く表（空行で途切れる）の直後に行を挿入し（INSERT_ROWS。下の行はずれる）、
 //   updates.updatedRange（'タブ'!A12:K13 の形）を返す
@@ -113,6 +114,7 @@ interface FakeTab {
   rows: Row[];
   columnCount: number;
   rowCount: number;
+  formats: Map<number, (v: number) => string>; // 列番号 → 数値の表示形式（人が付けた「0"万円"」等）
 }
 
 // 既定のグリッド（Googleスプレッドシートでタブを作ったときと同じ 1000行×26列）
@@ -162,7 +164,16 @@ export class FakeSheets {
       rows: values.map((r) => [...r]),
       columnCount,
       rowCount: DEFAULT_ROWS,
+      formats: new Map(),
     });
+  }
+
+  // 人が列に数値の表示形式を付ける（見出しの名前で列を指定。表示形式を通した値は FORMATTED_VALUE の読み出しにだけ現れる）
+  formatColumn(spreadsheetId: string, title: string, header: string, format: (v: number) => string): void {
+    const t = this.tab(spreadsheetId, title);
+    const col = this.header(spreadsheetId, title).indexOf(header);
+    if (col < 0) throw new Error(`fake: 列がありません (${header})`);
+    t.formats.set(col, format);
   }
 
   // タブのグリッドの大きさ（セル数の上限の検証用）
@@ -274,10 +285,15 @@ export class FakeSheets {
           this.run('batchUpdate', p.spreadsheetId, [], () => this.batchUpdate(p)),
         values: {
           get: (p: sheets_v4.Params$Resource$Spreadsheets$Values$Get) =>
-            this.run('values.get', p.spreadsheetId, [p.range ?? ''], () => ({ data: this.readRange(p.spreadsheetId!, p.range ?? '') })),
+            this.run('values.get', p.spreadsheetId, [p.range ?? ''], () => ({
+              data: this.readRange(p.spreadsheetId!, p.range ?? '', p.valueRenderOption),
+            })),
           batchGet: (p: sheets_v4.Params$Resource$Spreadsheets$Values$Batchget) =>
             this.run('values.batchGet', p.spreadsheetId, p.ranges ?? [], () => ({
-              data: { spreadsheetId: p.spreadsheetId, valueRanges: (p.ranges ?? []).map((r) => this.readRange(p.spreadsheetId!, r)) },
+              data: {
+                spreadsheetId: p.spreadsheetId,
+                valueRanges: (p.ranges ?? []).map((r) => this.readRange(p.spreadsheetId!, r, p.valueRenderOption)),
+              },
             })),
           update: (p: sheets_v4.Params$Resource$Spreadsheets$Values$Update) =>
             this.run('values.update', p.spreadsheetId, [p.range ?? ''], () => {
@@ -398,6 +414,7 @@ export class FakeSheets {
           rows: [],
           columnCount: grid?.columnCount ?? DEFAULT_COLUMNS,
           rowCount: grid?.rowCount ?? DEFAULT_ROWS,
+          formats: new Map(),
         });
         replies.push({ addSheet: { properties: { sheetId, title } } });
       } else if (r.appendDimension) {
@@ -428,14 +445,19 @@ export class FakeSheets {
     return { data: { spreadsheetId: id, replies } };
   }
 
-  private readRange(spreadsheetId: string, range: string): sheets_v4.Schema$ValueRange {
+  private readRange(spreadsheetId: string, range: string, render?: string | null): sheets_v4.Schema$ValueRange {
     const a = parseA1(range);
     const t = this.tab(spreadsheetId, a.tab);
-    const out: string[][] = [];
+    const out: Array<Array<string | number | boolean>> = [];
     const last = Math.min(a.r2, t.rows.length);
+    const cellOut = (v: Stored | undefined, col: number): string | number | boolean => {
+      if (render === 'UNFORMATTED_VALUE') return v === undefined ? '' : v;
+      const format = t.formats.get(col);
+      return typeof v === 'number' && format ? format(v) : formatted(v);
+    };
     for (let r = a.r1; r <= last; r++) {
       const row = t.rows[r - 1] ?? [];
-      const cells = row.slice(a.c1, a.c2 === Infinity ? undefined : a.c2 + 1).map(formatted);
+      const cells = row.slice(a.c1, a.c2 === Infinity ? undefined : a.c2 + 1).map((v, j) => cellOut(v, a.c1 + j));
       while (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
       out.push(cells);
     }
@@ -600,6 +622,8 @@ export class FakeMailTransport implements MailTransport {
   // 作成は済んだのに応答だけ失敗する（APPENDの応答待ちで接続が切れた状況の再現）送信元
   ambiguousDraftFrom = new Set<string>();
   sent: Array<{ to: string; subject: string; body: string }> = [];
+  // サマリ等の送信を失敗させる（SMTPのタイムアウトの再現）
+  failSend = false;
   // この送信元での下書き作成を失敗させる（エラー文に宛先を含め、秘匿されるかを確かめる）
   failDraftFrom = new Set<string>();
 
@@ -643,6 +667,7 @@ export class FakeMailTransport implements MailTransport {
   }
 
   async sendPlainMail(to: string, subject: string, body: string): Promise<void> {
+    if (this.failSend) throw Object.assign(new Error('smtp timeout'), { code: 'ETIMEDOUT' });
     this.sent.push({ to, subject, body });
   }
 

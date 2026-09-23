@@ -20,11 +20,17 @@ import {
   PROPER_CANDIDATE_TAB,
   DRAFT_REQUEST_COLUMNS,
   MATCHED_COLUMN,
+  RETIRED_PROPER_VERDICT,
+  properEngineerIdOf,
+  acquireBatchLeaseSheets,
+  releaseBatchLeaseSheets,
+  readStateJson,
 } from '../../database/sheets.js';
 import {
   saveProject,
   saveEngineer,
   saveMatch,
+  saveSkillEquivalence,
   fetchOpenProjects,
   fetchAvailableEngineers,
   fetchJudgedMatchIds,
@@ -44,13 +50,13 @@ import {
   MISSING_FILE_MEMO,
 } from '../proper/master.js';
 import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
-import { runProperFlow } from '../proper/index.js';
+import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
 import { collectSesMail } from '../collect.js';
 import { markMailProcessed } from '../store.js';
 import { recordFailure, recordSuccess, listQuarantined } from '../heal/quarantine.js';
 import { resetHealEvents, hasFatal } from '../heal/events.js';
 import { materializePendingDrafts } from '../pendingDrafts.js';
-import { persistAndNotify } from '../notify.js';
+import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from '../notify.js';
 import { buildReplyRef } from '../draft.js';
 import { matchIdOf } from '../match.js';
 import { SafeLogError } from '../redact.js';
@@ -676,7 +682,7 @@ async function testPendingDrafts(): Promise<void> {
   check(
     '作成後に状態を書き戻せなければ「作成中 日時」のまま残す',
     r4.created === 2 &&
-      /^作成中 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(row(m22())?.['案件側下書き状態'] ?? '') &&
+      /^作成中 \d{4}-\d{2}-\d{2} \d{2}:\d{2} #[A-Za-z0-9_-]{6,}$/.test(row(m22())?.['案件側下書き状態'] ?? '') &&
       (row(m22())?.['要員側下書き状態'] ?? '').startsWith('作成中'),
     JSON.stringify(r4),
   );
@@ -874,7 +880,7 @@ async function testProperMaster(): Promise<void> {
 // ===== 7b. ショートカットでまとめたスキルシート =====
 
 async function testDriveShortcuts(): Promise<void> {
-  section('スキルシートのフォルダのショートカット（ファイル・サブフォルダ）をたどる');
+  section('スキルシートのフォルダのショートカット（既定はたどらない・有効にしてもファイルへのショートカットだけ）');
   drive.put({ id: 'scRoot', name: 'root', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: [] });
   drive.put({ id: 'scOrigDir', name: '原本', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: ['elsewhere'] });
   drive.put(driveFile('scOrigFile', { name: '原本.pdf', parents: ['elsewhere'], modifiedTime: FILE_TIME(5), content: 'x' }));
@@ -883,15 +889,19 @@ async function testDriveShortcuts(): Promise<void> {
   drive.put({ id: 'scToDir', name: 'フォルダへのショートカット', mimeType: 'application/vnd.google-apps.shortcut', modifiedTime: FILE_TIME(1), parents: ['scRoot'], shortcutTarget: 'scOrigDir' });
   process.env.PROPER_SKILLSHEET_FOLDER_ID = 'scRoot';
   try {
+    const off = await listSkillSheetFiles();
+    check('既定ではショートカットをたどらない（フォルダに置いたショートカットで、フォルダの外のファイルを読ませない）', off.length === 0, off.map((f) => f.id).join(','));
+    process.env.PROPER_FOLLOW_SHORTCUTS = 'true';
     const files = await listSkillSheetFiles();
     const ids = files.map((f) => f.id).sort().join(',');
     const orig = files.find((f) => f.id === 'scOrigFile');
     check(
-      'ファイルへのショートカットは参照先のファイル（更新日時も参照先）、フォルダへのショートカットは中身をたどる',
-      ids === 'scInDir,scOrigFile' && orig?.modifiedTime === FILE_TIME(5) && orig.mimeType === 'application/pdf',
+      '有効にするとファイルへのショートカットだけ参照先を読み（更新日時も参照先）、フォルダへのショートカットはたどらない',
+      ids === 'scOrigFile' && orig?.modifiedTime === FILE_TIME(5) && orig.mimeType === 'application/pdf' && orig.viaShortcut === true,
       ids,
     );
   } finally {
+    delete process.env.PROPER_FOLLOW_SHORTCUTS;
     process.env.PROPER_SKILLSHEET_FOLDER_ID = 'folderRoot';
   }
 }
@@ -917,9 +927,9 @@ async function testProperCandidates(): Promise<void> {
   newRun();
   const r1 = await runProperFlow();
   const tab = PROPER_CANDIDATE_TAB;
-  const idA = `ownmatch_proper_fileA_${p1.id}`;
-  const idB = `ownmatch_proper_fileB_${p2.id}`;
-  const idH = `ownmatch_proper_fileH_${p1.id}`;
+  const idA = `ownmatch_${properEngineerIdOf('fileA')}_${p1.id}`;
+  const idB = `ownmatch_${properEngineerIdOf('fileB')}_${p2.id}`;
+  const idH = `ownmatch_${properEngineerIdOf('fileH')}_${p1.id}`;
   const rowA = sheets.record(SES_BOOK, tab, 'ID', idA);
   const rowB = sheets.record(SES_BOOK, tab, 'ID', idB);
   const rowH = sheets.record(SES_BOOK, tab, 'ID', idH);
@@ -929,6 +939,7 @@ async function testProperCandidates(): Promise<void> {
     `${r1?.candidates.length}`,
   );
   const candidateIds = sheets.records(SES_BOOK, tab).map((r) => r['ID']);
+  check('候補のIDにスキルシートのDriveのファイルIDを含めない', candidateIds.every((id) => !/file[A-Z]/.test(id)), candidateIds.join(','));
   check(
     '管理表で行が複製されていても同じ候補を2行にしない',
     new Set(candidateIds).size === candidateIds.length && r1?.engineers === 3,
@@ -961,7 +972,7 @@ async function testProperCandidates(): Promise<void> {
   sheets.setByKey(SES_BOOK, tab, 'ID', idA, 'ステータス', '紹介済');
   newRun();
   const draftsBefore = mail.drafts.length;
-  const d = await materializePendingDrafts();
+  const d = await materializePendingDrafts(undefined, activeProperEngineerIds);
   const created = mail.drafts.slice(draftsBefore);
   check('担当者メールを入れたプロパー候補は案件側の下書きを1件だけ作る', d.created === 1 && created.length === 1);
   check(
@@ -977,6 +988,35 @@ async function testProperCandidates(): Promise<void> {
     '再実行でも人のステータス・担当者メール・作成済を保持',
     after?.['ステータス'] === '紹介済' && after?.['担当者メール'] === `taro@${OWN_DOMAIN}` && STAMP.test(after?.['案件側下書き状態'] ?? ''),
   );
+
+  // 管理表で稼働可でなくした社員: プロパー候補の実行の前に届いた依頼は作らず、実行後は候補の行を退役させる
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileH', '稼働状況', '対象外');
+  sheets.setByKey(SES_BOOK, tab, 'ID', idH, '担当者メール', `taro@${OWN_DOMAIN}`);
+  newRun();
+  const beforeRetired = mail.drafts.length;
+  await materializePendingDrafts(undefined, activeProperEngineerIds);
+  check(
+    '稼働可でなくなった社員のプロパー候補は、担当者メールが入っても下書きを作らない',
+    mail.drafts.length === beforeRetired && (sheets.record(SES_BOOK, tab, 'ID', idH)?.['案件側下書き状態'] ?? '').includes('稼働可ではない'),
+    sheets.record(SES_BOOK, tab, 'ID', idH)?.['案件側下書き状態'],
+  );
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileB', '稼働状況', 'アサイン済');
+  newRun();
+  const r3 = await runProperFlow();
+  const retiredB = sheets.record(SES_BOOK, tab, 'ID', idB);
+  check(
+    '稼働可でなくなった社員の候補の行は退役させ、氏名・必要案件単価・文面・下書きデータを消す',
+    r3?.retired === 2 && retiredB?.['判定'] === RETIRED_PROPER_VERDICT && retiredB?.['プロパー'] === '（対象外）' &&
+      retiredB?.['必要案件単価'] === '' && retiredB?.['案件側文面'] === '' && retiredB?.['下書きデータ'] === '' &&
+      retiredB?.['案件側下書き状態'] === DRAFT_STATE.retired && STAMP.test(sheets.record(SES_BOOK, tab, 'ID', idA)?.['案件側下書き状態'] ?? ''),
+    JSON.stringify({ retired: r3?.retired, retiredB }),
+  );
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileB', '稼働状況', '稼働可');
+  newRun();
+  await runProperFlow();
+  const back = sheets.record(SES_BOOK, tab, 'ID', idB);
+  check('稼働可に戻れば候補の行も「未作成」に戻る', back?.['案件側下書き状態'] === '未作成' && back?.['プロパー'] !== '（対象外）' && Boolean(back?.['下書きデータ']));
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileH', '稼働状況', '稼働可');
 }
 
 // ===== 9. 見出しの名前による列の対応付けと、特定できない見出し =====
@@ -1097,7 +1137,7 @@ async function testResumeAndDurability(): Promise<void> {
       };
     };
     const first = await load();
-    check('保存したばかりの案件・要員は突合前', failedSave.size === 0 && first.scope.newProjectIds.has(rp.id) && first.scope.newEngineerIds.has(re.id) && !first.scope.newProjectIds.has('proj_legacy'));
+    check('保存したばかりの案件・要員は突合前', failedSave.failed.size === 0 && first.scope.newProjectIds.has(rp.id) && first.scope.newEngineerIds.has(re.id) && !first.scope.newProjectIds.has('proj_legacy'));
 
     // 1回目: 実行時間の期限を過ぎていた（ジョブの打ち切り相当）→ 何も判定・保存せず、突合前のまま次回へ
     startRunClock(Date.now() - 24 * 60 * 60 * 1000);
@@ -1217,6 +1257,262 @@ async function testResumeAndDurability(): Promise<void> {
   }
 }
 
+// ===== 9c. 本番運用レビューの指摘（冪等でない操作・移行・二重実行・知らせ損ね・署名・表示形式） =====
+
+const REVIEW_BOOK = 'fakeReviewBook';
+const MIG_BOOK = 'fakeMigrationBook';
+
+async function testReviewRegressions(): Promise<void> {
+  section('冪等でない操作の再送・突合済の移行・二重実行・知らせ損ね・返信メタの署名・表示形式');
+  sheets.createBook(REVIEW_BOOK);
+  process.env.SHEETS_DB_SPREADSHEET_ID = REVIEW_BOOK;
+  const tabsCheck = ['案件', '要員', 'マッチ', '処理済みメール', '_状態'];
+  try {
+    // タブの作成が済んだのに応答が 503 → 同じ作成を再送せず（再送は「既にある」で失敗する）、読み直して見出しを書く
+    newRun();
+    sheets.failNext('batchUpdate', 503, undefined, 1, true);
+    let createErr = '';
+    try {
+      await fetchOpenProjects(10);
+    } catch (err) {
+      createErr = String(err);
+    }
+    check(
+      'タブの作成の応答が失われても、再送せずに読み直して見出しを書き、処理を続ける',
+      createErr === '' && ALL_TABS.every((t) => sheets.hasTab(REVIEW_BOOK, t)) &&
+        JSON.stringify(sheets.header(REVIEW_BOOK, '案件')) === JSON.stringify(PROJECT_HEADER) &&
+        sheets.validations.some((v) => v.spreadsheetId === REVIEW_BOOK && v.options.includes('未確認')),
+      createErr,
+    );
+
+    // 行の削除が済んだのに応答が 503 → 同じ行番号を再送しない（繰り上がった新しい記録を消さない）
+    const oldAt = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const newAt = new Date().toISOString();
+    for (let i = 0; i < 3; i++) sheets.insertRowAt(REVIEW_BOOK, '処理済みメール', 2, [`sesmail_prune_old_${i}`, oldAt, '抽出済']);
+    for (let i = 0; i < 3; i++) sheets.insertRowAt(REVIEW_BOOK, '処理済みメール', 5, [`sesmail_prune_new_${i}`, newAt, '抽出済']);
+    newRun();
+    await checkSheetsTabs(tabsCheck);
+    sheets.failNext('batchUpdate', 503, undefined, 1, true);
+    const removed = await pruneProcessedMailSheets(new Date(Date.now() - 67 * 24 * 60 * 60 * 1000), 1);
+    const left = sheets.records(REVIEW_BOOK, '処理済みメール').map((r) => r['メールID']);
+    check(
+      '行の削除の応答が失われても、読み直して残っている対象だけを消す（新しい記録を消さない）',
+      removed === 3 && left.length === 3 && left.every((id) => id.startsWith('sesmail_prune_new_')),
+      `${removed} / ${left.join(',')}`,
+    );
+
+    // A列の見出しが空（先頭に見出しの無い列を挿入）→ 追記が右にずれるため書き込まない
+    sheets.seedTab(REVIEW_BOOK, 'スキル同義', [['', 'スキルA', 'スキルB', '追加者', '日時']]);
+    newRun();
+    let blankErr = '';
+    try {
+      await saveSkillEquivalence({ a: 'Java', b: 'JVM', addedBy: 'x', at: newAt });
+    } catch (err) {
+      blankErr = err instanceof SafeLogError ? err.message : String(err);
+    }
+    check('A列の見出しが空のタブには追記しない（列がずれて書き込まれるため）', blankErr.includes('A列'), blankErr);
+    sheets.seedTab(REVIEW_BOOK, 'スキル同義', [['スキルA', 'スキルB', '追加者', '日時']]);
+
+    // 「突合済」列を別のプロセス（確認UI等）が先に追加しても、バッチの開始時に一度だけ既存の行を突合済みにする
+    // （旧バージョンのタブがあるスプレッドシート。新しいスプレッドシートでは最初のバッチで空のタブに対して完了する）
+    sheets.seedTab(MIG_BOOK, '案件', [OLD_PROJECT_HEADER, ['proj_mig_1', '旧案件', 'Java', '', 60, 70, '東京都', '一部', '', '', '', '', '', '', '', 'm_mig', '', newAt, '募集中']]);
+    process.env.SHEETS_DB_SPREADSHEET_ID = MIG_BOOK;
+    newRun();
+    await fetchOpenProjects(10); // 別のプロセスが列を追加（移行はしない）
+    newRun();
+    sheets.failNext('values.batchUpdate', 400, '案件', 1);
+    let migErr = false;
+    try {
+      await checkSheetsTabs(tabsCheck);
+    } catch {
+      migErr = true;
+    }
+    const midState = await readStateJson<{ state: string }>(`migration:${MATCHED_COLUMN}:案件`);
+    newRun();
+    await checkSheetsTabs(tabsCheck);
+    check(
+      '列を別のプロセスが追加していても、移行が途中で失敗しても、次のバッチで既存の行を突合済みにする',
+      migErr && midState?.state === 'started' && (sheets.record(MIG_BOOK, '案件', 'ID', 'proj_mig_1')?.[MATCHED_COLUMN] ?? '').startsWith('移行'),
+      JSON.stringify(midState),
+    );
+    const fresh = project('proj_mig_2', { title: '新着案件', requiredSkills: ['Go'], rateMax: 70, location: '東京都', prefecture: '東京都' });
+    await saveProject(fresh);
+    newRun();
+    await checkSheetsTabs(tabsCheck);
+    check(
+      '移行は一度だけ（その後に保存した突合前の行は突合済みにしない）',
+      !sheets.record(MIG_BOOK, '案件', 'ID', fresh.id)?.[MATCHED_COLUMN] &&
+        (await readStateJson<{ state: string }>(`migration:${MATCHED_COLUMN}:案件`))?.state === 'done',
+    );
+
+    // 人が「終了」にした案件・突合済の案件を抽出し直して保存 → 保存後の状態はシートの値（終了・突合済）
+    sheets.setByKey(MIG_BOOK, '案件', 'ID', fresh.id, 'ステータス', '終了');
+    newRun();
+    const resaved = await saveProjectsSheets([{ ...fresh, title: '新着案件（再抽出）' }]);
+    const migrated = await saveProjectsSheets([project('proj_mig_1', { title: '旧案件', requiredSkills: ['Java'], sourceMailId: 'm_mig' })]);
+    check(
+      '抽出し直して保存した案件は、人が付けた「終了」と突合済の印をシートの値のまま引き継ぐ',
+      resaved.saved.get(fresh.id)?.status === 'closed' && migrated.saved.get('proj_mig_1')?.matched === true &&
+        sheets.record(MIG_BOOK, '案件', 'ID', fresh.id)?.['ステータス'] === '終了',
+    );
+    process.env.SHEETS_DB_SPREADSHEET_ID = REVIEW_BOOK;
+
+    // 人が単金の列に表示形式（0"万円"）を付けても、数値として読む
+    const priced = project('proj_fmt', { title: '表示形式', requiredSkills: ['Java'], rateMin: 60, rateMax: 80, location: '東京都', prefecture: '東京都' });
+    await saveProject(priced);
+    sheets.formatColumn(REVIEW_BOOK, '案件', '単金上限', (v) => `${v}万円`);
+    sheets.formatColumn(REVIEW_BOOK, '案件', '単金下限', (v) => v.toLocaleString('de-DE', { minimumFractionDigits: 1 }));
+    newRun();
+    const readBack = (await fetchOpenProjects(100)).find((x) => x.id === priced.id);
+    check('単金の列に表示形式が付いていても数値として読む', readBack?.rateMax === 80 && readBack?.rateMin === 60, JSON.stringify(readBack?.rateMax));
+
+    // 突合済の印付けは、行の位置が変わっていなければタブ全体を読み直さない。行がずれていれば読み直して正しい行に付ける
+    newRun();
+    await fetchOpenProjects(100);
+    const fullReads = () => sheets.calls.filter((c) => c.spreadsheetId === REVIEW_BOOK && c.method === 'values.get' && c.ranges[0] === "'案件'").length;
+    const before = fullReads();
+    await markItemsMatchedSheets('project', [priced.id]);
+    check('突合済の印付けは、行の位置を見出しとキー列だけで確かめる（タブ全体を読み直さない）', fullReads() === before && Boolean(sheets.record(REVIEW_BOOK, '案件', 'ID', priced.id)?.[MATCHED_COLUMN]));
+    sheets.setByKey(REVIEW_BOOK, '案件', 'ID', priced.id, MATCHED_COLUMN, '');
+    sheets.insertRowAt(REVIEW_BOOK, '案件', 2, ['proj_human', '人が挿入した行']);
+    await markItemsMatchedSheets('project', [priced.id]);
+    check(
+      '人が行を挿入して位置がずれていれば、読み直して正しい行に印を付ける',
+      Boolean(sheets.record(REVIEW_BOOK, '案件', 'ID', priced.id)?.[MATCHED_COLUMN]) && !sheets.record(REVIEW_BOOK, '案件', 'ID', 'proj_human')?.[MATCHED_COLUMN],
+    );
+
+    // 同時に動くバッチは1つだけ（実行中の印）
+    newRun();
+    const first = await acquireBatchLeaseSheets(60_000, 0);
+    const second = await acquireBatchLeaseSheets(60_000, 0);
+    if (first.ok) await releaseBatchLeaseSheets(first.token);
+    const third = await acquireBatchLeaseSheets(60_000, 0);
+    if (third.ok) await releaseBatchLeaseSheets(third.token);
+    check('実行中の印がある間は別のバッチを始めず、終われば次のバッチが始められる', first.ok && !second.ok && third.ok);
+
+    // 文面を用意できなかった成立候補が、判定し直しで参考提案になった → 「不要」にして判定済みに含める（毎回判定し直さない）
+    const pA = project('proj_rv_a', { title: '案件RA', requiredSkills: ['Java'], agentEmail: 'a@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】RA', 'ra') });
+    const eA = engineer('eng_rv_a', { displayName: 'R.A.', skills: ['Java'], agentEmail: 'b@beta.example.jp', replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【要員】RA', 'ea') });
+    newRun();
+    await saveMatch({ ...makeMatch(pA, eA, 'confirmed'), draftToProject: undefined, draftToEngineer: undefined, draftFailed: true });
+    await saveMatch(makeMatch(pA, eA, 'tentative'));
+    const rvRow = sheets.record(REVIEW_BOOK, 'マッチ', 'ID', matchIdOf(pA.id, eA.id));
+    check(
+      '作り直し待ちのマッチが参考提案になれば「不要」にして判定済みに含める',
+      rvRow?.['案件側下書き状態'] === '不要' && (await fetchJudgedMatchIds()).has(matchIdOf(pA.id, eA.id)),
+      rvRow?.['案件側下書き状態'],
+    );
+
+    // 同じ依頼を別の実行が先に「作成中」にした側は作らない（読み直して自分の印が残っている側だけ作る）
+    const eB = engineer('eng_rv_b', { displayName: 'R.B.', skills: ['Java'], agentEmail: 'c@gamma.example.jp', replyTarget: rt('検証三子', 'miko@gamma.example.jp', '【要員】RB', 'eb') });
+    const cas = makeMatch(pA, eB, 'confirmed');
+    newRun();
+    await saveMatch(cas);
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', cas.id, '担当者メール', `taro@${OWN_DOMAIN}`);
+    const foreign = '作成中 2026-01-01 00:00 #foreignNonce1';
+    sheets.beforeNext('values.batchUpdate', () =>
+      sheets.beforeNext('values.batchGet', () => sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', cas.id, '案件側下書き状態', foreign)),
+    );
+    newRun();
+    const draftsBeforeCas = mail.drafts.length;
+    await materializePendingDrafts();
+    const casRow = sheets.record(REVIEW_BOOK, 'マッチ', 'ID', cas.id);
+    check(
+      '別の実行が先に「作成中」にした側は作らず、自分の印が残っている側だけ作る',
+      mail.drafts.length - draftsBeforeCas === 1 && casRow?.['案件側下書き状態'] === foreign && STAMP.test(casRow?.['要員側下書き状態'] ?? ''),
+      JSON.stringify({ n: mail.drafts.length - draftsBeforeCas, p: casRow?.['案件側下書き状態'], e: casRow?.['要員側下書き状態'] }),
+    );
+
+    // 担当者を替えて依頼し直し、入力の誤りでエラーになった側は、前の担当者の下書きを「作成済」と取り違えない
+    const redo = makeMatch(p1, eB, 'confirmed');
+    newRun();
+    await saveMatch(redo);
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', redo.id, '担当者メール', `taro@${OWN_DOMAIN}`);
+    newRun();
+    await materializePendingDrafts();
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', redo.id, '担当者メール', 'bob@evil.example.com');
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', redo.id, '案件側下書き状態', '');
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', redo.id, '要員側下書き状態', '不要');
+    newRun();
+    await materializePendingDrafts();
+    sheets.setByKey(REVIEW_BOOK, 'マッチ', 'ID', redo.id, '担当者メール', `bob@${OWN_DOMAIN}`);
+    newRun();
+    const bobBefore = mail.drafts.filter((d) => d.from === `bob@${OWN_DOMAIN}`).length;
+    await materializePendingDrafts();
+    check(
+      '入力の誤りでエラーになった依頼は、直した後に新しい担当者の下書きを作る（前の担当者の下書きと取り違えない）',
+      mail.drafts.filter((d) => d.from === `bob@${OWN_DOMAIN}`).length === bobBefore + 1 &&
+        STAMP.test(sheets.record(REVIEW_BOOK, 'マッチ', 'ID', redo.id)?.['案件側下書き状態'] ?? ''),
+      sheets.record(REVIEW_BOOK, 'マッチ', 'ID', redo.id)?.['案件側下書き状態'],
+    );
+
+    // サマリを送れなかった回のマッチは、次の回のサマリに載せる（送れたら控えを消す）
+    process.env.SES_NOTIFY_TO = `boss@${OWN_DOMAIN}`;
+    const unsent = makeMatch(p2, eB, 'confirmed');
+    newRun();
+    await saveMatch(unsent);
+    const c0 = await loadUnnotifiedMatches();
+    await rememberUnnotified(c0.ids, [unsent]);
+    mail.failSend = true;
+    const failed = await notifyResults([unsent], { created: 0, failed: 0 }, null, c0.rows);
+    mail.failSend = false;
+    newRun();
+    const c1 = await loadUnnotifiedMatches();
+    const sentBefore = mail.sent.length;
+    const ok = await notifyResults([], { created: 0, failed: 0 }, null, c1.rows);
+    if (ok !== 'failed') await clearUnnotified();
+    const body = mail.sent.slice(sentBefore).map((m) => m.body).join('\n');
+    newRun();
+    const c2 = await loadUnnotifiedMatches();
+    check(
+      'サマリを送れなかった回のマッチは次の回のサマリに載せ、送れたら控えを消す',
+      failed === 'failed' && c1.ids.includes(unsent.id) && ok === 'sent' && body.includes('お知らせできなかったマッチ') &&
+        body.includes(unsent.title) && c2.ids.length === 0,
+      JSON.stringify({ failed, ok, ids: c1.ids, left: c2.ids }),
+    );
+    delete process.env.SES_NOTIFY_TO;
+
+    // 署名鍵があるとき、返信メタ（下書きの宛先の元）・営業元メールを書き換えた行・写した行は宛先に使わない
+    process.env.SES_DRAFT_SIGNING_KEY = 'k'.repeat(32);
+    const signedP = project('proj_sig', { title: '署名案件', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】署名', 'sig') });
+    const otherP = project('proj_sig2', { title: '署名案件2', requiredSkills: ['Java'], agentEmail: 'jiro@beta.example.jp', replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【案件】署名2', 'sig2') });
+    newRun();
+    await saveProjectsSheets([signedP, otherP]);
+    newRun();
+    const intact = (await fetchOpenProjects(100)).find((x) => x.id === signedP.id);
+    const metaCell = sheets.record(REVIEW_BOOK, '案件', 'ID', signedP.id)?.['返信メタ'] ?? '';
+    sheets.setByKey(REVIEW_BOOK, '案件', 'ID', signedP.id, '返信メタ', metaCell.replace(/hanako@alpha\.example\.jp/g, 'outsider@competitor.example'));
+    sheets.setByKey(REVIEW_BOOK, '案件', 'ID', otherP.id, '返信メタ', metaCell);
+    newRun();
+    const after = await fetchOpenProjects(100);
+    const edited = after.find((x) => x.id === signedP.id);
+    const copied = after.find((x) => x.id === otherP.id);
+    check(
+      '署名鍵があれば、書き換え・写しのあった返信メタ・営業元メールは下書きの宛先に使わない',
+      intact?.replyTarget?.from.includes('hanako@alpha.example.jp') === true && intact.agentEmail === 'hanako@alpha.example.jp' &&
+        edited !== undefined && edited.replyTarget === undefined && edited.agentEmail === '' &&
+        copied !== undefined && copied.replyTarget === undefined && copied.agentEmail === '',
+    );
+    const draftOf = buildReplyRef(edited?.replyTarget, edited?.agentEmail ?? '', '件名', '本文');
+    newRun();
+    const sigMatch: MatchResult = { ...makeMatch(signedP, eA, 'confirmed'), draftToProject: draftOf };
+    await saveMatch(sigMatch);
+    const sigRow = sheets.record(REVIEW_BOOK, 'マッチ', 'ID', sigMatch.id);
+    check(
+      '宛先の分からない側は「不要（宛先が不明…）」にして依頼を受けず、もう片側は署名つきで作れる',
+      sigRow?.['案件側下書き状態'] === DRAFT_STATE.noRecipient && sigRow?.['要員側下書き状態'] === '未作成' && !(sigRow?.['下書きデータ'] ?? '').includes('"project"'),
+      JSON.stringify({ p: sigRow?.['案件側下書き状態'], e: sigRow?.['要員側下書き状態'] }),
+    );
+    delete process.env.SES_DRAFT_SIGNING_KEY;
+  } finally {
+    delete process.env.SES_NOTIFY_TO;
+    delete process.env.SES_DRAFT_SIGNING_KEY;
+    mail.failSend = false;
+    process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;
+    newRun();
+  }
+}
+
 // ===== 10. ログ秘匿 =====
 
 function captureConsole(): { lines: string[]; restore: () => void } {
@@ -1309,6 +1605,7 @@ async function main(): Promise<void> {
     await testProperCandidates();
     await testHeaderByName();
     await testResumeAndDurability();
+    await testReviewRegressions();
     await testRedaction();
   } catch (err) {
     failures += 1;

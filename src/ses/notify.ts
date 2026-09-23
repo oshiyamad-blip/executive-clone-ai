@@ -5,9 +5,10 @@
 // 基本設計I/F（persistAndNotify(matches): Promise<void>）に対し、実装ではマッチ結果DBのrelation
 // （案件・要員）を張るため projects/engineers を追加引数にしている（draft.tsと同様の変更点）。
 import { saveMatches } from '../database/index.js';
+import { sheetsDbConfigured, readStateJson, writeStateJson, fetchMatchSummariesSheets, type MatchSummaryRow } from '../database/sheets.js';
 import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
 import { SUMMARY_SUBJECT } from './mail/ownMail.js';
-import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive } from './config.js';
+import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive, dbProvider } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
@@ -27,23 +28,108 @@ export async function persistAndNotify(
   await notifyResults(saved, requestedDrafts, proper);
 }
 
-// 保存済みのマッチ（保存できなかったものは含めない）のサマリを作って通知する
+// サマリの送信結果。skipped = 宛先・送信設定が無い、または demo（知らせる先が無いため、知らせ損ねの記録は持ち越さない）
+export type NotifyOutcome = 'sent' | 'skipped' | 'failed';
+
+// 保存済みのマッチ（保存できなかったものは含めない）のサマリを作って通知する。
+// carried は前回までの実行で保存したがサマリで知らせ損ねたマッチ（loadUnnotifiedMatches）
 export async function notifyResults(
   saved: MatchResult[],
   requestedDrafts: PendingDraftResult = { created: 0, failed: 0 },
   proper: ProperRunResult | null = null,
-): Promise<void> {
+  carried: MatchSummaryRow[] = [],
+): Promise<NotifyOutcome> {
   // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
   writeReviewMatches(saved);
   // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
-  const base = buildSummary(saved, requestedDrafts);
+  const base = buildSummary(saved, requestedDrafts, carried);
   let summary = `${base}\n${properSummaryLines(proper, true).join('\n')}`;
   const consoleSummary = `${base}\n${properSummaryLines(proper, false).join('\n')}`;
   // 本番のみ、自動検証・修復の診断レポートをサマリ末尾に添える（コスト概算・異常検知・隔離状況）
   if (!isDemo()) {
     summary = `${summary}\n${await buildDiagnosisReport()}`;
   }
-  await notifySummary(summary, consoleSummary, countLine(saved, proper));
+  return notifySummary(summary, consoleSummary, countLine(saved, proper));
+}
+
+// ===== サマリで知らせ損ねたマッチの持ち越し（Sheets運用の本番のみ） =====
+// マッチは判定のたびに保存するため、サマリを送れずに終わった回（送信の失敗・実行の打ち切り）のマッチは「判定済み」として
+// 次の回の判定から外れ、誰にも知らされない。保存したマッチのIDを「_状態」タブに控え、サマリを送れたら消す。
+// 控えが残っていれば、次の回のサマリに「前回までにお知らせできなかったマッチ」として載せる
+
+const UNNOTIFIED_KEY = 'unnotifiedMatches';
+// 1セルに収まる件数の上限（超えた分は件数だけを知らせる）
+const UNNOTIFIED_MAX_IDS = 800;
+const CARRIED_LIST_MAX = 30;
+
+interface UnnotifiedState {
+  ids: string[];
+  overflow: number; // 上限を超えて控えられなかった件数
+}
+
+function carryEnabled(): boolean {
+  return !isDemo() && dbProvider() === 'sheets' && sheetsDbConfigured();
+}
+
+let carriedOverflow = 0;
+// 直近に読んだ・書いた控えの内容（控えが空なら ''。同じ内容を書き直さないため）
+let persisted = '';
+
+function stateJson(state: UnnotifiedState): string {
+  return state.ids.length === 0 && state.overflow === 0 ? '' : JSON.stringify(state);
+}
+
+// 前回までに知らせ損ねたマッチ（控えのID）。読めなければ空（知らせ損ねは次の回に持ち越す）
+export async function loadUnnotifiedMatches(): Promise<{ ids: string[]; rows: MatchSummaryRow[] }> {
+  carriedOverflow = 0;
+  persisted = '';
+  if (!carryEnabled()) return { ids: [], rows: [] };
+  try {
+    const state = await readStateJson<UnnotifiedState>(UNNOTIFIED_KEY);
+    const ids = Array.isArray(state?.ids) ? state.ids.filter((id): id is string => typeof id === 'string') : [];
+    carriedOverflow = typeof state?.overflow === 'number' ? state.overflow : 0;
+    persisted = stateJson({ ids, overflow: carriedOverflow });
+    return { ids, rows: await fetchMatchSummariesSheets(ids) };
+  } catch (err) {
+    console.warn(`SES通知: 前回までに知らせ損ねたマッチの控えを読めません: ${safeErr(err)}`);
+    return { ids: [], rows: [] };
+  }
+}
+
+// 保存したがまだ知らせていないマッチのIDを控える（前回までの控え carriedIds を含めて書く。変わらなければ書かない）
+export async function rememberUnnotified(carriedIds: string[], saved: MatchResult[]): Promise<void> {
+  if (!carryEnabled()) return;
+  const all = [...new Set([...carriedIds, ...saved.map((m) => m.id)])];
+  const state: UnnotifiedState = {
+    ids: all.slice(0, UNNOTIFIED_MAX_IDS),
+    overflow: carriedOverflow + Math.max(0, all.length - UNNOTIFIED_MAX_IDS),
+  };
+  const json = stateJson(state);
+  if (json === persisted) return;
+  await writeStateJson(UNNOTIFIED_KEY, state);
+  persisted = json;
+}
+
+// サマリを送れた（または送る先が無い）ので控えを消す
+export async function clearUnnotified(): Promise<void> {
+  if (!carryEnabled() || persisted === '') return;
+  await writeStateJson(UNNOTIFIED_KEY, { ids: [], overflow: 0 } satisfies UnnotifiedState);
+  persisted = '';
+}
+
+function carriedSection(carried: MatchSummaryRow[], savedIds: Set<string>): string[] {
+  const rows = carried.filter((r) => !savedIds.has(r.id));
+  if (rows.length === 0 && carriedOverflow === 0) return [];
+  const lines = [`【前回までの実行でお知らせできなかったマッチ（${rows.length + carriedOverflow}件）】`];
+  for (const r of rows.slice(0, CARRIED_LIST_MAX)) {
+    const margin = r.grossMarginJpy !== null ? `粗利${(r.grossMarginJpy / 10000).toFixed(1)}万円/月, ` : '';
+    lines.push(`・${r.title} — ${margin}適合スコア${r.score ?? '-'}点`);
+    lines.push(`  根拠: ${r.reason}`);
+  }
+  const more = rows.length - Math.min(rows.length, CARRIED_LIST_MAX) + carriedOverflow;
+  if (more > 0) lines.push(`  ほか${more}件（スプレッドシート「マッチ」タブの検出日時で確認してください）`);
+  lines.push('');
+  return lines;
 }
 
 // マッチを保存する。保存できなかったものはサマリに載せず（マッチタブに無い行を案内しない）、異常終了として知らせる。
@@ -127,7 +213,7 @@ function draftRequestSection(requested: PendingDraftResult): string[] {
   ];
 }
 
-function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResult): string {
+function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResult, carried: MatchSummaryRow[] = []): string {
   const confirmed = matches.filter((m) => m.category === 'confirmed');
   const tentative = matches.filter((m) => m.category === 'tentative');
   const negotiable = matches.filter((m) => m.category === 'negotiable');
@@ -139,6 +225,7 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   lines.push(countLine(matches));
   lines.push('');
   lines.push(...draftRequestSection(requestedDrafts));
+  lines.push(...carriedSection(carried, new Set(matches.map((m) => m.id))));
 
   if (matches.length === 0) {
     lines.push('今回のバッチで成立・交渉・参考のいずれの候補も検出されませんでした。');
@@ -186,27 +273,32 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   return lines.join('\n');
 }
 
-async function notifySummary(summary: string, consoleSummary: string, counts: string): Promise<void> {
+async function notifySummary(summary: string, consoleSummary: string, counts: string): Promise<NotifyOutcome> {
   if (logRedact()) console.log(`SES通知: 結果 ${counts}（詳細はサマリメールを参照）`);
   else console.log(`\n${consoleSummary}\n`);
-  if (isDemo()) return; // demoはコンソール出力のみ
+  if (isDemo()) return 'skipped'; // demoはコンソール出力のみ
 
   const to = sesNotifyTo();
   if (!to) {
     console.warn('SES通知: SES_NOTIFY_TO が未設定のためサマリメール送信をスキップ');
-    return;
+    return 'skipped';
   }
   if (!sendMailReady()) {
     // 宛先があるのに送れない設定は、スケジュール実行では結果が誰にも届かないため異常終了扱いにする
     const message = 'サマリメールの送信設定（XSERVER_SMTP_* または SES_TARGET_GMAIL と Google認証）が未完了です';
-    if (requireLive()) recordFatal(message);
-    else console.warn(`SES通知: ${message} — 送信をスキップします`);
-    return;
+    if (requireLive()) {
+      recordFatal(message);
+      return 'failed';
+    }
+    console.warn(`SES通知: ${message} — 送信をスキップします`);
+    return 'skipped';
   }
   try {
     await sendPlainMailViaMail(to, summarySubject(), summary);
+    return 'sent';
   } catch (err) {
     console.error(`SES通知: サマリメール送信に失敗: ${safeErr(err)}`);
-    recordFatal('サマリメールの送信に失敗しました');
+    recordFatal('サマリメールの送信に失敗しました（このサマリのマッチは次の回のサマリにも載せます）');
+    return 'failed';
   }
 }
