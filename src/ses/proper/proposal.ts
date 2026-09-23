@@ -1,6 +1,7 @@
 // プロパー（自社社員）を案件にご提案する「全員に返信」文面（LLMを使わない定型文）。
 // 社外に出る文面のため、氏名ではなく提案用表記（イニシャル）だけを使い、必要案件単価（社内の採算ライン）は書かない。
 import { buildReplyRef } from '../draft.js';
+import { unsafeOutgoingText } from '../injection.js';
 import type { DraftRef, Project, ProperEngineer, RemoteOption } from '../../types/index.js';
 
 // 提案用表記が未入力のときの差し込み。氏名で代用しない（送る前に営業が気付けるよう目立つ表記にする）
@@ -42,9 +43,18 @@ export function buildProperProposalBody(e: ProperEngineer, project: Project): st
   return lines.join('\n');
 }
 
+// 提案文面にそのまま差し込む項目（案件名・営業元担当はスプレッドシートで書き換えられる）に URL・メールアドレス・
+// 指示らしき記載があるか。あれば文面を用意しない（書き換えた文言に署名を付けて社外への下書きにしないため）
+export function properProposalTextSuspicious(e: ProperEngineer, project: Project): boolean {
+  return unsafeOutgoingText([
+    project.title, project.agentContact, e.proposalLabel, ...e.skills.slice(0, 12), e.availableDate, e.availableFrom, e.prefecture,
+  ]);
+}
+
 // 案件の元メールへの全員に返信（元メール情報が無ければ営業元メール宛）。宛先が全く無ければ作らない
 export function buildProperProposalDraft(e: ProperEngineer, project: Project): DraftRef | undefined {
   if (!project.replyTarget?.from && !project.agentEmail) return undefined;
+  if (properProposalTextSuspicious(e, project)) return undefined;
   return buildReplyRef(
     project.replyTarget,
     project.agentEmail,

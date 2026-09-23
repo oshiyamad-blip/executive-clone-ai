@@ -1,9 +1,30 @@
 // ログ秘匿（公開リポジトリのActionsログ対策）。logRedact() が真のとき、コンソールには
 // ID・件数・エラー種別だけを出し、氏名・メールアドレス・件名・案件名・API生エラー文は出さない。
 // 詳細はサマリメール（非公開）側で確認する運用。
+import { createHmac, randomBytes } from 'crypto';
 import { logRedact } from './config.js';
 
 const MASK = '＊';
+
+// メールID（Message-ID のハッシュ）・案件/要員/マッチのID（メールIDから決まる）は、メールの送り主が手元で計算できる。
+// 公開ログにそのまま出すと「自分の送ったメールが抽出に失敗した・指示混入と判定された」が外から分かってしまうため、
+// 秘匿モードではプロセスごとの乱数鍵で HMAC した別名にする（同じ実行の中では同じIDは同じ別名。鍵は保存・出力しない）
+const RUN_LOG_KEY = randomBytes(32);
+const ID_IN_TEXT = /\b(?:sesmail|proj|eng|match|ownmatch|proper)_[A-Za-z0-9_-]+/g;
+
+export function pseudonymizeId(id: string, key: Buffer): string {
+  return `#${createHmac('sha256', key).update(id).digest('hex').slice(0, 10)}`;
+}
+
+// ログに出すID。秘匿モードでは実行ごとの別名（外部から計算できない）
+export function logId(id: string): string {
+  return logRedact() ? pseudonymizeId(id, RUN_LOG_KEY) : id;
+}
+
+// 文中のID（sesmail_… / proj_… / eng_… / match_… 等）を logId の別名に置き換える（修復イベントのコンソール出力用）
+export function redactIdsIn(text: string, redact: boolean = logRedact(), key: Buffer = RUN_LOG_KEY): string {
+  return redact ? text.replace(ID_IN_TEXT, (m) => pseudonymizeId(m, key)) : text;
+}
 
 // 秘匿モードでは伏せ字にするラベル（氏名・案件名・件名・ファイル名・URL等）
 export function redactable(label: string): string {

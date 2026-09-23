@@ -74,15 +74,19 @@ export interface ReplyMetaBinding {
 
 const REPLY_META_FIELDS = ['from', 'replyTo', 'to', 'cc', 'subject', 'messageId', 'references'] as const;
 
-function replyMetaSignature(rt: ReplyTarget | undefined, b: ReplyMetaBinding): string {
+// inj=true（抽出時にAIへの指示らしき記載があった行）のときだけ署名の対象に印を加える（印の無い以前の行の署名は変わらない）
+function replyMetaSignature(rt: ReplyTarget | undefined, b: ReplyMetaBinding, inj: boolean): string {
   const fields = rt ? REPLY_META_FIELDS.map((f) => rt[f] ?? '') : null;
-  const canonical = JSON.stringify([b.tab, b.id.trim(), b.agentEmail.trim(), fields]);
+  const canonical = JSON.stringify([b.tab, b.id.trim(), b.agentEmail.trim(), fields, ...(inj ? ['inj'] : [])]);
   return createHmac('sha256', b.key).update(canonical).digest('base64url');
 }
 
-export function replyMetaJson(rt: ReplyTarget | undefined, binding?: ReplyMetaBinding): string {
+// flags.injection は「指示混入疑い」の印。列の印は人が消せるため、署名した返信メタの中にも残す
+// （列を消しても、署名どおりの返信メタに印があれば要確認のまま。返信メタから印を消すと署名が合わず宛先に使わない）
+export function replyMetaJson(rt: ReplyTarget | undefined, binding?: ReplyMetaBinding, flags: { injection?: boolean } = {}): string {
   if (!binding?.key) return rt ? JSON.stringify(rt) : '';
-  return JSON.stringify({ ...(rt ?? {}), sig: replyMetaSignature(rt, binding) });
+  const inj = flags.injection === true;
+  return JSON.stringify({ ...(rt ?? {}), ...(inj ? { inj: true } : {}), sig: replyMetaSignature(rt, binding, inj) });
 }
 
 function parseReplyMetaObject(json: string): Record<string, unknown> | null {
@@ -98,8 +102,13 @@ function parseReplyMetaObject(json: string): Record<string, unknown> | null {
 export function parseReplyMeta(json: string): ReplyTarget | undefined {
   const o = parseReplyMetaObject(json);
   if (!o || typeof o.from !== 'string' || !o.from) return undefined;
-  const { sig: _sig, ...rest } = o;
+  const { sig: _sig, inj: _inj, ...rest } = o;
   return rest as unknown as ReplyTarget;
+}
+
+// 返信メタに署名つきで残した「指示混入疑い」の印（署名の確認は verifyReplyMeta で行う）
+export function replyMetaInjection(json: string): boolean {
+  return parseReplyMetaObject(json)?.inj === true;
 }
 
 // 返信メタ（と営業元メール）がこの行のものとして署名どおりか。鍵が無ければ検証しない（true）
@@ -108,7 +117,7 @@ export function verifyReplyMeta(json: string, binding: ReplyMetaBinding): boolea
   const o = parseReplyMetaObject(json);
   const sig = o && typeof o.sig === 'string' ? o.sig : '';
   if (!sig) return false;
-  const expected = Buffer.from(replyMetaSignature(parseReplyMeta(json), binding));
+  const expected = Buffer.from(replyMetaSignature(parseReplyMeta(json), binding, o?.inj === true));
   const actual = Buffer.from(sig);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }

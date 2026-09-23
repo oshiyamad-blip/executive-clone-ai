@@ -19,6 +19,8 @@ import {
   extractModel,
   matchModel,
   llmProviderName,
+  draftSigningKey,
+  DRAFT_SIGNING_KEY_MIN_CHARS,
 } from '../ses/config.js';
 import { retirementNotice } from '../llm/modelLifecycle.js';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
@@ -211,6 +213,9 @@ async function main(): Promise<void> {
     }
     if (!envSet('SES_ALLOWED_SENDER_DOMAINS')) {
       warn('SES_ALLOWED_SENDER_DOMAINS 未設定 — 「担当者メール」列で任意の送信元の下書きを作れます（自社ドメインの設定を推奨）');
+    }
+    if (draftSigningKey().length < DRAFT_SIGNING_KEY_MIN_CHARS) {
+      warn(`SES_DRAFT_SIGNING_KEY が未設定か${DRAFT_SIGNING_KEY_MIN_CHARS}文字未満 — 「担当者メール」の依頼はすべてエラーにして下書きを作りません（ランダムな${DRAFT_SIGNING_KEY_MIN_CHARS}文字以上を設定）`);
     }
   } else {
     const dbs = envSet('NOTION_TOKEN', 'NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID');

@@ -27,10 +27,17 @@ import {
   judgeBudgetJpy,
 } from './config.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
-import { redactable, safeErr } from './redact.js';
+import { redactable, safeErr, logId } from './redact.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
 import { jstDateOf } from './dates.js';
-import { INJECTION_REVIEW_REASON, INJECTION_CAUTION, dataSafe } from './injection.js';
+import {
+  INJECTION_REVIEW_REASON,
+  INJECTION_CAUTION,
+  OUTGOING_TEXT_REVIEW_REASON,
+  OUTGOING_TEXT_CAUTION,
+  dataSafe,
+  unsafeOutgoingText,
+} from './injection.js';
 import {
   AGING_DAYS,
   allocateWithCaps,
@@ -432,6 +439,10 @@ function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomain
   if (project.injectionSuspected || engineer.injectionSuspected) {
     reviewReasons.push(INJECTION_REVIEW_REASON);
     cautions.push(INJECTION_CAUTION);
+  } else if (outgoingTextSuspicious(project, engineer)) {
+    // シートで書き換えられる項目が紹介文面にそのまま入るため、URL・メールアドレス等があれば自動の下書きに回さない
+    reviewReasons.push(OUTGOING_TEXT_REVIEW_REASON);
+    cautions.push(OUTGOING_TEXT_CAUTION);
   }
 
   // 8. 鮮度。受信から日数が経った案件・要員は募集・稼働の状況が変わっている恐れがあるため、
@@ -715,6 +726,15 @@ export async function judgePairs(
   return results.filter((r): r is MatchResult => r !== undefined);
 }
 
+// 紹介文面（案件側宛・要員側宛）に入る項目に URL・メールアドレス・指示らしき記載があるか
+export function outgoingTextSuspicious(project: Project, engineer: Engineer): boolean {
+  return unsafeOutgoingText([
+    project.title, project.agentContact, ...project.requiredSkills, ...project.preferredSkills, project.location,
+    project.startPeriod, project.duration, engineer.displayName, engineer.agentContact, ...engineer.skills,
+    engineer.availableDate, engineer.availableFrom, engineer.residence,
+  ]);
+}
+
 async function judgeOne(pair: MatchPair, fewShot: string, budget: JudgeBudget | undefined): Promise<MatchResult> {
   // 要確認枠（単金・勤務地不明等）はLLM節約のため最終判定に回さない（下書きも作らない）
   if (pair.needsReview) return buildHeuristicResult(pair);
@@ -751,7 +771,7 @@ async function judgeOne(pair: MatchPair, fewShot: string, budget: JudgeBudget | 
     return result;
   } catch (err) {
     console.error(
-      `SESマッチ: 最終判定に失敗 (${pair.project.id} × ${pair.engineer.id} ${redactable(`${pair.project.title} × ${pair.engineer.displayName}`)}): ${safeErr(err)}`,
+      `SESマッチ: 最終判定に失敗 (${logId(pair.project.id)} × ${logId(pair.engineer.id)} ${redactable(`${pair.project.title} × ${pair.engineer.displayName}`)}): ${safeErr(err)}`,
     );
     // 下書きはAI判定を通った組にだけ作る（判定できなかった組をルールの結果のまま成立候補にしない）
     if (isTransientLlmError(err)) {

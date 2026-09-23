@@ -1,6 +1,7 @@
 import { google, gmail_v1 } from 'googleapis';
 import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
+import { attachmentsWithinLimits } from '../ses/mail/attachmentLimits.js';
 import type { RawLog, SesRawMail, SesAttachment, SesAttachmentKind } from '../types/index.js';
 
 // Gmail 収集 — 対象経営者の送受信メールを取得する（gmail.readonly）
@@ -178,7 +179,7 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
   const header = (name: string) =>
     headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? '';
 
-  const subject = header('Subject');
+  const subject = capSubject(header('Subject'));
   const from = header('From');
   const to = header('To');
   const cc = header('Cc');
@@ -210,11 +211,15 @@ async function collectAttachments(
   payload: gmail_v1.Schema$MessagePart | undefined,
 ): Promise<SesAttachment[]> {
   const results: SesAttachment[] = [];
-  for (const part of flattenParts(payload)) {
-    const filename = part.filename;
-    const attachmentId = part.body?.attachmentId;
-    if (!filename || !attachmentId) continue;
-    if (!isSupportedAttachment(filename, part.mimeType ?? '')) continue;
+  const supported = flattenParts(payload)
+    .filter((part) => part.filename && part.body?.attachmentId && isSupportedAttachment(part.filename, part.mimeType ?? ''))
+    .map((part) => ({ filename: part.filename ?? '', mimeType: part.mimeType ?? '', bytes: part.body?.size ?? 0, part }));
+  // 抽出・解析で使えない大きさの添付はダウンロードしない（attachmentLimits.ts）
+  const { kept, dropped } = attachmentsWithinLimits(supported);
+  if (dropped > 0) console.warn(`SESメール収集: 大きすぎる添付${dropped}件は読み込みません`);
+  for (const { part } of kept) {
+    const filename = part.filename ?? '';
+    const attachmentId = part.body?.attachmentId ?? '';
     try {
       const att = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: attachmentId });
       const data = base64UrlToStandard(att.data.data ?? '');
@@ -266,6 +271,14 @@ function base64UrlToStandard(data: string): string {
   let b64 = data.replace(/-/g, '+').replace(/_/g, '/');
   while (b64.length % 4 !== 0) b64 += '=';
   return b64;
+}
+
+// 件名の上限（文字）。件名は抽出のプロンプト・失敗時の伏せ字処理に丸ごと入るため、収集の時点で切り詰める
+// （極端に長い件名で API 費用と伏せ字処理の時間を膨らませないため）
+export const MAX_SUBJECT_CHARS = 500;
+
+export function capSubject(subject: string): string {
+  return subject.length > MAX_SUBJECT_CHARS ? subject.slice(0, MAX_SUBJECT_CHARS) : subject;
 }
 
 // 本文中の Google スプレッドシートリンクを検出する

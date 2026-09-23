@@ -1,5 +1,7 @@
 import '../env.js';
+import { readFileSync } from 'fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer as createHttpsServer } from 'https';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData, createReplyDraftForSender } from './review.js';
 import { recordFeedback, loadFeedback } from './feedback.js';
@@ -9,6 +11,9 @@ import {
   sesWebPort,
   sesWebHost,
   webAccessToken,
+  sesWebTlsCertPath,
+  sesWebTlsKeyPath,
+  sesWebBehindTls,
   isDemo,
   setDemoOverride,
   demoModeExplicit,
@@ -23,6 +28,7 @@ import {
   securityHeaders,
   sendJson as json,
   unsafeBind,
+  plaintextExposure,
 } from '../web/httpSecurity.js';
 import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 
@@ -134,6 +140,11 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
   try {
     const result = await createReplyDraftForSender(matchId, side, fromEmail);
     if (!result.ok) {
+      if (result.reason === 'use_sheet') {
+        return json(res, 409, {
+          error: 'Sheets運用では、スプレッドシートの「担当者メール」列にあなたのアドレスを入れて下書きを依頼してください（次回のバッチで作成します。二重作成を防ぐため確認UIからは作成しません）',
+        });
+      }
       return result.reason === 'already_created'
         ? json(res, 409, { error: 'この側の下書きは作成済み（または作成中）です' })
         : json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
@@ -176,9 +187,40 @@ const API_ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler }> =
   '/api/make-draft': { method: 'POST', handler: handleMakeDraft },
 };
 
+// HTTPS の証明書・秘密鍵（両方指定されたときだけ）。読めなければ 'error'
+function loadTls(): { cert: Buffer; key: Buffer } | null | 'error' {
+  const certPath = sesWebTlsCertPath();
+  const keyPath = sesWebTlsKeyPath();
+  if (!certPath && !keyPath) return null;
+  if (!certPath || !keyPath) {
+    console.error('❌ HTTPS で待ち受けるには SES_WEB_TLS_CERT と SES_WEB_TLS_KEY の両方を指定してください。起動を中止します');
+    return 'error';
+  }
+  try {
+    return { cert: readFileSync(certPath), key: readFileSync(keyPath) };
+  } catch (err) {
+    console.error(`❌ SES_WEB_TLS_CERT / SES_WEB_TLS_KEY のファイルを読めません: ${safeErr(err)}。起動を中止します`);
+    return 'error';
+  }
+}
+
 function main(): void {
   if (unsafeBind(HOST, ACCESS_TOKEN)) {
     console.error(`❌ SES_WEB_HOST=${HOST} で公開するには WEB_ACCESS_TOKEN の設定が必要です（ローカルのみなら 127.0.0.1）。起動を中止します`);
+    process.exitCode = 1;
+    return;
+  }
+  const tls = loadTls();
+  if (tls === 'error') {
+    process.exitCode = 1;
+    return;
+  }
+  if (plaintextExposure(HOST, tls !== null || sesWebBehindTls())) {
+    console.error(
+      `❌ SES_WEB_HOST=${HOST} で公開するには HTTPS が必要です（平文HTTPでは、アクセストークンと要員の個人情報・単金・下書き本文が` +
+        '同じネットワークの誰からも読めます）。SES_WEB_TLS_CERT / SES_WEB_TLS_KEY に証明書と秘密鍵のファイルを指定するか、' +
+        'HTTPS のリバースプロキシ・VPN の内側でだけ公開する場合は SES_WEB_BEHIND_TLS=true を設定してください。起動を中止します',
+    );
     process.exitCode = 1;
     return;
   }
@@ -190,7 +232,7 @@ function main(): void {
   }
 
   const page = renderPage();
-  const server = createServer((req, res) => {
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
     const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
     if (blocked) return json(res, blocked.status, { error: blocked.message });
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -202,10 +244,11 @@ function main(): void {
     if (!route || route.method !== req.method) return json(res, 404, { error: '不明なパスです' });
     if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
     runHandler(res, () => route.handler(req, res));
-  });
+  };
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key, minVersion: 'TLSv1.2' }, handle) : createServer(handle);
 
   server.listen(PORT, HOST, () => {
-    console.log(`\n🌐 SESマッチ確認UI: http://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
+    console.log(`\n🌐 SESマッチ確認UI: ${tls ? 'https' : 'http'}://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
   });
 }
 
@@ -305,10 +348,12 @@ function renderPage(): string {
   var tokenEl = document.getElementById('token');
   nameEl.value = localStorage.getItem('ses_reviewer') || '';
   senderEl.value = localStorage.getItem('ses_sender') || '';
-  tokenEl.value = localStorage.getItem('ses_token') || '';
+  // アクセストークンはタブを閉じれば消える sessionStorage に置く（共用PCのブラウザに残さない）
+  try { localStorage.removeItem('ses_token'); } catch (e) {}
+  tokenEl.value = sessionStorage.getItem('ses_token') || '';
   nameEl.addEventListener('change', function(){ localStorage.setItem('ses_reviewer', nameEl.value); });
   senderEl.addEventListener('change', function(){ localStorage.setItem('ses_sender', senderEl.value); });
-  tokenEl.addEventListener('change', function(){ localStorage.setItem('ses_token', tokenEl.value); });
+  tokenEl.addEventListener('change', function(){ sessionStorage.setItem('ses_token', tokenEl.value); });
   function senderEmail(){ return senderEl.value.trim(); }
 
   var STATUS_LABEL = { unconfirmed: '未確認', introduced: '紹介済', closed_won: '成約', dropped: '見送り' };

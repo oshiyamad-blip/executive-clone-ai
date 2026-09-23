@@ -189,7 +189,9 @@ Sheets運用の本番では、確認UIを常駐させなくても「担当営業
 「案件」「要員」タブの末尾には `指示混入疑い` の列が追加されます（元のメールに AI への指示らしき記載があった行は `あり`。その組は要確認にし、
 AI判定・下書きの文面を作りません）。AI最終判定がカードに指示らしき記載を見つけたときも、その側（案件・要員）に
 `あり` を付け、同じ実行の残りの組と次回以降の組を要確認にします（どちらか分からないときはその組だけを要確認にします）。
-`あり` は同じメールの抽出し直しでも消えません。確認して問題が無ければ人が空欄に戻してください。
+`あり` は同じメールの抽出し直しでも消えません。Sheets運用（`SES_DRAFT_SIGNING_KEY` あり）では印を署名した「返信メタ」の中にも残すため、
+列を空欄に戻しても要確認のままで、自動の下書きは作りません（シートの編集者が印を外して、社外から届いた指示入りの内容で下書きを
+作らせないため）。確認して問題が無ければ、紹介メールは手動で作成してください。
 
 **「メトリクス」タブ**（バッチ1回につき1行を追記。件数と比率だけで、人名・案件名・スキル語そのものは書きません）:
 
@@ -221,8 +223,9 @@ Notion運用ではタブに記録せず、診断レポートにだけ載せま�
 - 送信元に使えるのは `SES_ALLOWED_SENDER_DOMAINS=example.co.jp`（カンマ区切り・完全一致）のドメインだけです。未設定なら
   `SES_OWN_DOMAINS` と共有メールボックスのドメインだけ、どれも無ければ下書きを作りません（確認UIにも適用）。
   `SES_ALLOWED_SENDERS=a@example.co.jp,b@example.co.jp` を設定するとそのアドレスだけに限ります（`MAIL_PROVIDER=gmail` では必須）
-- `SES_DRAFT_SIGNING_KEY`（ランダムな32文字以上）を設定すると、「下書きデータ」列と案件・要員の「返信メタ」「営業元メール」（宛先の元）に
+- `SES_DRAFT_SIGNING_KEY`（ランダムな32文字以上）が**必須**です。「下書きデータ」列と案件・要員の「返信メタ」「営業元メール」（宛先の元）に
   行のタブ・IDと合わせた署名を付け、シート上で書き換えられた行・別の行から写した行からは作りません
+  （未設定・32文字未満の間は、担当者メールの依頼はすべて「エラー: 署名鍵…」にして作りません）
 - `作成中 日時 #記号` のまま残った行は、作成中に実行が止まったか、作成直後の状態書き戻しに失敗したものです（二重作成を避けるため自動では
   再作成しません）。次のバッチが下書きフォルダで同じ識別子（`#記号` から作る X-SES-Draft-Key ヘッダ）の下書きを見つければ `作成済` にします。
   それ以外は下書きフォルダを確認し、無ければ状態を空欄に戻してください
@@ -549,24 +552,42 @@ npm run ses:repair    # 手動実行（いつでも可）
 ## 9. 確認UI と 複数人での共有
 
 ```bash
-npm run ses:web        # http://<host>:8788
+npm run ses:web        # http://127.0.0.1:8788（既定はこのパソコンからだけ）
 ```
 
-複数人でLAN共有する場合は、**必ずトークンを設定**してください（トークン無しで `127.0.0.1` 以外に公開しようとすると起動を中止します。
+複数人でLAN共有する場合は、**トークンと HTTPS の両方が必要**です。平文の HTTP ではアクセストークンと、要員の個人情報・単金・
+取引先のアドレス・下書き本文が同じネットワーク（社内・共用 Wi-Fi 等）の誰からも読めるため、`127.0.0.1` 以外で待ち受けるときは
+次のどちらかが無いと起動を中止します（トークン無しで `127.0.0.1` 以外に公開しようとした場合も中止します。
 トークン無しの運用では `localhost`/`127.0.0.1` 以外のホスト名での要求と、他サイトからの送信を拒否します）。
 
-```
-SES_WEB_HOST=0.0.0.0
-SES_WEB_PORT=8788
-WEB_ACCESS_TOKEN=<共有トークン>
-```
+- **A. UI 自身が HTTPS で待ち受ける**（社内の認証局やサーバー証明書の PEM ファイルを指定）
+
+  ```
+  SES_WEB_HOST=0.0.0.0
+  SES_WEB_PORT=8788
+  WEB_ACCESS_TOKEN=<共有トークン（ランダムな32文字以上）>
+  SES_WEB_TLS_CERT=/path/to/server.crt
+  SES_WEB_TLS_KEY=/path/to/server.key
+  ```
+
+- **B. HTTPS のリバースプロキシ・VPN の内側でだけ公開する**（プロキシが同じパソコンなら `SES_WEB_HOST=127.0.0.1` のままでよく、
+  下の設定は不要です。別のマシンのプロキシ・VPN の内側のアドレスで待ち受ける場合だけ、そのことを明示します）
+
+  ```
+  SES_WEB_HOST=<VPN・社内プロキシからだけ届くアドレス>
+  WEB_ACCESS_TOKEN=<共有トークン>
+  SES_WEB_BEHIND_TLS=true
+  ```
+
+アクセストークンはブラウザのタブを閉じると消えます（共用のパソコンに残さないため）。
 
 UIでできること:
 - マッチ一覧の閲覧（成立候補／交渉提案／参考提案／要確認のバンド表示）
 - 下書き内容の閲覧、ステータス更新（評価者名つき）
 - 「妥当／ズレ」フィードバック、スキル同義語の登録（学習に反映）
 - **「あなたの会社メール（送信元）」を入力 →「自分のアドレスで下書き作成」** で、
-  全員に返信の下書きを**本人の会社アドレス**で作成
+  全員に返信の下書きを**本人の会社アドレス**で作成（Notion運用・demo のみ。**Sheets運用（`DB_PROVIDER=sheets`）の本番では
+  確認UIからは作成しません**。スプレッドシートの「担当者メール」列からバッチだけが作るため、同じ組の下書きの二重作成を防げます）
 
 ---
 
@@ -625,5 +646,5 @@ UIでできること:
 - 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
-- 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_REVIEW_DATA_DIR`
+- 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_WEB_TLS_CERT` `SES_WEB_TLS_KEY` `SES_WEB_BEHIND_TLS` `SES_REVIEW_DATA_DIR`
 - 自己修復・パッチ案: `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_HEAL_DATA_DIR` `JPY_PER_USD` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `ANTHROPIC_MODEL_REPAIR`

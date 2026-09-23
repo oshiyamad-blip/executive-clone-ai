@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { healDataDir, healBudgetJpy, logRedact } from '../config.js';
-import { safeErr } from '../redact.js';
+import { safeErr, redactIdsIn } from '../redact.js';
 import { batchCostJpy, healSpentJpy } from './budget.js';
 import { quarantineCount, quarantineLocation } from './quarantine.js';
 
@@ -71,12 +71,13 @@ export function resetHealEvents(): void {
   stats = emptyStats();
 }
 
-// message は件数・ID等のみで組み立てること（秘匿モードでもコンソールに出る）。内容を含み得る文は detail へ
+// message は件数・ID等のみで組み立てること（秘匿モードでもコンソールに出る）。内容を含み得る文は detail へ。
+// サマリメール・診断JSONには元のIDのまま残し、秘匿モードのコンソールではIDを実行ごとの別名にする
 export function recordHealEvent(severity: HealSeverity, message: string, detail?: string): void {
   events.push({ severity, message, detail });
   const prefix = severity === 'critical' ? '🚨' : severity === 'warn' ? '⚠️' : 'ℹ️';
   const shownDetail = detail && !logRedact() ? `（${detail}）` : '';
-  console.log(`SES修復: ${prefix} ${message}${shownDetail}`);
+  console.log(`SES修復: ${prefix} ${redactIdsIn(message)}${shownDetail}`);
 }
 
 // バッチを異常終了（非0の終了コード）にすべき事象を記録する。スケジュール実行の失敗通知に使う。
@@ -84,7 +85,7 @@ export function recordHealEvent(severity: HealSeverity, message: string, detail?
 // reason は固定文言＋件数のみ（秘匿モードでもそのまま出力する）
 export function recordFatal(reason: string): void {
   events.push({ severity: 'critical', message: reason });
-  console.error(`SES: 🚨 異常終了の要因: ${reason}`);
+  console.error(`SES: 🚨 異常終了の要因: ${redactIdsIn(reason)}`);
 }
 
 // critical が1件でもあれば異常終了扱い（抽出の過半数失敗・抽出0件などの重大異常を含む）

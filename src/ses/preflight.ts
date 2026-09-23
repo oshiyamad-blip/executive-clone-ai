@@ -31,6 +31,7 @@ import {
   allowedSenderDomains,
   allowedSenders,
   draftSigningKey,
+  DRAFT_SIGNING_KEY_MIN_CHARS,
   runDeadlineMinutes,
   properFolderId,
   properMasterSpreadsheetId,
@@ -392,9 +393,9 @@ function checkSenders(): void {
 function checkDraftSigning(): void {
   const key = draftSigningKey();
   if (!key) {
-    warn('SES_DRAFT_SIGNING_KEY が未設定です — スプレッドシートの「下書きデータ」列や案件・要員の「返信メタ」「営業元メール」（宛先の元）を書き換えられても、その内容で下書きを作ります（ランダムな32文字以上を Secrets に登録すると、書き換えを検知して作成しません）');
-  } else if (key.length < 32) {
-    warn('SES_DRAFT_SIGNING_KEY が短すぎます（ランダムな32文字以上を推奨）');
+    warn('SES_DRAFT_SIGNING_KEY が未設定です — 担当者メールの下書き依頼はすべて「エラー」にして作成しません（署名が無いと、スプレッドシートの「下書きデータ」列や案件・要員の「返信メタ」「営業元メール」を書き換えた内容で下書きを作ってしまうため。ランダムな32文字以上を Secrets に登録してください）');
+  } else if (key.length < DRAFT_SIGNING_KEY_MIN_CHARS) {
+    warn(`SES_DRAFT_SIGNING_KEY が短すぎるため、担当者メールの下書き依頼はすべて「エラー」にして作成しません（ランダムな${DRAFT_SIGNING_KEY_MIN_CHARS}文字以上にしてください）`);
   } else {
     ok('SES_DRAFT_SIGNING_KEY: 設定済み（下書きデータ・返信メタ・営業元メールの書き換えと、別の行からの写しを検知します）');
   }

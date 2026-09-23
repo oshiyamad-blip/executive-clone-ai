@@ -17,11 +17,12 @@ import {
   xserverSharedUser,
   sesTargetGmail,
   draftSigningKey,
+  DRAFT_SIGNING_KEY_MIN_CHARS,
 } from './config.js';
 import { materializeReplyDraft, hasNonInitialsEngineerLabel } from './draft.js';
 import { replyDraftReady, replyDraftExistsViaMail } from './mail/index.js';
 import { recordHealEvent } from './heal/events.js';
-import { safeErr, errKind, SafeLogError } from './redact.js';
+import { safeErr, errKind, SafeLogError, logId } from './redact.js';
 import { isPlainEmailAddress } from './settingsFormat.js';
 import {
   sheetsDbConfigured,
@@ -91,7 +92,10 @@ function domainOf(address: string): string {
 
 export function currentSenderPolicy(): SenderPolicy {
   const explicit = allowedSenderDomains();
-  const fallback = [...ownDomains(), domainOf(xserverSharedUser()), domainOf(sesTargetGmail())].filter(Boolean);
+  // 未設定時の既定は自社ドメインと、使っているプロバイダの共有メールボックスのドメインだけ
+  // （Xserver運用で SES_TARGET_GMAIL に個人のGmail等が残っていても、そのドメインを送信元に許さない）
+  const mailbox = mailProvider() === 'gmail' ? sesTargetGmail() : xserverSharedUser();
+  const fallback = [...ownDomains(), domainOf(mailbox)].filter(Boolean);
   return {
     domains: [...new Set(explicit.length > 0 ? explicit : fallback)],
     addresses: allowedSenders(),
@@ -113,6 +117,8 @@ export function senderRejection(email: string, policy: SenderPolicy): string {
 export function jstStamp(now: Date = new Date()): string {
   return new Date(now.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
 }
+
+const SIGNING_KEY_MISSING = '署名鍵（SES_DRAFT_SIGNING_KEY）が未設定か短いため作成しません';
 
 function errorState(reason: string): string {
   return `${DRAFT_STATE.error}: ${reason}`.slice(0, 120);
@@ -168,6 +174,7 @@ export function planDraftRequest(
   policy: SenderPolicy,
   signingKey = '',
   activeProperEngineers: Set<string> | null = null,
+  opts: { requireSigningKey?: boolean } = {},
 ): { sender: string; data: StoredDraftData; create: DraftSide[]; errors: SideStates } {
   const sender = normalizeSenderEmail(row.senderEmail);
   const data = parseDraftData(row.draftData);
@@ -175,12 +182,15 @@ export function planDraftRequest(
     ? '担当者メールの形式が正しくありません（ご自身の会社アドレスを1件だけ入力してください）'
     : senderRejection(sender, policy);
   const tampered = !verifyDraftData(row.draftData, signingKey, draftBinding(row.tab, row.id));
+  // 本番は署名鍵が無ければ作らない（鍵が無いと書き換えを検知できない。verifyDraftData は鍵が無いと常に真）
+  const keyMissing = opts.requireSigningKey === true && signingKey.length < DRAFT_SIGNING_KEY_MIN_CHARS;
   // プロパー候補は、今も稼働可の社員のものだけ作る（管理表で対象外・アサイン済にした社員を社外に紹介しない）
   const retired = row.tab === PROPER_CANDIDATE_TAB && !activeProperEngineers?.has(properEngineerIdOfCandidate(row.id));
   const create: DraftSide[] = [];
   const errors: SideStates = {};
   for (const side of pendingSides(row)) {
-    if (invalid) errors[side] = errorState(invalid);
+    if (keyMissing) errors[side] = errorState(SIGNING_KEY_MISSING);
+    else if (invalid) errors[side] = errorState(invalid);
     else if (retired) {
       errors[side] = errorState(
         activeProperEngineers ? 'この社員は稼働可ではないため作成しません（プロパー管理表の稼働状況）' : 'プロパー管理表を確認できないため作成しません（次回のバッチで再試行します）',
@@ -216,7 +226,7 @@ async function draftAlreadyExists(key: string): Promise<boolean | null> {
 
 // ログ用の行の表記。プロパー候補のIDはDriveのファイルID（＝ファイルのURL）を含むため短いハッシュにする
 function rowLabel(tab: string, id: string): string {
-  return id.includes('proper_') ? `${tab} #${createHash('sha256').update(id).digest('hex').slice(0, 8)}` : `${tab} ${id}`;
+  return id.includes('proper_') ? `${tab} #${createHash('sha256').update(id).digest('hex').slice(0, 8)}` : `${tab} ${logId(id)}`;
 }
 
 // プロパー候補の依頼を受けてよい社員（稼働可）の一覧。必要になったときに1回だけ読む（読めなければ null）
@@ -240,7 +250,7 @@ async function processRequest(
   if (!row || !row.senderEmail.trim()) return out; // 行の削除・担当者メールの取り消し
 
   const active = row.tab === PROPER_CANDIDATE_TAB ? await properActive() : null;
-  const { sender, data, create, errors } = planDraftRequest(row, policy, draftSigningKey(), active);
+  const { sender, data, create, errors } = planDraftRequest(row, policy, draftSigningKey(), active, { requireSigningKey: true });
   out.failed += Object.keys(errors).length;
   if (create.length === 0 && Object.keys(errors).length === 0) return out;
 
@@ -349,6 +359,9 @@ export async function materializePendingDrafts(
     return result;
   }
   const policy = currentSenderPolicy();
+  if (draftSigningKey().length < DRAFT_SIGNING_KEY_MIN_CHARS) {
+    recordHealEvent('warn', `SES_DRAFT_SIGNING_KEY が未設定か${DRAFT_SIGNING_KEY_MIN_CHARS}文字未満のため、担当者メールの下書き依頼はすべてエラーにします（ランダムな${DRAFT_SIGNING_KEY_MIN_CHARS}文字以上を Secrets に登録してください）`);
+  }
   if (policy.addresses.length === 0 && (policy.requireAddress || policy.domains.length === 0)) {
     console.warn(
       'SES下書き依頼: 送信元に使えるアドレス・ドメインが設定されていないため、依頼にはエラーを返します（SES_ALLOWED_SENDER_DOMAINS / SES_ALLOWED_SENDERS）',

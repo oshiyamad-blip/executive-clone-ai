@@ -343,6 +343,10 @@ export function draftSigningKey(): string {
   return env('SES_DRAFT_SIGNING_KEY');
 }
 
+// 署名鍵の最短の長さ。これより短い（未設定を含む）ときは、担当者メールの下書き依頼を受けない
+// （署名が無いと、シートの編集者が宛先・本文を書き換えた行からも下書きを作ってしまうため）
+export const DRAFT_SIGNING_KEY_MIN_CHARS = 32;
+
 // ===== 自動検証・自己修復（heal）と修正パッチ案生成（repair）の設定 =====
 
 // 自己修復（失敗時の再試行・モデル昇格・隔離）を有効にするか。既定ON（予算で拘束される）
@@ -552,6 +556,21 @@ export function sesWebHost(): string {
 // 確認UIのアクセストークン（共有）。空なら認証なし＝ローカル専用運用
 export function webAccessToken(): string {
   return env('WEB_ACCESS_TOKEN');
+}
+
+// 確認UIを HTTPS で待ち受けるときの証明書・秘密鍵（PEMファイルのパス）。両方あるときだけ HTTPS。
+// ループバック以外（LAN共有）で待ち受けるには HTTPS か、次の SES_WEB_BEHIND_TLS=true が必要
+export function sesWebTlsCertPath(): string {
+  return env('SES_WEB_TLS_CERT');
+}
+
+export function sesWebTlsKeyPath(): string {
+  return env('SES_WEB_TLS_KEY');
+}
+
+// HTTPS のリバースプロキシ・VPN の内側でだけ公開していることの明示（true なら平文HTTPのままループバック以外で待ち受ける）
+export function sesWebBehindTls(): boolean {
+  return envBool('SES_WEB_BEHIND_TLS', false);
 }
 
 // trueでBatch API（50%割引）を使用。Phase3で参照（現状は未使用の予約設定）

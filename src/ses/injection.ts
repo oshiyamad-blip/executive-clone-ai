@@ -4,6 +4,9 @@
 
 export const INJECTION_REVIEW_REASON = 'メール内にAIへの指示らしき記載';
 export const INJECTION_CAUTION = 'メール本文にAIへの指示らしき記載があるため、AI判定と自動の下書きを行いません（内容を人が確認してください）';
+export const OUTGOING_TEXT_REVIEW_REASON = '文面に入る項目にURL・メールアドレス・指示らしき記載';
+export const OUTGOING_TEXT_CAUTION =
+  '案件名・営業元担当・スキル等の文面に入る項目にURL・メールアドレス・AIへの指示らしき記載があるため、AI判定と自動の下書きを行いません（内容を人が確認してください）';
 
 // 通常の営業メールには現れない、AI・システムに向けた命令の言い回しだけを拾う（生成AI案件の説明文
 // 「生成AIへの移行」「プロンプト設計」「PDFとして出力すること」等は拾わない）。
@@ -37,6 +40,17 @@ export function looksLikeInjection(text: string): boolean {
   const spaced = text.normalize('NFKC').replace(ZERO_WIDTH, '');
   const compact = spaced.replace(/\s+/g, '');
   return JA_PATTERNS.some((p) => p.test(compact)) || EN_PATTERNS.some((p) => p.test(spaced));
+}
+
+const URL_LIKE = /(?:https?|hxxps?|ftp):\/\/|\bwww\./i;
+const EMAIL_LIKE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
+
+// 紹介・提案の文面にそのまま差し込む短い項目（案件名・営業元担当・スキル・提案用表記等）に、URL・メールアドレス・
+// AIへの指示らしき記載があるか。これらの項目はスプレッドシートで人が書き換えられ、下書きデータの署名は書き換えた後の
+// 文面にも付くため、文面に入れる前に確かめる（あれば自動の下書きを作らず人が確かめる）
+export function unsafeOutgoingText(values: ReadonlyArray<string | null | undefined>): boolean {
+  const text = values.filter((v): v is string => typeof v === 'string' && v !== '').join('\n').normalize('NFKC').replace(ZERO_WIDTH, '');
+  return URL_LIKE.test(text) || EMAIL_LIKE.test(text) || looksLikeInjection(text);
 }
 
 // データ区切りのタグを値の側から閉じられないようにする（抽出・最終判定・文面の生成の入力に入れる社外・人の自由記述の値）。

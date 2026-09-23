@@ -10,7 +10,7 @@ import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown }
 import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace } from './match.js';
-import { INJECTION_REVIEW_REASON } from './injection.js';
+import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
 import { writeReviewOwnMatches } from './review.js';
 import { loadFixtureOwnEngineers } from './fixtures/ownEngineers.js';
 import { fetchOwnEngineers, fetchOpenProjects } from '../database/index.js';
@@ -95,6 +95,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   if (rateUnknown) reviewReasons.push('単価不明');
   // 元のメールにAIへの指示らしき記載がある案件は、人が確かめる（提案文面も作らない。proper/index.ts）
   if (project.injectionSuspected) reviewReasons.push(INJECTION_REVIEW_REASON);
+  else if (unsafeOutgoingText([project.title, project.agentContact])) reviewReasons.push(OUTGOING_TEXT_REVIEW_REASON);
   const meetsRate = !rateUnknown && (rate as number) >= (required as number);
   // 表示用に0.5万円刻みへ切り下げる（「+5.200000000000003万円」を出さない。多めには見せない）
   const rateGapMan = rateUnknown ? null : roundManDown((rate as number) - (required as number));

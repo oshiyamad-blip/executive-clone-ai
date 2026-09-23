@@ -19,8 +19,9 @@ import { normalizeRate, type RateUnit } from './pricing.js';
 import { jstDateOf, resolveItemDate } from './dates.js';
 import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
 import { sanitizeListItem } from '../database/mapping.js';
-import { safeErr } from './redact.js';
+import { safeErr, logId } from './redact.js';
 import { toInitials } from './pii.js';
+import { capSubject } from '../collectors/email.js';
 import { looksLikeInjection, dataSafe } from './injection.js';
 import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyTarget } from '../types/index.js';
 
@@ -319,7 +320,7 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       processedMailIds.push(mail.id);
       pending.items.push(...extracted);
       pending.processedMailIds.push(mail.id);
-      await recordSuccess(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
+      await recordSuccessSafely(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
       if (pending.processedMailIds.length >= batchSize && !(await flush())) {
         stopReason = 'flush';
         break;
@@ -327,7 +328,7 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       continue;
     }
     consecutiveInfraFailures = isInfraError(firstErr) ? consecutiveInfraFailures + 1 : 0;
-    console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${safeErr(firstErr)} — 処理済みにせず次回再処理します`);
+    console.error(`SES抽出: 抽出に失敗 (mail ${logId(mail.id)}): ${safeErr(firstErr)} — 処理済みにせず次回再処理します`);
     failed.push({ mail, err: firstErr, unfair });
   }
   if (stopReason !== 'flush' && !(await flush())) stopReason ??= 'flush';
@@ -364,10 +365,10 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       const lastChance = isLastChance(f.mail.receivedAt, collectDays());
       if (massFailure) {
         if (lastChance) lost += 1;
-        await recordFailure(f.mail, f.err, { countTowardQuarantine: false });
+        await recordFailureSafely(f.mail, f.err, { countTowardQuarantine: false });
         continue;
       }
-      const { attempts, quarantined, recorded } = await recordFailure(f.mail, f.err, {
+      const { attempts, quarantined, recorded } = await recordFailureSafely(f.mail, f.err, {
         countTowardQuarantine: !f.unfair,
         lastChance,
       });
@@ -497,6 +498,28 @@ const PDF_SKIP_REASON: Record<Exclude<PdfCheck, 'ok'>, string> = {
 
 // 区切りタグを本文側から閉じられないよう、タグ名を含む山括弧を全角にする
 
+// 隔離リストの記録（失敗回数の帳簿）の失敗で抽出の段ごと止めない。記録できなかった失敗は recorded=false として扱う
+async function recordSuccessSafely(mailId: string): Promise<void> {
+  try {
+    await recordSuccess(mailId);
+  } catch (err) {
+    console.warn(`SES修復: 隔離リストの更新に失敗: ${safeErr(err)}`);
+  }
+}
+
+async function recordFailureSafely(
+  mail: SesRawMail,
+  err: unknown,
+  opts: Parameters<typeof recordFailure>[2],
+): Promise<{ attempts: number; quarantined: boolean; recorded: boolean }> {
+  try {
+    return await recordFailure(mail, err, opts);
+  } catch (e) {
+    console.warn(`SES修復: 隔離リストへの記録に失敗: ${safeErr(e)}`);
+    return { attempts: 0, quarantined: false, recorded: false };
+  }
+}
+
 function capText(s: string, max: number): { text: string; truncated: boolean } {
   return s.length > max ? { text: `${s.slice(0, max)}\n…（長いため以降を省略）`, truncated: true } : { text: s, truncated: false };
 }
@@ -542,7 +565,7 @@ function prepareMail(mail: SesRawMail): PreparedMail {
   const body = capText(mail.body, MAX_BODY_CHARS);
   truncated ||= body.truncated;
 
-  const content = `件名: ${mail.subject}\nFrom: ${mail.from}\n\n本文:\n${body.text}\n\n${attachmentParts.join('\n\n')}`.trim();
+  const content = `件名: ${capSubject(mail.subject)}\nFrom: ${mail.from}\n\n本文:\n${body.text}\n\n${attachmentParts.join('\n\n')}`.trim();
   // 受信日はメールの外（サーバーの受信日時）から渡す。「即日」「10月〜」の年・日付の解釈の基準にする
   const user =
     `受信日: ${jstDateOf(mail.receivedAt)}\n` +
@@ -594,7 +617,7 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
       `mail ${mail.id}: 添付PDF${prepared.skippedPdfs.length}件を送らずに抽出します（${[...new Set(prepared.skippedPdfs)].join('・')}）`,
     );
   }
-  if (!attempt && prepared.truncated) console.log(`SES抽出: mail ${mail.id} は本文・添付が長いため一部を省略して抽出します`);
+  if (!attempt && prepared.truncated) console.log(`SES抽出: mail ${logId(mail.id)} は本文・添付が長いため一部を省略して抽出します`);
 
   let usedDocuments = prepared.documents.length > 0;
   // 抽出モデルが退役・提供終了で使えなければ、判定用モデルに切り替えて呼び直す（extractModelFallback.ts）

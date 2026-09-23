@@ -72,7 +72,7 @@ import {
 } from './heal/events.js';
 import { runRepair } from './heal/repair.js';
 import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule.js';
-import { redactable, safeErr } from './redact.js';
+import { redactable, safeErr, logId } from './redact.js';
 import { splitResends, serializeFingerprint, type ResendSplit } from './resend.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
@@ -396,7 +396,7 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     for (const p of projects) {
       const err = pr.failed.get(p.id);
       if (err !== undefined) {
-        console.error(`SES保存: 案件保存失敗 (${p.id} ${redactable(p.title)}): ${safeErr(err)}`);
+        console.error(`SES保存: 案件保存失敗 (${logId(p.id)} ${redactable(p.title)}): ${safeErr(err)}`);
         failedMailIds.add(p.sourceMailId);
         continue;
       }
@@ -410,7 +410,7 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     for (const e of engineers) {
       const err = er.failed.get(e.id);
       if (err !== undefined) {
-        console.error(`SES保存: 要員保存失敗 (${e.id} ${redactable(e.displayName)}): ${safeErr(err)}`);
+        console.error(`SES保存: 要員保存失敗 (${logId(e.id)} ${redactable(e.displayName)}): ${safeErr(err)}`);
         failedMailIds.add(e.sourceMailId);
         continue;
       }

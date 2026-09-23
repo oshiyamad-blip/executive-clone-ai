@@ -6,6 +6,7 @@
 // 単価などの数字は残すので、条件を変えた再送は別の内容として抽出し直す。添付が違う（スキルシートの差し替え）、
 // 項目の見出し（【要員2】・氏名: 等）が増えた一覧も抽出し直す
 import { createHash } from 'crypto';
+import { addressOf, domainOfAddress } from './mail/ownMail.js';
 import type { SesRawMail } from '../types/index.js';
 
 const SIG_SIZE = 128;
@@ -114,9 +115,10 @@ export function estimatedSimilarity(a: number[], b: number[]): number {
   return same / SIG_SIZE;
 }
 
+// 送り主のドメイン。表示名の中の "@partner.jp" に惑わされないよう、アドレスヘッダとして解釈したアドレスから取る
 function senderDomain(from: string): string {
-  const m = from.match(/@([A-Za-z0-9.-]+)/);
-  return (m ? m[1] : from).toLowerCase().replace(/\.$/, '');
+  const domain = domainOfAddress(addressOf(from));
+  return (domain || from.toLowerCase()).replace(/\.$/, '');
 }
 
 export function fingerprintOf(mail: SesRawMail): MailFingerprint {

@@ -3,6 +3,7 @@
 // Cc に共有メーリスを入れたりすると、次回の収集でそれを「案件・要員のメール」として取り込み直してしまう。
 // 収集時に「このバッチ自身の送信元」「サマリ・修復レポートの件名」「自社ドメイン（SES_OWN_DOMAINS）」からの
 // メールを除く。除外件数だけをログに出す（件名・アドレスは出さない）。
+import addressparser from 'nodemailer/lib/addressparser/index.js';
 import { mailProvider, xserverSharedUser, sesTargetGmail, ownDomains, collectOwnDomain } from '../config.js';
 import type { SesRawMail } from '../../types/index.js';
 
@@ -19,10 +20,31 @@ export interface OwnMailPolicy {
   collectOwnDomain: boolean;
 }
 
-// "表示名 <addr>" でも素のアドレスでもアドレス部分だけを小文字で取り出す
+export interface ParsedAddress {
+  name: string; // 表示名（無ければ ''）
+  address: string; // アドレス（小文字。比較・判定用）
+  original: string; // アドレス（元の大文字小文字のまま。宛先の表記用）
+}
+
+// アドレスヘッダを RFC 5322 の解釈（nodemailer の addressparser。送信時に宛先を決めるのと同じ解釈）で分ける。
+// 正規表現で "<...>" を探すと、引用符で囲んだ表示名の中の "<partner@example.jp>" を宛先と取り違えるため使わない。
+// アドレスの無い要素（グループ名だけ等）は除く
+export function parseAddressList(header: string): ParsedAddress[] {
+  return addressparser(header ?? '', { flatten: true })
+    .map((a) => {
+      const original = (a.address ?? '').trim();
+      return { name: (a.name ?? '').replace(/[\r\n]+/g, ' ').trim(), address: original.toLowerCase(), original };
+    })
+    .filter((a) => a.address !== '');
+}
+
+// "表示名 <addr>" でも素のアドレスでも、先頭の宛先のアドレス部分だけを小文字で取り出す（無ければ ''）
 export function addressOf(header: string): string {
-  const m = header.match(/<([^>]+)>/);
-  return (m ? m[1] : header).trim().toLowerCase();
+  return parseAddressList(header)[0]?.address ?? '';
+}
+
+export function domainOfAddress(address: string): string {
+  return address.includes('@') ? address.slice(address.lastIndexOf('@') + 1) : '';
 }
 
 // 返信・転送の接頭辞（Re: / Fwd: / 転送: 等）を除いた件名

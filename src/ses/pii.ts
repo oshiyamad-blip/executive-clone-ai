@@ -88,7 +88,8 @@ function maskHonorificName(match: string): string {
 export function maskPii(s: string): string {
   return s
     .normalize('NFKC')
-    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<メールアドレス>')
+    // 連続した英数字の途中からは始めない（結果は同じで、長い英数字の列で2乗の時間がかからない）
+    .replace(/(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<メールアドレス>')
     .replace(/(?<![\d])(?:\+81[\s-]?\(?0?\)?|0)\d{1,4}[\s-]*\(?[\s-]*\d{1,4}[\s-]*\)?[\s-]*\d{3,4}(?![\d])/g, '<電話番号>')
     .replace(/(?<![\d])0\d{9,10}(?![\d])/g, '<電話番号>')
     .replace(NAME_LABEL, (_m, label: string, sep: string, value: string) => `${label}${sep}${maskNameValue(value)}`)

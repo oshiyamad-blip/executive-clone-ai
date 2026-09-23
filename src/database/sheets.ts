@@ -13,7 +13,7 @@ import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../
 import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { toInitials } from '../ses/pii.js';
-import { SafeLogError } from '../ses/redact.js';
+import { SafeLogError, logId } from '../ses/redact.js';
 import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
 import {
   remoteLabel,
@@ -22,6 +22,7 @@ import {
   FB_VERDICT_LABEL,
   replyMetaJson,
   parseReplyMeta,
+  replyMetaInjection,
   verifyReplyMeta,
   joinList,
   splitList,
@@ -184,6 +185,14 @@ function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[]
   return row;
 }
 
+// 保存済みの行に指示混入疑いの印（列、または署名した返信メタの中）があれば、保存し直す行の返信メタにも印を含めて署名する
+// （同じメールの抽出し直しで返信メタを書き直しても、列の印を人が消せば外れる状態に戻さないため）
+function withKeptInjection<T extends { injectionSuspected?: boolean }>(tab: string, item: T, existing: string[] | null): T {
+  if (item.injectionSuspected || !existing) return item;
+  const marked = cellStr(existing, colIndex(tab, INJECTION_COLUMN)) !== '' || replyMetaInjection(cellStr(existing, colIndex(tab, '返信メタ')));
+  return marked ? { ...item, injectionSuspected: true } : item;
+}
+
 // 受信日の解釈。機械が書くISO形式に加え、人が手で入れた「2026/9/1」「2026年9月1日」「9/1」（年なし＝直近のその日）を受け付ける。
 // 空欄・読めない値は null（受信日で絞る突合の対象から外す。「今」とみなして毎回の突合に紛れ込ませない）
 export function parseReceivedAt(raw: string, now = new Date()): Date | null {
@@ -248,14 +257,18 @@ function replyBinding(tab: string, id: string, agentEmail: string) {
 // 書き換えられた・署名の無い行は宛先を空にする（その行の下書きは「宛先が不明」になり作られない）
 const untrustedReplyRows = new Map<string, number>();
 
-function trustedReply(tab: string, cells: string[]): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string } {
+// injection は署名どおりの返信メタに残した「指示混入疑い」の印（列の印を人が消しても要確認のままにする）
+function trustedReply(
+  tab: string,
+  cells: string[],
+): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string; injection: boolean } {
   const c = (name: string) => cellStr(cells, colIndex(tab, name));
   const meta = c('返信メタ');
   if (verifyReplyMeta(meta, replyBinding(tab, c('ID'), c('営業元メール')))) {
-    return { replyTarget: parseReplyMeta(meta), agentEmail: c('営業元メール') };
+    return { replyTarget: parseReplyMeta(meta), agentEmail: c('営業元メール'), injection: replyMetaInjection(meta) };
   }
   untrustedReplyRows.set(tab, (untrustedReplyRows.get(tab) ?? 0) + 1);
-  return { replyTarget: undefined, agentEmail: '' };
+  return { replyTarget: undefined, agentEmail: '', injection: false };
 }
 
 const warnedUntrustedReply = new Set<string>();
@@ -276,14 +289,14 @@ function projectToRow(p: Project): Cell[] {
     p.id, p.title, joinList(p.requiredSkills), joinList(p.preferredSkills), p.rateMin, p.rateMax,
     p.location, remoteLabel(p.remote), p.startPeriod, p.startDate ?? '', p.duration, p.businessFlow,
     p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId,
-    replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail)),
+    replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail), { injection: p.injectionSuspected }),
     p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '', p.injectionSuspected ? INJECTION_MARK : '',
   ];
 }
 
 export async function saveProjectSheets(project: Project): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(project), existing));
+  await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', project, existing)), existing));
   return project.id;
 }
 
@@ -314,7 +327,7 @@ function rowToProject(cells: string[]): Project {
     status: c('ステータス') === '終了' ? 'closed' : 'open',
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
     matched: c(MATCHED_COLUMN) !== '',
-    ...(c(INJECTION_COLUMN) !== '' ? { injectionSuspected: true } : {}),
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -354,14 +367,14 @@ function engineerToRow(e: Engineer): Cell[] {
   return [
     e.id, e.displayName, joinList(e.skills), e.experienceYears, e.desiredRate, e.residence,
     remoteLabel(e.remoteWish), e.availableFrom ?? '', e.agentCompany, e.agentContact, e.agentEmail,
-    e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail)), e.receivedAt.toISOString(),
+    e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail), { injection: e.injectionSuspected }), e.receivedAt.toISOString(),
     e.status === 'assigned' ? '決定済' : '提案可', '', e.age, e.utilization, e.injectionSuspected ? INJECTION_MARK : '',
   ];
 }
 
 export async function saveEngineerSheets(engineer: Engineer): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(engineer), existing));
+  await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', engineer, existing)), existing));
   return engineer.id;
 }
 
@@ -394,7 +407,7 @@ function rowToEngineer(cells: string[]): Engineer {
     status: c('ステータス') === '決定済' ? 'assigned' : 'available',
     notionPageId: c('ID'),
     matched: c(MATCHED_COLUMN) !== '',
-    ...(c(INJECTION_COLUMN) !== '' ? { injectionSuspected: true } : {}),
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -500,7 +513,7 @@ function rowCell(tab: string, row: Cell[], name: string): string {
 }
 
 export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSaveResult<Project>> {
-  const { failed, rows } = await saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(p), existing));
+  const { failed, rows } = await saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', p, existing)), existing));
   const saved = new Map<string, Project>();
   for (const p of projects) {
     const row = rows.get(p.id);
@@ -515,7 +528,7 @@ export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSav
 }
 
 export async function saveEngineersSheets(engineers: Engineer[]): Promise<SheetsSaveResult<Engineer>> {
-  const { failed, rows } = await saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(e), existing));
+  const { failed, rows } = await saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', e, existing)), existing));
   const saved = new Map<string, Engineer>();
   for (const e of engineers) {
     const row = rows.get(e.id);
@@ -544,13 +557,33 @@ export async function markItemsMatchedSheets(kind: 'project' | 'engineer', ids: 
   );
 }
 
-// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける。付けた行数を返す
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける。付けた行数を返す。
+// 列の印は人が消せるため、署名どおりの返信メタがある行は印を含めて署名し直す（列を消しても要確認のまま）
 export async function markItemsInjectionSuspectedSheets(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
   if (!configured() || ids.length === 0) return 0;
+  const tab = kind === 'project' ? '案件' : '要員';
+  const unique = [...new Set(ids)];
+  const metaById = new Map<string, string>();
+  if (draftSigningKey()) {
+    const wanted = new Set(unique);
+    for (const r of await readRows(tab)) {
+      const c = (name: string) => cellStr(r.cells, colIndex(tab, name));
+      const id = c('ID');
+      if (!wanted.has(id) || metaById.has(id)) continue;
+      const meta = c('返信メタ');
+      const binding = replyBinding(tab, id, c('営業元メール'));
+      if (meta && verifyReplyMeta(meta, binding) && !replyMetaInjection(meta)) {
+        metaById.set(id, replyMetaJson(parseReplyMeta(meta), binding, { injection: true }));
+      }
+    }
+  }
   return book.writeCellsByKey(
-    kind === 'project' ? '案件' : '要員',
+    tab,
     'ID',
-    [...new Set(ids)].map((id) => ({ key: id, cells: [[INJECTION_COLUMN, INJECTION_MARK]] })),
+    unique.map((id) => ({
+      key: id,
+      cells: [[INJECTION_COLUMN, INJECTION_MARK], ...(metaById.has(id) ? [['返信メタ', metaById.get(id)!] as [string, string]] : [])],
+    })),
   );
 }
 
@@ -743,7 +776,7 @@ export async function updateMatchStatusSheets(id: string, status: MatchStatus): 
   if (!configured()) return;
   const hit = await locateRow('マッチ', 'ID', id);
   if (!hit) {
-    console.warn(`SheetsDB: ステータス更新対象のマッチが見つかりません (${id})`);
+    console.warn(`SheetsDB: ステータス更新対象のマッチが見つかりません (${logId(id)})`);
     return;
   }
   await book.writeCells('マッチ', hit, [['ステータス', matchStatusLabel(status)]]);

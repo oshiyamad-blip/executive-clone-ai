@@ -14,6 +14,7 @@ import {
   saveProperCandidatesSheets,
   saveProjectsSheets,
   markItemsMatchedSheets,
+  markItemsInjectionSuspectedSheets,
   updateMatchStatusSheets,
   pruneProcessedMailSheets,
   checkSheetsTabs,
@@ -72,6 +73,7 @@ import { INJECTION_REVIEW_REASON } from '../injection.js';
 import { recordFeedback } from '../feedback.js';
 import { recordLlmUsage } from '../../llm/usage.js';
 import { SafeLogError } from '../redact.js';
+import { parseAttachments } from '../parse.js';
 import { FakeSheets, FakeDrive, FakeMailTransport, type FakeDriveFile } from './fakeGoogle.js';
 import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail } from '../../types/index.js';
 
@@ -83,6 +85,7 @@ const PROPER_BOOK = 'fakeProperBook';
 const CONFLICT_BOOK = 'fakeConflictBook';
 const OWN_DOMAIN = 'ourco.example.jp';
 const SALES = `sales@${OWN_DOMAIN}`;
+const FLOW_SIGNING_KEY = 's'.repeat(40);
 
 const ENV_PREFIXES = [
   'SES_', 'PROPER_', 'XSERVER_', 'SHEETS_', 'NOTION_', 'GOOGLE_', 'ANTHROPIC_', 'GEMINI_', 'SKILL_', 'MATCH_',
@@ -105,6 +108,8 @@ function isolateEnv(): void {
     XSERVER_SHARED_USER: SALES,
     SES_OWN_DOMAINS: OWN_DOMAIN,
     SES_ALLOWED_SENDER_DOMAINS: OWN_DOMAIN,
+    // 本番は署名鍵が無ければ担当者メールの依頼を受けない（pendingDrafts）。鍵の無い場合は個別の検証で外す
+    SES_DRAFT_SIGNING_KEY: FLOW_SIGNING_KEY,
     SES_HEAL_ENABLED: 'false', // 抽出失敗の再試行の待ち時間を入れない
     SES_HEAL_MAX_ATTEMPTS: '2',
     SES_HEAL_DATA_DIR: `${WORK_DIR}/heal`,
@@ -1857,10 +1862,9 @@ async function testReviewRegressions(): Promise<void> {
       sigRow?.['案件側下書き状態'] === DRAFT_STATE.noRecipient && sigRow?.['要員側下書き状態'] === '未作成' && !(sigRow?.['下書きデータ'] ?? '').includes('"project"'),
       JSON.stringify({ p: sigRow?.['案件側下書き状態'], e: sigRow?.['要員側下書き状態'] }),
     );
-    delete process.env.SES_DRAFT_SIGNING_KEY;
   } finally {
     delete process.env.SES_NOTIFY_TO;
-    delete process.env.SES_DRAFT_SIGNING_KEY;
+    process.env.SES_DRAFT_SIGNING_KEY = FLOW_SIGNING_KEY;
     mail.failSend = false;
     process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;
     newRun();
@@ -1920,6 +1924,9 @@ async function testRedaction(): Promise<void> {
   for (const line of cap.lines) console.log(`    | ${line}`);
   const leaked = SENSITIVE.filter((s) => s && out.includes(s));
   check(`秘匿モードのログに氏名・アドレス・件名・案件名が出ない（検査${SENSITIVE.length}語・出力${cap.lines.length}行）`, leaked.length === 0, `漏れ: ${leaked.join(' / ')}`);
+  // メールID（Message-IDのハッシュ）や案件・要員・マッチのIDは送り主が手元で計算できるため、公開ログには実行ごとの別名で出す
+  const ids = out.match(/\b(?:sesmail|proj|eng|match)_[A-Za-z0-9_-]+/g) ?? [];
+  check('秘匿モードのログにメール・案件・要員・マッチのIDを出さない（別名にする）', ids.length === 0, ids.slice(0, 5).join(' / '));
   check('秘匿モードでもエラーの種別は出す', /Error/.test(out));
   const summary = mail.sent.slice(sentBefore).find((m) => m.to === `boss@${OWN_DOMAIN}`);
   check('詳細（案件名・プロパー氏名）は非公開のサマリメールに載せる', Boolean(summary) && summary!.body.includes(p1.title) && summary!.body.includes('山田太郎'));
@@ -1945,6 +1952,102 @@ async function testRedaction(): Promise<void> {
   }
   check('（対照）秘匿を解除すると案件名がログに出る', cap2.lines.join('\n').includes(p1.title));
   mail.failDraftFrom.clear();
+}
+
+// ===== 11. セキュリティ監査の指摘の回帰（署名鍵・状態の形・リンク先シート） =====
+
+async function testSecurityRegressions(): Promise<void> {
+  section('セキュリティ監査の指摘の回帰（Sheets運用）');
+  // 署名鍵が無い本番では、担当者メールの依頼から下書きを作らない（書き換えを検知できないため）
+  const pk = project('proj_nokey', { title: '署名鍵なし案件', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】鍵なし', 'nokey') });
+  const ek = engineer('eng_nokey', { displayName: 'N.K.', skills: ['Java'], agentEmail: 'jiro@beta.example.jp', replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【要員】鍵なし', 'nokey-e') });
+  const mk = makeMatch(pk, ek, 'confirmed');
+  newRun();
+  await saveMatch(mk);
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', mk.id, '担当者メール', `taro@${OWN_DOMAIN}`);
+  const draftsBefore = mail.drafts.length;
+  delete process.env.SES_DRAFT_SIGNING_KEY;
+  try {
+    newRun();
+    await materializePendingDrafts();
+  } finally {
+    process.env.SES_DRAFT_SIGNING_KEY = FLOW_SIGNING_KEY;
+  }
+  const rowK = sheets.record(SES_BOOK, 'マッチ', 'ID', mk.id);
+  check(
+    '署名鍵の無い本番では担当者メールの依頼から下書きを作らず、状態列にエラーを書く',
+    mail.drafts.length === draftsBefore && (rowK?.['案件側下書き状態'] ?? '').includes('署名鍵') && (rowK?.['要員側下書き状態'] ?? '').includes('署名鍵'),
+    JSON.stringify({ n: mail.drafts.length - draftsBefore, p: rowK?.['案件側下書き状態'], e: rowK?.['要員側下書き状態'] }),
+  );
+  newRun();
+  await materializePendingDrafts();
+  const rowK2 = sheets.record(SES_BOOK, 'マッチ', 'ID', mk.id);
+  check(
+    '署名鍵を登録した後の実行では、エラーだった依頼から下書きを作る',
+    mail.drafts.length === draftsBefore + 2 && STAMP.test(rowK2?.['案件側下書き状態'] ?? '') && STAMP.test(rowK2?.['要員側下書き状態'] ?? ''),
+    JSON.stringify({ n: mail.drafts.length - draftsBefore, p: rowK2?.['案件側下書き状態'] }),
+  );
+
+  // 指示混入疑いの印は署名した返信メタにも残すため、人が列の印を消しても要確認のまま（宛先は署名どおり使える）
+  const injP = project('proj_injsig', { title: '印の検証案件', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】印', 'inj') });
+  const extractedInj = project('proj_injsig2', { title: '抽出時の印', requiredSkills: ['Java'], agentEmail: 'jiro@beta.example.jp', injectionSuspected: true, replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【案件】印2', 'inj2') });
+  newRun();
+  await saveProjectsSheets([injP, extractedInj]);
+  newRun();
+  await markItemsInjectionSuspectedSheets('project', [injP.id]);
+  sheets.setByKey(SES_BOOK, '案件', 'ID', injP.id, INJECTION_COLUMN, '');
+  sheets.setByKey(SES_BOOK, '案件', 'ID', extractedInj.id, INJECTION_COLUMN, '');
+  newRun();
+  const reread = await fetchOpenProjects(1000);
+  const judged = reread.find((x) => x.id === injP.id);
+  const extracted = reread.find((x) => x.id === extractedInj.id);
+  check(
+    '指示混入疑いの列の印を人が消しても、署名した返信メタの印で要確認のまま（抽出時・AI判定時とも）',
+    judged?.injectionSuspected === true && judged.replyTarget !== undefined && extracted?.injectionSuspected === true && extracted.replyTarget !== undefined,
+    JSON.stringify({ j: judged?.injectionSuspected, jr: Boolean(judged?.replyTarget), e: extracted?.injectionSuspected, er: Boolean(extracted?.replyTarget) }),
+  );
+
+  // _状態タブの隔離リストを人が壊しても（配列でない値）、抽出の段を止めずに次の保存で配列に書き直す
+  sheets.setByKey(SES_BOOK, '_状態', 'キー', 'quarantine', 'JSON', '{}');
+  newRun();
+  let threw = '';
+  let failure = { attempts: 0, quarantined: false, recorded: false };
+  try {
+    await recordSuccess('sesmail_flow_any');
+    failure = await recordFailure(rawMail('sesmail_flow_q2', '検証 <q@eta.example.jp>', '件名', 5), new Error('解析失敗'));
+  } catch (err) {
+    threw = String(err);
+  }
+  const stateJson = sheets.record(SES_BOOK, '_状態', 'キー', 'quarantine')?.['JSON'] ?? '';
+  check(
+    '壊れた隔離リスト（配列でない）でも例外にせず、次の保存で配列に書き直す',
+    threw === '' && failure.recorded && failure.attempts === 1 && stateJson.startsWith('['),
+    `${threw} ${stateJson.slice(0, 80)}`,
+  );
+
+  // 自社ドメイン・プロパーのフォルダが未設定だと社内のシートか確かめられないため、メール本文のリンク先は読まない
+  const savedEnv = { own: process.env.SES_OWN_DOMAINS, folder: process.env.PROPER_SKILLSHEET_FOLDER_ID };
+  delete process.env.SES_OWN_DOMAINS;
+  delete process.env.PROPER_SKILLSHEET_FOLDER_ID;
+  process.env.GOOGLE_SA_CLIENT_EMAIL = 'bot@proj.iam.gserviceaccount.com';
+  process.env.GOOGLE_SA_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----';
+  const link = 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef/edit';
+  const cap = captureConsole();
+  let parsed: SesRawMail[] = [];
+  try {
+    parsed = await parseAttachments([{ ...rawMail('sesmail_flow_link', '検証 <a@x.example.jp>', 's', 1), body: link, sheetLinks: [link] }]);
+  } finally {
+    cap.restore();
+    process.env.SES_OWN_DOMAINS = savedEnv.own ?? OWN_DOMAIN;
+    if (savedEnv.folder !== undefined) process.env.PROPER_SKILLSHEET_FOLDER_ID = savedEnv.folder;
+    delete process.env.GOOGLE_SA_CLIENT_EMAIL;
+    delete process.env.GOOGLE_SA_PRIVATE_KEY;
+  }
+  check(
+    '自社ドメイン等が未設定なら、メール本文のスプレッドシートのリンク先を読まない（社内のシートを読み出させない）',
+    parsed.length === 1 && parsed[0].attachments.length === 0 && cap.lines.join('\n').includes('確かめられないため'),
+    cap.lines.join(' / '),
+  );
 }
 
 const RESEND_BOOK = 'fakeResendBook';
@@ -2020,6 +2123,7 @@ async function main(): Promise<void> {
     await testReviewRegressions();
     await testResendSkip();
     await testRedaction();
+    await testSecurityRegressions();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

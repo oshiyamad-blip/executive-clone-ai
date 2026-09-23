@@ -9,6 +9,7 @@ import { join } from 'path';
 import { healDataDir, healMaxAttempts, durableStateInSheets } from '../config.js';
 import { safeErr } from '../redact.js';
 import { maskPii } from '../pii.js';
+import { addressOf, domainOfAddress } from '../mail/ownMail.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, STATE_JSON_MAX_CHARS } from '../../database/sheets.js';
 import type { SesRawMail } from '../../types/index.js';
 
@@ -41,11 +42,49 @@ function filePath(): string {
   return join(process.cwd(), healDataDir(), 'quarantine.json');
 }
 
+// 1件の記録として読めるか。mailId の無いものは捨て、それ以外の欠けた・型の違う項目は既定値で補う（以前の版の記録も読めるように）
+function toEntry(v: unknown): QuarantineEntry | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const e = v as Record<string, unknown>;
+  if (typeof e.mailId !== 'string' || !e.mailId) return null;
+  const str = (x: unknown) => (typeof x === 'string' ? x : '');
+  return {
+    mailId: e.mailId,
+    subject: str(e.subject),
+    from: str(e.from),
+    attempts: typeof e.attempts === 'number' && Number.isFinite(e.attempts) ? e.attempts : 0,
+    lastError: str(e.lastError),
+    firstFailedAt: str(e.firstFailedAt),
+    lastFailedAt: str(e.lastFailedAt),
+    quarantinedAt: typeof e.quarantinedAt === 'string' && e.quarantinedAt ? e.quarantinedAt : null,
+  };
+}
+
+// 保存された値（「_状態」タブのセルは人も編集できる）を隔離リストとして解釈する（純関数）。
+// 配列でない値・記録として読めない要素は捨てる（壊れた値のまま list.filter 等で例外になり、抽出の段ごと止まらないため）
+export function quarantineEntriesFrom(value: unknown): { entries: QuarantineEntry[]; malformed: boolean } {
+  if (value === null || value === undefined) return { entries: [], malformed: false };
+  if (!Array.isArray(value)) return { entries: [], malformed: true };
+  const entries = value.map(toEntry).filter((e): e is QuarantineEntry => e !== null);
+  return { entries, malformed: entries.length !== value.length };
+}
+
+let warnedMalformed = false;
+
+function validated(value: unknown): QuarantineEntry[] {
+  const { entries, malformed } = quarantineEntriesFrom(value);
+  if (malformed && !warnedMalformed) {
+    warnedMalformed = true;
+    console.warn('SES修復: 隔離リストに形の合わない値があるため、その部分を無視します（次の保存で書き直します）');
+  }
+  return entries;
+}
+
 // 読み込みに失敗した場合は null（空扱いで上書き保存すると履歴を消してしまうため区別する）
 async function load(): Promise<QuarantineEntry[] | null> {
   if (inSheets()) {
     try {
-      return (await readStateJson<QuarantineEntry[]>(STATE_KEY)) ?? [];
+      return validated(await readStateJson<unknown>(STATE_KEY));
     } catch (err) {
       console.warn(`SES修復: 隔離リストの読み込みに失敗: ${safeErr(err)}`);
       return null;
@@ -53,7 +92,7 @@ async function load(): Promise<QuarantineEntry[] | null> {
   }
   try {
     if (!existsSync(filePath())) return [];
-    return JSON.parse(readFileSync(filePath(), 'utf-8')) as QuarantineEntry[];
+    return validated(JSON.parse(readFileSync(filePath(), 'utf-8')));
   } catch {
     return [];
   }
@@ -97,8 +136,8 @@ async function save(input: QuarantineEntry[]): Promise<void> {
 
 // 送信者はドメインだけを残す（表示名の氏名やローカル部を隔離リスト・修復レポートに持ち込まない）
 export function senderDomainOnly(from: string): string {
-  const m = from.normalize('NFKC').match(/@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/);
-  return m ? `@${m[1].toLowerCase()}` : '';
+  const domain = domainOfAddress(addressOf(from.normalize('NFKC')));
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain) ? `@${domain}` : '';
 }
 
 // 失敗を記録する。countTowardQuarantine=false のときはカウンタを増やさない
@@ -120,7 +159,8 @@ export async function recordFailure(
   if (!entry) {
     entry = {
       mailId: mail.id,
-      subject: maskPii(mail.subject).slice(0, 120),
+      // 伏せ字処理は入力の長さに対して重いため、先に切り詰めてから伏せる
+      subject: maskPii(mail.subject.slice(0, 200)).slice(0, 120),
       from: senderDomainOnly(mail.from),
       attempts: 0,
       lastError: '',
@@ -131,7 +171,7 @@ export async function recordFailure(
     list.push(entry);
   }
   if (opts.countTowardQuarantine) entry.attempts += 1;
-  entry.lastError = maskPii(String(err)).slice(0, 300);
+  entry.lastError = maskPii(String(err).slice(0, 1000)).slice(0, 300);
   entry.lastFailedAt = now;
   const quarantined = entry.attempts >= healMaxAttempts() || Boolean(opts.lastChance);
   if (quarantined && !entry.quarantinedAt) entry.quarantinedAt = now;

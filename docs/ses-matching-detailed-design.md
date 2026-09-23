@@ -194,7 +194,8 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
 （下書きなし・サマリは件数だけ）、`MATCH_MIN_LLM_SCORE`（既定60）未満 → 成立候補・交渉提案を `tentative` に、それ以外はルールの区分のまま。
 商流メモの年齢の上限は `ageCondition`（要員の実年齢）で照合し、上限内ならAIの `age` を外し、超えれば `age` を足す（AIには照合の結果だけを渡す）。
 AIが `injectionSuspected` を返し、`injectionSource` で示した側（project/engineer）の案件・要員は同じ実行の残りの組を要確認にし、
-DB の「指示混入疑い」に保存する（再保存・抽出し直しでも消さない。外すのは人だけ）。`unknown` はその組だけ要確認にし、
+DB の「指示混入疑い」に保存する（再保存・抽出し直しでも消さない。Notion運用で外すのは人だけ。Sheets運用では署名した返信メタにも
+印を残すため、列を消しても要確認のまま）。`unknown` はその組だけ要確認にし、
 `reference`（参考の評価のメモ）はその組を参考の評価なしで判定し直し、実行の残りは参考の評価を使わない。
 交渉提案もこの関門を通る。1回の実行の予算 `SES_JUDGE_BUDGET_JPY` に達した後の組と、一時的な失敗（429/5xx/通信）の組、
 アカウント・設定の誤り（401/403/404・残高不足等。最初の1件で以後の判定を止め、異常終了で知らせる）の組は

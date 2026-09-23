@@ -3,33 +3,48 @@
 // demoは fixture にあらかじめ埋めたテキストをそのまま返す（外部アクセスしない）。
 // 添付は社外の誰からでも届くため、表計算の解析前に形式（先頭バイト）とサイズを確かめ、
 // 解析は数式・スタイル・マクロ等を読まない設定で行い、行数と文字数に上限を設ける。
+import { inflateRawSync } from 'zlib';
 import { read as readXlsx, utils as xlsxUtils } from 'xlsx';
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains } from './config.js';
-import { redactable, safeErr, SafeLogError } from './redact.js';
+import { redactable, safeErr, SafeLogError, logId } from './redact.js';
 import { GOOGLE_REQUEST_TIMEOUT_MS } from '../database/sheetBook.js';
+import { pastExtractDeadline } from './schedule.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
 
 export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[]> {
   if (isDemo()) return mails; // fixtureは attachments[].text 済み。展開処理をスキップ
 
   const parsed: SesRawMail[] = [];
-  const linkStats: SheetLinkStats = { read: 0, skipped: 0, internal: 0 };
+  const linkStats: SheetLinkStats = { read: 0, skipped: 0, internal: 0, unchecked: 0 };
+  let deferred = 0;
   for (const mail of mails) {
+    // 抽出の持ち時間を過ぎたら残りは展開しない（抽出も始めないため、処理済みにならず次回の実行で続きから処理する）
+    if (pastExtractDeadline()) {
+      deferred += 1;
+      parsed.push(mail);
+      continue;
+    }
     try {
       const fileAttachments = await Promise.all(mail.attachments.map(parseAttachment));
       const sheetAttachments = await parseSheetLinks(mail, linkStats);
       parsed.push({ ...mail, attachments: [...fileAttachments, ...sheetAttachments] });
     } catch (err) {
-      console.error(`SES展開: 添付展開に失敗 (mail ${mail.id}): ${safeErr(err)}`);
+      console.error(`SES展開: 添付展開に失敗 (mail ${logId(mail.id)}): ${safeErr(err)}`);
       parsed.push(mail); // 失敗しても本文だけで処理継続
     }
   }
+  if (deferred > 0) console.log(`SES展開: 実行時間の上限を過ぎたため${deferred}件の添付展開を次回に回します`);
   if (linkStats.read + linkStats.skipped > 0) {
     console.log(
       `SES展開: スプレッドシートのリンク 読取${linkStats.read}件・読めず${linkStats.skipped}件` +
         `${linkStats.internal > 0 ? `（うち社内のファイルのため読まなかった${linkStats.internal}件）` : ''}（サービスアカウントに共有された社外のものだけ読みます）`,
+    );
+  }
+  if (linkStats.unchecked > 0) {
+    console.warn(
+      `SES展開: SES_OWN_DOMAINS（自社ドメイン）が未設定などで社内のファイルかを確かめられないため、スプレッドシートのリンク${linkStats.unchecked}件を読みませんでした`,
     );
   }
   return parsed;
@@ -64,6 +79,9 @@ function xlsxToText(base64Data: string): string {
 
 // 表計算の解析上限。これを超えるファイルは解析しない／以降の行・文字を読まない
 export const SPREADSHEET_MAX_BYTES = 10 * 1024 * 1024;
+// xlsx（ZIP）を展開した後の合計の上限。圧縮後は10MB以内でも展開すると数GBになるファイル（zip bomb）は、
+// SheetJS が全エントリを展開するため1通で数十秒・数GBのメモリを使い、実行時間の上限を超えて毎回同じメールで止まる
+export const SPREADSHEET_MAX_INFLATED_BYTES = 64 * 1024 * 1024;
 const SPREADSHEET_MAX_ROWS = 2000;
 const SPREADSHEET_MAX_TEXT_CHARS = 200_000;
 
@@ -76,10 +94,43 @@ export function spreadsheetKind(data: Buffer): 'xlsx' | 'xls' | null {
   return null;
 }
 
+// xlsx（ZIP）の各エントリを SheetJS と同じ手順（中央ディレクトリの各エントリ→ローカルヘッダの直後のデータ）で、
+// 合計 maxBytes まで実際に展開して確かめる（ヘッダの宣言サイズは偽れるため信用しない）。
+// 上限を超える・壊れている・対応しない圧縮方式なら false（解析しない）
+export function zipInflatesWithin(data: Buffer, maxBytes: number): boolean {
+  const eocd = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocd < 0 || eocd + 22 > data.length) return false;
+  const count = data.readUInt16LE(eocd + 8);
+  let p = data.readUInt32LE(eocd + 16);
+  let remaining = maxBytes;
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > data.length) return false;
+    const offset = data.readUInt32LE(p + 42);
+    p += 46 + data.readUInt16LE(p + 28) + data.readUInt16LE(p + 30) + data.readUInt16LE(p + 32);
+    if (offset + 30 > data.length) return false;
+    const method = data.readUInt16LE(offset + 8);
+    const start = offset + 30 + data.readUInt16LE(offset + 26) + data.readUInt16LE(offset + 28);
+    if (start > data.length) return false;
+    if (method === 0) continue; // 無圧縮（ファイルの大きさ以上にはならない）
+    if (method !== 8) return false;
+    try {
+      remaining -= inflateRawSync(data.subarray(start), { maxOutputLength: remaining + 1 }).length;
+    } catch {
+      return false; // 上限超過（ERR_BUFFER_TOO_LARGE）・壊れたデータ
+    }
+    if (remaining < 0) return false;
+  }
+  return true;
+}
+
 // Excel（.xlsx/.xls）の全シートをCSVテキストにする（プロパーのスキルシート読み取りでも使う）
 export function spreadsheetBufferToText(data: Buffer): string {
   if (data.length > SPREADSHEET_MAX_BYTES) throw new SafeLogError('表計算ファイルが大きすぎるため解析しません（10MB超）');
-  if (!spreadsheetKind(data)) throw new SafeLogError('Excel形式（xlsx/xls）ではないため解析しません');
+  const kind = spreadsheetKind(data);
+  if (!kind) throw new SafeLogError('Excel形式（xlsx/xls）ではないため解析しません');
+  if (kind === 'xlsx' && !zipInflatesWithin(data, SPREADSHEET_MAX_INFLATED_BYTES)) {
+    throw new SafeLogError('表計算ファイルの展開後の大きさが上限を超えるか壊れているため解析しません');
+  }
   const workbook = readXlsx(data, {
     type: 'buffer',
     dense: true,
@@ -117,6 +168,7 @@ interface SheetLinkStats {
   read: number;
   skipped: number;
   internal: number;
+  unchecked: number; // 自社ドメイン（SES_OWN_DOMAINS）等が未設定で社内のファイルかを確かめられず読まなかった件数
 }
 
 const DRIVE_METADATA_SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly'];
@@ -148,6 +200,29 @@ function reasonOf(err: unknown): string {
 // 社内の個人情報を抽出・保存しないよう、確かめられない場合も社内とみなして読まない。
 // - 共有ドライブのファイルは所有者（owners）が空で返るため、社外のドメインの人が明示的に共有したもの以外は社内とみなす
 // - サービスアカウントに共有されていないファイル（404・権限なし）は読めないだけなので「読めない」として数える
+// このシステムのDB・プロパー管理表の所有者と、サービスアカウントに共有した人（社内の人のアドレス）。
+// 個人のGoogleアカウント（@gmail.com 等）で社内のシートを持つ運用では、自社ドメインだけでは社内のファイルと分からないため、
+// これらの人が所有する・共有したファイルも社内とみなす（1回の実行で1回だけ読む。読めなければ加えない）
+let internalPeopleCache: Promise<Set<string>> | null = null;
+
+function internalPeople(drive: drive_v3.Drive): Promise<Set<string>> {
+  internalPeopleCache ??= (async () => {
+    const out = new Set<string>();
+    for (const fileId of [sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean)) {
+      try {
+        const f = (await drive.files.get({ fileId, fields: 'owners(emailAddress), sharingUser(emailAddress)', supportsAllDrives: true })).data;
+        for (const a of [...(f.owners ?? []).map((o) => o.emailAddress), f.sharingUser?.emailAddress]) {
+          if (a) out.add(a.toLowerCase());
+        }
+      } catch {
+        // 読めない（Drive APIが無効等）。自社ドメイン・フォルダでの判定だけになる
+      }
+    }
+    return out;
+  })();
+  return internalPeopleCache;
+}
+
 async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOrigin> {
   const own = ownDomains();
   const folder = properFolderId();
@@ -169,6 +244,9 @@ async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOr
   }
   const ownerDomains = (f.owners ?? []).map((o) => domainOf(o.emailAddress)).filter(Boolean);
   if (ownerDomains.some((d) => own.includes(d))) return 'internal';
+  const internal = await internalPeople(drive);
+  const people = [...(f.owners ?? []).map((o) => o.emailAddress), f.sharingUser?.emailAddress].map((a) => (a ?? '').toLowerCase());
+  if (people.some((a) => a !== '' && internal.has(a))) return 'internal';
   const sharer = domainOf(f.sharingUser?.emailAddress);
   const sharedByOutsider = sharer !== '' && own.length > 0 && !own.includes(sharer);
   if (f.driveId) return sharedByOutsider ? 'external' : 'internal';
@@ -205,10 +283,15 @@ async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise
 
   const ownSheets = new Set([sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean));
   const sheetsApi = google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
-  // 自社ドメイン・プロパーのフォルダが分からなければ社内かどうかを判定できないため、確かめない
-  const checkInternal = ownDomains().length > 0 || Boolean(properFolderId());
-  const driveAuth = checkInternal ? getServiceAccountAuth(DRIVE_METADATA_SCOPES) : null;
-  const driveApi = driveAuth ? google.drive({ version: 'v3', auth: driveAuth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
+  // 自社ドメイン・プロパーのフォルダが分からなければ社内のファイルかを判定できないため、リンクは読まない
+  // （サービスアカウントに共有した社内のシートを、URLを知る社外の人に読み出させないため。確かめられないときは読まない側に倒す）
+  const driveAuth = ownDomains().length > 0 || properFolderId() ? getServiceAccountAuth(DRIVE_METADATA_SCOPES) : null;
+  if (!driveAuth) {
+    stats.skipped += mail.sheetLinks.length;
+    stats.unchecked += mail.sheetLinks.length;
+    return [];
+  }
+  const driveApi = google.drive({ version: 'v3', auth: driveAuth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
   const results: SesAttachment[] = [];
   for (const link of mail.sheetLinks) {
     const spreadsheetId = extractSpreadsheetId(link);
@@ -216,7 +299,7 @@ async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise
       stats.skipped += 1;
       continue;
     }
-    const origin = driveApi ? await fileOrigin(driveApi, spreadsheetId) : 'external';
+    const origin = await fileOrigin(driveApi, spreadsheetId);
     if (origin !== 'external') {
       stats.skipped += 1;
       if (origin === 'internal') stats.internal += 1;

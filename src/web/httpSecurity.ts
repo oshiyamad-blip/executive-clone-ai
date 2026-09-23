@@ -106,3 +106,10 @@ export function runHandler(res: ServerResponse, handler: () => Promise<void>): v
 export function unsafeBind(host: string, token: string): boolean {
   return !token && !isLoopbackHost(host);
 }
+
+// 非ループバックで平文HTTPのまま待ち受けようとしていないか（起動時の確認）。平文ではアクセストークン（Authorizationヘッダ）と
+// 応答の中身が同じネットワークの誰からも読めるため、HTTPS で待ち受けるか、TLS終端（リバースプロキシ・VPN）の内側である
+// ことを明示したときだけ許す
+export function plaintextExposure(host: string, tlsProtected: boolean): boolean {
+  return !tlsProtected && !isLoopbackHost(host);
+}

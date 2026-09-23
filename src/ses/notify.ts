@@ -12,7 +12,7 @@ import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive, dbProvider }
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
-import { redactable, safeErr } from './redact.js';
+import { redactable, safeErr, logId } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
 import { primarySelectTally, DEAL_BREAKER_CODES, DEAL_BREAKER_LABEL } from './match.js';
@@ -164,7 +164,7 @@ export async function persistMatches(
       saved.push({ ...match, notionPageId: result.pageIds.get(match.id) });
       continue;
     }
-    console.error(`SES通知: マッチ保存失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
+    console.error(`SES通知: マッチ保存失敗 (${logId(match.id)} ${redactable(match.title)}): ${safeErr(err)}`);
   }
   const failed = matches.length - saved.length;
   if (failed > 0) {

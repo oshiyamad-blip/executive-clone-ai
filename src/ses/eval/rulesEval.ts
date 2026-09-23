@@ -107,6 +107,23 @@ import {
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
 import { joinList, splitList } from '../../database/mapping.js';
+import { createHash, randomBytes } from 'crypto';
+import { deflateRawSync } from 'zlib';
+import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
+import { redactIdsIn } from '../redact.js';
+import { planReplyAddresses } from '../draft.js';
+import { addressOf } from '../mail/ownMail.js';
+import { zipInflatesWithin, spreadsheetBufferToText, SPREADSHEET_MAX_INFLATED_BYTES, SPREADSHEET_MAX_BYTES } from '../parse.js';
+import { attachmentsWithinLimits, PDF_MAX_BYTES } from '../mail/attachmentLimits.js';
+import { capSubject, MAX_SUBJECT_CHARS } from '../../collectors/email.js';
+import { planDraftRequest, currentSenderPolicy } from '../pendingDrafts.js';
+import { replyMetaJson, verifyReplyMeta, replyMetaInjection, parseReplyMeta } from '../../database/mapping.js';
+import { unsafeOutgoingText, OUTGOING_TEXT_REVIEW_REASON } from '../injection.js';
+import { buildProperProposalDraft } from '../proper/proposal.js';
+import { quarantineEntriesFrom } from '../heal/quarantine.js';
+import { plaintextExposure } from '../../web/httpSecurity.js';
+import { createReplyDraftForSender } from '../review.js';
+import type { ProperEngineer } from '../../types/index.js';
 import type {
   Project,
   Engineer,
@@ -2154,6 +2171,196 @@ function resendChecks(): void {
   check('壊れた指紋は無視する', parseFingerprint('v1|x|y') === null && parseFingerprint('v0|a|b|c|1|n|AAAA') === null);
 }
 
+// ===== セキュリティ監査の指摘（公開ログ・社外メール・シートの編集者・確認UI）の回帰 =====
+
+// 1エントリ（deflate）の最小のZIP。宣言サイズは正直に書く（展開して確かめる側の検査なので宣言は信用しない）
+function zipOf(name: string, content: Buffer): Buffer {
+  const data = deflateRawSync(content);
+  const nameBuf = Buffer.from(name);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(nameBuf.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(nameBuf.length, 28);
+  const cdOffset = local.length + nameBuf.length + data.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(central.length + nameBuf.length, 12);
+  eocd.writeUInt32LE(cdOffset, 16);
+  return Buffer.concat([local, nameBuf, data, central, nameBuf, eocd]);
+}
+
+async function securityAuditChecks(): Promise<void> {
+  section('セキュリティ: 公開ログのメール・案件・要員・マッチのIDは外から計算できない別名にする');
+  const computable = `sesmail_m${createHash('sha256').update('attacker-123@evil.example').digest('hex').slice(0, 24)}`;
+  const line = `mail ${computable}: AIへの指示らしき記載 (proj_abc123 × eng_def456 / match_proj_a_eng_b / sesmail_x77_12)`;
+  const keyA = randomBytes(32);
+  const keyB = randomBytes(32);
+  const red = redactIdsIn(line, true, keyA);
+  check('秘匿時はIDを別名にする（本文の文言は残す）', !/sesmail_|proj_|eng_|match_/.test(red) && red.includes('AIへの指示'), red);
+  check(
+    '別名は実行ごとの鍵で変わり、同じ実行の中では同じ',
+    redactIdsIn(computable, true, keyA) === redactIdsIn(computable, true, keyA) && redactIdsIn(computable, true, keyA) !== redactIdsIn(computable, true, keyB),
+  );
+  check('秘匿しないときはIDをそのまま出す', redactIdsIn(line, false, keyA) === line);
+
+  section('セキュリティ: 表示名の中の <アドレス> で返信先・Ccの判定をすり抜けさせない');
+  const trick = planReplyAddresses(
+    {
+      from: 'Tanaka <tanaka@realpartner.jp>', replyTo: '"<tanaka@realpartner.jp>" <leak@evil.example>', to: 'sales@our.jp',
+      cc: '"<boss@our.jp>" <x@third.example>', subject: 's', messageId: '', references: '',
+    },
+    '',
+    { ourDomains: ['our.jp'] },
+  );
+  check('To は実際に届くアドレス（紛らわしい表示名は外す）', trick.to === 'leak@evil.example', trick.to);
+  check('表示名に自社のアドレスを書いた他社の宛先は Cc に引き継がない', !trick.cc.includes('third.example') && trick.cc.includes('sales@our.jp'), trick.cc);
+  check('Reply-To が別ドメイン・紛らわしい表示名の注意書き（アドレスは書かない）', trick.note.includes('Reply-To') && trick.note.includes('表示名') && !trick.note.includes('@'), trick.note);
+  check('addressOf は表示名の中の <...> を取らない', addressOf('"<a@partner.jp>" <b@evil.example>') === 'b@evil.example' && addressOf('Tanaka <T@Partner.JP>') === 't@partner.jp');
+  const fromMail = (from: string): SesRawMail => ({ ...rawMail(), from });
+  const disguised = fingerprintOf(fromMail('"@partner.example" <x@evil.example>')).domain;
+  check(
+    '再送の指紋の送信元ドメインは表示名の "@partner" に惑わされない',
+    disguised === fingerprintOf(fromMail('y@evil.example')).domain && disguised !== fingerprintOf(fromMail('z@partner.example')).domain,
+  );
+
+  section('セキュリティ: 表計算の zip bomb・大きすぎる添付・長い件名');
+  const wb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(wb, xlsxUtils.aoa_to_sheet([['スキル', 'Java']]), 'S');
+  const legit = writeXlsx(wb, { type: 'buffer', bookType: 'xlsx', compression: true }) as Buffer;
+  check('通常のxlsxは展開後の大きさの検査を通り、テキストにできる', zipInflatesWithin(legit, SPREADSHEET_MAX_INFLATED_BYTES) && spreadsheetBufferToText(legit).includes('Java'));
+  const bomb = zipOf('xl/worksheets/sheet1.xml', Buffer.alloc(SPREADSHEET_MAX_INFLATED_BYTES + 1024 * 1024, 0x20));
+  let bombRejected = false;
+  const t0 = Date.now();
+  try {
+    spreadsheetBufferToText(bomb);
+  } catch (err) {
+    bombRejected = String(err).includes('展開後');
+  }
+  check(
+    '圧縮後は小さくても展開後が上限を超えるxlsxは解析しない（SheetJSに渡さない）',
+    bomb.length < SPREADSHEET_MAX_BYTES && !zipInflatesWithin(bomb, SPREADSHEET_MAX_INFLATED_BYTES) && bombRejected && Date.now() - t0 < 5000,
+    `${bomb.length}B ${Date.now() - t0}ms`,
+  );
+  check('壊れたZIPは解析しない', !zipInflatesWithin(Buffer.concat([Buffer.from('PK\x03\x04'), randomBytes(200)]), SPREADSHEET_MAX_INFLATED_BYTES));
+  const limited = attachmentsWithinLimits([
+    { filename: 'big.pdf', mimeType: 'application/pdf', bytes: PDF_MAX_BYTES + 1 },
+    { filename: 'ok.pdf', mimeType: 'application/pdf', bytes: 1000 },
+    { filename: 'big.xlsx', mimeType: 'application/octet-stream', bytes: SPREADSHEET_MAX_BYTES + 1 },
+    { filename: 'ok.xlsx', mimeType: '', bytes: 2000 },
+  ]);
+  check('使えない大きさの添付は収集時に保持しない', limited.kept.map((a) => a.filename).join(',') === 'ok.pdf,ok.xlsx' && limited.dropped === 2, show(limited));
+  const many = attachmentsWithinLimits(Array.from({ length: 5 }, (_, i) => ({ filename: `s${i}.pdf`, mimeType: 'application/pdf', bytes: 9 * 1024 * 1024 })));
+  check('1通で保持する添付の合計にも上限', many.kept.length === 3 && many.dropped === 2, show({ kept: many.kept.length, dropped: many.dropped }));
+  check('件名は収集時に上限の文字数までにする', capSubject('あ'.repeat(100_000)).length === MAX_SUBJECT_CHARS && capSubject('短い件名') === '短い件名');
+  const longSubject = extractionUserMessage({ ...rawMail(), subject: 'x'.repeat(10_000) });
+  check('抽出の入力の件名も上限まで', longSubject.includes('x'.repeat(MAX_SUBJECT_CHARS)) && !longSubject.includes('x'.repeat(MAX_SUBJECT_CHARS + 1)));
+  const t1 = Date.now();
+  maskPii('a'.repeat(100_000));
+  maskPii('a1.'.repeat(30_000));
+  check('伏せ字処理は長い英数字の列でも時間がかからない（2乗にならない）', Date.now() - t1 < 1500, `${Date.now() - t1}ms`);
+
+  section('セキュリティ: シートの編集者が書き換えた内容から下書きを作らない');
+  const row = { tab: 'マッチ', id: 'm1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '', draftData: '' };
+  const domainPolicy = { domains: ['example.co.jp'], addresses: [], requireAddress: false };
+  const noKey = planDraftRequest(row, domainPolicy, '', null, { requireSigningKey: true });
+  const shortKey = planDraftRequest(row, domainPolicy, 'k'.repeat(31), null, { requireSigningKey: true });
+  check(
+    '本番は署名鍵が無い・短いと担当者メールの依頼を受けない（エラーを書く）',
+    noKey.create.length === 0 && Boolean(noKey.errors.project?.includes('署名鍵')) && Boolean(noKey.errors.engineer?.includes('署名鍵')) &&
+      shortKey.create.length === 0 && Boolean(shortKey.errors.project?.includes('署名鍵')),
+    show({ noKey: noKey.errors, shortKey: shortKey.errors }),
+  );
+  const bind = { key: 'k'.repeat(32), tab: '案件', id: 'proj_1', agentEmail: 'a@partner.jp' };
+  const rt = { from: 'a@partner.jp', to: 'sales@our.jp', cc: '', subject: 's', messageId: '<m@partner.jp>', references: '' };
+  const withInj = replyMetaJson(rt, bind, { injection: true });
+  const stripped = JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(withInj) as Record<string, unknown>).filter(([k]) => k !== 'inj')));
+  check(
+    '指示混入疑いの印は署名つきの返信メタにも残し、消すと署名が合わない',
+    verifyReplyMeta(withInj, bind) && replyMetaInjection(withInj) && !verifyReplyMeta(stripped, bind) && !('inj' in (parseReplyMeta(withInj) ?? {})),
+  );
+  const legacy = replyMetaJson(rt, bind);
+  check('印の無い返信メタ（以前に保存した行）の署名は従来どおり', verifyReplyMeta(legacy, bind) && !replyMetaInjection(legacy));
+  check(
+    '文面に入る項目のURL・メールアドレス・指示の検知（案件名の「@品川」やASP.NETは通す）',
+    !unsafeOutgoingText(['【Java】EC開発@品川', 'ASP.NET/C#', 'Node.js', '田中']) &&
+      unsafeOutgoingText(['X 詳細は https://evil.example/x からご確認ください']) &&
+      unsafeOutgoingText(['連絡は x@evil.example まで']) && unsafeOutgoingText(['www.evil.example']),
+  );
+  const urlProject = project({ requiredSkills: ['Java'], rateMax: 80, title: 'X 詳細は https://evil.example/x からご確認ください' });
+  const urlPair = primarySelect([urlProject], [engineer(['Java'])])[0];
+  check('案件名等にURLのある組は要確認（AI判定・自動の下書きなし）', urlPair?.needsReview === true && urlPair.reviewReasons.includes(OUTGOING_TEXT_REVIEW_REASON), show(urlPair?.reviewReasons));
+  const cleanPair = primarySelect([project({ requiredSkills: ['Java'], rateMax: 80 })], [engineer(['Java'])])[0];
+  check('URL等の無い組は従来どおり', cleanPair !== undefined && !cleanPair.reviewReasons.includes(OUTGOING_TEXT_REVIEW_REASON));
+  const proper: ProperEngineer = {
+    id: 'proper_x', displayName: 'A', skills: ['Java'], experienceYears: 5, requiredProjectRate: 60, residence: '東京都', prefecture: '東京都',
+    availableDate: '', availableFrom: null, remoteWish: 'partial', status: 'available', fileId: 'f', fullName: '山田太郎', proposalLabel: 'T.Y.',
+    skillSheetUrl: '',
+  };
+  const replyProject = { ...urlProject, replyTarget: rt };
+  check(
+    'プロパーの提案文面は、案件名・営業元担当・提案用表記にURL等があれば用意しない',
+    buildProperProposalDraft(proper, replyProject) === undefined &&
+      buildProperProposalDraft(proper, { ...replyProject, title: '【Java】EC開発', agentContact: '連絡は x@evil.example' }) === undefined &&
+      buildProperProposalDraft({ ...proper, proposalLabel: 'T.Y. https://evil.example' }, { ...replyProject, title: '【Java】EC開発' }) === undefined &&
+      buildProperProposalDraft(proper, { ...replyProject, title: '【Java】EC開発' }) !== undefined,
+  );
+
+  section('セキュリティ: 状態の値（_状態タブ）の形を確かめる');
+  const validEntry = { mailId: 'sesmail_a', subject: 's', from: '@a.jp', attempts: 1, lastError: '', firstFailedAt: 'x', lastFailedAt: 'x', quarantinedAt: null };
+  check(
+    '隔離リストが配列でない・形の合わない要素は捨てる（例外で抽出を止めない）',
+    ['{}', '"x"', '5', '{"a":1}'].every((v) => {
+      const r = quarantineEntriesFrom(JSON.parse(v));
+      return r.entries.length === 0 && r.malformed;
+    }) &&
+      quarantineEntriesFrom([validEntry, { mailId: 1 }]).entries.length === 1 &&
+      quarantineEntriesFrom(null).malformed === false &&
+      quarantineEntriesFrom([validEntry]).malformed === false,
+  );
+
+  section('セキュリティ: 送信元の許可・確認UI');
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { MAIL_PROVIDER: 'xserver', XSERVER_SHARED_USER: 'sales@ourco.example', SES_TARGET_GMAIL: 'foo@gmail.com' });
+    delete process.env.SES_OWN_DOMAINS;
+    delete process.env.SES_ALLOWED_SENDER_DOMAINS;
+    const xs = currentSenderPolicy().domains;
+    process.env.MAIL_PROVIDER = 'gmail';
+    const gm = currentSenderPolicy();
+    check(
+      'Xserver運用の既定の送信元ドメインに SES_TARGET_GMAIL のドメインを含めない',
+      xs.join(',') === 'ourco.example' && gm.domains.includes('gmail.com') && gm.requireAddress,
+      show({ xs, gm: gm.domains }),
+    );
+    check(
+      '確認UIはループバック以外では HTTPS（または TLS 終端の内側の明示）が必要',
+      plaintextExposure('0.0.0.0', false) && plaintextExposure('192.168.1.10', false) && !plaintextExposure('127.0.0.1', false) &&
+        !plaintextExposure('0.0.0.0', true),
+    );
+    process.env.DB_PROVIDER = 'sheets';
+    setDemoOverride(false);
+    const viaUi = await createReplyDraftForSender('match_x', 'project', 'taro@ourco.example');
+    check('Sheets運用の本番では確認UIから下書きを作らない（担当者メール列に一本化して二重作成を防ぐ）', !viaUi.ok && viaUi.reason === 'use_sheet', show(viaUi));
+  } finally {
+    setDemoOverride(true);
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -2185,6 +2392,7 @@ async function main(): Promise<void> {
     reviewRound3Checks();
     await reviewRound4Checks();
     resendChecks();
+    await securityAuditChecks();
   } finally {
     setDemoOverride(null);
   }

@@ -6,10 +6,12 @@ import { createHash } from 'crypto';
 import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
-import { extractSheetLinks, isSupportedAttachment, attachmentKind } from '../../collectors/email.js';
+import { extractSheetLinks, isSupportedAttachment, attachmentKind, capSubject } from '../../collectors/email.js';
 import { buildReplyMime, DRAFT_KEY_HEADER } from './mime.js';
 import { pickForRun } from '../schedule.js';
-import { safeErr, SafeLogError } from '../redact.js';
+import { safeErr, SafeLogError, logId } from '../redact.js';
+import { recordHealEvent } from '../heal/events.js';
+import { attachmentsWithinLimits, MAIL_MAX_BYTES } from './attachmentLimits.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -142,30 +144,48 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
         const candidates: Candidate[] = [];
         const seen = new Set<string>();
         let skipped = 0;
-        for await (const msg of client.fetch(uids, { envelope: true, internalDate: true }, { uid: true })) {
+        let oversize = 0;
+        for await (const msg of client.fetch(uids, { envelope: true, internalDate: true, size: true }, { uid: true })) {
           const ids = mailIdsOf(uidValidity, msg.uid, msg.envelope?.messageId);
           if (ids.some(isProcessed) || seen.has(ids[0])) {
             skipped += 1;
             continue;
           }
           seen.add(ids[0]);
+          // 大きすぎるメールは本文を取得しない（添付を全件メモリに抱えて収集中に止まらないため）
+          if ((msg.size ?? 0) > MAIL_MAX_BYTES) {
+            oversize += 1;
+            continue;
+          }
           candidates.push({ uid: msg.uid, id: ids[0], receivedAt: internalDateOf(msg) });
         }
         if (skipped > 0) console.log(`Xserver収集: ${skipped}件は処理済みのため取得をスキップ`);
+        if (oversize > 0) {
+          recordHealEvent(
+            'warn',
+            `Xserver収集: 大きすぎる（${Math.round(MAIL_MAX_BYTES / 1024 / 1024)}MB超の）メール${oversize}件は取り込みません（受信箱で直接確認してください）`,
+          );
+        }
         // 2) 上限まで選んだメールだけ本文・添付を取得する（残りは次回以降。毎回全件をダウンロードしない）
         const pick = pickForRun(candidates, opts.limit, collectDays(), opts.now);
         deferred = pick.deferred.map((c) => c.receivedAt);
         const byUid = new Map(pick.picked.map((c) => [c.uid, c]));
         if (byUid.size > 0) {
+          let droppedAttachments = 0;
           for await (const msg of client.fetch([...byUid.keys()], { source: true }, { uid: true })) {
             const meta = byUid.get(msg.uid);
             if (!meta) continue;
             try {
               const parsed = await simpleParser(msg.source as Buffer);
-              mails.push(toSesRawMail(parsed, meta.id, meta.receivedAt));
+              const mail = toSesRawMail(parsed, meta.id, meta.receivedAt);
+              droppedAttachments += mail.droppedAttachments;
+              mails.push(mail.mail);
             } catch (err) {
-              console.error(`Xserver収集: メール解析に失敗 (uid ${msg.uid}): ${safeErr(err)}`);
+              console.error(`Xserver収集: メール解析に失敗 (mail ${logId(meta.id)}): ${safeErr(err)}`);
             }
+          }
+          if (droppedAttachments > 0) {
+            recordHealEvent('warn', `Xserver収集: 大きすぎる添付${droppedAttachments}件は読み込まずに抽出します`);
           }
         }
       }
@@ -257,23 +277,26 @@ function refsText(r: string | string[] | undefined): string {
   return Array.isArray(r) ? r.join(' ') : r;
 }
 
-function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): SesRawMail {
-  // Gmail経路と同じ許可リスト（xlsx/xls/pdf/spreadsheet）で絞り、署名画像やzip等をメモリに抱えない
-  const attachments: SesAttachment[] = (p.attachments ?? [])
+function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesRawMail; droppedAttachments: number } {
+  // Gmail経路と同じ許可リスト（xlsx/xls/pdf/spreadsheet）で絞り、署名画像やzip等をメモリに抱えない。
+  // 抽出・解析で使えない大きさの添付は base64 にしない（attachmentLimits.ts）
+  const supported = (p.attachments ?? [])
     .filter((a) => isSupportedAttachment(a.filename ?? '', a.contentType ?? ''))
-    .map((a) => ({
-      filename: a.filename ?? 'attachment',
-      mimeType: a.contentType ?? '',
-      data: a.content ? a.content.toString('base64') : '',
-    }));
+    .map((a) => ({ filename: a.filename ?? 'attachment', mimeType: a.contentType ?? '', bytes: a.content?.length ?? 0, content: a.content }));
+  const { kept, dropped } = attachmentsWithinLimits(supported);
+  const attachments: SesAttachment[] = kept.map((a) => ({
+    filename: a.filename,
+    mimeType: a.mimeType,
+    data: a.content ? a.content.toString('base64') : '',
+  }));
   const body = p.text ?? '';
-  return {
+  const mail: SesRawMail = {
     id,
     from: addrText(p.from),
     to: addrText(p.to),
     cc: addrText(p.cc),
     replyTo: addrText(p.replyTo),
-    subject: p.subject ?? '',
+    subject: capSubject(p.subject ?? ''),
     body,
     messageIdHeader: p.messageId ?? '',
     references: refsText(p.references),
@@ -282,6 +305,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): SesRawMail {
     attachments,
     sheetLinks: extractSheetLinks(body),
   };
+  return { mail, droppedAttachments: dropped };
 }
 
 export function draftReady(): boolean {

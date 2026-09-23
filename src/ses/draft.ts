@@ -8,11 +8,11 @@ import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { generateText } from '../llm/index.js';
 import { createReplyDraftViaMail } from './mail/index.js';
-import { addressOf, currentOwnMailPolicy } from './mail/ownMail.js';
+import { addressOf, parseAddressList, currentOwnMailPolicy } from './mail/ownMail.js';
 import { isDemo, matchModel, demoDataDir } from './config.js';
 import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
-import { redactable, safeErr } from './redact.js';
+import { redactable, safeErr, logId } from './redact.js';
 import { recordHealEvent, recordStat } from './heal/events.js';
 import { hasKnownInitials, toInitials, UNKNOWN_INITIALS } from './pii.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
@@ -32,25 +32,33 @@ function ensureRe(subject: string): string {
   return /^re\s*:/i.test(s) ? s : `Re: ${s}`;
 }
 
-// アドレスヘッダをカンマで分割する。ただし引用符内のカンマ（例: "Suzuki, Taro" <t@a.jp>）では
-// 分割しない（RFC 5322 の表示名対応。素朴な split(',') は宛先を壊す）。
-function splitAddrs(s: string): string[] {
-  const out: string[] = [];
-  let current = '';
-  let inQuotes = false;
-  for (const ch of s || '') {
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-      current += ch;
-    } else if (ch === ',' && !inQuotes) {
-      out.push(current);
-      current = '';
-    } else {
-      current += ch;
+// 宛先に使えるアドレス（addr-spec）。引用符付きのローカル部などの珍しい形は扱わない（宛先から外す）
+const PLAIN_ADDRESS = /^[^\s<>"(),;:\\@]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
+// 表示名にアドレスや山括弧があると、メーラーが表示名だけを見せたときに別の宛先に見える（なりすましの手口）
+const DECEPTIVE_NAME = /[@<>＠＜＞]/;
+
+// アドレスヘッダを RFC 5322 の解釈で宛先ごとに分け（引用符内のカンマ・表示名の中の "<...>" に惑わされない）、
+// 解釈した表示名とアドレスから表記を組み立て直す。宛先の判定（自社/他社・返信先の会社）に使うアドレスと、
+// 下書きに書かれて実際に届く宛先を一致させるため。アドレスらしくない宛先は除き、紛らわしい表示名は外す
+function parseAddrs(s: string): { list: string[]; deceptiveNames: number } {
+  let deceptiveNames = 0;
+  const list: string[] = [];
+  for (const { name, address, original } of parseAddressList(s)) {
+    if (!PLAIN_ADDRESS.test(address)) continue;
+    if (name && DECEPTIVE_NAME.test(name.normalize('NFKC'))) {
+      deceptiveNames += 1;
+      list.push(original);
+      continue;
     }
+    if (!name) list.push(original);
+    else if (/[()[\]:;\\,."]/.test(name)) list.push(`"${name.replace(/[\\"]/g, '\\$&')}" <${original}>`);
+    else list.push(`${name} <${original}>`);
   }
-  out.push(current);
-  return out.map((x) => x.trim()).filter(Boolean);
+  return { list, deceptiveNames };
+}
+
+function splitAddrs(s: string): string[] {
+  return parseAddrs(s).list;
 }
 
 // アドレス一覧から指定アドレスを除く（表示名の有無・大文字小文字は問わない）
@@ -104,12 +112,18 @@ export function planReplyAddresses(
   fallbackTo: string,
   policy: ReplyAddressPolicy,
 ): { to: string; cc: string; note: string } {
-  const replyTo = splitAddrs(rt.replyTo ?? '');
-  const toList = replyTo.length > 0 ? replyTo : splitAddrs(rt.from || fallbackTo);
+  const replyToParsed = parseAddrs(rt.replyTo ?? '');
+  const replyTo = replyToParsed.list;
+  const fromParsed = parseAddrs(rt.from || fallbackTo);
+  const toList = replyTo.length > 0 ? replyTo : fromParsed.list;
   const toKeys = toList.map(addressOf);
   const toDomains = new Set(toKeys.map(domainOf).filter(Boolean));
   const ours = new Set(policy.ourDomains);
-  const original = [...splitAddrs(rt.to), ...splitAddrs(rt.cc)];
+  const toParsed = parseAddrs(rt.to);
+  const ccParsed = parseAddrs(rt.cc);
+  const original = [...toParsed.list, ...ccParsed.list];
+  const deceptiveNames =
+    (replyTo.length > 0 ? replyToParsed.deceptiveNames : fromParsed.deceptiveNames) + toParsed.deceptiveNames + ccParsed.deceptiveNames;
   // 自社の宛先が元メールの To/Cc に無い＝Bcc で受け取った一斉配信（To/Cc は配信先の一覧）
   const broadcast = ours.size > 0 && !original.some((a) => ours.has(domainOf(addressOf(a))));
 
@@ -152,6 +166,9 @@ export function planReplyAddresses(
     dropped.length > 0 ? `元メールの宛先のうち${dropped.join('・')}をCcに含めていません（必要なら送信前に追加してください）` : '',
     toKeys.some(isNoReplyAddress) ? '返信先(To)が送信専用アドレスの可能性があります。送信前に宛先をご確認ください' : '',
     replyToElsewhere ? '返信先(Reply-To)が差出人(From)と別のドメインです。宛先が元の送り主の会社か、送信前にご確認ください' : '',
+    deceptiveNames > 0
+      ? `元メールの宛先のうち${deceptiveNames}件は表示名にメールアドレスや山括弧を含んでいたため、表示名を外しました（宛先を別の相手に見せかける手口のことがあります。送信前に宛先をご確認ください）`
+      : '',
   ].filter(Boolean);
   return { to: toList.join(', '), cc: cc.join(', '), note: notes.join('。') };
 }
@@ -208,7 +225,7 @@ function writeDraftFile(ref: DraftRef): DraftRef {
     writeFileSync(filePath, `${header}\n${ref.body ?? ''}`, 'utf-8');
     return { ...ref, url: filePath };
   } catch (err) {
-    console.warn(`SES下書き: ローカル保存に失敗 (${ref.draftId}): ${safeErr(err)}`);
+    console.warn(`SES下書き: ローカル保存に失敗 (${logId(ref.draftId)}): ${safeErr(err)}`);
     return ref;
   }
 }
@@ -248,7 +265,7 @@ export async function createDrafts(
     // 文面を用意できなかった成立候補・交渉提案は、下書き状態を「文面を用意できませんでした」にして次回作り直す
     // （「不要」にすると判定済みのまま二度と文面が作られない）
     if (!project || !engineer) {
-      console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${match.id} ${redactable(match.title)})`);
+      console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${logId(match.id)} ${redactable(match.title)})`);
       counts.failed += 1;
       return { ...match, draftFailed: true };
     }
@@ -260,7 +277,7 @@ export async function createDrafts(
       recordStat('draftsCreated', 2);
       return { ...match, draftToProject, draftToEngineer };
     } catch (err) {
-      console.error(`SES下書き: 生成に失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
+      console.error(`SES下書き: 生成に失敗 (${logId(match.id)} ${redactable(match.title)}): ${safeErr(err)}`);
       counts.failed += 1;
       return { ...match, draftFailed: true };
     }
@@ -466,14 +483,14 @@ async function createProdDraftPair(
       body = await generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt(side, view) }], opts);
     } catch (err) {
       // 生成できなくても、相手に出してよい事実だけで組んだ定型文で下書きを用意する（成立候補を文面なしにしない）
-      console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の文面を生成できないため定型文にしました (${match.id}): ${safeErr(err)}`);
+      console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の文面を生成できないため定型文にしました (${logId(match.id)}): ${safeErr(err)}`);
       counts.templated += 1;
       return buildTemplate(view);
     }
     const issues = disclosureIssues(body, side, project, engineer, match);
     if (issues.length === 0) return body;
     // 生成文面に相手へ出さない情報が混ざった場合は、材料を絞った定型文に差し替える（IDと種別だけをログに出す）
-    console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の生成文面に開示しない情報（${issues.join('・')}）が含まれたため定型文に差し替えました (${match.id})`);
+    console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の生成文面に開示しない情報（${issues.join('・')}）が含まれたため定型文に差し替えました (${logId(match.id)})`);
     return buildTemplate(view);
   };
   const [bodyToProject, bodyToEngineer] = await Promise.all([generate('project'), generate('engineer')]);
