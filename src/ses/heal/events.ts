@@ -24,6 +24,8 @@ export interface BatchStats {
   healedRetry: number;
   healedEscalation: number;
   budgetExhausted: number;
+  skillTokens: number; // 抽出したスキル語の数（人名・社名らしい語を除く）
+  unknownSkillTokens: number; // うち辞書に無い語の数（辞書拡充の指標）
 }
 
 let events: HealEvent[] = [];
@@ -38,6 +40,8 @@ function emptyStats(): BatchStats {
     healedRetry: 0,
     healedEscalation: 0,
     budgetExhausted: 0,
+    skillTokens: 0,
+    unknownSkillTokens: 0,
   };
 }
 

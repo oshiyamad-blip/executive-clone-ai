@@ -12,6 +12,7 @@ import { recordFailure, recordSuccess } from './heal/quarantine.js';
 import { recordHealEvent, recordStat, recordFatal, getStats } from './heal/events.js';
 import { isLastChance, pastExtractDeadline, callLimits } from './schedule.js';
 import { normalizeSkills } from './skillDict.js';
+import { tallySkillTokens } from './skillStats.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
 import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
@@ -38,6 +39,9 @@ const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリング�
 - 開始時期・稼働可能日から具体的な日付が読み取れる場合はISO 8601形式（YYYY-MM-DD）で
   startDateIso / availableFromIso に設定し、読み取れなければ null にしてください
 - リモート可否は full（フルリモート可）/ partial（一部リモート可）/ none（不可）/ unknown（不明）から選んでください
+- スキル（requiredSkills / preferredSkills / skills）は配列の1要素に1つの技術名だけを入れてください。
+  括弧内・「/」「・」で並んだ技術もそれぞれ別の要素にし（例: 「Java(Spring Boot)」→ "Java", "Spring Boot"）、
+  バージョン・経験年数・レベルは名前に含めないでください（例: 「Python3」→ "Python"、「Java 5年以上」→ "Java"）
 - 案件情報も要員情報も含まれないメール（雑談・事務連絡等）の場合は projects, engineers とも空配列にしてください
 - 営業元の会社名・担当者名・メールアドレスは、記載があれば必ず抽出してください（紹介メールの宛先に使用します）`;
 
@@ -580,11 +584,15 @@ export function itemIdOf(kind: 'proj' | 'eng', mailId: string, index: number): s
 }
 
 function buildProject(raw: RawProject, mail: SesRawMail, index: number, numbers: Set<string> | null): Project {
+  const requiredSkills = skillsOf(raw.requiredSkills);
+  const preferredSkills = skillsOf(raw.preferredSkills);
+  // 未知語の集計（営業元の会社名・担当者名と同じ語は人名・社名の混入として数えない）
+  tallySkillTokens([...requiredSkills, ...preferredSkills], [raw.agentCompany, raw.agentContact]);
   return {
     id: itemIdOf('proj', mail.id, index),
     title: raw.title,
-    requiredSkills: skillsOf(raw.requiredSkills),
-    preferredSkills: skillsOf(raw.preferredSkills),
+    requiredSkills,
+    preferredSkills,
     rateMin: verifiedRate(raw.rateMin, raw.rateUnit, numbers),
     rateMax: verifiedRate(raw.rateMax, raw.rateUnit, numbers),
     location: raw.location,
@@ -613,11 +621,13 @@ function residenceWithStation(residence: string, station: string): string {
 
 function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number, numbers: Set<string> | null): Engineer {
   const residence = residenceWithStation(raw.residence, raw.nearestStation);
+  const skills = skillsOf(raw.skills);
+  tallySkillTokens(skills, [raw.displayName, raw.agentCompany, raw.agentContact]);
   return {
     id: itemIdOf('eng', mail.id, index),
     displayName: raw.displayName,
     age: raw.age,
-    skills: skillsOf(raw.skills),
+    skills,
     experienceYears: raw.experienceYears,
     desiredRate: verifiedRate(raw.desiredRate, raw.desiredRateUnit, numbers),
     residence,

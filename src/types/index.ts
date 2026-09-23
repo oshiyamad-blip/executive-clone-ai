@@ -190,6 +190,22 @@ export type MatchBand = 'strong' | 'tentative';
 // マッチの表示区分。優先度: review > tentative > negotiable > confirmed
 export type MatchCategory = 'confirmed' | 'negotiable' | 'tentative' | 'review';
 
+// 必須スキルの満たし方の内訳（正規化後のスキル名）。implied=要員の下位の技術（Spring Boot 等）の経験から含意して
+// 満たしたもの（直接の記載なし）。via は implied/equiv の根拠となった要員側のスキル（必須スキル名 → 要員のスキル名）
+export interface SkillBreakdown {
+  exact: string[];
+  implied: string[];
+  equiv: string[];
+  missing: string[];
+  via: Record<string, string>;
+}
+
+// 尚可スキルの一致数（m=0 なら尚可の記載なし）
+export interface PreferredMatch {
+  matched: number;
+  total: number;
+}
+
 // 一次選抜（LLM不使用）を通過した候補ペア
 export interface MatchPair {
   project: Project;
@@ -203,6 +219,8 @@ export interface MatchPair {
   reviewReasons: string[]; // 要確認の理由（'単金不明' 等。needsReview のときだけ非空）
   cautions: string[]; // 判定の前提・注意（例: 案件単金は下限のみの記載）。判定根拠の末尾に付す
   negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
+  skillBreakdown?: SkillBreakdown; // 判定に使ったスキル（必須、無ければ尚可）の満たし方
+  preferredMatch?: PreferredMatch; // 尚可スキルの一致数（同順位の並べ替え・最終判定の参考）
 }
 
 // 紹介メール下書き参照（全員に返信のスレッド返信下書き）

@@ -576,6 +576,7 @@ npm run ses:mail-stats      # メール量の測定（読み取り専用・集�
 npm run ses:mail-stats:demo # 測定の表示例（架空のメールで集計。接続しない）
 npm run ses:demo            # バッチのデモ（接続しない）
 npm run ses:flow:check      # スプレッドシート運用の結合自己検証（偽のGoogle API・メールで動かす。接続しない）
+npm run ses:eval:rules      # 突合ルール（スキル正規化・含意等）の表駆動の回帰確認（接続しない）
 ```
 
 `.env.local` に値を書く場合も、このファイルは**コミットしないでください**（`.gitignore` 済み）。

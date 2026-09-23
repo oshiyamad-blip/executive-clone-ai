@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData, createReplyDraftForSender } from './review.js';
 import { recordFeedback, loadFeedback } from './feedback.js';
-import { addSkillEquivalence } from './skillEquiv.js';
+import { addSkillEquivalence, type EquivalenceRejection } from './skillEquiv.js';
 import { computeBandMetrics } from './metrics.js';
 import {
   sesWebPort,
@@ -145,6 +145,12 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
   }
 }
 
+const EQUIVALENCE_REJECTION_MESSAGE: Record<EquivalenceRejection, string> = {
+  invalid: '異なる2つのスキル名を1つずつ入力してください（「Java(Spring)」のような複数の技術を含む名前は登録できません）',
+  not_equivalent: 'この2つは名前が似ていても別の技術として扱う組み合わせのため、同義には登録できません',
+  implied: 'この2つは上位・下位の技術の関係です。下位の技術の経験で上位の必須スキルは既に満たされるため登録は不要です（上位だけで下位の必須を満たす扱いにはしません）',
+};
+
 async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonObject(req, MAX_BODY_BYTES);
   const a = text(body, 'a', MAX_SKILL_CHARS);
@@ -152,7 +158,7 @@ async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Prom
   const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
   try {
     const added = await addSkillEquivalence(a, b, reviewer);
-    if (!added) return json(res, 400, { error: '異なる2つのスキル名が必要です' });
+    if (!added.ok) return json(res, 400, { error: EQUIVALENCE_REJECTION_MESSAGE[added.reason] });
     return json(res, 200, { ok: true, entry: added.entry, degraded: !isDemo() && added.savedTo === 'local' });
   } catch (err) {
     console.error(`SES確認UI: 同義の保存に失敗: ${safeErr(err)}`);
@@ -276,7 +282,7 @@ function renderPage(): string {
   <span id="status" class="empty"></span>
   <h2>バンド別メトリクス（フィードバックで精度を可視化）</h2>
   <div id="metrics" class="metrics"></div>
-  <h2>スキル同義の追加（例: PHP ≈ Laravel）</h2>
+  <h2>スキル同義の追加（例: CakePHP ≈ Laravel。Spring Boot → Java のような上位・下位の関係は登録不要）</h2>
   <div class="fb" style="border:0">
     <input id="eqA" placeholder="スキルA" style="width:140px" />
     <span>≈</span>
@@ -368,7 +374,7 @@ function renderPage(): string {
       var fb = '<div class="fb">評価: ' +
         '<button class="good" data-act="fb" data-id="' + esc(m.id) + '" data-title="' + esc(m.title) + '" data-band="' + esc(m.band) + '" data-verdict="good">妥当</button>' +
         '<button class="bad" data-act="fb" data-id="' + esc(m.id) + '" data-title="' + esc(m.title) + '" data-band="' + esc(m.band) + '" data-verdict="bad">ズレ</button>' +
-        '<input class="note" placeholder="メモ（例: PHPとLaravelは実質同じ）" />' +
+        '<input class="note" placeholder="メモ（例: CakePHPとLaravelは実質同じ）" />' +
         '</div>';
       return '<div class="card ' + cat.cls + '">' +
         '<div class="title">' + esc(m.title) + catBadge(m.category) + statusBadge(m.status) + by + '</div>' +

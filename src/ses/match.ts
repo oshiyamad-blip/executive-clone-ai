@@ -1,7 +1,7 @@
 // マッチング。一次選抜（純コード・無料、primarySelect）→ 通過ペアのみ最終判定
 // （本番=Sonnet 5、demo/要確認枠=ヒューリスティック）。
 import { generateJson } from '../llm/index.js';
-import { assessSkills, fmtMan, roundManUp, roundManDown } from './pricing.js';
+import { assessSkills, impliedSkillNote, fmtMan, roundManUp, roundManDown } from './pricing.js';
 import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { buildFeedbackFewShot } from './feedback.js';
@@ -93,8 +93,9 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
   const reviewReasons: string[] = [];
   const cautions: string[] = [];
 
-  // 3. スキル一致（必須スキルの被覆率・同義辞書考慮）。許容範囲の下限未満は除外。
+  // 3. スキル一致（必須スキルの被覆率・同義辞書・含意考慮）。許容範囲の下限未満は除外。
   // 下限〜強マッチ閾値未満は「参考提案(tentative)」バンド、強マッチ閾値以上は「強マッチ(strong)」。
+  // 含意だけで満たした必須（Spring Boot の経験で Java 必須）がある組は直接の記載が無いため参考提案に一段下げる。
   // 必須スキルの記載が無い案件は尚可スキルで判定して参考提案止まり。どちらも無ければ判定不能として、
   // 案件名に要員のスキルが現れる組だけを要確認で残す（誰にでも100%一致する扱いにしない）
   const skill = assessSkills(project, engineer.skills);
@@ -105,8 +106,10 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
     cautions.push(`案件名に要員のスキル（${skill.titleHits.join('、')}）の記載があります`);
   } else {
     if (skill.rate < skillMatchThreshold()) return null;
-    if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold()) band = 'strong';
+    const implied = impliedSkillNote(skill.breakdown);
+    if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold() && !implied) band = 'strong';
     if (skill.basis === 'preferred') cautions.push('必須スキルの記載がないため尚可スキルで判定しています');
+    if (implied) cautions.push(implied);
   }
 
   // 4. 勤務地。フルリモート可なら不問。両方の都道府県がわかれば同一/隣接のみ通過し、
@@ -153,6 +156,8 @@ function evaluatePair(project: Project, engineer: Engineer): MatchPair | null {
     reviewReasons,
     cautions,
     negotiation,
+    ...(skill.breakdown ? { skillBreakdown: skill.breakdown } : {}),
+    preferredMatch: skill.preferred,
   };
 }
 

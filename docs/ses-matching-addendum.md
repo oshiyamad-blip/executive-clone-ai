@@ -101,12 +101,13 @@
 `MatchResult` に `band`（strong/tentative）と `category`（confirmed/negotiable/tentative/review）を追加。しきい値は `.env` で調整でき、下げれば提案数が増える。
 
 ### 5-2. スキル同義・類似辞書を育てる（`skillEquiv.ts`）
-静的な表記ゆれ辞書（`skillDict.ts`）とは別に、「PHP≈Laravel」「React≈Next.js」のような**相互に満たすスキル**を蓄積。`skillMatchRate` が完全一致に加えてこの辞書を参照するため、許容範囲が実務に合っていく。確認UIから追加でき、**次回マッチから即反映**（共有の正: prod=Notion同義DB / demo=ローカルJSON）。
+静的な表記ゆれ辞書（`skillDict.ts`。分割・バージョン除去・約180語の正規形）と含意表（`skillGraph.ts`。Spring Boot ⇒ Java のような上位・下位の関係）とは別に、「CakePHP≈Laravel」「PostgreSQL≈MySQL」のような**相互に満たすスキル**を蓄積。`skillMatch` が完全一致・含意に加えてこの辞書を参照するため、許容範囲が実務に合っていく。確認UIから追加でき、**次回マッチから即反映**（共有の正: prod=Notion同義DB・Sheetsの「スキル同義」タブ / demo=ローカルJSON）。
+否定リスト（Java≠JavaScript、C≠C#/C++、Go≠GCP、SQL Server≠MySQL 等）に当たる組と、含意の親子の組（PHP≈Laravel、React≈Next.js。子→親は含意で満たし、親だけで子の必須を満たす扱いにはしない）は登録できず、既に登録済みでも効かせません（件数だけをログに出します）。
 
 ### 5-3. 人間フィードバック（`feedback.ts`）を3経路に反映
 確認UIで各マッチに「妥当／ズレ＋メモ＋評価者名」を付与。蓄積した評価を:
 1. **LLM最終判定にfew-shot** … 直近の評価例をSonnetのシステムプロンプトに添え、御社の許容感覚を学習（本番LLM経路）
-2. **スキル同義辞書の成長** … 「PHPとLaravelは同じ」等の気づきを同義登録に反映
+2. **スキル同義辞書の成長** … 「CakePHPとLaravelは同じ」等の気づきを同義登録に反映
 3. **バンド別成約率の可視化**（`metrics.ts`）… バンドごとの成約率・妥当率を確認UIに表示し、しきい値の締め/緩めの判断材料に
 
 ### 5-4. 複数人運用

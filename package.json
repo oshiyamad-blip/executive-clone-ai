@@ -39,7 +39,8 @@
     "ses:mail-stats": "tsx src/ses/mailStats.ts",
     "ses:mail-stats:demo": "DEMO_MODE=true tsx src/ses/mailStats.ts",
     "ses:heal:check": "DEMO_MODE=true SES_HEAL_DATA_DIR=data/ses-heal-selftest tsx src/ses/heal/selftest.ts",
-    "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts"
+    "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts",
+    "ses:eval:rules": "DEMO_MODE=true tsx src/ses/eval/rulesEval.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

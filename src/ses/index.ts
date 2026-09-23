@@ -51,6 +51,7 @@ import {
   COLLECT_DAYS_MAX,
 } from './config.js';
 import { startHealBatch } from './heal/budget.js';
+import { persistUnknownSkillTokens, resetSkillTokenTally } from './skillStats.js';
 import {
   resetHealEvents,
   recordStat,
@@ -95,6 +96,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   // 自動検証・修復レイヤーの初期化（コストメーターとイベント収集。demoでは実質no-op）
   startHealBatch();
   resetHealEvents();
+  resetSkillTokenTally();
   resetSheetsCache();
   resetProperMasterCache();
   if (!isDemo()) startRunClock();
@@ -102,7 +104,10 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   let lease: string | null = null;
   try {
     lease = await acquireLease();
-    if (lease !== null) await runStages(opts);
+    if (lease !== null) {
+      await runStages(opts);
+      await persistUnknownSkillTokens();
+    }
   } finally {
     if (lease) await releaseLease(lease);
     stopRunClock();

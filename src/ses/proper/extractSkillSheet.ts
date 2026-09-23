@@ -5,6 +5,7 @@ import { generateJsonWithDocuments } from '../../llm/index.js';
 import type { HealAttempt } from '../heal/retry.js';
 import { isDemo, extractModel } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
+import { tallySkillTokens } from '../skillStats.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { SafeLogError } from '../redact.js';
 import { callLimits } from '../schedule.js';
@@ -49,7 +50,8 @@ function systemPrompt(todayIso: string): string {
 - initials: 提案用のローマ字イニシャル（例: "K.S."）。シートにイニシャルが書かれていればそのまま使う。
   氏名の読み（ふりがな・ローマ字）が書かれている場合のみ「名.姓.」の順で作る。読みが分からない漢字の氏名から推測しない（分からなければ空文字）
 - skills: プログラミング言語・フレームワーク・DB・クラウド・OS・ミドルウェア・主要ツールの名称。
-  実務経験のあるものを優先し、重要度の高い順に最大20件。資格名や業務知識は含めない
+  実務経験のあるものを優先し、重要度の高い順に最大20件。資格名や業務知識は含めない。
+  1要素に1つの技術名だけを入れ（「Java(Spring Boot)」→ "Java", "Spring Boot"）、バージョン・経験年数は名前に含めない（「Python3」→ "Python"）
 - experienceYears: IT業界での実務経験年数の合計（数値。分からなければ null）
 - residence: 居住地（都道府県と市区町村まで。番地・建物名は含めない。無ければ空文字）
 - remoteWish: リモート勤務の希望。full（フルリモート希望）/ partial（一部リモート希望）/ none（常駐可・出社希望）/ unknown（記載なし）
@@ -131,10 +133,13 @@ export async function extractSkillSheet(content: SkillSheetContent, attempt?: He
   const exp = raw.experienceYears;
   const rate = raw.desiredRateMan;
   const displayName = raw.displayName.trim();
+  const initials = sanitizeInitials(raw.initials, displayName);
+  const skills = normalizeSkills(raw.skills);
+  tallySkillTokens(skills, [displayName, raw.initials]);
   return {
     displayName,
-    initials: sanitizeInitials(raw.initials, displayName),
-    skills: [...new Set(normalizeSkills(raw.skills))],
+    initials,
+    skills,
     experienceYears: exp !== null && Number.isFinite(exp) && exp >= 0 && exp < 60 ? exp : null,
     residence: coarseResidence(raw.residence),
     prefecture: normalizePrefecture(raw.residence),

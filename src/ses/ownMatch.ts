@@ -6,7 +6,7 @@
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
-import { assessSkills, fmtMan, roundManDown } from './pricing.js';
+import { assessSkills, impliedSkillNote, fmtMan, roundManDown } from './pricing.js';
 import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace } from './match.js';
@@ -34,14 +34,16 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
   const reviewReasons: string[] = [];
   // スキル: 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける。
   // 必須スキルが空の案件は尚可スキルで参考判定、どちらも空なら案件名に社員のスキルが現れる場合だけ要確認
+  // 含意だけで満たした必須（Spring Boot の経験で Java 必須）がある組は参考提案に一段下げる
   const skill = assessSkills(project, own.skills);
   let band: MatchBand = 'tentative';
+  const implied = impliedSkillNote(skill.breakdown);
   if (skill.basis === 'unknown') {
     if (skill.titleHits.length === 0) return null;
     reviewReasons.push('必須スキル不明');
   } else {
     if (skill.rate < skillMatchThreshold()) return null;
-    if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold()) band = 'strong';
+    if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold() && !implied) band = 'strong';
   }
 
   // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
@@ -76,6 +78,7 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
   const notes =
     (band === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
+    (implied ? `${implied}。` : '') +
     (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '');
   const skillText =
     skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
