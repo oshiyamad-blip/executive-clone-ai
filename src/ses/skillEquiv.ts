@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { isDemo, reviewDataDir } from './config.js';
 import { fetchSkillEquivalences, saveSkillEquivalence } from '../database/index.js';
+import { safeErr } from './redact.js';
 import type { SkillEquivalence } from '../types/index.js';
 
 // lowercased スキル → 相互に満たす lowercased スキル集合
@@ -41,7 +42,7 @@ function writeLocal(list: SkillEquivalence[]): void {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(localPath(), JSON.stringify(list, null, 2), 'utf-8');
   } catch (err) {
-    console.warn(`スキル同義辞書の保存に失敗: ${String(err)}`);
+    console.warn(`スキル同義辞書の保存に失敗: ${safeErr(err)}`);
   }
 }
 
@@ -55,7 +56,7 @@ export async function loadSkillEquivalences(): Promise<void> {
     try {
       entries = await fetchSkillEquivalences();
     } catch (err) {
-      console.warn(`スキル同義辞書の取得に失敗: ${String(err)}`);
+      console.warn(`スキル同義辞書の取得に失敗: ${safeErr(err)}`);
     }
   }
   for (const e of entries) link(e.a, e.b);
@@ -80,7 +81,7 @@ export async function addSkillEquivalence(a: string, b: string, addedBy: string)
     try {
       await saveSkillEquivalence(entry);
     } catch (err) {
-      console.warn(`スキル同義の保存に失敗: ${String(err)}`);
+      console.warn(`スキル同義の保存に失敗: ${safeErr(err)}`);
     }
   }
   return entry;

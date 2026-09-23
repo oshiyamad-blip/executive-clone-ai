@@ -1,36 +1,69 @@
-// SES用ローカルストア。
-// (1) 処理済みメールID管理（src/store/rawLogStore.ts と同型・二重処理防止）
+// SES用ストア。
+// (1) 処理済みメールID管理（二重処理防止）。DB_PROVIDER=sheets の本番はスプレッドシートの
+//     「処理済みメール」タブ（毎回クリーンな環境で動くスケジュール実行でも状態が残る）、それ以外はローカルJSON
 // (2) demoの成果物書き出し/読み込み（data/ses-demo/ 配下。本番 data/ とは隔離）
 // (3) 案件・要員の名寄せ（内容類似度による重複統合。src/dedup の手法を流用）
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { isDemo, demoDataDir } from './config.js';
+import { isDemo, demoDataDir, durableStateInSheets } from './config.js';
+import { safeErr } from './redact.js';
+import {
+  sheetsDbConfigured,
+  loadProcessedMailIdsSheets,
+  markMailProcessedSheets,
+  type ProcessedMailResult,
+} from '../database/sheets.js';
 import type { Project, Engineer } from '../types/index.js';
+
+export type { ProcessedMailResult };
 
 const PROCESSED_FILE = join(process.cwd(), 'data', 'ses-processed-ids.json');
 
-export function loadProcessedMailIds(): Set<string> {
+function processedInSheets(): boolean {
+  return durableStateInSheets() && sheetsDbConfigured();
+}
+
+function loadProcessedLocal(): Set<string> {
   try {
     if (!existsSync(PROCESSED_FILE)) return new Set();
     const ids: string[] = JSON.parse(readFileSync(PROCESSED_FILE, 'utf-8'));
     return new Set(ids);
   } catch (err) {
-    console.warn(`SES: 処理済みメールIDの読み込みに失敗: ${String(err)}`);
+    console.warn(`SES: 処理済みメールIDの読み込みに失敗: ${safeErr(err)}`);
     return new Set();
   }
 }
 
-// demoでは処理済みIDを記録しない（毎回fixture全件で決定的に完走させるため）
-export function markMailProcessed(ids: string[]): void {
-  if (isDemo() || ids.length === 0) return;
+// スプレッドシートの読み込み失敗は例外のまま返す（空集合で続行すると収集窓の全メールを再抽出してしまうため、
+// 呼び出し側で収集失敗として扱う）
+export async function loadProcessedMailIds(): Promise<Set<string>> {
+  if (processedInSheets()) return loadProcessedMailIdsSheets();
+  return loadProcessedLocal();
+}
+
+// 処理済みとして記録する。保存できなかった場合は false（次回同じメールを再処理することになる）。
+// demoでは記録しない（毎回fixture全件で決定的に完走させるため）
+export async function markMailProcessed(ids: string[], result: ProcessedMailResult = '抽出済'): Promise<boolean> {
+  if (isDemo() || ids.length === 0) return true;
+  if (processedInSheets()) {
+    try {
+      await markMailProcessedSheets(ids, result);
+      return true;
+    } catch (err) {
+      console.error(`SES: 処理済みメールID(${ids.length}件)のスプレッドシート保存に失敗: ${safeErr(err)}`);
+      return false;
+    }
+  }
   try {
     const dir = join(process.cwd(), 'data');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const processed = loadProcessedMailIds();
+    const processed = loadProcessedLocal();
     ids.forEach((id) => processed.add(id));
     writeFileSync(PROCESSED_FILE, JSON.stringify([...processed], null, 2), 'utf-8');
+    return true;
   } catch (err) {
-    console.warn(`SES: 処理済みメールIDの保存に失敗: ${String(err)}`);
+    console.warn(`SES: 処理済みメールIDの保存に失敗: ${safeErr(err)}`);
+    return false;
   }
 }
 
@@ -41,7 +74,7 @@ export function writeDemoArtifact(name: string, data: unknown): void {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.json`), JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.warn(`SES: demo成果物の書き出しに失敗 (${name}): ${String(err)}`);
+    console.warn(`SES: demo成果物の書き出しに失敗 (${name}): ${safeErr(err)}`);
   }
 }
 
@@ -52,7 +85,7 @@ export function readDemoArtifact<T>(name: string): T | null {
     if (!existsSync(filePath)) return null;
     return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
   } catch (err) {
-    console.warn(`SES: demo成果物の読み込みに失敗 (${name}): ${String(err)}`);
+    console.warn(`SES: demo成果物の読み込みに失敗 (${name}): ${safeErr(err)}`);
     return null;
   }
 }

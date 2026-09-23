@@ -88,9 +88,12 @@ export function xserverSharedPass(): string {
 export function xserverDraftsMailbox(): string {
   return process.env.XSERVER_DRAFTS_MAILBOX ?? 'Drafts';
 }
-// 収集の時間窓（日数）
-export function xserverCollectDays(): number {
-  return Number(process.env.XSERVER_COLLECT_DAYS ?? '1');
+
+// 収集の時間窓（日数。メールプロバイダ共通）。月曜朝の実行で週末分を拾えるよう広めに取り、
+// 重複は処理済みメールIDで除外する前提。旧名 XSERVER_COLLECT_DAYS も受け付ける
+export function collectDays(): number {
+  const n = Number(process.env.SES_COLLECT_DAYS ?? process.env.XSERVER_COLLECT_DAYS ?? '1');
+  return Number.isFinite(n) && n > 0 ? n : 1;
 }
 
 // サマリ通知の宛先
@@ -155,6 +158,31 @@ export function dbProvider(): string {
 // DB_PROVIDER=sheets のときに使うスプレッドシートID（URLの /d/ と /edit の間の文字列）
 export function sheetsDbSpreadsheetId(): string {
   return process.env.SHEETS_DB_SPREADSHEET_ID ?? '';
+}
+
+// SheetsDBを特定ユーザーになりすまして読み書きする場合のみ設定（要DWD）。
+// 空ならサービスアカウント自身で認証する（スプレッドシートをSAのメールに共有するだけでよい）
+export function sheetsDbImpersonate(): string {
+  return process.env.SHEETS_DB_IMPERSONATE ?? '';
+}
+
+// 処理済みメールID・隔離リスト等のバッチ横断の状態をスプレッドシートに置くか。
+// 毎回クリーンな環境で動くスケジュール実行（GitHub Actions等）ではローカル data/ が残らないため
+export function durableStateInSheets(): boolean {
+  return dbProvider() === 'sheets' && !isDemo();
+}
+
+// DWD（ドメイン全体委任）でなりすます既定ユーザー。空ならサービスアカウント単体で認証する
+export function googleTargetEmail(): string {
+  return process.env.GOOGLE_TARGET_EMAIL ?? '';
+}
+
+// ログ秘匿モード。公開リポジトリのActionsログは誰でも読めるため、CI上では既定で有効にし、
+// 氏名・メールアドレス・件名・本文・API生エラー文をコンソールに出さない（明示的に false で解除可）
+export function logRedact(): boolean {
+  const v = process.env.SES_LOG_REDACT;
+  if (v !== undefined && v !== '') return v === 'true';
+  return process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 }
 
 export function notionProjectDbId(): string {

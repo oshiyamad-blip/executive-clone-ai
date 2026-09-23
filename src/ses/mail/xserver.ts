@@ -8,6 +8,7 @@ import nodemailer from 'nodemailer';
 import { extractSheetLinks, isSupportedAttachment } from '../../collectors/email.js';
 import { loadProcessedMailIds } from '../store.js';
 import { buildReplyMime } from './mime.js';
+import { safeErr } from '../redact.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -16,7 +17,7 @@ import {
   xserverSharedUser,
   xserverSharedPass,
   xserverDraftsMailbox,
-  xserverCollectDays,
+  collectDays,
 } from '../config.js';
 import type { SesRawMail, DraftRef, SesAttachment } from '../../types/index.js';
 
@@ -48,18 +49,19 @@ export async function collect(): Promise<SesRawMail[]> {
   }
   const client = imapClient();
   const mails: SesRawMail[] = [];
+  // 接続・検索・処理済みID読込の失敗は呼び出し側へ伝える（収集失敗としてバッチを異常終了扱いにするため）
   try {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
     try {
-      const since = new Date(Date.now() - xserverCollectDays() * 24 * 60 * 60 * 1000);
+      const since = new Date(Date.now() - collectDays() * 24 * 60 * 60 * 1000);
       const uids = await client.search({ since }, { uid: true });
       if (uids && uids.length > 0) {
         // UIDはメールボックス再構築(UIDVALIDITY変化)で再利用されるため、IDにUIDVALIDITYを含めて
         // 別メールとの誤同一視（誤スキップ）を防ぐ
         const uidValidity = String((client.mailbox as { uidValidity?: bigint }).uidValidity ?? '0');
         // 処理済みのUIDは本文ダウンロード前に除外する（毎回全件を再取得しない）
-        const processed = loadProcessedMailIds();
+        const processed = await loadProcessedMailIds();
         const targets = uids.filter((uid) => !processed.has(mailId(uidValidity, uid)));
         if (targets.length < uids.length) {
           console.log(`Xserver収集: ${uids.length - targets.length}件は処理済みのため取得をスキップ`);
@@ -70,7 +72,7 @@ export async function collect(): Promise<SesRawMail[]> {
               const parsed = await simpleParser(msg.source as Buffer);
               mails.push(toSesRawMail(parsed, uidValidity, msg.uid));
             } catch (err) {
-              console.error(`Xserver収集: メール解析に失敗 (uid ${msg.uid}): ${String(err)}`);
+              console.error(`Xserver収集: メール解析に失敗 (uid ${msg.uid}): ${safeErr(err)}`);
             }
           }
         }
@@ -78,8 +80,6 @@ export async function collect(): Promise<SesRawMail[]> {
     } finally {
       lock.release();
     }
-  } catch (err) {
-    console.error(`Xserver収集: エラー: ${String(err)}`);
   } finally {
     try {
       await client.logout();
@@ -145,7 +145,7 @@ export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promis
     await client.connect();
     await client.append(xserverDraftsMailbox(), raw, ['\\Draft']);
   } catch (err) {
-    console.error(`Xserver下書き: 下書きフォルダへのAPPENDに失敗: ${String(err)}`);
+    console.error(`Xserver下書き: 下書きフォルダへのAPPENDに失敗: ${safeErr(err)}`);
   } finally {
     try {
       await client.logout();

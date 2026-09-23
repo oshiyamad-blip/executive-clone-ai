@@ -10,6 +10,7 @@ import {
   notionFeedbackDbId,
   notionSkillEquivDbId,
 } from '../ses/config.js';
+import { safeErr } from '../ses/redact.js';
 import * as sheetsDb from './sheets.js';
 import {
   remoteLabel,
@@ -105,7 +106,7 @@ async function resolveDataSourceId(databaseId: string): Promise<string> {
       return databaseId;
     }
     // 一過性エラー（429/5xx/ネットワーク）はキャッシュ汚染を避け、今回のみフォールバック
-    console.warn(`Notion: data_source_id 解決に失敗（今回のみフォールバック）: ${String(err)}`);
+    console.warn(`Notion: data_source_id 解決に失敗（今回のみフォールバック）: ${safeErr(err)}`);
     return databaseId;
   }
 }
@@ -320,7 +321,7 @@ async function findMatchPageIdByTitle(dataSourceId: string, title: string): Prom
     const first = res.results[0] as { id?: string } | undefined;
     return first?.id ?? null;
   } catch (err) {
-    console.warn(`SES保存: マッチ既存ページの検索に失敗（新規作成にフォールバック）: ${String(err)}`);
+    console.warn(`SES保存: マッチ既存ページの検索に失敗（新規作成にフォールバック）: ${safeErr(err)}`);
     return null;
   }
 }

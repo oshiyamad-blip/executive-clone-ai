@@ -31,26 +31,69 @@ export const SES_SCOPES = [
   'https://www.googleapis.com/auth/spreadsheets.readonly',
 ];
 
+type GoogleJwt = InstanceType<typeof google.auth.JWT>;
+
+export interface ServiceAccountCredentials {
+  clientEmail: string;
+  privateKey: string;
+}
+
+// JSON鍵（GCPでダウンロードした .json の中身そのもの）を解釈する。不正なら null。
+// 鍵の中身はログに出さない（公開ログへの漏洩防止）
+export function parseServiceAccountJson(json: string): ServiceAccountCredentials | null {
+  try {
+    const o = JSON.parse(json) as { client_email?: unknown; private_key?: unknown };
+    if (typeof o.client_email !== 'string' || typeof o.private_key !== 'string') return null;
+    if (!o.client_email || !o.private_key) return null;
+    return { clientEmail: o.client_email, privateKey: o.private_key.replace(/\\n/g, '\n') };
+  } catch {
+    return null;
+  }
+}
+
+let warnedBadKeyJson = false;
+
+// サービスアカウントの資格情報。GOOGLE_SA_KEY_JSON（JSON鍵を丸ごと1変数に。GitHub Secrets向け）を優先し、
+// 無ければ従来の GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY を使う。どちらも無ければ null
+export function loadServiceAccountCredentials(): ServiceAccountCredentials | null {
+  const json = process.env.GOOGLE_SA_KEY_JSON?.trim();
+  if (json) {
+    const parsed = parseServiceAccountJson(json);
+    if (parsed) return parsed;
+    if (!warnedBadKeyJson) {
+      warnedBadKeyJson = true;
+      console.warn('Google認証: GOOGLE_SA_KEY_JSON を解釈できません（client_email / private_key を含むJSON鍵全体を設定してください）');
+    }
+  }
+  const clientEmail = process.env.GOOGLE_SA_CLIENT_EMAIL;
+  const privateKey = process.env.GOOGLE_SA_PRIVATE_KEY?.replace(/\\n/g, '\n');
+  if (clientEmail && privateKey) return { clientEmail, privateKey };
+  return null;
+}
+
+// サービスアカウント認証。subject 指定時のみDWDでそのユーザーになりすます（要: 管理コンソールでの委任登録）。
+// subject 無しはSA自身として認証する（対象のファイルをSAのメールアドレスに共有しておけば読み書きできる。DWD不要）
+export function getServiceAccountAuth(
+  scopes: string[],
+  subject?: string,
+  creds?: ServiceAccountCredentials,
+): GoogleJwt | null {
+  const c = creds ?? loadServiceAccountCredentials();
+  if (!c) return null;
+  return new google.auth.JWT({ email: c.clientEmail, key: c.privateKey, scopes, subject: subject || undefined });
+}
+
 // 認証クライアントを返す。設定不足なら null（呼び出し側で縮退動作）。
 // 型は googleapis 同梱の JWT に合わせるため google.auth.JWT を使う。
-export function getGoogleAuth(scopes: string[] = BASE_SCOPES): InstanceType<typeof google.auth.JWT> | null {
+export function getGoogleAuth(scopes: string[] = BASE_SCOPES): GoogleJwt | null {
   return getGoogleAuthAs(process.env.GOOGLE_TARGET_EMAIL, scopes);
 }
 
 // 指定ユーザーを impersonate した認証クライアントを返す（SES: 担当営業本人のGmailに
 // 全員に返信の下書きを作るため、その営業の会社アドレスで委任する）。subject 未指定/設定不足は null。
-export function getGoogleAuthAs(
-  subject: string | undefined,
-  scopes: string[] = BASE_SCOPES,
-): InstanceType<typeof google.auth.JWT> | null {
-  const clientEmail = process.env.GOOGLE_SA_CLIENT_EMAIL;
-  const privateKey = process.env.GOOGLE_SA_PRIVATE_KEY?.replace(/\\n/g, '\n');
-
-  if (!clientEmail || !privateKey || !subject) {
-    return null;
-  }
-
-  return new google.auth.JWT({ email: clientEmail, key: privateKey, scopes, subject });
+export function getGoogleAuthAs(subject: string | undefined, scopes: string[] = BASE_SCOPES): GoogleJwt | null {
+  if (!subject) return null;
+  return getServiceAccountAuth(scopes, subject);
 }
 
 // 収集の時間窓（デフォルト: 過去24時間）

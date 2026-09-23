@@ -17,6 +17,7 @@ import {
   maxNegotiationRaiseMan,
   maxNegotiationCutMan,
 } from './config.js';
+import { redactable, safeErr } from './redact.js';
 import type {
   Project,
   Engineer,
@@ -169,7 +170,9 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
     try {
       results.push(await judgeWithLlm(pair, fewShot));
     } catch (err) {
-      console.error(`SESマッチ: 最終判定に失敗 (${pair.project.title} × ${pair.engineer.displayName}): ${String(err)}`);
+      console.error(
+        `SESマッチ: 最終判定に失敗 (${pair.project.id} × ${pair.engineer.id} ${redactable(`${pair.project.title} × ${pair.engineer.displayName}`)}): ${safeErr(err)}`,
+      );
       results.push(buildHeuristicResult(pair)); // 判定失敗時はヒューリスティックにフォールバック
     }
   }

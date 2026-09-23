@@ -139,22 +139,26 @@ Notion を使う場合: 内部インテグレーションを作成し、対象�
 
 ### 4-7. 【代替】Googleスプレッドシートを保存先にする（`DB_PROVIDER=sheets`）
 
-Notionのかわりに、**1つのスプレッドシート（6タブ）**をデータ保存先にできます。
-タブ（案件／要員／マッチ／自社社員／評価／スキル同義）と**ヘッダー行は初回実行時に自動生成**されるため、
-Notionのような手動DB作成は不要です。営業チームが普段のスプシ操作でソート・フィルタできる利点もあります。
+Notionのかわりに、**1つのスプレッドシート**をデータ保存先にできます。
+データタブ（案件／要員／マッチ／自社社員／評価／スキル同義）と状態タブ（処理済みメール／_状態）、
+**ヘッダー行は初回実行時に自動生成**されるため、Notionのような手動DB作成は不要です。
+営業チームが普段のスプシ操作でソート・フィルタできる利点もあります（並べ替え後もバッチは行位置を検証してから更新します）。
 
 **手順**:
 1. Googleドライブで**空のスプレッドシートを1つ作成**し、URLの `/d/` と `/edit` の間のIDを控える
-2. そのシートを `GOOGLE_TARGET_EMAIL` のユーザー（サービスアカウントが impersonate するユーザー）が編集できる状態にする
-3. Workspace管理コンソールのDWD登録に `https://www.googleapis.com/auth/spreadsheets` スコープを追加
-4. `.env.local` に設定:
+2. そのシートを**サービスアカウントのメールアドレス（JSON鍵の `client_email`）に「編集者」として共有**する
+   （DWD＝ドメイン全体委任は不要。個人Googleアカウントのシートでも可）
+3. `.env.local`（GitHub Actions では Secrets）に設定:
 ```
 DB_PROVIDER=sheets
 SHEETS_DB_SPREADSHEET_ID=<手順1のID>
-GOOGLE_SA_CLIENT_EMAIL=...
-GOOGLE_SA_PRIVATE_KEY=...
-GOOGLE_TARGET_EMAIL=...
+GOOGLE_SA_KEY_JSON={"type":"service_account",...}   # JSON鍵の中身を丸ごと（または GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY）
 ```
+
+- 特定ユーザーとして読み書きしたい場合のみ `SHEETS_DB_IMPERSONATE=<ユーザーのメール>`（要DWD＋`spreadsheets` スコープ）
+- **処理済みメールID（「処理済みメール」タブ）と隔離リスト（「_状態」タブ）もこのシートに保存**されるため、
+  毎回クリーンな環境で動く GitHub Actions 等でも二重処理・無限再試行を防げます
+- 既存シートのヘッダーが古い（末尾の列が足りない）場合は自動で列を追記します。列の並びが違う場合は警告のみで上書きしません
 
 - Notion用の `NOTION_*_DB_ID` は不要になります（`NOTION_TOKEN` も SES用途では不要）
 - マッチのステータス更新（確認UI）・評価・同義辞書もすべて同じシートに読み書きされます
@@ -178,10 +182,10 @@ XSERVER_SMTP_PORT=465
 XSERVER_SHARED_USER=sales@yourcompany.co.jp
 XSERVER_SHARED_PASS=********
 XSERVER_DRAFTS_MAILBOX=Drafts      # サーバにより INBOX.Drafts / 下書き 等
-XSERVER_COLLECT_DAYS=1             # 収集の遡り日数（1日2回バッチ想定）
+SES_COLLECT_DAYS=1                 # 収集の遡り日数（旧名 XSERVER_COLLECT_DAYS も可。月曜に週末分を拾うなら4等）
 ```
 
-- 収集: `INBOX` を直近 `XSERVER_COLLECT_DAYS` 日で検索。
+- 収集: `INBOX` を直近 `SES_COLLECT_DAYS` 日で検索（処理済みメールIDで重複除外）。
 - 下書き: 「全員に返信」MIMEを組み立て、共有の**下書きフォルダに APPEND**。営業は共有下書きを開いて送信。
 - `XSERVER_DRAFTS_MAILBOX` はサーバの下書きフォルダ名に合わせてください（不明ならメールソフトで確認）。
 
@@ -267,7 +271,7 @@ cron 例（毎日 9:00 と 18:00）:
 0 9,18 * * *  cd /path/to/executive-clone-ai && /usr/bin/npm run ses >> /var/log/ses.log 2>&1
 ```
 
-- 処理済みメールIDはローカルに記録され、**二重処理を防止**します（`data/` 配下）。
+- 処理済みメールIDを記録して**二重処理を防止**します（`DB_PROVIDER=sheets` の本番はシートの「処理済みメール」タブ、それ以外は `data/` 配下）。
 - `data/` は再作成される作業領域です。サーバ移設時は Notion が正となります。
 
 ### 8-2. 自動検証・自己修復（うまく動かない時の自動リカバリ）
@@ -277,7 +281,7 @@ cron 例（毎日 9:00 と 18:00）:
 **Phase A: 実行時の自動修復（`SES_HEAL_ENABLED=true` 既定）**
 - 抽出に失敗したメールは、**2秒後に再試行 → それでも失敗なら上位モデル（Sonnet）へ昇格**して再抽出
 - 修復に使うLLMコストは**実測トークンから円換算**され、`SES_HEAL_BUDGET_JPY`（既定50円/バッチ）で頭打ち。超えた分は次回バッチへ繰越
-- 同じメールが累計 `SES_HEAL_MAX_ATTEMPTS`（既定3回）失敗したら**隔離**（`data/ses-heal/quarantine.json`）し、無限再試行を打ち切り
+- 同じメールが累計 `SES_HEAL_MAX_ATTEMPTS`（既定3回）失敗したら**隔離**（`DB_PROVIDER=sheets` はシートの「_状態」タブ、それ以外は `data/ses-heal/quarantine.json`）し、無限再試行を打ち切り
 - バッチ内の**過半数が失敗**した場合は基盤障害（APIキー・Anthropic障害等）とみなし、誤隔離を防ぐためカウントを保留
 - サマリメール末尾に**診断レポート**（コスト概算・救済件数・異常検知・隔離状況）が付きます
 
@@ -355,8 +359,10 @@ UIでできること:
 
 - 実行/モデル: `ANTHROPIC_API_KEY` `DEMO_MODE` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `USE_BATCH_API`
 - メール（共通/切替）: `MAIL_PROVIDER` `SES_NOTIFY_TO`
-- メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX` `XSERVER_COLLECT_DAYS`
+- メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX` `SES_COLLECT_DAYS`
 - メール（Gmail）: `SES_TARGET_GMAIL` `GOOGLE_SA_*`
+- スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
+- 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
 - 事業ルール: `MIN_GROSS_MARGIN_JPY` `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`

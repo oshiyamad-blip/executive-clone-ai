@@ -8,7 +8,17 @@ import { join } from 'path';
 import { generateJson } from '../../llm/index.js';
 import { totalLlmCostJpy } from '../../llm/pricing.js';
 import { sendPlainMailViaMail } from '../mail/index.js';
-import { isDemo, healDataDir, repairBudgetJpy, repairModel, mailProvider, sesNotifyTo } from '../config.js';
+import {
+  isDemo,
+  healDataDir,
+  repairBudgetJpy,
+  repairModel,
+  mailProvider,
+  sesNotifyTo,
+  durableStateInSheets,
+} from '../config.js';
+import { safeErr } from '../redact.js';
+import { sheetsDbConfigured, readStateJson, writeStateJson } from '../../database/sheets.js';
 import { listQuarantined, type QuarantineEntry } from './quarantine.js';
 import { readLastBatchDiagnosis, type LastBatchDiagnosis } from './events.js';
 
@@ -100,21 +110,36 @@ function lastRepairPath(): string {
   return join(process.cwd(), healDataDir(), 'last-repair.json');
 }
 
-function ranToday(): boolean {
+// 「1日1回」判定の記録先。スケジュール実行ではローカルファイルが残らないためシート側に置く
+const LAST_REPAIR_KEY = 'lastRepair';
+
+function repairStateInSheets(): boolean {
+  return durableStateInSheets() && sheetsDbConfigured();
+}
+
+async function ranToday(): Promise<boolean> {
   try {
-    if (!existsSync(lastRepairPath())) return false;
-    const { at } = JSON.parse(readFileSync(lastRepairPath(), 'utf-8')) as { at: string };
-    return at.slice(0, 10) === new Date().toISOString().slice(0, 10);
+    const last = repairStateInSheets()
+      ? await readStateJson<{ at: string }>(LAST_REPAIR_KEY)
+      : existsSync(lastRepairPath())
+        ? (JSON.parse(readFileSync(lastRepairPath(), 'utf-8')) as { at: string })
+        : null;
+    return last?.at?.slice(0, 10) === new Date().toISOString().slice(0, 10);
   } catch {
     return false;
   }
 }
 
-function markRan(): void {
+async function markRan(): Promise<void> {
+  const record = { at: new Date().toISOString() };
   try {
+    if (repairStateInSheets()) {
+      await writeStateJson(LAST_REPAIR_KEY, record);
+      return;
+    }
     const dir = join(process.cwd(), healDataDir());
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(lastRepairPath(), JSON.stringify({ at: new Date().toISOString() }), 'utf-8');
+    writeFileSync(lastRepairPath(), JSON.stringify(record), 'utf-8');
   } catch {
     /* noop */
   }
@@ -193,12 +218,12 @@ export async function runRepair(auto = false): Promise<void> {
     return;
   }
 
-  if (auto && ranToday()) {
+  if (auto && (await ranToday())) {
     console.log('本日はすでに自動生成済みのためスキップします（手動実行: npm run ses:repair）');
     return;
   }
 
-  const quarantined = listQuarantined();
+  const quarantined = await listQuarantined();
   const diagnosis = readLastBatchDiagnosis();
   const hasCritical = (diagnosis?.events ?? []).some((e) => e.severity === 'critical');
   if (quarantined.length === 0 && !hasCritical) {
@@ -222,7 +247,7 @@ export async function runRepair(auto = false): Promise<void> {
     }
     const md = renderReport(proposal, costJpy);
     const p = writeReport(md);
-    markRan();
+    await markRan();
     console.log(`パッチ案レポートを生成しました → ${p}（コスト約${costJpy.toFixed(1)}円）`);
 
     const to = sesNotifyTo();
@@ -230,10 +255,10 @@ export async function runRepair(auto = false): Promise<void> {
       try {
         await sendPlainMailViaMail(to, 'SES自己修復: 修正パッチ案レポート', md);
       } catch (err) {
-        console.warn(`SES修復: レポートメールの送信に失敗: ${String(err)}`);
+        console.warn(`SES修復: レポートメールの送信に失敗: ${safeErr(err)}`);
       }
     }
   } catch (err) {
-    console.error(`SES修復: パッチ案の生成に失敗しました: ${String(err)}`);
+    console.error(`SES修復: パッチ案の生成に失敗しました: ${safeErr(err)}`);
   }
 }

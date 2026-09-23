@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { isDemo, reviewDataDir } from './config.js';
 import { saveMatchFeedback, fetchRecentFeedback } from '../database/index.js';
+import { safeErr } from './redact.js';
 import type { MatchFeedback } from '../types/index.js';
 
 function localPath(): string {
@@ -25,7 +26,7 @@ function writeLocal(list: MatchFeedback[]): void {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(localPath(), JSON.stringify(list, null, 2), 'utf-8');
   } catch (err) {
-    console.warn(`フィードバックの保存に失敗: ${String(err)}`);
+    console.warn(`フィードバックの保存に失敗: ${safeErr(err)}`);
   }
 }
 
@@ -51,7 +52,7 @@ export async function recordFeedback(fb: MatchFeedback): Promise<'notion' | 'loc
     const pageId = await saveMatchFeedback(fb);
     if (pageId) return 'notion';
   } catch (err) {
-    console.warn(`フィードバックのNotion保存に失敗: ${String(err)}`);
+    console.warn(`フィードバックのDB保存に失敗: ${safeErr(err)}`);
   }
   appendLocal(fb); // 退避分は loadFeedback がマージして読むため、学習・メトリクスには反映され続ける
   return 'local';
@@ -68,7 +69,7 @@ export async function loadFeedback(limit = 200): Promise<MatchFeedback[]> {
   try {
     fromNotion = await fetchRecentFeedback(limit);
   } catch (err) {
-    console.warn(`フィードバックの取得に失敗: ${String(err)}`);
+    console.warn(`フィードバックの取得に失敗: ${safeErr(err)}`);
   }
   const merged = [...fromNotion, ...readLocal()]
     .sort((a, b) => b.at.localeCompare(a.at)) // ISO文字列の辞書順=時刻順（新しい順）

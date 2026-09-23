@@ -28,7 +28,8 @@ export async function healLlmCall<T>(
   if (!isRetryableLlmError(firstError)) {
     recordHealEvent(
       'warn',
-      `${label}: 再試行不能なエラー種別のため修復をスキップ（${maskPii(String(firstError)).slice(0, 120)}）`,
+      `${label}: 再試行不能なエラー種別のため修復をスキップ`,
+      maskPii(String(firstError)).slice(0, 120),
     );
     return null;
   }
@@ -62,7 +63,7 @@ export async function healLlmCall<T>(
     recordHealEvent('info', `${label}: 上位モデルへの昇格で成功しました`);
     return value;
   } catch (err) {
-    recordHealEvent('warn', `${label}: 昇格でも失敗しました（${maskPii(String(err)).slice(0, 120)}）`);
+    recordHealEvent('warn', `${label}: 昇格でも失敗しました`, maskPii(String(err)).slice(0, 120));
     return null;
   }
 }

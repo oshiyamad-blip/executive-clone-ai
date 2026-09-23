@@ -1,8 +1,8 @@
-import '../env.js';
 // 自社社員(候補要員)→ 合いそうな案件を探す機能。
 // 外部要員との突合(match.ts)と異なり、金額条件は「案件単価 ≥ 社員の必要案件単価」の閾値方式。
 // スキル・勤務地・時期の判定は match.ts と同じヘルパーを流用する。
-// 本番=Notion自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
+// 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
+// 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
@@ -19,15 +19,18 @@ import {
   skillMatchThreshold,
   skillMatchStrongThreshold,
   maxCandidatesPerItem,
+  logRedact,
 } from './config.js';
+import { safeErr } from './redact.js';
 import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand } from '../types/index.js';
 
 // 案件単価は上限(rateMax)を優先し、無ければ下限(rateMin)。両方無ければ null。
-function projectRateMan(project: Project): number | null {
+export function projectRateMan(project: Project): number | null {
   return project.rateMax ?? project.rateMin ?? null;
 }
 
-function evaluate(own: OwnEngineer, project: Project): OwnMatch | null {
+// 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
+export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch | null {
   // スキル: 必須スキルの被覆率が閾値未満なら除外。
   // 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける
   const matchRate = skillMatchRate(project.requiredSkills, own.skills);
@@ -94,7 +97,7 @@ export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Projec
   for (const engineer of availableOwn) {
     const candidates: OwnMatch[] = [];
     for (const project of openProjects) {
-      const m = evaluate(engineer, project);
+      const m = evaluateOwnMatch(engineer, project);
       if (m) candidates.push(m);
     }
     // 単価充足(meetsRate) 優先 → 単価差(rateGap)降順 → スキル一致率 降順
@@ -114,7 +117,7 @@ async function loadOwnEngineers(): Promise<OwnEngineer[]> {
   try {
     return await fetchOwnEngineers();
   } catch (err) {
-    console.error(`自社社員探し: 自社社員の取得に失敗: ${String(err)}`);
+    console.error(`自社社員探し: 自社社員の取得に失敗: ${safeErr(err)}`);
     return [];
   }
 }
@@ -133,7 +136,7 @@ async function loadProjects(): Promise<Project[]> {
   try {
     return await fetchOpenProjects();
   } catch (err) {
-    console.error(`自社社員探し: 案件の取得に失敗: ${String(err)}`);
+    console.error(`自社社員探し: 案件の取得に失敗: ${safeErr(err)}`);
     return [];
   }
 }
@@ -160,6 +163,16 @@ export async function runOwnMatch(): Promise<OwnMatch[]> {
 }
 
 function printSummary(own: OwnEngineer[], matches: OwnMatch[]): void {
+  if (logRedact()) {
+    // 公開ログには社員名・案件名・単価を出さない（通し番号と件数のみ）
+    console.log('\n=== 自社社員ごとの候補件数（ログ秘匿モード） ===');
+    own.forEach((engineer, i) => {
+      const n = matches.filter((m) => m.ownEngineerId === engineer.id).length;
+      console.log(`  社員${i + 1}: 候補${n}件`);
+    });
+    console.log('');
+    return;
+  }
   console.log('\n=== 自社社員ごとの候補案件 ===');
   for (const engineer of own) {
     const forEngineer = matches.filter((m) => m.ownEngineerId === engineer.id);
@@ -178,4 +191,3 @@ function printSummary(own: OwnEngineer[], matches: OwnMatch[]): void {
   console.log('');
 }
 
-runOwnMatch().catch(console.error);

@@ -2,6 +2,7 @@ import '../env.js';
 import { existsSync } from 'fs';
 import { generateText } from '../llm/index.js';
 import { fetchRecentSignals, fetchRecentStories } from '../database/index.js';
+import { logRedact } from '../ses/config.js';
 
 // 環境診断（セットアップ確認用）
 // 使い方: npm run doctor
@@ -19,6 +20,11 @@ const section = (title: string) => console.log(`\n■ ${title}`);
 
 function envSet(...names: string[]): boolean {
   return names.every((n) => Boolean(process.env[n]?.trim()));
+}
+
+// サービスアカウント鍵は JSON丸ごと（GOOGLE_SA_KEY_JSON）か、client_email/private_key の個別指定のどちらでもよい
+function serviceAccountSet(): boolean {
+  return envSet('GOOGLE_SA_KEY_JSON') || envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY');
 }
 
 async function main(): Promise<void> {
@@ -85,14 +91,14 @@ async function main(): Promise<void> {
   console.log(`  ・ライフログ受け皿: ${lifelogDir} ${existsSync(lifelogDir) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
   console.log(`  ・LINE受け皿:      ${messengerDir} ${existsSync(messengerDir) ? '（あり）' : '（未作成 — 初回収集時に用意）'}`);
   console.log(`  ・Slack:           ${envSet('SLACK_USER_TOKEN', 'SLACK_TARGET_USER_ID') ? '設定済み' : '未設定（スキップされます）'}`);
-  console.log(`  ・Google Workspace: ${envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY', 'GOOGLE_TARGET_EMAIL') ? '設定済み' : '未設定（スキップされます）'}`);
+  console.log(`  ・Google Workspace: ${serviceAccountSet() && envSet('GOOGLE_TARGET_EMAIL') ? '設定済み' : '未設定（スキップされます）'}`);
 
   // 5. SESマッチング（任意 — 使う場合のみ）
   section('SESマッチング（任意）');
   const mailProvider = (process.env.MAIL_PROVIDER ?? 'xserver').toLowerCase();
   console.log(`  ・メールプロバイダ: ${mailProvider}`);
   if (mailProvider === 'gmail') {
-    if (envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY', 'SES_TARGET_GMAIL')) ok('Gmail(DWD)設定あり');
+    if (serviceAccountSet() && envSet('SES_TARGET_GMAIL')) ok('Gmail(DWD)設定あり');
     else warn('Gmail設定が不足（GOOGLE_SA_* / SES_TARGET_GMAIL）— SES収集はスキップされます');
   } else {
     if (envSet('XSERVER_IMAP_HOST', 'XSERVER_SHARED_USER', 'XSERVER_SHARED_PASS')) ok('Xserver IMAP設定あり');
@@ -102,21 +108,23 @@ async function main(): Promise<void> {
   const dbProvider = (process.env.DB_PROVIDER ?? 'notion').toLowerCase();
   if (dbProvider === 'sheets') {
     console.log(
-      `  ・データ保存先:    sheets（スプレッドシート ${envSet('SHEETS_DB_SPREADSHEET_ID') ? '設定済み' : '未設定 — SHEETS_DB_SPREADSHEET_ID が必要'}／Google認証 ${envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY') ? '設定済み' : '未設定'}）`,
+      `  ・データ保存先:    sheets（スプレッドシート ${envSet('SHEETS_DB_SPREADSHEET_ID') ? '設定済み' : '未設定 — SHEETS_DB_SPREADSHEET_ID が必要'}／Google認証 ${serviceAccountSet() ? '設定済み（シートをサービスアカウントのメールに共有してください）' : '未設定'}）`,
     );
   } else {
     console.log(
       `  ・データ保存先:    notion（${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '案件/要員/マッチDB 設定済み' : 'DB未設定 — 保存はスキップされます'}）`,
     );
   }
-  console.log(`  ・通知先:          ${process.env.SES_NOTIFY_TO?.trim() ? process.env.SES_NOTIFY_TO : '未設定（サマリはコンソールのみ）'}`);
+  // 公開CIのログに宛先アドレスを出さない
+  const notifyTo = process.env.SES_NOTIFY_TO?.trim();
+  console.log(`  ・通知先:          ${notifyTo ? (logRedact() ? '設定済み' : notifyTo) : '未設定（サマリはコンソールのみ）'}`);
   const healOn = (process.env.SES_HEAL_ENABLED ?? 'true') !== 'false';
   console.log(
     `  ・自己修復:        ${healOn ? `有効（予算 ${process.env.SES_HEAL_BUDGET_JPY ?? '50'}円/バッチ・${process.env.SES_HEAL_MAX_ATTEMPTS ?? '3'}回失敗で隔離）` : '無効'}`,
   );
   try {
     const { quarantineCount } = await import('../ses/heal/quarantine.js');
-    const qc = quarantineCount();
+    const qc = await quarantineCount();
     if (qc > 0) warn(`隔離中のメールが${qc}件あります — npm run ses:repair で原因分析・修正パッチ案を生成できます`);
     else ok('隔離中のメールなし');
   } catch {
@@ -125,7 +133,7 @@ async function main(): Promise<void> {
 
   // 6. プロファイル・セキュリティ
   section('プロファイル・セキュリティ');
-  if (envSet('EXECUTIVE_NAME')) ok(`経営者名: ${process.env.EXECUTIVE_NAME}`);
+  if (envSet('EXECUTIVE_NAME')) ok(`経営者名: ${logRedact() ? '設定済み' : process.env.EXECUTIVE_NAME}`);
   else warn('EXECUTIVE_NAME が未設定 — src/data/executiveProfile.ts のサンプル値の差し替えも忘れずに');
   if (envSet('WEB_ACCESS_TOKEN')) ok('WEB_ACCESS_TOKEN 設定済み（Web UIに認証あり）');
   else warn('WEB_ACCESS_TOKEN 未設定 — Web UIはローカル(127.0.0.1)でのみ使ってください');

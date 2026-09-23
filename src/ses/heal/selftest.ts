@@ -1,9 +1,21 @@
-// 自己修復レイヤーのオフライン自己検証（npm run ses:heal:check）。外部API呼び出しゼロ。
-// 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスクを検証する。
+// 自己修復レイヤーと本番実行基盤のオフライン自己検証（npm run ses:heal:check）。外部API呼び出しゼロ。
+// 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスク・異常終了判定・
+// ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈を検証する。
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { isRetryableLlmError } from './retry.js';
-import { maskPii, recordFailure, recordSuccess, listQuarantined } from './quarantine.js';
-import { resetHealEvents, recordStat, getStats } from './events.js';
+import {
+  maskPii,
+  recordFailure,
+  recordSuccess,
+  listQuarantined,
+  capQuarantine,
+  QUARANTINE_MAX_ENTRIES,
+  type QuarantineEntry,
+} from './quarantine.js';
+import { resetHealEvents, recordStat, getStats, recordHealEvent, recordFatal, hasFatal } from './events.js';
+import { formatErr, SafeLogError } from '../redact.js';
+import { columnLetter, quoteTab, planHeaderMigration } from '../../database/sheets.js';
+import { parseServiceAccountJson } from '../../collectors/googleAuth.js';
 import type { SesRawMail } from '../../types/index.js';
 
 let failures = 0;
@@ -36,7 +48,7 @@ function fakeMail(id: string): SesRawMail {
   };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   console.log('=== SES自己修復レイヤー 自己検証 ===');
 
   // 1. 円換算（Haiku: $1/$5 per MTok）
@@ -64,27 +76,84 @@ function main(): void {
 
   // 4. 隔離ラウンドトリップ（SES_HEAL_DATA_DIR は呼び出し側でscratchに向ける）
   const mail = fakeMail(`selftest_${process.pid}`);
-  recordFailure(mail, new Error('test1'));
-  recordFailure(mail, new Error('test2'));
-  const third = recordFailure(mail, new Error('test3 to quarantine taro@example.jp'));
+  await recordFailure(mail, new Error('test1'));
+  await recordFailure(mail, new Error('test2'));
+  const third = await recordFailure(mail, new Error('test3 to quarantine taro@example.jp'));
   check('隔離: 3回目の失敗で隔離される（既定 SES_HEAL_MAX_ATTEMPTS=3）', third.quarantined && third.attempts === 3);
-  const q = listQuarantined().find((e) => e.mailId === mail.id);
+  const q = (await listQuarantined()).find((e) => e.mailId === mail.id);
   check('隔離: エラー文中のメールアドレスがマスクされる', Boolean(q) && !q!.lastError.includes('taro@example.jp'));
   check('隔離: 件名の電話番号がマスクされる', Boolean(q) && !q!.subject.includes('090-1234-5678'));
-  recordSuccess(mail.id);
-  check('隔離: 成功で履歴が消える', !listQuarantined().some((e) => e.mailId === mail.id));
+  await recordSuccess(mail.id);
+  check('隔離: 成功で履歴が消える', !(await listQuarantined()).some((e) => e.mailId === mail.id));
 
   // 5. 過半数失敗ガード（countTowardQuarantine=false ならカウントが増えない）
   const mail2 = fakeMail(`selftest2_${process.pid}`);
-  const r = recordFailure(mail2, new Error('mass'), { countTowardQuarantine: false });
+  const r = await recordFailure(mail2, new Error('mass'), { countTowardQuarantine: false });
   check('過半数失敗ガード: カウント保留', r.attempts === 0 && !r.quarantined);
-  recordSuccess(mail2.id);
+  await recordSuccess(mail2.id);
 
   // 6. 統計カウンタ
   resetHealEvents();
   recordStat('collected', 5);
   recordStat('extractFailures', 2);
   check('統計: 加算が反映される', getStats().collected === 5 && getStats().extractFailures === 2);
+
+  // 7. 異常終了判定（warnでは立たず、critical・recordFatalで立つ。resetで消える）
+  resetHealEvents();
+  recordHealEvent('warn', 'selftest warn');
+  check('異常終了: warnでは立たない', !hasFatal());
+  recordHealEvent('critical', 'selftest critical');
+  check('異常終了: criticalで立つ', hasFatal());
+  resetHealEvents();
+  recordFatal('selftest fatal');
+  const fatalRaised = hasFatal();
+  resetHealEvents();
+  check('異常終了: recordFatalで立ち、resetで消える', fatalRaised && !hasFatal());
+
+  // 8. ログ秘匿（秘匿時はエラー本文を出さず種別・ステータスのみ。固定文言のエラーはそのまま）
+  const apiErr = Object.assign(new Error('本文 山田太郎 taro@example.jp'), { status: 403 });
+  const redacted = formatErr(apiErr, true);
+  check('ログ秘匿: 生エラー文を出さない', !redacted.includes('山田') && !redacted.includes('@') && redacted.includes('403'));
+  check('ログ秘匿: 非秘匿時は全文', formatErr(apiErr, false).includes('山田太郎'));
+  check('ログ秘匿: SafeLogErrorは秘匿時も文言を出す', formatErr(new SafeLogError('固定文言'), true) === '固定文言');
+
+  // 9. SheetsDB: A1表記・ヘッダー移行判定
+  check('A1列文字: 0→A / 25→Z / 26→AA / 701→ZZ', [0, 25, 26, 701].map(columnLetter).join(',') === 'A,Z,AA,ZZ');
+  check('タブ名の引用', quoteTab("_状態") === "'_状態'" && quoteTab("a'b") === "'a''b'");
+  const def = ['ID', '名前', '日時'];
+  check('ヘッダー: 一致はok', planHeaderMigration(['ID', '名前', '日時'], def).kind === 'ok');
+  check('ヘッダー: 人が末尾に足した列はok', planHeaderMigration(['ID', '名前', '日時', 'メモ'], def).kind === 'ok');
+  const appendPlan = planHeaderMigration(['ID'], def);
+  check(
+    'ヘッダー: 先頭部分なら不足列を末尾に追記',
+    appendPlan.kind === 'append' && appendPlan.fromIndex === 1 && appendPlan.cells.join(',') === '名前,日時',
+  );
+  check('ヘッダー: 空タブは全列を追記', planHeaderMigration([], def).kind === 'append');
+  const conflict = planHeaderMigration(['ID', '日時'], def);
+  check('ヘッダー: 並びが違えば上書きしない', conflict.kind === 'conflict' && conflict.index === 1);
+
+  // 10. 隔離リストの切り詰め（件数上限・1セル文字数上限）
+  const many: QuarantineEntry[] = Array.from({ length: QUARANTINE_MAX_ENTRIES + 50 }, (_, i) => ({
+    mailId: `m${i}`,
+    subject: 'x'.repeat(120),
+    from: 'y'.repeat(80),
+    attempts: 1,
+    lastError: 'z'.repeat(300),
+    firstFailedAt: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+    lastFailedAt: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+    quarantinedAt: null,
+  }));
+  const capped = capQuarantine(many);
+  check(
+    '隔離リスト: 件数・文字数の上限内に収まり、新しいものが残る',
+    capped.length <= QUARANTINE_MAX_ENTRIES && JSON.stringify(capped).length <= 45_000 && capped[0].mailId === `m${many.length - 1}`,
+    `len=${capped.length}`,
+  );
+
+  // 11. サービスアカウント鍵JSON（GOOGLE_SA_KEY_JSON）の解釈
+  const sa = parseServiceAccountJson(JSON.stringify({ client_email: 'sa@p.iam.gserviceaccount.com', private_key: 'A\\nB' }));
+  check('SA鍵JSON: client_email/private_keyを取り出し、\\n を改行に戻す', sa?.clientEmail === 'sa@p.iam.gserviceaccount.com' && sa.privateKey === 'A\nB');
+  check('SA鍵JSON: 不正なJSONは null', parseServiceAccountJson('{not json') === null && parseServiceAccountJson('{}') === null);
 
   console.log('');
   if (failures > 0) {
@@ -95,4 +164,7 @@ function main(): void {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

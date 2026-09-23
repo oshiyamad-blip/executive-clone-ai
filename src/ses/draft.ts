@@ -10,6 +10,7 @@ import { generateText } from '../llm/index.js';
 import { createReplyDraftViaMail } from './mail/index.js';
 import { isDemo, matchModel, demoDataDir } from './config.js';
 import { writeDemoArtifact } from './store.js';
+import { redactable, safeErr } from './redact.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
@@ -111,7 +112,7 @@ function writeDraftFile(ref: DraftRef): DraftRef {
     writeFileSync(filePath, `${header}\n${ref.body ?? ''}`, 'utf-8');
     return { ...ref, url: filePath };
   } catch (err) {
-    console.warn(`SES下書き: ローカル保存に失敗 (${ref.draftId}): ${String(err)}`);
+    console.warn(`SES下書き: ローカル保存に失敗 (${ref.draftId}): ${safeErr(err)}`);
     return ref;
   }
 }
@@ -147,7 +148,7 @@ export async function createDrafts(
     const project = projectMap.get(match.projectId);
     const engineer = engineerMap.get(match.engineerId);
     if (!project || !engineer) {
-      console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${match.title})`);
+      console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${match.id} ${redactable(match.title)})`);
       results.push(match);
       continue;
     }
@@ -158,7 +159,7 @@ export async function createDrafts(
       results.push({ ...match, draftToProject, draftToEngineer });
       if (isDemo()) demoRecords.push({ matchId: match.id, title: match.title, draftToProject, draftToEngineer });
     } catch (err) {
-      console.error(`SES下書き: 生成に失敗 (${match.title}): ${String(err)}`);
+      console.error(`SES下書き: 生成に失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
       results.push(match);
     }
   }

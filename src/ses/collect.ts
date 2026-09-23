@@ -10,7 +10,7 @@ export async function collectSesMail(): Promise<SesRawMail[]> {
   if (isDemo()) return loadFixtureMails(); // demoは毎回全件処理（処理済みID管理は本番のみ）
 
   const mails = await collectMail();
-  const processed = loadProcessedMailIds();
+  const processed = await loadProcessedMailIds();
   const unprocessed = mails.filter((m) => !processed.has(m.id));
   if (unprocessed.length < mails.length) {
     console.log(`SES収集: ${mails.length - unprocessed.length}件は処理済みのためスキップ`);

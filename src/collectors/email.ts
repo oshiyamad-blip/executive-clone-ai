@@ -1,5 +1,6 @@
 import { google, gmail_v1 } from 'googleapis';
 import { getGoogleAuth } from './googleAuth.js';
+import { redactable, safeErr } from '../ses/redact.js';
 import type { RawLog, SesRawMail, SesAttachment } from '../types/index.js';
 
 // Gmail 収集 — 対象経営者の送受信メールを取得する（gmail.readonly）
@@ -114,14 +115,14 @@ export async function collectSesRawMail(query: string): Promise<SesRawMail[]> {
           const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
           mails.push(await buildSesRawMail(gmail, msg.data));
         } catch (err) {
-          console.error(`SESメール収集: メッセージ取得に失敗 (${ref.id}): ${String(err)}`);
+          console.error(`SESメール収集: メッセージ取得に失敗 (${ref.id}): ${safeErr(err)}`);
         }
       }
 
       pageToken = list.data.nextPageToken ?? undefined;
     } while (pageToken);
   } catch (err) {
-    console.error(`SESメール収集: 収集中にエラー: ${String(err)}`);
+    console.error(`SESメール収集: 収集中にエラー: ${safeErr(err)}`);
   }
 
   console.log(`SESメール収集: ${mails.length}件を収集`);
@@ -174,7 +175,7 @@ async function collectAttachments(
       const data = base64UrlToStandard(att.data.data ?? '');
       results.push({ filename, mimeType: part.mimeType ?? 'application/octet-stream', data });
     } catch (err) {
-      console.error(`SESメール収集: 添付ダウンロードに失敗 (${filename}): ${String(err)}`);
+      console.error(`SESメール収集: 添付ダウンロードに失敗 (${redactable(filename)}): ${safeErr(err)}`);
     }
   }
   return results;

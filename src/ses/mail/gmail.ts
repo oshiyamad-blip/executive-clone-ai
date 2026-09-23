@@ -4,14 +4,14 @@
 import { google } from 'googleapis';
 import { collectSesRawMail } from '../../collectors/email.js';
 import { getGoogleAuth, getGoogleAuthAs, SES_SCOPES } from '../../collectors/googleAuth.js';
-import { sesTargetGmail } from '../config.js';
+import { sesTargetGmail, collectDays } from '../config.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
 import type { SesRawMail, DraftRef } from '../../types/index.js';
 
 export async function collect(): Promise<SesRawMail[]> {
   const target = sesTargetGmail();
   const targetClause = target ? ` to:${target}` : '';
-  const query = `newer_than:1d -in:drafts -in:spam -in:trash${targetClause}`;
+  const query = `newer_than:${Math.ceil(collectDays())}d -in:drafts -in:spam -in:trash${targetClause}`;
   return collectSesRawMail(query);
 }
 

@@ -7,6 +7,7 @@ import { join } from 'path';
 import { reviewDataDir, demoDataDir } from './config.js';
 import { updateMatchStatus } from '../database/index.js';
 import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
+import { safeErr } from './redact.js';
 import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef } from '../types/index.js';
 
 // UIで送信元（本人の会社アドレス）を確定済みの下書きか。
@@ -25,7 +26,7 @@ function writeJson(name: string, data: unknown): void {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(reviewPath(name), JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.warn(`SESレビュー: 書き出しに失敗 (${name}): ${String(err)}`);
+    console.warn(`SESレビュー: 書き出しに失敗 (${name}): ${safeErr(err)}`);
   }
 }
 
@@ -35,7 +36,7 @@ function readJson<T>(name: string, fallback: T): T {
     if (!existsSync(filePath)) return fallback;
     return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
   } catch (err) {
-    console.warn(`SESレビュー: 読み込みに失敗 (${name}): ${String(err)}`);
+    console.warn(`SESレビュー: 読み込みに失敗 (${name}): ${safeErr(err)}`);
     return fallback;
   }
 }
@@ -133,7 +134,7 @@ export async function setMatchStatus(
     try {
       await updateMatchStatus(target.notionPageId, status);
     } catch (err) {
-      console.warn(`SESレビュー: ステータスのNotion反映に失敗 (${id}): ${String(err)}`);
+      console.warn(`SESレビュー: ステータスのDB反映に失敗 (${id}): ${safeErr(err)}`);
     }
   }
   return target;

@@ -11,6 +11,7 @@ import { normalizeSkills } from './skillDict.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
 import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
+import { safeErr } from './redact.js';
 import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyTarget } from '../types/index.js';
 
 const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリングサービス）業界の営業メールを解析する専門家です。
@@ -164,31 +165,37 @@ export interface ExtractOutcome {
   items: ExtractedItem[];
   // 抽出に成功した（=処理済みにしてよい）メールのID。失敗したメールは含めず、次回バッチで再処理させる
   processedMailIds: string[];
+  // 累計失敗で隔離した（=再試行を打ち切る）メールのID。処理済みとして「隔離」の結果で記録する
+  quarantinedMailIds: string[];
 }
 
 export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome> {
-  if (isDemo()) return { items: extractItemsDemo(mails), processedMailIds: mails.map((m) => m.id) };
+  if (isDemo()) {
+    return { items: extractItemsDemo(mails), processedMailIds: mails.map((m) => m.id), quarantinedMailIds: [] };
+  }
 
   const items: ExtractedItem[] = [];
   const processedMailIds: string[] = [];
+  const quarantinedMailIds: string[] = [];
   const failed: Array<{ mail: SesRawMail; err: unknown }> = [];
   for (const mail of mails) {
+    let extracted: ExtractedItem[] | null = null;
+    let firstErr: unknown;
     try {
-      items.push(...(await extractFromMail(mail)));
-      processedMailIds.push(mail.id);
-      recordSuccess(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
+      extracted = await extractFromMail(mail);
     } catch (err) {
+      firstErr = err;
       // 自動修復: 予算内でバックオフ再試行 → 上位モデルへ昇格
-      const healed = await healLlmCall(`SES抽出(mail ${mail.id})`, err, (model) => extractFromMail(mail, model));
-      if (healed) {
-        items.push(...healed);
-        processedMailIds.push(mail.id);
-        recordSuccess(mail.id);
-        continue;
-      }
-      console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${String(err)} — 処理済みにせず次回再処理します`);
-      failed.push({ mail, err });
+      extracted = await healLlmCall(`SES抽出(mail ${mail.id})`, err, (model) => extractFromMail(mail, model));
     }
+    if (extracted) {
+      items.push(...extracted);
+      processedMailIds.push(mail.id);
+      await recordSuccess(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
+      continue;
+    }
+    console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${safeErr(firstErr)} — 処理済みにせず次回再処理します`);
+    failed.push({ mail, err: firstErr });
   }
 
   // 失敗の累積カウントと隔離。バッチ内の過半数が失敗した場合はメール固有の問題ではなく
@@ -203,10 +210,10 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome>
       );
     }
     for (const f of failed) {
-      const { attempts, quarantined } = recordFailure(f.mail, f.err, { countTowardQuarantine: !massFailure });
+      const { attempts, quarantined } = await recordFailure(f.mail, f.err, { countTowardQuarantine: !massFailure });
       if (quarantined) {
-        // 隔離 = 再試行を打ち切る（処理済み扱いにして次回以降スキップ。メタ情報は quarantine.json に残る）
-        processedMailIds.push(f.mail.id);
+        // 隔離 = 再試行を打ち切る（処理済み扱いにして次回以降スキップ。メタ情報は隔離リストに残る）
+        quarantinedMailIds.push(f.mail.id);
         recordStat('quarantinedNew');
         recordHealEvent(
           'warn',
@@ -219,7 +226,7 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome>
   const extractedCount = items.filter((i) => i.kind !== 'other').length;
   console.log(`SES抽出: ${mails.length}件のメールから案件・要員 計${extractedCount}件を抽出`);
   recordStat('extractedItems', extractedCount);
-  return { items, processedMailIds };
+  return { items, processedMailIds, quarantinedMailIds };
 }
 
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {

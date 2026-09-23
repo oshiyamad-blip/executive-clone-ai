@@ -7,14 +7,18 @@ import { createDrafts } from './draft.js';
 import { persistAndNotify } from './notify.js';
 import { markMailProcessed, writeDemoArtifact, readDemoArtifact, dedupeProjects, dedupeEngineers } from './store.js';
 import { saveProject, saveEngineer, fetchOpenProjects, fetchAvailableEngineers } from '../database/index.js';
+import { resetSheetsCache } from '../database/sheets.js';
 import { isDemo, minGrossMarginJpy, maxCandidatesPerItem, repairEnabled } from './config.js';
 import { startHealBatch } from './heal/budget.js';
-import { resetHealEvents, recordStat, getStats } from './heal/events.js';
+import { resetHealEvents, recordStat, getStats, recordFatal, hasFatal, fatalReasons } from './heal/events.js';
 import { runRepair } from './heal/repair.js';
+import { redactable, safeErr } from './redact.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 
 // SESマッチングバッチのオーケストレータ。collect→parse→extract→store→match→draft→notify を順に呼ぶ。
 // 各段は try/catch でエラーを吸収し、途中段が失敗しても後続へ渡せるデータがあれば継続する。
+// 収集失敗・重大異常・サマリ送信失敗などは recordFatal で記録し、終了コードを非0にする
+// （スケジュール実行で「失敗」として検知・通知させるため）。
 export interface SesBatchOptions {
   collectOnly?: boolean; // ①〜④まで（保存で止める）
   matchOnly?: boolean; // ⑤〜⑦のみ（既存DB/demo成果物から読んで突合）
@@ -29,7 +33,19 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   // 自動検証・修復レイヤーの初期化（コストメーターとイベント収集。demoでは実質no-op）
   startHealBatch();
   resetHealEvents();
+  resetSheetsCache();
 
+  try {
+    await runStages(opts);
+  } finally {
+    if (hasFatal()) {
+      console.error(`=== SESバッチ: 異常終了扱い（要因${fatalReasons().length}件）: ${fatalReasons().join(' / ')} ===`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+async function runStages(opts: SesBatchOptions): Promise<void> {
   let projects: Project[];
   let engineers: Engineer[];
 
@@ -51,7 +67,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
     try {
       await runRepair(true);
     } catch (err) {
-      console.error(`SES修復: パッチ案の自動生成に失敗: ${String(err)}`);
+      console.error(`SES修復: パッチ案の自動生成に失敗: ${safeErr(err)}`);
     }
   }
 }
@@ -67,14 +83,17 @@ function isEngineerItem(item: ExtractedItem): item is { kind: 'engineer'; engine
 // ①〜④: 収集 → 展開 → 抽出 → 保存（名寄せ込み）
 async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engineer[] }> {
   let mails: SesRawMail[] = [];
+  let collectFailed = false;
   try {
     mails = await collectSesMail();
   } catch (err) {
-    console.error(`SES収集: 失敗: ${String(err)}`);
+    collectFailed = true;
+    console.error(`SES収集: 失敗: ${safeErr(err)}`);
+    recordFatal('メール収集に失敗しました');
   }
   console.log(`SES収集: 未処理メール${mails.length}件`);
   recordStat('collected', mails.length);
-  if (mails.length === 0) {
+  if (mails.length === 0 && !collectFailed) {
     console.warn('SES収集: 受信0件です（Xserverからの転送設定をご確認ください）');
   }
 
@@ -82,30 +101,39 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
   try {
     parsedMails = await parseAttachments(mails);
   } catch (err) {
-    console.error(`SES展開: 失敗: ${String(err)}`);
+    console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }
 
   // 抽出に成功したメールだけを処理済みにする（失敗分は次回バッチで再処理。データ消失防止）
   let items: ExtractedItem[] = [];
   let processedMailIds: string[] = [];
+  let quarantinedMailIds: string[] = [];
   try {
-    ({ items, processedMailIds } = await extractItems(parsedMails));
+    ({ items, processedMailIds, quarantinedMailIds } = await extractItems(parsedMails));
   } catch (err) {
-    console.error(`SES抽出: 失敗: ${String(err)}（処理済みマークを保留し次回再処理します）`);
+    console.error(`SES抽出: 失敗: ${safeErr(err)}（処理済みマークを保留し次回再処理します）`);
+    recordFatal('抽出段が例外で停止しました');
   }
 
   const rawProjects = dedupeProjects(items.filter(isProjectItem).map((i) => i.project));
   const rawEngineers = dedupeEngineers(items.filter(isEngineerItem).map((i) => i.engineer));
 
-  const storedProjects = await storeProjects(rawProjects);
-  const storedEngineers = await storeEngineers(rawEngineers);
+  const failedMailIds = new Set<string>();
+  const storedProjects = await storeProjects(rawProjects, failedMailIds);
+  const storedEngineers = await storeEngineers(rawEngineers, failedMailIds);
 
-  markMailProcessed(processedMailIds);
+  // DB保存に失敗した案件・要員の元メールは処理済みにしない（次回再抽出。IDは決定的なので重複しない）
+  const toMark = processedMailIds.filter((id) => !failedMailIds.has(id));
+  const extractedMarked = await markMailProcessed(toMark, '抽出済');
+  const quarantinedMarked = await markMailProcessed(quarantinedMailIds, '隔離');
+  if (!extractedMarked || !quarantinedMarked) {
+    recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
+  }
 
   return { projects: storedProjects, engineers: storedEngineers };
 }
 
-async function storeProjects(projects: Project[]): Promise<Project[]> {
+async function storeProjects(projects: Project[], failedMailIds: Set<string>): Promise<Project[]> {
   if (isDemo()) {
     writeDemoArtifact('projects', projects);
     return projects;
@@ -116,14 +144,15 @@ async function storeProjects(projects: Project[]): Promise<Project[]> {
       const notionPageId = await saveProject(project);
       results.push({ ...project, notionPageId });
     } catch (err) {
-      console.error(`SES保存: 案件保存失敗 (${project.title}): ${String(err)}`);
+      console.error(`SES保存: 案件保存失敗 (${project.id} ${redactable(project.title)}): ${safeErr(err)}`);
+      failedMailIds.add(project.sourceMailId);
       results.push(project);
     }
   }
   return results;
 }
 
-async function storeEngineers(engineers: Engineer[]): Promise<Engineer[]> {
+async function storeEngineers(engineers: Engineer[], failedMailIds: Set<string>): Promise<Engineer[]> {
   if (isDemo()) {
     writeDemoArtifact('engineers', engineers);
     return engineers;
@@ -134,7 +163,8 @@ async function storeEngineers(engineers: Engineer[]): Promise<Engineer[]> {
       const notionPageId = await saveEngineer(engineer);
       results.push({ ...engineer, notionPageId });
     } catch (err) {
-      console.error(`SES保存: 要員保存失敗 (${engineer.displayName}): ${String(err)}`);
+      console.error(`SES保存: 要員保存失敗 (${engineer.id} ${redactable(engineer.displayName)}): ${safeErr(err)}`);
+      failedMailIds.add(engineer.sourceMailId);
       results.push(engineer);
     }
   }
@@ -160,7 +190,8 @@ async function loadExisting(): Promise<{ projects: Project[]; engineers: Enginee
     const [projects, engineers] = await Promise.all([fetchOpenProjects(), fetchAvailableEngineers()]);
     return { projects, engineers };
   } catch (err) {
-    console.error(`SES: 既存データの読み込みに失敗: ${String(err)}`);
+    console.error(`SES: 既存データの読み込みに失敗: ${safeErr(err)}`);
+    recordFatal('既存の案件・要員データを読み込めませんでした');
     return { projects: [], engineers: [] };
   }
 }
@@ -171,19 +202,22 @@ async function matchDraftAndNotify(projects: Project[], engineers: Engineer[]): 
   try {
     matches = await matchAll(projects, engineers);
   } catch (err) {
-    console.error(`SESマッチング: 失敗: ${String(err)}`);
+    console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
+    recordFatal('マッチング段が例外で停止しました');
   }
 
   try {
     matches = await createDrafts(matches, projects, engineers);
   } catch (err) {
-    console.error(`SES下書き: 失敗: ${String(err)}`);
+    console.error(`SES下書き: 失敗: ${safeErr(err)}`);
+    recordFatal('下書き生成段が例外で停止しました');
   }
 
   try {
     await persistAndNotify(matches, projects, engineers);
   } catch (err) {
-    console.error(`SES通知: 失敗: ${String(err)}`);
+    console.error(`SES通知: 失敗: ${safeErr(err)}`);
+    recordFatal('保存・通知段が例外で停止しました');
   }
 
   return matches;
@@ -197,4 +231,7 @@ function parseArgs(): SesBatchOptions {
   };
 }
 
-runSesBatch(parseArgs()).catch(console.error);
+runSesBatch(parseArgs()).catch((err) => {
+  console.error(`SESバッチ: 予期しないエラーで終了しました: ${safeErr(err)}`);
+  process.exitCode = 1;
+});

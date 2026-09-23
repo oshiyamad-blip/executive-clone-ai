@@ -1,14 +1,15 @@
-// マッチ結果DB更新 + サマリ生成。demo=ローカルJSON+コンソール、本番=Notion保存+Gmailサマリ送信。
-// 0件でも実行結果を通知する（要件F6）。
+// マッチ結果DB更新 + サマリ生成。demo=ローカルJSON+コンソール、本番=DB保存+サマリメール送信。
+// 0件でも実行結果を通知する（要件F6）。ログ秘匿モードではコンソールに件数1行だけを出す（詳細はメールのみ）。
 //
 // 基本設計I/F（persistAndNotify(matches): Promise<void>）に対し、実装ではマッチ結果DBのrelation
 // （案件・要員）を張るため projects/engineers を追加引数にしている（draft.tsと同様の変更点）。
 import { saveMatch } from '../database/index.js';
 import { sendPlainMailViaMail } from './mail/index.js';
-import { isDemo, sesNotifyTo } from './config.js';
+import { isDemo, sesNotifyTo, logRedact } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
-import { buildDiagnosisReport } from './heal/events.js';
+import { buildDiagnosisReport, recordFatal } from './heal/events.js';
+import { redactable, safeErr } from './redact.js';
 import type { MatchResult, Project, Engineer } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -25,9 +26,9 @@ export async function persistAndNotify(
   let summary = buildSummary(saved);
   // 本番のみ、自動検証・修復の診断レポートをサマリ末尾に添える（コスト概算・異常検知・隔離状況）
   if (!isDemo()) {
-    summary = `${summary}\n${buildDiagnosisReport()}`;
+    summary = `${summary}\n${await buildDiagnosisReport()}`;
   }
-  await notifySummary(summary);
+  await notifySummary(summary, countLine(saved));
 }
 
 async function persistMatches(
@@ -48,11 +49,17 @@ async function persistMatches(
       });
       results.push({ ...match, notionPageId });
     } catch (err) {
-      console.error(`SES通知: マッチ保存失敗 (${match.title}): ${String(err)}`);
+      console.error(`SES通知: マッチ保存失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
       results.push(match);
     }
   }
   return results;
+}
+
+// 区分ごとの件数（サマリ本文とログ秘匿モードのコンソール出力で共用。人名・案件名を含まない）
+function countLine(matches: MatchResult[]): string {
+  const count = (category: MatchResult['category']) => matches.filter((m) => m.category === category).length;
+  return `成立候補: ${count('confirmed')}件 / 交渉提案: ${count('negotiable')}件 / 参考提案: ${count('tentative')}件 / 要確認: ${count('review')}件`;
 }
 
 function buildSummary(matches: MatchResult[]): string {
@@ -64,9 +71,7 @@ function buildSummary(matches: MatchResult[]): string {
   const lines: string[] = [];
   lines.push('=== SESマッチング結果サマリ ===');
   lines.push(`検出日時: ${new Date().toLocaleString('ja-JP')}`);
-  lines.push(
-    `成立候補: ${confirmed.length}件 / 交渉提案: ${negotiable.length}件 / 参考提案: ${tentative.length}件 / 要確認: ${needsReview.length}件`,
-  );
+  lines.push(countLine(matches));
   lines.push('');
 
   if (matches.length === 0) {
@@ -115,8 +120,9 @@ function buildSummary(matches: MatchResult[]): string {
   return lines.join('\n');
 }
 
-async function notifySummary(summary: string): Promise<void> {
-  console.log(`\n${summary}\n`);
+async function notifySummary(summary: string, counts: string): Promise<void> {
+  if (logRedact()) console.log(`SES通知: 結果 ${counts}（詳細はサマリメールを参照）`);
+  else console.log(`\n${summary}\n`);
   if (isDemo()) return; // demoはコンソール出力のみ
 
   const to = sesNotifyTo();
@@ -127,6 +133,7 @@ async function notifySummary(summary: string): Promise<void> {
   try {
     await sendPlainMailViaMail(to, 'SES案件・要員マッチング バッチ実行結果', summary);
   } catch (err) {
-    console.error(`SES通知: サマリメール送信に失敗: ${String(err)}`);
+    console.error(`SES通知: サマリメール送信に失敗: ${safeErr(err)}`);
+    recordFatal('サマリメールの送信に失敗しました');
   }
 }

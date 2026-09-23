@@ -3,8 +3,9 @@
 // demoは fixture にあらかじめ埋めたテキストをそのまま返す（外部アクセスしない）。
 import { read as readXlsx, utils as xlsxUtils } from 'xlsx';
 import { google, sheets_v4 } from 'googleapis';
-import { getGoogleAuth, SES_SCOPES } from '../collectors/googleAuth.js';
-import { isDemo } from './config.js';
+import { getServiceAccountAuth } from '../collectors/googleAuth.js';
+import { isDemo, googleTargetEmail } from './config.js';
+import { redactable, safeErr } from './redact.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
 
 export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[]> {
@@ -17,7 +18,7 @@ export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[
       const sheetAttachments = await parseSheetLinks(mail);
       parsed.push({ ...mail, attachments: [...fileAttachments, ...sheetAttachments] });
     } catch (err) {
-      console.error(`SES展開: 添付展開に失敗 (mail ${mail.id}): ${String(err)}`);
+      console.error(`SES展開: 添付展開に失敗 (mail ${mail.id}): ${safeErr(err)}`);
       parsed.push(mail); // 失敗しても本文だけで処理継続
     }
   }
@@ -31,7 +32,7 @@ async function parseAttachment(att: SesAttachment): Promise<SesAttachment> {
   try {
     return { ...att, text: xlsxToText(att.data) };
   } catch (err) {
-    console.warn(`SES展開: xlsx解析に失敗 (${att.filename}): ${String(err)}`);
+    console.warn(`SES展開: xlsx解析に失敗 (${redactable(att.filename)}): ${safeErr(err)}`);
     return att;
   }
 }
@@ -56,10 +57,14 @@ function xlsxToText(base64Data: string): string {
   }).join('\n\n');
 }
 
-// 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す
+const SHEETS_READONLY_SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
+
+// 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す。
+// GOOGLE_TARGET_EMAIL があればDWDでそのユーザーとして（社内共有のシートも読める）、
+// 無ければサービスアカウント単体で読む（リンク共有・SAへの共有のシートのみ）
 async function parseSheetLinks(mail: SesRawMail): Promise<SesAttachment[]> {
   if (mail.sheetLinks.length === 0) return [];
-  const auth = getGoogleAuth(SES_SCOPES); // spreadsheets.readonly を含むSES用スコープで認証
+  const auth = getServiceAccountAuth(SHEETS_READONLY_SCOPES, googleTargetEmail() || undefined);
   if (!auth) {
     console.warn(`SES展開: Google認証未設定のためスプレッドシートリンクをスキップ (mail ${mail.id})`);
     return [];
@@ -79,7 +84,7 @@ async function parseSheetLinks(mail: SesRawMail): Promise<SesAttachment[]> {
         text,
       });
     } catch (err) {
-      console.warn(`SES展開: スプレッドシート読取に失敗 (${link}): ${String(err)}`);
+      console.warn(`SES展開: スプレッドシート読取に失敗 (mail ${mail.id} ${redactable(link)}): ${safeErr(err)}`);
     }
   }
   return results;
@@ -104,7 +109,7 @@ async function readSheetAsText(sheetsApi: sheets_v4.Sheets, spreadsheetId: strin
       if (rows.length === 0) continue; // 空タブはスキップ
       parts.push(`【タブ: ${title}】\n${rows.map((row) => row.join('\t')).join('\n')}`);
     } catch (err) {
-      console.warn(`SES展開: スプレッドシートのタブ読取に失敗 (${title}): ${String(err)}`);
+      console.warn(`SES展開: スプレッドシートのタブ読取に失敗 (${redactable(title)}): ${safeErr(err)}`);
     }
   }
   return parts.join('\n\n');
