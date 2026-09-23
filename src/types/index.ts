@@ -206,6 +206,33 @@ export interface PreferredMatch {
   total: number;
 }
 
+// 受信からの鮮度。fresh=14日以内、aging=それより古い（並びで少し下げる）、stale=SES_STALE_DAYS 超（強マッチにしない）
+export type FreshnessLevel = 'fresh' | 'aging' | 'stale';
+export interface Freshness {
+  level: FreshnessLevel;
+  ageDays: number; // 受信からの経過日数
+}
+
+// 一次選抜の内訳（判定根拠・サマリ・最終判定の入力に簡潔な形で載せる）。
+// location: same=同一都道府県 / adjacent=隣接県 / remote=フルリモートで不問 / unknown=片側不明。
+// rate: ok=粗利下限以上 / lowerOnly=案件単金の下限で計算 / negotiable=交渉で下限に届く / unknown=単金不明
+export interface PairBreakdown {
+  skill: {
+    basis: 'required' | 'preferred' | 'unknown'; // 判定に使ったスキル（必須 / 必須が空のため尚可 / どちらも空）
+    rate: number; // 0〜1
+    exact: number;
+    equiv: number;
+    implied: number;
+    total: number;
+    preferred: PreferredMatch;
+  };
+  location: 'same' | 'adjacent' | 'remote' | 'unknown';
+  timing: 'ok' | 'unknown';
+  rate: 'ok' | 'lowerOnly' | 'negotiable' | 'unknown';
+  freshness: Freshness; // 案件・要員のうち古い側
+  notes: string[]; // 区分・並びを調整した理由の短い記述（含意のみで降格・鮮度で降格 等）
+}
+
 // 一次選抜（LLM不使用）を通過した候補ペア
 export interface MatchPair {
   project: Project;
@@ -221,6 +248,7 @@ export interface MatchPair {
   negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
   skillBreakdown?: SkillBreakdown; // 判定に使ったスキル（必須、無ければ尚可）の満たし方
   preferredMatch?: PreferredMatch; // 尚可スキルの一致数（同順位の並べ替え・最終判定の参考）
+  breakdown: PairBreakdown;
 }
 
 // 紹介メール下書き参照（全員に返信のスレッド返信下書き）

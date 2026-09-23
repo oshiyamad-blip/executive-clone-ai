@@ -41,6 +41,8 @@ import {
   notionMatchDbId,
   minGrossMarginJpy,
   maxCandidatesPerItem,
+  maxProjectsPerEngineer,
+  staleDays,
   skillMatchThreshold,
   skillMatchStrongThreshold,
   hourlyToMonthlyHours,
@@ -102,6 +104,8 @@ function collectNumberWarnings(): string[] {
     for (const read of [
       minGrossMarginJpy,
       maxCandidatesPerItem,
+      maxProjectsPerEngineer,
+      staleDays,
       skillMatchThreshold,
       skillMatchStrongThreshold,
       hourlyToMonthlyHours,
@@ -425,6 +429,7 @@ function checkNumbers(numberWarnings: string[]): void {
   const margin = logRedact() ? '粗利下限 設定済み（値は表示しません）' : `粗利下限 ${minGrossMarginJpy().toLocaleString('ja-JP')}円/月`;
   info(
     `${margin}・スキル一致率 ${skillMatchThreshold()}（強マッチ ${skillMatchStrongThreshold()}）・` +
+      `候補 1案件${maxCandidatesPerItem()}件・1要員${maxProjectsPerEngineer()}件まで・受信${staleDays()}日超は要再確認・` +
       `収集 直近${collectDays()}日（1回${maxMailsPerRun()}件まで）`,
   );
   if (numberWarnings.length === 0) ok('数値の設定はすべて解釈できました（未設定の項目は既定値）');

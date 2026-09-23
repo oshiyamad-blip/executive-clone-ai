@@ -2,7 +2,7 @@ import '../env.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
-import { matchAll, type PairScope } from './match.js';
+import { matchAll, resetPrimarySelectTally, type PairScope } from './match.js';
 import { matchIncrementally } from './matchRun.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
@@ -97,6 +97,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   startHealBatch();
   resetHealEvents();
   resetSkillTokenTally();
+  resetPrimarySelectTally();
   resetSheetsCache();
   resetProperMasterCache();
   if (!isDemo()) startRunClock();

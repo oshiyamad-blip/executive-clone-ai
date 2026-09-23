@@ -149,6 +149,17 @@ export function maxCandidatesPerItem(): number {
   return envNum('MAX_CANDIDATES_PER_ITEM', 5, { min: 1, int: true });
 }
 
+// 1回の突合で1名の要員を候補に入れる案件数の上限（単金の安い1名が多数の案件の上位を独占しないように。
+// 枠からあふれた案件には次点の要員を繰り上げる）
+export function maxProjectsPerEngineer(): number {
+  return envNum('MAX_PROJECTS_PER_ENGINEER', 3, { min: 1, int: true });
+}
+
+// 受信からこの日数を超えた案件・要員は、募集・稼働の状況が変わっている恐れが高いため強マッチにせず「要再確認」を付ける
+export function staleDays(): number {
+  return envNum('SES_STALE_DAYS', 45, { min: 1 });
+}
+
 // 必須スキル一致率の下限（0〜1）。これ未満は除外（＝許容範囲の下端）
 export function skillMatchThreshold(): number {
   return envNum('SKILL_MATCH_THRESHOLD', 0.6, { min: 0, max: 1 });

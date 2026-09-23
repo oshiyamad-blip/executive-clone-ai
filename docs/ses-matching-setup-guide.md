@@ -328,7 +328,9 @@ MIN_GROSS_MARGIN_JPY=100000     # 粗利下限（円/月）
 | `ENABLE_NEGOTIATION` | true | 単金交渉で粗利を作る提案を出すか |
 | `NEGOTIATION_MAX_PROJECT_RAISE_MAN` | 5 | 交渉で案件単金を上げる上限（万円） |
 | `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | 5 | 交渉で要員単金を下げる上限（万円） |
-| `MAX_CANDIDATES_PER_ITEM` | 5 | 1件あたりLLM判定に回す上限（コスト上限保証）。成立候補→交渉提案→参考提案→要確認の順に残す |
+| `MAX_CANDIDATES_PER_ITEM` | 5 | 1案件あたりLLM判定に回す上限（コスト上限保証）。下の「並び順」で上から残す |
+| `MAX_PROJECTS_PER_ENGINEER` | 3 | 1回の突合で1名の要員を候補に入れる案件数の上限（単金の安い1名が多数の案件の上位を独占しないように。あふれた案件の枠は次点の要員で埋める） |
+| `SES_STALE_DAYS` | 45 | 受信からこの日数を超えた案件・要員は成立候補にせず参考提案に下げ、根拠に「要再確認（受信から45日超）」を付ける |
 | `MATCH_MIN_LLM_SCORE` | 50 | AI最終判定のスコアがこれ未満の成立候補は参考提案に下げる（0で無効） |
 
 判定の補足:
@@ -350,6 +352,22 @@ MIN_GROSS_MARGIN_JPY=100000     # 粗利下限（円/月）
   Sheets運用以外は `data/ses-review/unknown-skills.json`）に残します。辞書を育てる材料にしてください（公開ログには件数だけを出します）。
   ルールを変えたら `npm run ses:eval:rules`（API キー不要）で表駆動の回帰確認をしてください。
 - 交渉後の単金は0.5万円刻みで提示します。
+- 常駐のみ（リモート不可）の案件とフルリモート希望の要員は組みません。一部出社の案件×フルリモート希望は根拠に注意を付けて残します。
+- 案件と要員の営業元のメールドメインが同じ組（同じ会社の案件と要員）は組みません。フリーメール（gmail.com・yahoo.co.jp・
+  outlook.jp・icloud.com 等）と `SES_OWN_DOMAINS`（社内の営業が共有した案件・要員）は対象外です。サブドメインは寄せず、完全一致だけを同じ会社とみなします。
+- 候補は「合う順」に並べます: 区分（成立候補→交渉提案→参考提案→要確認）→ スキルの適合度（一致率。受信から14日を超えた組は少し下げる）
+  → 完全一致の多さ（同義・推定より先）→ 尚可スキルの一致 → 粗利 → 受信の新しい順 → ID（毎回同じ順）。粗利は同じ適合度の中の並びにだけ効きます。
+  この順に、1案件 `MAX_CANDIDATES_PER_ITEM` 件・1要員 `MAX_PROJECTS_PER_ENGINEER` 件を超えない組を上から採ります（自社社員→案件探しも、
+  社員ごと・案件ごとに `MAX_CANDIDATES_PER_ITEM` 件まで同じ方法で採ります）。
+- 判定根拠には一次選抜の内訳（例: 「スキル100%（一致2/2）・尚可1/1・勤務地 同一都道府県・時期 適合・粗利15万円・受信1日前」）を載せます。
+  AI判定の組は AI の根拠文の後に「［内訳: …］」として添え、AI判定の入力にも同じ内訳を渡します。
+- 抽出時は、メールの受信日（日本時間）を基準に開始時期・稼働可能日を日付にします。「即日」「随時」は受信日、「10月〜」はその月の1日、
+  上旬/中旬/下旬は1日/11日/21日、年の無い月日は受信日の60日前以降で最も早い年（受信9/23の「8月〜」は今年、「1月〜」は翌年）です。
+  原文の表記から決まる日付はコードで決め、決まらないときだけAIの日付を使います（受信日より60日以上前なら1年後ろに補正）。
+  時期の判定では、開始日が過ぎてもまだ募集中の案件は「今日から」として扱います（稼働可能日 ≤ 開始日（過ぎていれば今日）＋ `MATCH_TIMING_GRACE_DAYS`）。
+- 抽出値の妥当性: 単金は5〜300万円/月の範囲外を「単金不明」（要確認）にします。「希望 600,000（万円と誤記）」のような明らかな単位の取り違えは
+  60万円に直します。年齢は18〜75歳、経験年数は0〜50年の範囲外を不明にし、単金の下限と上限が逆なら入れ替えます。
+- バッチのログに一次選抜の件数（評価した組・除外理由別の件数・上限で絞った件数。人名・案件名は含まない）を1行で出します。
 
 ---
 
@@ -386,7 +404,8 @@ npm run ses:match      # マッチのみ
   結果列は `抽出済`（保存まで成功）/ `隔離`（再試行の打ち切り）/ `除外`（自分たちのメール）。保存に失敗した案件・要員の元メールは記録せず、次回再処理します。
 - 通常バッチは、今回の新着を **直近 `SES_MATCH_LOOKBACK_DAYS`（既定14日）に保存済みの募集中案件・提案可要員とも突合**します
   （別々の実行回に届いた案件と要員の組を見逃さないため）。LLM判定は「新着を含み、まだマッチタブ/DBに無いペア」だけ
-  （新着1件あたり最大 `MAX_CANDIDATES_PER_ITEM` 件）なので、同じペアを毎回判定・通知し直すことはありません。
+  （新着の案件1件あたり最大 `MAX_CANDIDATES_PER_ITEM` 件・要員1名あたり最大 `MAX_PROJECTS_PER_ENGINEER` 件）なので、
+  同じペアを毎回判定・通知し直すことはありません。
 - `data/` は再作成される作業領域です。サーバ移設時は Notion／スプレッドシートが正となります。
 - 異常（収集失敗・抽出の過半数失敗・保存やサマリ送信の失敗・LLM鍵の未設定など）があると**終了コード1**で終わります（スケジューラの失敗通知に使えます）。
 
@@ -504,7 +523,7 @@ UIでできること:
 - プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
 - メール量の測定: `SES_STATS_DAYS`（`npm run ses:mail-stats` の遡り日数。既定30）
-- 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MATCH_MIN_LLM_SCORE` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
+- 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
 - 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_REVIEW_DATA_DIR`

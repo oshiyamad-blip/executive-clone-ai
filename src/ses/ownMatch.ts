@@ -22,15 +22,36 @@ import {
   logRedact,
 } from './config.js';
 import { safeErr } from './redact.js';
-import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand } from '../types/index.js';
+import {
+  allocateWithCaps,
+  compareDesc,
+  directnessKeys,
+  freshnessOf,
+  freshnessScorePenalty,
+  preferredShare,
+  skillFitScore,
+  staleCaution,
+} from './ranking.js';
+import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand, PairBreakdown, Freshness } from '../types/index.js';
 
 // 案件単価は上限(rateMax)を優先し、無ければ下限(rateMin)。両方無ければ null。
 export function projectRateMan(project: Project): number | null {
   return project.rateMax ?? project.rateMin ?? null;
 }
 
+// 並びに使う内部の値（OwnMatch には載せない）
+interface OwnRankInfo {
+  skill: PairBreakdown['skill'];
+  freshness: Freshness;
+  receivedMs: number;
+}
+
 // 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
-export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch | null {
+export function evaluateOwnMatch(own: OwnEngineer, project: Project, now = new Date()): OwnMatch | null {
+  return evaluateOwnMatchDetailed(own, project, now)?.match ?? null;
+}
+
+function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date): { match: OwnMatch; rank: OwnRankInfo } | null {
   const reviewReasons: string[] = [];
   // スキル: 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける。
   // 必須スキルが空の案件は尚可スキルで参考判定、どちらも空なら案件名に社員のスキルが現れる場合だけ要確認
@@ -46,6 +67,9 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
     if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold() && !implied) band = 'strong';
   }
 
+  // リモート条件: 常駐のみの案件にフルリモート希望の社員は組まない（外部要員と同じ）
+  if (project.remote === 'none' && own.remoteWish === 'full') return null;
+
   // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
   const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
   const locationKnownOk = isAdjacentOrSame(project.prefecture, own.prefecture);
@@ -58,7 +82,7 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
   const timingUnknown = project.startDate === null || own.availableFrom === null;
   const timingOk = timingUnknown
     ? true
-    : isTimingWithinGrace(project.startDate as string, own.availableFrom as string);
+    : isTimingWithinGrace(project.startDate as string, own.availableFrom as string, now);
   if (!timingUnknown && !timingOk) return null;
 
   // 金額: 案件単価 ≥ 必要案件単価。どちらか不明なら要確認、満たさなければ除外
@@ -71,14 +95,25 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
   // 表示用に0.5万円刻みへ切り下げる（「+5.200000000000003万円」を出さない。多めには見せない）
   const rateGapMan = rateUnknown ? null : roundManDown((rate as number) - (required as number));
 
+  // 鮮度: 受信から SES_STALE_DAYS 超の案件は募集が終わっている恐れがあるため強マッチにせず要再確認を付ける
+  const freshness = freshnessOf(project.receivedAt, now);
+  const stale = freshness.level === 'stale';
+  const skillBand = band;
+  if (stale) band = 'tentative';
+
   const needsReview = reviewReasons.length > 0;
-  const score = Math.round(skill.rate * 70 + (locationOk ? 20 : 0) + (timingOk ? 10 : 0));
+  const score = Math.max(
+    0,
+    Math.round(skill.rate * 70 + (locationOk ? 20 : 0) + (timingOk ? 10 : 0) - freshnessScorePenalty(freshness)),
+  );
 
   const pct = Math.round(skill.rate * 100);
   const notes =
-    (band === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
+    (skillBand === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
+    (skillBand === 'strong' && stale ? '【参考提案】' : '') +
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
     (implied ? `${implied}。` : '') +
+    (stale ? `${staleCaution('案件')}。` : '') +
     (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '');
   const skillText =
     skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
@@ -86,51 +121,73 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
     ? `${notes}${reviewReasons.join('・')}のため要確認です（${skillText}）。`
     : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 +${fmtMan(rateGapMan as number)}万円）・${skillText}・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
 
+  const b = skill.breakdown;
   return {
-    id: `ownmatch_${own.id}_${project.id}`,
-    ownEngineerId: own.id,
-    ownEngineerName: own.displayName,
-    projectId: project.id,
-    projectTitle: project.title,
-    projectRate: rate,
-    requiredProjectRate: required,
-    rateGapMan,
-    meetsRate,
-    skillMatchRate: skill.rate,
-    band,
-    locationOk,
-    timingOk,
-    needsReview,
-    score,
-    reason,
-    agentEmail: project.agentEmail,
-    detectedAt: new Date(),
+    match: {
+      id: `ownmatch_${own.id}_${project.id}`,
+      ownEngineerId: own.id,
+      ownEngineerName: own.displayName,
+      projectId: project.id,
+      projectTitle: project.title,
+      projectRate: rate,
+      requiredProjectRate: required,
+      rateGapMan,
+      meetsRate,
+      skillMatchRate: skill.rate,
+      band,
+      locationOk,
+      timingOk,
+      needsReview,
+      score,
+      reason,
+      agentEmail: project.agentEmail,
+      detectedAt: new Date(),
+    },
+    rank: {
+      skill: {
+        basis: skill.basis,
+        rate: skill.rate,
+        exact: b?.exact.length ?? 0,
+        equiv: b?.equiv.length ?? 0,
+        implied: b?.implied.length ?? 0,
+        total: b ? b.exact.length + b.equiv.length + b.implied.length + b.missing.length : 0,
+        preferred: skill.preferred,
+      },
+      freshness,
+      receivedMs: Number.isFinite(new Date(project.receivedAt).getTime()) ? new Date(project.receivedAt).getTime() : 0,
+    },
   };
 }
 
-// 自社社員ごとに、合いそうな案件を上位 maxCandidatesPerItem() 件まで返す（純関数・LLM不使用）。
-export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Project[]): OwnMatch[] {
+// 自社社員ごとに合いそうな案件を最大 maxCandidatesPerItem() 件（案件ごとにも同数まで）返す（純関数・LLM不使用）。
+// 並びは適合が先: 強マッチ → 参考提案 → 要確認、同じ区分の中はスキル適合度（一致率−鮮度の減点）→ 完全一致の割合 →
+// 尚可の一致 → 単価差 → 受信の新しい順 → ID。割り当ては外部要員の一次選抜と同じ上限つき貪欲法
+export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Project[], now = new Date()): OwnMatch[] {
   const openProjects = projects.filter((p) => p.status === 'open');
   const availableOwn = own.filter((o) => o.status === 'available');
 
-  const results: OwnMatch[] = [];
+  const candidates: Array<{ match: OwnMatch; rank: OwnRankInfo }> = [];
   for (const engineer of availableOwn) {
-    const candidates: OwnMatch[] = [];
     for (const project of openProjects) {
-      const m = evaluateOwnMatch(engineer, project);
+      const m = evaluateOwnMatchDetailed(engineer, project, now);
       if (m) candidates.push(m);
     }
-    // 強マッチ → 参考提案 → 要確認 の順（単価差の大きい参考提案が強マッチを押し出さないように）→ 単価差 降順 → スキル一致率 降順
-    const rank = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
-    candidates.sort(
-      (a, b) =>
-        rank(a) - rank(b) ||
-        (b.rateGapMan ?? -Infinity) - (a.rateGapMan ?? -Infinity) ||
-        b.skillMatchRate - a.skillMatchRate,
-    );
-    results.push(...candidates.slice(0, maxCandidatesPerItem()));
   }
-  return results;
+  const category = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
+  const keys = (c: { match: OwnMatch; rank: OwnRankInfo }): number[] => [
+    -category(c.match),
+    skillFitScore(c.rank.skill, c.rank.freshness),
+    ...directnessKeys(c.rank.skill),
+    preferredShare(c.rank.skill),
+    c.match.rateGapMan ?? -Infinity,
+    c.rank.receivedMs,
+  ];
+  candidates.sort((a, b) => compareDesc(keys(a), keys(b)) || (a.match.id < b.match.id ? -1 : a.match.id > b.match.id ? 1 : 0));
+  const limit = maxCandidatesPerItem();
+  return allocateWithCaps(candidates, [
+    { key: (c) => c.match.ownEngineerId, max: limit },
+    { key: (c) => c.match.projectId, max: limit },
+  ]).map((c) => c.match);
 }
 
 async function loadOwnEngineers(): Promise<OwnEngineer[]> {

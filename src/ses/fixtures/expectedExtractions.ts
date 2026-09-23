@@ -1,6 +1,7 @@
 // demo用の決定的スタブ抽出結果。src/ses/fixtures/mails.ts の各メールIDに対応する
 // 期待 ExtractedItem[] を固定マッピングとして持つ（LLM不使用）。
 import type { ExtractedItem } from '../../types/index.js';
+import { demoReceivedAt } from './demoClock.js';
 
 export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
   sesmail_demo_p1: [
@@ -24,7 +25,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '田中一郎',
         agentEmail: 'tanaka@alphatech.example.jp',
         sourceMailId: 'sesmail_demo_p1',
-        receivedAt: new Date('2026-07-16T09:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T09:00:00+09:00'),
         status: 'open',
       },
     },
@@ -51,7 +52,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '鈴木花子',
         agentEmail: 'suzuki@betasol.example.jp',
         sourceMailId: 'sesmail_demo_e1',
-        receivedAt: new Date('2026-07-16T09:30:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T09:30:00+09:00'),
         status: 'available',
       },
     },
@@ -78,7 +79,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '佐藤次郎',
         agentEmail: 'sato@gammasys.example.jp',
         sourceMailId: 'sesmail_demo_p2',
-        receivedAt: new Date('2026-07-16T10:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T10:00:00+09:00'),
         status: 'open',
       },
     },
@@ -105,7 +106,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '高橋三郎',
         agentEmail: 'takahashi@deltapartners.example.jp',
         sourceMailId: 'sesmail_demo_e2',
-        receivedAt: new Date('2026-07-16T10:30:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T10:30:00+09:00'),
         status: 'available',
       },
     },
@@ -132,7 +133,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '山本四郎',
         agentEmail: 'yamamoto@epsilontech.example.jp',
         sourceMailId: 'sesmail_demo_e3',
-        receivedAt: new Date('2026-07-16T11:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T11:00:00+09:00'),
         status: 'available',
       },
     },
@@ -159,7 +160,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '中村五郎',
         agentEmail: 'nakamura@zetapartners.example.jp',
         sourceMailId: 'sesmail_demo_multi',
-        receivedAt: new Date('2026-07-16T13:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T13:00:00+09:00'),
         status: 'open',
       },
     },
@@ -183,7 +184,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '中村五郎',
         agentEmail: 'nakamura@zetapartners.example.jp',
         sourceMailId: 'sesmail_demo_multi',
-        receivedAt: new Date('2026-07-16T13:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T13:00:00+09:00'),
         status: 'open',
       },
     },
@@ -212,7 +213,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '伊藤六郎',
         agentEmail: 'ito@thetaworks.example.jp',
         sourceMailId: 'sesmail_demo_p3',
-        receivedAt: new Date('2026-07-16T15:00:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T15:00:00+09:00'),
         status: 'open',
       },
     },
@@ -239,7 +240,7 @@ export const EXPECTED_EXTRACTIONS: Record<string, ExtractedItem[]> = {
         agentContact: '渡辺七海',
         agentEmail: 'watanabe@iotasoft.example.jp',
         sourceMailId: 'sesmail_demo_e4',
-        receivedAt: new Date('2026-07-16T15:30:00+09:00'),
+        receivedAt: demoReceivedAt('2026-07-16T15:30:00+09:00'),
         status: 'available',
       },
     },

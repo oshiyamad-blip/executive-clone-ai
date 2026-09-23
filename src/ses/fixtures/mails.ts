@@ -2,9 +2,10 @@
 // 「成立」「粗利不足で除外」「単金不明で要確認」「その他（破棄）」の全分岐と、
 // 1通複数件抽出・添付(xlsx)・スプレッドシートリンクのケースを網羅する。
 import type { SesRawMail } from '../../types/index.js';
+import { demoReceivedAt } from './demoClock.js';
 
 function d(iso: string): Date {
-  return new Date(iso);
+  return demoReceivedAt(iso);
 }
 
 // cc/messageIdHeader/references は loadFixtureMails() で既定値を補完する（記述を簡潔に保つ）

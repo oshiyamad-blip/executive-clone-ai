@@ -5,7 +5,15 @@
 //   次回の実行でも突合の対象に残るため、時間切れ・途中の失敗で判定し損ねたペアを取りこぼさない
 // - 保存できなかったマッチ・文面を用意できなかったマッチのある案件・要員は突合済にしない（次回判定し直す）
 // - 次回の実行では突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れる案件・要員を先に突合し、それでも残れば異常終了で知らせる
-import { primarySelect, prepareJudging, judgePairs, matchIdOf, type PairScope } from './match.js';
+import {
+  primarySelectDetailed,
+  prepareJudging,
+  judgePairs,
+  matchIdOf,
+  formatPrimaryStats,
+  type PairScope,
+  type PrimarySelectStats,
+} from './match.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
 import { markItemsMatched } from '../database/index.js';
@@ -31,6 +39,7 @@ interface Group {
 export interface IncrementalMatchResult {
   saved: MatchResult[]; // 保存できたマッチ（サマリに載せる）
   deferredItems: number; // 期限切れ・失敗で突合し終えず次回に回した案件・要員の数
+  primaryStats: PrimarySelectStats; // 一次選抜の除外理由・上限の内訳
 }
 
 export interface IncrementalMatchOptions {
@@ -90,8 +99,10 @@ export async function matchIncrementally(
   opts: IncrementalMatchOptions = {},
 ): Promise<IncrementalMatchResult> {
   const fewShot = await prepareJudging();
-  const groups = groupPairs(projects, engineers, scope, primarySelect(projects, engineers, scope));
+  const primary = primarySelectDetailed(projects, engineers, scope);
+  const groups = groupPairs(projects, engineers, scope, primary.pairs);
   const pairCount = groups.reduce((n, g) => n + g.pairs.length, 0);
+  console.log(`SESマッチング: ${formatPrimaryStats(primary.stats)}`);
   console.log(`SESマッチング: 突合前の案件・要員${groups.length}件・判定するペア${pairCount}件`);
 
   const saved = opts.saved ?? [];
@@ -156,5 +167,5 @@ export async function matchIncrementally(
         '（実行時間の上限・判定の失敗が続いています。SES_RUN_DEADLINE_MINUTES・SES_MAX_MAILS_PER_RUN を見直すか、SES_MATCH_LOOKBACK_DAYS を広げて手動で再実行してください）',
     );
   }
-  return { saved, deferredItems: unfinished.length };
+  return { saved, deferredItems: unfinished.length, primaryStats: primary.stats };
 }

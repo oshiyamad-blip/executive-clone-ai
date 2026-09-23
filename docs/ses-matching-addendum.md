@@ -33,7 +33,7 @@
 |---|---|
 | 型 `OwnEngineer` / `OwnMatch`（`src/types/index.ts`） | 自社社員と、その社員×案件のマッチ。`requiredProjectRate`(必要案件単価)を持つ |
 | Notion 自社社員DB（`src/database/index.ts`） | `saveOwnEngineer` / `fetchOwnEngineers`。プロパティ: 表示名・スキル・経験年数・**必要案件単価**・居住地・リモート希望・稼働可能日・ステータス（稼働可/アサイン済） |
-| `src/ses/ownMatch.ts` | `matchOwnEngineersToProjects()`（純関数）＋ `runOwnMatch()`（社員・案件を読み込み→突合→出力）。社員ごとに上位 `MAX_CANDIDATES_PER_ITEM` 件を提示 |
+| `src/ses/ownMatch.ts` | `matchOwnEngineersToProjects()`（純関数）＋ `runOwnMatch()`（社員・案件を読み込み→突合→出力）。適合順（スキル適合が先・単価差は後）に、社員ごと・案件ごとに `MAX_CANDIDATES_PER_ITEM` 件まで提示 |
 | demo fixtures（`src/ses/fixtures/ownEngineers.ts`） | 単価充足で成立するケースと、単価不足で除外されるケースを網羅 |
 | npm scripts | `ses:own-match`（本番=Notion自社社員DB＋案件DB）/ `ses:own-match:demo`（fixtureで外部呼び出しなし） |
 | env | `NOTION_OWN_ENGINEER_DB_ID` |
