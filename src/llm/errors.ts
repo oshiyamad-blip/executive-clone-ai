@@ -33,7 +33,10 @@ function errorText(err: unknown): string {
   return `${typeof e.message === 'string' ? e.message : ''} ${body}`;
 }
 
-const RETIRED_WORDS = /deprecat|retire|no longer (?:available|supported)|end[- ]of[- ]life|has been (?:removed|sunset)|not available/i;
+// モデルを主語にした退役・提供終了の言い回しだけを拾う（「<機能> is not available for model …」「… is deprecated for this model」の
+// ような、生きているモデルでの機能・引数の誤りで代替モデルに切り替えない）
+const MODEL_RETIRED =
+  /\bmodel\b[^.;]{0,80}?\b(?:has been|have been|is|was)\s+(?:now\s+)?(?:deprecated|retired|removed|sunset|discontinued|no longer (?:available|supported))|\bmodel\b[^.;]{0,80}?\b(?:reached|is past|has passed)\s+(?:its\s+)?end[- ]of[- ]life/i;
 
 // モデルそのものが使えない（退役・提供終了・存在しないモデルID）ことを示すAPIエラーか。
 // 404 not_found_error は「model: …」を含むときだけ（ファイル・バッチ等の別リソースの404と取り違えない）
@@ -43,6 +46,6 @@ export function isModelUnavailableError(err: unknown): boolean {
   const text = errorText(err);
   if (!/model/i.test(text)) return false;
   if (status === 404) return /not_found_error|not[_ ]found/i.test(text);
-  if (status === 400 || status === 410) return RETIRED_WORDS.test(text);
+  if (status === 400 || status === 410) return MODEL_RETIRED.test(text);
   return false;
 }

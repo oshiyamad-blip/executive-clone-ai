@@ -64,14 +64,17 @@ export function totalLlmCostJpy(): number {
   return getLlmUsageLog().reduce((sum, u) => sum + usageCostJpy(u), 0);
 }
 
-// 入力のうちキャッシュから読んだ割合（0〜1）。入力が無ければ null
+// 入力のうちキャッシュから読んだ割合（0〜1）。入力が無い・どの呼び出しもキャッシュを使っていない（書き込みも読み込みも0）
+// ときは null（プロンプトキャッシュを使っていない構成で「0%」と表示して、キャッシュの劣化と読み違えないように）
 export function cacheReadShare(usages: readonly LlmUsage[]): number | null {
   let read = 0;
+  let written = 0;
   let total = 0;
   for (const u of usages) {
     const r = u.cacheReadInputTokens ?? 0;
     read += r;
+    written += u.cacheCreationInputTokens ?? 0;
     total += u.inputTokens + (u.cacheCreationInputTokens ?? 0) + r;
   }
-  return total > 0 ? read / total : null;
+  return total > 0 && read + written > 0 ? read / total : null;
 }

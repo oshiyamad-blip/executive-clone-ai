@@ -213,8 +213,8 @@ export type DealBreakerCode =
   | 'rate'
   | 'other';
 
-// 必須スキルの満たし方の内訳（正規化後のスキル名）。implied=要員の下位の技術（Spring Boot 等）の経験から含意して
-// 満たしたもの（直接の記載なし）。via は implied/equiv の根拠となった要員側のスキル（必須スキル名 → 要員のスキル名）
+// 必須スキルの満たし方の内訳（要件の表記）。equiv=同義辞書または確実な含意（EC2 ⇒ AWS 等）で満たしたもの、
+// implied=要員の下位の技術の経験から推定して満たしたもの（Spring ⇒ Java 等。直接の記載なし）。via は implied/equiv の根拠となった要員側のスキル（必須スキル名 → 要員のスキル名）
 export interface SkillBreakdown {
   exact: string[];
   implied: string[];

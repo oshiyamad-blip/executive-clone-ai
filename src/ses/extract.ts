@@ -12,7 +12,7 @@ import { healLlmCall, type HealAttempt } from './heal/retry.js';
 import { recordFailure, recordSuccess } from './heal/quarantine.js';
 import { recordHealEvent, recordStat, recordFatal, getStats } from './heal/events.js';
 import { isLastChance, pastExtractDeadline, callLimits } from './schedule.js';
-import { normalizeSkills } from './skillDict.js';
+import { normalizeSkills, normalizeRequirementLists, requirementMembers } from './skillDict.js';
 import { tallySkillTokens } from './skillStats.js';
 import { normalizePrefecture, isFullRemoteLocation } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
@@ -51,8 +51,12 @@ const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリング�
 - startPeriod / availableDate には原文の表記（「即日」「2026年10月〜」「11月中旬」等）をそのまま入れてください
 - リモート可否は full（フルリモート可）/ partial（一部リモート可）/ none（不可）/ unknown（不明）から選んでください
 - スキル（requiredSkills / preferredSkills / skills）は配列の1要素に1つの技術名だけを入れてください。
-  括弧内・「/」「・」で並んだ技術もそれぞれ別の要素にし（例: 「Java(Spring Boot)」→ "Java", "Spring Boot"）、
-  バージョン・経験年数・レベルは名前に含めないでください（例: 「Python3」→ "Python"、「Java 5年以上」→ "Java"）
+  バージョン・経験年数・レベルは名前に含めないでください（例: 「Python3」→ "Python"、「Java 5年以上」→ "Java"）。
+  ただし案件の requiredSkills / preferredSkills では、次の2つは原文の形のまま1要素にしてください（照合側で解釈します）:
+  「いずれか」「または」「or」「等」で並んだ選択肢（例: "Java または C#"、"AWS/GCP/Azureのいずれか"）と、
+  括弧で例を挙げた記載（例: "AWS(EC2/RDS/Lambda)"）。
+  要員の skills は括弧内・「/」「・」で並んだ技術もそれぞれ別の要素にしてください（例: 「Java(Spring Boot)」→ "Java", "Spring Boot"）
+- 必須の欄に「尚可」「歓迎」と書かれた技術は preferredSkills に入れてください
 - 案件情報も要員情報も含まれないメール（雑談・事務連絡等）の場合は projects, engineers とも空配列にしてください
 - 営業元の会社名・担当者名・メールアドレスは、記載があれば必ず抽出してください（紹介メールの宛先に使用します）
 - 要員の displayName はイニシャルだけにしてください（例: "K.S."）。フルネームが書かれていても出力しないでください。
@@ -614,11 +618,19 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
     ...parsed.projects.map((p, i) => ({ kind: 'project' as const, project: buildProject(p, mail, i, numbers) })),
     ...parsed.engineers.map((e, i) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, i, numbers) })),
   ];
-  const injection = parsed.injectionSuspected === true || looksLikeInjection(text);
+  // 添付PDFの中身はコードで読めないため、抽出した値（PDF由来の文言も入る）にも指示の言い回しが無いかを確かめる
+  const injection = parsed.injectionSuspected === true || looksLikeInjection(text) || looksLikeInjection(extractedText(parsed));
   if (injection && items.length > 0) {
     recordHealEvent('warn', `mail ${mail.id}: AIへの指示らしき記載があるため、このメールの案件・要員の組は要確認にします（自動の下書きなし）`);
   }
   return withReplyTarget(items.length > 0 ? withInjectionFlag(items, injection) : [{ kind: 'other' }], mail);
+}
+
+// 抽出した案件・要員の文字列の値（配列の要素を含む）を1つの文字列に
+function extractedText(parsed: RawExtraction): string {
+  const values = (item: object) =>
+    Object.values(item).flatMap((v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []));
+  return [...parsed.projects, ...parsed.engineers].flatMap(values).join('\n');
 }
 
 // 原文に現れる数値の集合（全角・桁区切りを正規化）。抽出された単金が原文にあるかの照合に使う
@@ -660,6 +672,12 @@ function skillsOf(raw: string[]): string[] {
   return normalizeSkills(raw.map(sanitizeListItem).filter(Boolean));
 }
 
+// 案件の必須・尚可スキル → 要件の表記。読点・カンマは「すべて満たす」の区切り（';'）にして渡す
+// （保存時のセルの区切りと衝突させず、「AWS、GCP、Azureのいずれか」の選択肢を読み取れるように）
+function requirementItems(raw: string[]): string[] {
+  return raw.map((r) => r.replace(/\s*[,，、]\s*/g, ';').replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
 function hashId(prefix: string, parts: string[]): string {
   const digest = createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 12);
   return `${prefix}_${digest}`;
@@ -673,10 +691,12 @@ export function itemIdOf(kind: 'proj' | 'eng', mailId: string, index: number): s
 
 // 抽出結果（LLMの出力）→ 案件。単金・日付の検証と補正はここで決定的に行う（numbers=null は原文照合を省く）
 export function buildProject(raw: RawProject, mail: SesRawMail, index: number, numbers: Set<string> | null): Project {
-  const requiredSkills = skillsOf(raw.requiredSkills);
-  const preferredSkills = skillsOf(raw.preferredSkills);
+  const { required: requiredSkills, preferred: preferredSkills } = normalizeRequirementLists(
+    requirementItems(raw.requiredSkills),
+    requirementItems(raw.preferredSkills),
+  );
   // 未知語の集計（営業元の会社名・担当者名と同じ語は人名・社名の混入として数えない）
-  tallySkillTokens([...requiredSkills, ...preferredSkills], [raw.agentCompany, raw.agentContact]);
+  tallySkillTokens(requirementMembers([...requiredSkills, ...preferredSkills]), [raw.agentCompany, raw.agentContact]);
   return {
     id: itemIdOf('proj', mail.id, index),
     title: raw.title,

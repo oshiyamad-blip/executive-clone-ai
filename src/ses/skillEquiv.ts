@@ -10,7 +10,14 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { isDemo, reviewDataDir } from './config.js';
 import { normalizeSkill, tokenizeSkill } from './skillDict.js';
-import { descendantKeysOf, impliesSkill, isNotEquivalent } from './skillGraph.js';
+import {
+  conditionalImplier,
+  descendantKeysOf,
+  impliesSkill,
+  impliesSkillStrongly,
+  isConditionalImplication,
+  isNotEquivalent,
+} from './skillGraph.js';
 import { fetchSkillEquivalences, saveSkillEquivalence } from '../database/index.js';
 import { safeErr } from './redact.js';
 import type { SkillEquivalence } from '../types/index.js';
@@ -41,7 +48,7 @@ export function equivalenceRejection(a: string, b: string): EquivalenceRejection
   const nb = normalizeSkill(b);
   if (na.toLowerCase() === nb.toLowerCase()) return 'invalid';
   if (isNotEquivalent(na, nb)) return 'not_equivalent';
-  if (impliesSkill(na, nb) || impliesSkill(nb, na)) return 'implied';
+  if (impliesSkill(na, nb) || impliesSkill(nb, na) || isConditionalImplication(na, nb)) return 'implied';
   return null;
 }
 
@@ -170,6 +177,7 @@ export type SkillCoverage = 'exact' | 'equiv' | 'implied';
 export interface CoverageHit {
   kind: SkillCoverage;
   via: string; // 満たした要員側のスキル（小文字の正規形）
+  strong?: boolean; // implied のうち確実な含意（Spring Boot ⇒ Spring 等。直接の記載と同等に数える）
 }
 
 // required を have 集合（小文字の正規形）がどう満たすか。満たさなければ null。
@@ -179,8 +187,15 @@ export function skillCoverage(required: string, haveSetLower: ReadonlySet<string
   if (!key) return null;
   if (haveSetLower.has(key)) return { kind: 'exact', via: key };
   for (const e of cache.get(key) ?? []) if (haveSetLower.has(e)) return { kind: 'equiv', via: e };
-  for (const d of descendantKeysOf(key)) if (haveSetLower.has(d)) return { kind: 'implied', via: d };
-  return null;
+  let weak: CoverageHit | null = null;
+  for (const d of descendantKeysOf(key)) {
+    if (!haveSetLower.has(d)) continue;
+    if (impliesSkillStrongly(d, key)) return { kind: 'implied', via: d, strong: true };
+    weak ??= { kind: 'implied', via: d };
+  }
+  if (weak) return weak;
+  const conditional = conditionalImplier(key, haveSetLower);
+  return conditional ? { kind: 'implied', via: conditional } : null;
 }
 
 export function equivalencesLoaded(): boolean {

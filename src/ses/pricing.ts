@@ -1,6 +1,7 @@
 // 単金正規化（万円/月・円/時・円/月 → 万円/月）とスキル一致率の計算。extract/match の双方が参照する。
 import { hourlyToMonthlyHours } from './config.js';
-import { skillCoverage } from './skillEquiv.js';
+import { skillCoverage, type CoverageHit } from './skillEquiv.js';
+import { parseRequirements } from './skillDict.js';
 import type { SkillBreakdown, PreferredMatch } from '../types/index.js';
 
 export type RateUnit = 'manYenPerMonth' | 'yenPerHour' | 'yenPerMonth';
@@ -17,25 +18,52 @@ export interface SkillMatch {
   breakdown: SkillBreakdown;
 }
 
-// スキルの被覆率と内訳。required/have は既に normalizeSkills 済みの前提。
+// スキルの被覆率と内訳。required は要件の表記（normalizeRequirementLists 済み。'AWS(EC2/RDS)' 'Java / C#（いずれか）' は
+// どれか1つを満たせば1要件を満たす）、have は normalizeSkills 済みの前提。
 // 完全一致に加え、育てた同義辞書（skillEquiv）と含意（skillGraph。下位の技術の経験で上位の必須を満たす）も
-// 「満たす」とみなす。対象が空なら null（＝不明。添付の解析失敗などで空になった案件を「誰にでも100%一致」とはみなさない）
+// 「満たす」とみなす。確実な含意（Spring Boot ⇒ Spring 等）は同等（equiv）に数え、それ以外の含意は implied（推定）に数える。
+// 対象が空なら null（＝不明。添付の解析失敗などで空になった案件を「誰にでも100%一致」とはみなさない）
 export function skillMatch(required: string[], have: string[]): SkillMatch | null {
-  const targets = [...new Map(required.map((r) => [r.toLowerCase(), r] as const)).values()];
+  const targets = [
+    ...new Map(required.flatMap((r) => parseRequirements(r)).map((r) => [r.label.toLowerCase(), r] as const)).values(),
+  ];
   if (targets.length === 0) return null;
   const haveByKey = new Map(have.map((h) => [h.toLowerCase(), h] as const));
   const haveKeys = new Set(haveByKey.keys());
   const breakdown: SkillBreakdown = { exact: [], implied: [], equiv: [], missing: [], via: {} };
   for (const r of targets) {
-    const hit = skillCoverage(r, haveKeys);
+    const hit = bestCoverage(r.members, haveKeys);
     if (!hit) {
-      breakdown.missing.push(r);
+      breakdown.missing.push(r.label);
       continue;
     }
-    breakdown[hit.kind].push(r);
-    if (hit.kind !== 'exact') breakdown.via[r] = haveByKey.get(hit.via) ?? hit.via;
+    const kind = hit.kind === 'implied' && hit.strong ? 'equiv' : hit.kind;
+    breakdown[kind].push(r.label);
+    if (kind !== 'exact' || hit.member.toLowerCase() !== r.label.toLowerCase()) {
+      breakdown.via[r.label] = haveByKey.get(hit.via) ?? hit.via;
+    }
   }
   return { rate: (targets.length - breakdown.missing.length) / targets.length, breakdown };
+}
+
+const COVERAGE_ORDER = (h: CoverageHit): number => (h.kind === 'exact' ? 0 : h.kind === 'equiv' ? 1 : h.strong ? 2 : 3);
+
+// 要件のどれか1つの満たし方のうち、最も直接的なもの
+function bestCoverage(members: string[], haveKeys: ReadonlySet<string>): (CoverageHit & { member: string }) | null {
+  let best: (CoverageHit & { member: string }) | null = null;
+  for (const m of members) {
+    const hit = skillCoverage(m, haveKeys);
+    if (hit && (!best || COVERAGE_ORDER(hit) < COVERAGE_ORDER(best))) best = { ...hit, member: m };
+  }
+  return best;
+}
+
+// 直接の記載（完全一致・同義・確実な含意）で満たした必須の割合。強マッチかどうかはこの割合で決める
+// （推定の含意で満たした必須は一致率と並びには効くが、満たさない場合より組を悪くしない）
+export function directSkillRate(b: SkillBreakdown | null): number {
+  if (!b) return 0;
+  const total = b.exact.length + b.equiv.length + b.implied.length + b.missing.length;
+  return total > 0 ? (b.exact.length + b.equiv.length) / total : 0;
 }
 
 // スキル判定の根拠。required=必須スキルで判定、preferred=必須が空のため尚可スキルで判定（参考扱い）、

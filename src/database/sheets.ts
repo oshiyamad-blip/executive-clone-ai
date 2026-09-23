@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'crypto';
 import { google } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
-import { normalizeSkills } from '../ses/skillDict.js';
+import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { toInitials } from '../ses/pii.js';
 import { SafeLogError } from '../ses/redact.js';
@@ -283,8 +283,7 @@ function rowToProject(cells: string[]): Project {
   return {
     id: c('ID'),
     title: c('案件名'),
-    requiredSkills: normalizeSkills(splitList(c('必須スキル'))),
-    preferredSkills: normalizeSkills(splitList(c('尚可スキル'))),
+    ...requirementsOf(splitList(c('必須スキル')), splitList(c('尚可スキル'))),
     rateMin: n('単金下限'),
     rateMax: n('単金上限'),
     location,
@@ -580,18 +579,66 @@ export async function saveMatchSheets(match: MatchResult): Promise<string> {
   return String(row[idCol]);
 }
 
-// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。文面を用意できなかった行
-// （下書き状態が「文面を用意できませんでした」）と、AI判定を次回に回した行（判定「未判定」）は判定済みに含めず、
-// 次回のバッチで判定と文面の作成をやり直す
-export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
-  if (!configured()) return new Set();
+// マッチタブの判定の控え。judged=判定済み（通常バッチで同じペアをLLMで判定し直さない）、capFree=そのうち不適合・低評価で
+// 候補の枠（案件ごと・要員ごとの上限）を使わない組、deferred=AI判定を次回に回した組（判定「未判定」）と文面の作り直し待ちの組
+// （一次選抜で選ばれ直さなくても判定し直す作業の列）。文面を用意できなかった行（下書き状態「文面を用意できませんでした」）と
+// 未判定の行は判定済みに含めず、次回のバッチで判定と文面の作成をやり直す
+export interface MatchLedger {
+  judged: Set<string>;
+  capFree: Set<string>;
+  deferred: Set<string>;
+}
+
+const CAP_FREE_VERDICTS = new Set([JUDGE_VERDICT_LABEL.rejected, JUDGE_VERDICT_LABEL.low]);
+
+export async function fetchMatchLedgerSheets(): Promise<MatchLedger> {
+  const ledger: MatchLedger = { judged: new Set(), capFree: new Set(), deferred: new Set() };
+  if (!configured()) return ledger;
   const rows = await readRows('マッチ');
   const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
-  const regenerate = (cells: string[]) =>
-    isDraftRegenerationPending(c(cells, '案件側下書き状態')) ||
-    isDraftRegenerationPending(c(cells, '要員側下書き状態')) ||
-    c(cells, JUDGE_COLUMN) === JUDGE_VERDICT_LABEL.deferred;
-  return new Set(rows.filter((r) => !regenerate(r.cells)).map((r) => c(r.cells, 'ID')).filter(Boolean));
+  for (const r of rows) {
+    const id = c(r.cells, 'ID');
+    if (!id) continue;
+    const verdict = c(r.cells, JUDGE_COLUMN);
+    if (verdict === JUDGE_VERDICT_LABEL.deferred) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    // 文面の作り直し待ちの組も作業の列に入れる（案件・要員が突合済でも判定と文面の作成をやり直す）
+    if (isDraftRegenerationPending(c(r.cells, '案件側下書き状態')) || isDraftRegenerationPending(c(r.cells, '要員側下書き状態'))) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    ledger.judged.add(id);
+    if (CAP_FREE_VERDICTS.has(verdict)) ledger.capFree.add(id);
+  }
+  // 同じIDの行が複数あり、どれかが判定済みなら判定済みとして扱う（作業の列に残さない）
+  for (const id of ledger.judged) ledger.deferred.delete(id);
+  return ledger;
+}
+
+export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
+  return (await fetchMatchLedgerSheets()).judged;
+}
+
+// 判定待ちのまま対象から外れた組（案件の終了・要員の稼働終了・ルールを通らなくなった等）を閉じる:
+// 判定を「ルールのみ」にし、「判定待ち」の下書き状態を「不要」にする（人が変えた状態は変えない）。閉じた行数を返す
+export async function closeDeferredMatchesSheets(ids: string[]): Promise<number> {
+  if (!configured() || ids.length === 0) return 0;
+  const want = new Set(ids);
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  for (const r of await readRows('マッチ')) {
+    const id = c(r.cells, 'ID');
+    if (!want.has(id) || c(r.cells, JUDGE_COLUMN) !== JUDGE_VERDICT_LABEL.deferred) continue;
+    const cells: Array<[string, Cell]> = [[JUDGE_COLUMN, JUDGE_VERDICT_LABEL.rule]];
+    for (const col of ['案件側下書き状態', '要員側下書き状態']) {
+      if (c(r.cells, col).startsWith(DRAFT_STATE.awaitingJudge)) cells.push([col, DRAFT_STATE.notNeeded]);
+    }
+    updates.push({ key: id, cells });
+    want.delete(id);
+  }
+  return book.writeCellsByKey('マッチ', 'ID', updates);
 }
 
 // 再提案抑制の元になる組: ステータスを「見送り」にしたマッチと、評価で「ズレ」にしたマッチ（badIds）の案件ID・要員ID

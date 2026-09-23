@@ -47,6 +47,8 @@ import {
   skillMatchStrongThreshold,
   hourlyToMonthlyHours,
   matchMinLlmScore,
+  matchRejectLlmScore,
+  judgeBudgetJpy,
   matchTimingGraceDays,
   maxNegotiationRaiseMan,
   maxNegotiationCutMan,
@@ -111,6 +113,8 @@ function collectNumberWarnings(): string[] {
       skillMatchStrongThreshold,
       hourlyToMonthlyHours,
       matchMinLlmScore,
+      matchRejectLlmScore,
+      judgeBudgetJpy,
       matchTimingGraceDays,
       maxNegotiationRaiseMan,
       maxNegotiationCutMan,
@@ -451,6 +455,12 @@ function checkNumbers(numberWarnings: string[]): void {
   );
   if (numberWarnings.length === 0) ok('数値の設定はすべて解釈できました（未設定の項目は既定値）');
   for (const w of numberWarnings) warn(w);
+  if (matchRejectLlmScore() > 0 && matchMinLlmScore() > 0 && matchRejectLlmScore() > matchMinLlmScore()) {
+    warn(
+      `MATCH_REJECT_LLM_SCORE（${matchRejectLlmScore()}）が MATCH_MIN_LLM_SCORE（${matchMinLlmScore()}）より大きいため、` +
+        '基準未満の組がすべて「不適合」になり「参考提案」の帯がなくなります',
+    );
+  }
   if (skillMatchThreshold() > skillMatchStrongThreshold()) {
     warn('SKILL_MATCH_THRESHOLD が SKILL_MATCH_STRONG_THRESHOLD より大きいため「参考提案」の帯がなくなります');
   }

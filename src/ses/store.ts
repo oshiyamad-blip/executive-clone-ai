@@ -175,15 +175,32 @@ function projectsCompatible(a: Project, b: Project): boolean {
 function engineersCompatibleIgnoringRate(a: Engineer, b: Engineer): boolean {
   const nameA = hasKnownInitials(a.displayName) ? a.displayName.trim() : null;
   const nameB = hasKnownInitials(b.displayName) ? b.displayName.trim() : null;
+  // 表示名（イニシャル）が決められなかった要員（漢字の氏名だけのメール）は、同じ営業元のアドレス・ほぼ同じスキル・
+  // 年齢か最寄駅の一致で同じ人物とみなす（氏名そのものは保存しないため、氏名以外の手がかりで再送を見分ける）
+  const sameIdentity = nameA !== null || nameB !== null ? nameA === nameB : sameWithoutInitials(a, b);
   return (
     a.sourceMailId !== b.sourceMailId &&
-    // 表示名（イニシャル）が無い・決められなかった要員は人物を特定できないため統合しない
-    nameA !== null &&
-    nameA === nameB &&
+    sameIdentity &&
     sameIfKnown(a.age, b.age, (x, y) => Math.abs(x - y) <= 1) &&
     sameIfKnown(nonEmpty(a.nearestStation), nonEmpty(b.nearestStation), (x, y) => x === y) &&
     sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y)
   );
+}
+
+// イニシャル不明の要員どうしの同一人物の手がかり（氏名以外）
+const SKILL_OVERLAP_FOR_UNKNOWN_INITIALS = 0.8;
+
+function sameWithoutInitials(a: Engineer, b: Engineer): boolean {
+  const mailA = a.agentEmail.trim().toLowerCase();
+  if (!mailA || mailA !== b.agentEmail.trim().toLowerCase()) return false;
+  const sa = new Set(a.skills.map((x) => x.toLowerCase()));
+  const sb = new Set(b.skills.map((x) => x.toLowerCase()));
+  if (sa.size < 2 || sb.size < 2) return false;
+  const common = [...sa].filter((x) => sb.has(x)).length;
+  if (common / (sa.size + sb.size - common) < SKILL_OVERLAP_FOR_UNKNOWN_INITIALS) return false;
+  const ageKnown = a.age !== null && b.age !== null;
+  const stationKnown = nonEmpty(a.nearestStation) !== null && nonEmpty(b.nearestStation) !== null;
+  return ageKnown || stationKnown; // 一致は呼び出し側（sameIfKnown）で確かめる
 }
 
 function engineersCompatible(a: Engineer, b: Engineer): boolean {

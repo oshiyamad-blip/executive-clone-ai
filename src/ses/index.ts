@@ -2,7 +2,7 @@ import '../env.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
-import { matchAll, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
+import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
 import { matchIncrementally } from './matchRun.js';
 import { loadSuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
@@ -25,7 +25,8 @@ import {
   saveEngineers,
   fetchOpenProjects,
   fetchAvailableEngineers,
-  fetchJudgedMatchIds,
+  fetchMatchLedger,
+  fetchItemsByIds,
   fetchSavedItemsForMails,
 } from '../database/index.js';
 import {
@@ -68,6 +69,7 @@ import { runRepair } from './heal/repair.js';
 import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule.js';
 import { redactable, safeErr } from './redact.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
+import type { MatchLedger } from '../database/sheets.js';
 
 // SESマッチングバッチのオーケストレータ。
 // 本番の通常バッチ: 下書き依頼 → 保存先の確認 → collect→parse→extract（10通ごとに保存・処理済み記録）→
@@ -191,10 +193,15 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
       const { projects, engineers, scope } = matchScope(pool, stored);
       console.log(
         `SESマッチング: 新着 案件${stored.projects.length}件・要員${stored.engineers.length}件を、直近${matchLookbackDays()}日の` +
-          `案件${projects.length - stored.projects.length}件・要員${engineers.length - stored.engineers.length}件とも突合します（判定済み${pool.judged.size}組は除外）`,
+          `案件${projects.length - stored.projects.length}件・要員${engineers.length - stored.engineers.length}件とも突合します（判定済み${pool.ledger.judged.size}組は除外・判定待ち${pool.ledger.deferred.size}組は判定し直し）`,
       );
       const suppression = await loadSuppressionIndex({ projects, engineers });
-      await matchIncrementally(projects, engineers, scope, { saved, checkpoint: remember, suppression });
+      await matchIncrementally(projects, engineers, scope, {
+        saved,
+        checkpoint: remember,
+        suppression,
+        pendingItems: pool.pendingItems,
+      });
     } catch (err) {
       console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
       recordFatal('マッチング段が例外で停止しました（突合済でない案件・要員は次回の実行で突合します）');
@@ -264,7 +271,9 @@ function isEngineerItem(item: ExtractedItem): item is { kind: 'engineer'; engine
 interface StorePool {
   projects: Project[];
   engineers: Engineer[];
-  judged: Set<string>;
+  ledger: MatchLedger;
+  // 判定待ちの組の相手のうち、突合の対象期間を外れた案件・要員（その組の判定にだけ使う）
+  pendingItems: { projects: Project[]; engineers: Engineer[] };
 }
 
 interface StoredItems {
@@ -291,11 +300,12 @@ async function loadStorePool(): Promise<StorePool | null> {
         );
       }
     }
-    const [projects, engineers, judged] = await Promise.all([
+    const [projects, engineers, ledger] = await Promise.all([
       fetchOpenProjects(matchPoolLimit(), { receivedSince: since }),
       fetchAvailableEngineers(matchPoolLimit(), { receivedSince: since }),
-      fetchJudgedMatchIds(since),
+      fetchMatchLedger(since),
     ]);
+    const pendingItems = await loadPendingItems(ledger, projects, engineers);
     if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
       const beyond = await countUnmatchedBeyondPoolSheets(matchPoolLimit(), since);
       if (beyond.projects + beyond.engineers > 0) {
@@ -306,11 +316,51 @@ async function loadStorePool(): Promise<StorePool | null> {
         );
       }
     }
-    return { projects, engineers, judged };
+    return { projects, engineers, ledger, pendingItems };
   } catch (err) {
     console.error(`SES: 保存先を読み込めません: ${safeErr(err)}`);
     recordFatal('保存先（スプレッドシート等）を読み込めないため、メールの抽出と突合を行いませんでした（共有・見出しを確認してください）');
     return null;
+  }
+}
+
+// 判定待ちの組（判定「未判定」）の相手のうち、突合の対象期間を外れた案件・要員を ID で読む。
+// 読めなかった組は今回は判定も閉じもせず、判定待ちのまま次回に回す（ledger.deferred から外す）
+async function loadPendingItems(
+  ledger: MatchLedger,
+  projects: Project[],
+  engineers: Engineer[],
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  const knownProjects = new Set(projects.map((p) => p.id));
+  const knownEngineers = new Set(engineers.map((e) => e.id));
+  const wantProjects = new Set<string>();
+  const wantEngineers = new Set<string>();
+  for (const id of ledger.deferred) {
+    const ids = parseMatchId(id);
+    if (!ids) {
+      ledger.deferred.delete(id);
+      continue;
+    }
+    if (!knownProjects.has(ids.projectId)) wantProjects.add(ids.projectId);
+    if (!knownEngineers.has(ids.engineerId)) wantEngineers.add(ids.engineerId);
+  }
+  if (wantProjects.size + wantEngineers.size === 0 || dbProvider() !== 'sheets') {
+    // Notion は ID で読めないため、対象期間内の案件・要員の組だけを判定し直す（それ以外は閉じずに残す）
+    for (const id of [...ledger.deferred]) {
+      const ids = parseMatchId(id)!;
+      if (wantProjects.has(ids.projectId) || wantEngineers.has(ids.engineerId)) ledger.deferred.delete(id);
+    }
+    return { projects: [], engineers: [] };
+  }
+  try {
+    return await fetchItemsByIds(wantProjects, wantEngineers);
+  } catch (err) {
+    console.warn(`SES: 判定待ちの組の案件・要員を読めません（今回はその組を判定せず次回に回します）: ${safeErr(err)}`);
+    for (const id of [...ledger.deferred]) {
+      const ids = parseMatchId(id)!;
+      if (wantProjects.has(ids.projectId) || wantEngineers.has(ids.engineerId)) ledger.deferred.delete(id);
+    }
+    return { projects: [], engineers: [] };
   }
 }
 
@@ -450,7 +500,9 @@ function matchScope(pool: StorePool, stored: StoredItems): { projects: Project[]
     scope: {
       newProjectIds: new Set(projects.filter((p) => p.matched === false).map((p) => p.id)),
       newEngineerIds: new Set(engineers.filter((e) => e.matched === false).map((e) => e.id)),
-      judgedMatchIds: pool.judged,
+      judgedMatchIds: pool.ledger.judged,
+      capFreeMatchIds: pool.ledger.capFree,
+      pendingMatchIds: pool.ledger.deferred,
     },
   };
 }
@@ -529,6 +581,24 @@ async function runProperStage(projects: Project[]): Promise<ProperRunResult | nu
   }
 }
 
+// --match-only（本番）: 判定の予算に達して「未判定」になった組のうち、既にAI判定のある組は保存しない
+// （判定済みの行を未判定で上書きすると、案件・要員は突合済のため定時の実行でも判定し直されず、良い組が埋もれる）
+async function withoutDeferredOverwrites(matches: MatchResult[]): Promise<MatchResult[]> {
+  if (isDemo() || !matches.some((m) => m.category === 'deferred')) return matches;
+  let judged: Set<string>;
+  try {
+    judged = (await fetchMatchLedger()).judged;
+  } catch (err) {
+    console.warn(`SESマッチング: 判定済みの組を確かめられないため、未判定の組は保存しません: ${safeErr(err)}`);
+    return matches.filter((m) => m.category !== 'deferred');
+  }
+  const kept = matches.filter((m) => !(m.category === 'deferred' && judged.has(m.id)));
+  if (kept.length < matches.length) {
+    console.log(`SESマッチング: 判定の予算に達したため、判定済みの${matches.length - kept.length}組は前回の判定のまま残します`);
+  }
+  return kept;
+}
+
 // demo・--match-only の⑤〜⑦: マッチング → 下書き生成 → プロパー → 保存・通知
 async function matchDraftAndNotify(
   projects: Project[],
@@ -538,6 +608,7 @@ async function matchDraftAndNotify(
   let matches: MatchResult[] = [];
   try {
     matches = await matchAll(projects, engineers, undefined, { suppression: await loadSuppressionIndex({ projects, engineers }) });
+    matches = await withoutDeferredOverwrites(matches);
   } catch (err) {
     console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
     recordFatal('マッチング段が例外で停止しました');

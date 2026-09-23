@@ -3,7 +3,7 @@
 // 住所の番地・電話番号・生年月日などは抽出しない（管理表に載せる必要が無い個人情報のため）。
 import { generateJsonWithDocuments } from '../../llm/index.js';
 import type { HealAttempt } from '../heal/retry.js';
-import { isDemo, extractModel } from '../config.js';
+import { isDemo, extractModel, configuredExtractModel } from '../config.js';
 import { withExtractModelFallback } from '../extractModelFallback.js';
 import { normalizeSkills } from '../skillDict.js';
 import { tallySkillTokens } from '../skillStats.js';
@@ -105,14 +105,18 @@ function coarseResidence(raw: string): string {
 // attempt は自動修復（heal/retry.ts）の再試行・上位モデル昇格用（出力上限の拡大・SDK再試行の抑止を含む）
 export async function extractSkillSheet(content: SkillSheetContent, attempt?: HealAttempt): Promise<SkillSheetProfile> {
   if (isDemo()) throw new SafeLogError('プロパー: demoではスキルシートの抽出を行いません');
-  const maxTokens = 4000 * (attempt?.maxTokensFactor ?? 1);
-  // 出力量に応じた待ち時間（SDKの既定の10分×再試行で、実行の期限・ジョブの制限時間を越えないように）
-  const limits = callLimits(60_000 + maxTokens * 15, attempt ? attempt.sdkRetries : 1);
+  // 判定用モデルで代替したときは adaptive thinking の思考も出力上限に数えるため、上限を2倍にする（メールの抽出と同じ）
+  const optionsFor = (model: string) => {
+    const factor = Math.max(attempt?.maxTokensFactor ?? 1, model !== configuredExtractModel() && !attempt?.model ? 2 : 1);
+    const maxTokens = 4000 * factor;
+    // 出力量に応じた待ち時間（SDKの既定の10分×再試行で、実行の期限・ジョブの制限時間を越えないように）
+    return { model, maxTokens, ...callLimits(60_000 + maxTokens * 15, attempt ? attempt.sdkRetries : 1) };
+  };
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const system = systemPrompt(todayJst);
   // 抽出モデルが退役・提供終了で使えなければ、判定用モデルに切り替えて呼び直す（extractModelFallback.ts）
   const raw = await withExtractModelFallback(attempt?.model ?? extractModel(), (model) => {
-    const opts = { model, maxTokens, ...limits };
+    const opts = optionsFor(model);
     return content.kind === 'pdf'
       ? generateJsonWithDocuments<RawSkillSheet>(
           system,

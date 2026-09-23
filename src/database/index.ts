@@ -1,6 +1,6 @@
 import { Client } from '@notionhq/client';
 import { normalizePrefecture } from '../ses/prefecture.js';
-import { normalizeSkills } from '../ses/skillDict.js';
+import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { toInitials } from '../ses/pii.js';
 import {
   dbProvider,
@@ -12,6 +12,7 @@ import {
   notionSkillEquivDbId,
 } from '../ses/config.js';
 import { safeErr } from '../ses/redact.js';
+import { recordHealEvent } from '../ses/heal/events.js';
 import * as sheetsDb from './sheets.js';
 import {
   remoteLabel,
@@ -316,6 +317,14 @@ async function upsertByStableId(
   );
 }
 
+// 指示混入疑いの列が無いDBに、印の付いた案件・要員を突合の対象外として保存したことを知らせる
+function injectionColumnMissing(kind: '案件' | '要員'): void {
+  recordHealEvent(
+    'warn',
+    `Notionの${kind}DBに「${sheetsDb.INJECTION_COLUMN}」の列を追加できないため、AIへの指示らしき記載のある${kind}を突合の対象外（${kind === '案件' ? '終了' : '決定済'}）で保存しました（列を追加し、内容を人が確かめてください）`,
+  );
+}
+
 // SES案件をNotion案件DBに保存する（案件ID=抽出時の決定的IDで upsert。再実行で重複ページを作らない）
 export async function saveProject(project: Project): Promise<string> {
   if (dbProvider() === 'sheets') return sheetsDb.saveProjectSheets(project);
@@ -346,9 +355,13 @@ export async function saveProject(project: Project): Promise<string> {
   };
   const startDate = dateOnly(project.startDate);
   if (startDate) properties['開始日'] = { date: { start: startDate } };
-  // 指示混入疑いの列を追加できない（権限不足等）ときは書かずに保存する（保存そのものを失敗させない）
+  // 指示混入疑いの列を追加できない（権限不足等）ときは書かずに保存する（保存そのものを失敗させない）。
+  // ただし印の付いた案件は、読み戻したときに印が消えてAI判定・自動の下書きに進まないよう「終了」で保存する
   if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
     properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(project.injectionSuspected ? 'あり' : '') };
+  } else if (project.injectionSuspected) {
+    properties['ステータス'] = { select: { name: '終了' } };
+    injectionColumnMissing('案件');
   }
   return upsertByStableId(
     dataSourceId,
@@ -386,6 +399,9 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
   if (availableFrom) properties['稼働開始可能日'] = { date: { start: availableFrom } };
   if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
     properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(engineer.injectionSuspected ? 'あり' : '') };
+  } else if (engineer.injectionSuspected) {
+    properties['ステータス'] = { select: { name: '決定済' } };
+    injectionColumnMissing('要員');
   }
   return upsertByStableId(
     dataSourceId,
@@ -490,24 +506,61 @@ export async function markItemsMatched(kind: 'project' | 'engineer', ids: string
   return 0;
 }
 
-// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。since 以降に検出したものに絞る。
-// AI判定を次回に回した組（判定「未判定」）は含めない
-export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
-  if (dbProvider() === 'sheets') return sheetsDb.fetchJudgedMatchIdsSheets();
-  if (!MATCH_DB_ID) return new Set();
+// マッチの判定の控え（判定済み・枠を使わない判定済み・判定待ちの組）。since 以降に検出したものに絞る（Notion）。
+// AI判定を次回に回した組（判定「未判定」）は判定済みに含めず、判定待ちの作業の列として返す
+export async function fetchMatchLedger(since?: Date): Promise<sheetsDb.MatchLedger> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchMatchLedgerSheets();
+  const ledger: sheetsDb.MatchLedger = { judged: new Set(), capFree: new Set(), deferred: new Set() };
+  if (!MATCH_DB_ID) return ledger;
+  const pages = await matchPagesSince(since);
+  for (const page of pages) {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    const id = readRichText(props['マッチID']);
+    if (!id) continue;
+    const verdict = readRichText(props['判定']);
+    if (verdict === JUDGE_VERDICT_LABEL.deferred) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    ledger.judged.add(id);
+    if (verdict === JUDGE_VERDICT_LABEL.rejected || verdict === JUDGE_VERDICT_LABEL.low) ledger.capFree.add(id);
+  }
+  for (const id of ledger.judged) ledger.deferred.delete(id);
+  return ledger;
+}
+
+async function matchPagesSince(since?: Date): Promise<unknown[]> {
   const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
   await ensureTextProperties(dataSourceId, ['マッチID', '判定']);
-  const pages = await queryAll(
+  return queryAll(
     dataSourceId,
     since ? { filter: { property: '検出日時', date: { on_or_after: since.toISOString() } } } : {},
     10_000,
   );
-  const ids = pages
-    .map((page) => (page as { properties?: Record<string, unknown> }).properties ?? {})
-    .filter((props) => readRichText(props['判定']) !== JUDGE_VERDICT_LABEL.deferred)
-    .map((props) => readRichText(props['マッチID']))
-    .filter(Boolean);
-  return new Set(ids);
+}
+
+// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）
+export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
+  return (await fetchMatchLedger(since)).judged;
+}
+
+// 判定待ちのまま対象から外れた組を閉じる（判定「ルールのみ」）。閉じた件数を返す
+export async function closeDeferredMatches(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  if (dbProvider() === 'sheets') return sheetsDb.closeDeferredMatchesSheets(ids);
+  if (!MATCH_DB_ID) return 0;
+  const want = new Set(ids);
+  let closed = 0;
+  for (const page of await matchPagesSince()) {
+    const p = page as { id?: string; properties?: Record<string, unknown> };
+    const props = p.properties ?? {};
+    if (!p.id || !want.has(readRichText(props['マッチID'])) || readRichText(props['判定']) !== JUDGE_VERDICT_LABEL.deferred) continue;
+    await throttle(() =>
+      notion.pages.update({ page_id: p.id!, properties: { 判定: { rich_text: toRichText(JUDGE_VERDICT_LABEL.rule) } } } as never),
+    );
+    closed += 1;
+  }
+  return closed;
 }
 
 export type { RejectedMatchRow } from './sheets.js';
@@ -596,8 +649,7 @@ function projectFromPage(page: unknown): Project {
     id: readRichText(props['案件ID']) || p.id,
     title: readTitle(props['案件名']),
     // 人がNotion上で直接編集したスキル（'JS'/'k8s' 等の表記ゆれ）もマッチングに乗るよう読出時に正規化する
-    requiredSkills: normalizeSkills(readMultiSelect(props['必須スキル'])),
-    preferredSkills: normalizeSkills(readMultiSelect(props['尚可スキル'])),
+    ...requirementsOf(readMultiSelect(props['必須スキル']), readMultiSelect(props['尚可スキル'])),
     rateMin: readNumber(props['単金下限']) ?? null,
     rateMax: readNumber(props['単金上限']) ?? null,
     location,

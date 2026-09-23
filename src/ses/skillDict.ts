@@ -2,6 +2,7 @@
 // 1つの記載を複数の技術に分ける（1→N）: 'Java(Spring Boot)' → Java, Spring Boot / 'AWS(EC2/RDS)' → AWS, EC2, RDS。
 // 辞書に無い語は正規化した表記のまま残す（未知語は skillStats.ts が件数を数え、辞書を育てる材料にする）。
 // 含意（Spring Boot ⇒ Java 等）と否定（Java ≠ JavaScript 等）は skillGraph.ts。
+import { impliesSkill } from './skillGraph.js';
 
 export type SkillCategory = 'skill' | 'role' | 'phase' | 'domain';
 
@@ -13,7 +14,7 @@ const SKILLS: string[][] = [
   ['TypeScript', 'ts'],
   ['Python', 'py', 'パイソン'],
   ['C#', 'csharp', 'c sharp', 'cシャープ'],
-  ['C++', 'cplusplus', 'cpp'],
+  ['C++', 'cplusplus', 'cpp', 'vc++', 'visual c++'],
   ['C', 'c言語'],
   ['PHP'],
   ['Ruby', 'ルビー'],
@@ -244,21 +245,32 @@ const PROTECTED_RES = PROTECTED.map((term) => new RegExp(term.replace(/[.*+?^${}
 // 2つの技術をつなげて書く慣用表記（分割の前に区切りを入れる）
 const REWRITES: Array<[RegExp, string]> = [[/c#\s*\.net(?![a-z])/gi, 'C#/.NET']];
 
-// 保護語の置き換え先（区切り文字・数字・括弧を含まない私用領域の文字）
+// 保護語・括弧の置き換え先（区切り文字・数字・括弧を含まない私用領域の文字）
 const PLACEHOLDER_BASE = 0xe000;
+const BRACKET_BASE = 0xe800;
+const PLACEHOLDER_CHAR = /[\uE000-\uE7FF]/g;
+const BRACKET_CHAR = /[\uE800-\uEFFF]/g;
 
 const BRACKET_GROUP = /[(\[{<【〔「『〈《]([^()\[\]{}<>【】〔〕「」『』〈〉《》]*)[)\]}>】〕」』〉》]/;
 const STRAY_BRACKET = /[()\[\]{}<>【】〔〕「」『』〈〉《》]/g;
-const SEPARATOR = /[\/,;&+・、|~〜\n\r\t]|\s+(?:and|or)\s+|及び|および|並びに|又は|または|もしくは/gi;
-const SEP = '\u0001';
+// 必須の並び（すべて満たす）を分ける区切り。extract は読点・カンマを ';' にして渡す
+const CLAUSE_SEP = /[;,、，\n\r]|\s+and\s+|及び|および|並びに/gi;
+// 1つの並びの中の技術を分ける区切り（選択肢の語もここで分ける。「いずれか」かどうかは OR_MARK で決める）
+const PIECE_SEP = /[\/・|&+~〜\t]|\s+or\s+|又は|または|もしくは|ないし/gi;
+// 選択肢（どれか1つで足りる）の印。「Java or C#」「AWS・GCP等」「AWS/GCP/Azureのいずれか」
+const OR_MARK = /(?:^|[^a-z])or(?:$|[^a-z])|又は|または|もしくは|ないし|いずれか|どれか|どちらか|のうち|等|など/i;
+// 尚可（必須ではない）の印。必須スキルの欄に紛れた「AWS（尚可）」を尚可スキルへ移す
+const PREFERRED_MARK = /尚可|なお可|歓迎|優遇|望ましい|あれば/;
+const REQUIRED_MARK = /必須/;
 
 // 年数・レベル・経験の語（名前には含めない。年数の構造化は後段の施策で扱う）
 const LEVEL_PATTERNS: RegExp[] = [
   /\d+(?:\.\d+)?\s*[~〜\-]?\s*\d*(?:\.\d+)?\s*(?:年|ヶ月|か月|カ月|ヵ月|箇月)(?:以上|程度|前後|未満|以下|半)?/g,
   /\d+(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)\b/gi,
-  /実務|経験者|経験|以上|程度|レベル|上級|中級|初級|を含む|含む|必須|尚可|歓迎|優遇/g,
+  /(?:等|など|ほか)(?:の.*)?$/, // 'PostgreSQL等のDB' → 'PostgreSQL'
+  /(?:の)?(?:いずれか|どれか|どちらか|のうち)(?:の|で|が)?/g,
+  /実務|経験者|経験|以上|程度|レベル|上級|中級|初級|を含む|含む|必須|尚可|なお可|歓迎|優遇|が望ましい|望ましい|あれば/g,
   /(?:での|の|を用いた|を使った|による)(?:開発|実装|構築)\s*$/,
-  /(?:等|など|ほか)\s*$/,
 ];
 
 // それだけでは技術名にならない語（括弧内の補足等。分割後の要素がこれなら捨てる）
@@ -310,6 +322,7 @@ function cleanPiece(piece: string): string {
   let s = piece;
   for (const re of LEVEL_PATTERNS) s = s.replace(re, ' ');
   return s
+    .replace(/(?:での|の|が|を|で|\s)+$/, '')
     .replace(/\s+/g, ' ')
     .replace(/^[\s\-・:：。*※•●○◆◇■□>]+|[\s\-・:：、。*※]+$/g, '')
     .trim();
@@ -322,59 +335,205 @@ function keepUnknown(token: string): boolean {
   return !/^[a-z]$/i.test(token);
 }
 
-const tokenCache = new Map<string, string[]>();
-const TOKEN_CACHE_MAX = 20_000;
 
-// 1つの記載 → 正規化したスキル名の配列（辞書にあれば正規形、無ければ正規化した表記）
-export function tokenizeSkill(raw: string): string[] {
-  const cached = tokenCache.get(raw);
-  if (cached) return [...cached];
-  const result = tokenizeUncached(raw);
-  if (tokenCache.size >= TOKEN_CACHE_MAX) tokenCache.clear();
-  tokenCache.set(raw, result);
-  return [...result];
+// 必須・尚可スキルの1要件。members のどれか1つを満たせばその要件を満たす（単一の技術なら1つ）。
+// 括弧の補足（'AWS(EC2/RDS)'）は親か子のどれかを満たせばよい1要件、選択肢（'Java or C#' 'AWS・GCP等' 'いずれか'）も1要件にする。
+// label は保存・表示する表記で、読み戻して解析し直しても同じ要件になる（'AWS(EC2/RDS)' 'Java / C#（いずれか）'）
+export interface SkillRequirement {
+  label: string;
+  members: string[];
+  preferred: boolean; // 尚可・歓迎の印があった（必須スキルの欄に紛れた尚可を尚可スキルへ移す）
 }
 
-function tokenizeUncached(raw: string): string[] {
+// ラムダ式（Java・C# 等の言語機能）を AWS Lambda と読まない言語
+const LAMBDA_EXPRESSION_LANGS = new Set(['java', 'kotlin', 'scala', 'c#', 'c++', 'vb.net']);
+const LAMBDA_EXPRESSION = 'Lambda式';
+
+interface ParseContext {
+  restore: string[];
+  brackets: string[];
+  lambdaExpression: boolean;
+}
+
+function restoreText(s: string, ctx: ParseContext): string {
+  return s.replace(PLACEHOLDER_CHAR, (ch) => ctx.restore[ch.charCodeAt(0) - PLACEHOLDER_BASE] ?? '');
+}
+
+function bracketContent(ch: string, ctx: ParseContext): string {
+  return ctx.brackets[ch.charCodeAt(0) - BRACKET_BASE] ?? '';
+}
+
+function resolveName(segment: string, ctx: ParseContext): string | null {
+  const piece = cleanPiece(restoreText(segment, ctx));
+  if (!piece) return null;
+  const name = resolve(piece) ?? (keepUnknown(piece) ? piece : null);
+  if (name === 'Lambda' && ctx.lambdaExpression && !/aws|amazon/i.test(piece)) return LAMBDA_EXPRESSION;
+  return name;
+}
+
+// 括弧・区切りを含む文字列の技術名をすべて取り出す（括弧の中も。順序を保ち重複を除く）
+function flatNames(s: string, ctx: ParseContext): string[] {
+  const out: string[] = [];
+  for (const raw of s.replace(STRAY_BRACKET, ';').split(CLAUSE_SEP)) {
+    for (const piece of raw.split(PIECE_SEP)) {
+      const p = pieceOf(piece, ctx);
+      out.push(...p.parents, ...p.children);
+    }
+  }
+  return uniqueCi(out);
+}
+
+// 1つの技術の記載（括弧の印を含む）→ 括弧の外の名前（親）と括弧の中の名前（子）
+function pieceOf(piece: string, ctx: ParseContext): { parents: string[]; children: string[] } {
+  const parents = piece
+    .split(BRACKET_CHAR)
+    .map((seg) => resolveName(seg, ctx))
+    .filter((n): n is string => n !== null);
+  const children = [...piece.matchAll(BRACKET_CHAR)].flatMap((m) => flatNames(bracketContent(m[0], ctx), ctx));
+  return { parents: uniqueCi(parents), children: uniqueCi(children) };
+}
+
+// 印の判定に使う本文（括弧の中は「（尚可）」「（いずれか）」のように技術名を含まない注記だけを含める。
+// 'Java(AWS尚可)' の尚可を Java に掛けないため）
+function markText(s: string, ctx: ParseContext): string {
+  return restoreText(
+    s.replace(BRACKET_CHAR, (ch) => {
+      const content = bracketContent(ch, ctx);
+      return flatNames(content, ctx).length === 0 ? ` ${markText(content, ctx)} ` : ' ';
+    }),
+    ctx,
+  );
+}
+
+function uniqueCi(names: string[]): string[] {
+  const seen = new Set<string>();
+  return names.filter((n) => {
+    const k = n.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function singleReq(name: string, preferred: boolean): SkillRequirement {
+  return { label: name, members: [name], preferred };
+}
+
+function parentReq(parent: string, children: string[], preferred: boolean): SkillRequirement {
+  const kids = children.filter((c) => c.toLowerCase() !== parent.toLowerCase());
+  return kids.length === 0
+    ? singleReq(parent, preferred)
+    : { label: `${parent}(${kids.join('/')})`, members: uniqueCi([parent, ...kids]), preferred };
+}
+
+function anyOfReq(reqs: SkillRequirement[], preferred: boolean): SkillRequirement {
+  const members = uniqueCi(reqs.flatMap((r) => r.members));
+  if (reqs.length === 1) return { ...reqs[0], preferred };
+  if (members.length === 1) return singleReq(members[0], preferred);
+  return { label: `${reqs.map((r) => r.label).join(' / ')}（いずれか）`, members, preferred };
+}
+
+function uniqueReqs(reqs: SkillRequirement[]): SkillRequirement[] {
+  const seen = new Set<string>();
+  return reqs.filter((r) => {
+    const k = r.label.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function parseWith(text: string, lambdaExpression: boolean): SkillRequirement[] {
+  const ctx: ParseContext = { restore: [], brackets: [], lambdaExpression };
+  let s = REWRITES.reduce((acc, [re, to]) => acc.replace(re, to), text);
+  for (const re of PROTECTED_RES) {
+    s = s.replace(re, (hit) => {
+      if (ctx.restore.length >= BRACKET_BASE - PLACEHOLDER_BASE) return hit;
+      ctx.restore.push(hit);
+      return String.fromCharCode(PLACEHOLDER_BASE + ctx.restore.length - 1);
+    });
+  }
+  // 括弧は内側から印に置き換える（印の位置で親と子を対応付ける）
+  for (let m = s.match(BRACKET_GROUP); m && m.index !== undefined && ctx.brackets.length < 0x800; m = s.match(BRACKET_GROUP)) {
+    ctx.brackets.push(m[1]);
+    s = `${s.slice(0, m.index)}${String.fromCharCode(BRACKET_BASE + ctx.brackets.length - 1)}${s.slice(m.index + m[0].length)}`;
+  }
+  s = s.replace(STRAY_BRACKET, ';');
+
+  const out: SkillRequirement[] = [];
+  let itemAnyOf = false;
+  for (const clause of s.split(CLAUSE_SEP)) {
+    const clauseMarks = markText(clause, ctx);
+    const clausePreferred = PREFERRED_MARK.test(clauseMarks);
+    const reqs: SkillRequirement[] = [];
+    let explicitRequired = false;
+    for (const piece of clause.split(PIECE_SEP)) {
+      const { parents, children } = pieceOf(piece, ctx);
+      const pieceRequired = REQUIRED_MARK.test(markText(piece, ctx));
+      if (pieceRequired) explicitRequired = true;
+      const preferred = clausePreferred && !pieceRequired;
+      if (parents.length === 0) reqs.push(...children.map((c) => singleReq(c, preferred)));
+      else {
+        reqs.push(parentReq(parents[0], children, preferred));
+        reqs.push(...parents.slice(1).map((n) => singleReq(n, preferred)));
+      }
+    }
+    const unique = uniqueReqs(reqs);
+    if (unique.length === 0) continue;
+    if (OR_MARK.test(clauseMarks)) {
+      // 並びの中に選択肢があればその並びを1要件に。1語だけの並び（'AWS、GCP、Azureのいずれか' の最後）なら項目全体を1要件にする
+      if (unique.length >= 2) out.push(anyOfReq(unique, clausePreferred && !explicitRequired));
+      else {
+        itemAnyOf = true;
+        out.push(...unique);
+      }
+    } else out.push(...unique);
+  }
+  const reqs = uniqueReqs(out);
+  if (!itemAnyOf || reqs.length < 2) return reqs;
+  const required = reqs.filter((r) => !r.preferred);
+  const preferred = reqs.filter((r) => r.preferred);
+  return [
+    ...(required.length > 0 ? [anyOfReq(required, false)] : []),
+    ...(preferred.length > 0 ? [anyOfReq(preferred, true)] : []),
+  ];
+}
+
+function parseUncached(raw: string): SkillRequirement[] {
   // 丸数字は NFKC で数字になり語に付いてしまうため、先に区切りにする
   const text = raw.replace(/[①-⑳]/g, ' / ').normalize('NFKC').replace(/[ \t]+/g, ' ').trim();
   if (!text) return [];
   const whole = resolve(text);
-  if (whole) return [whole];
-
-  const restore: string[] = [];
-  let s = REWRITES.reduce((acc, [re, to]) => acc.replace(re, to), text);
-  for (const re of PROTECTED_RES) {
-    s = s.replace(re, (hit) => {
-      restore.push(hit);
-      return String.fromCharCode(PLACEHOLDER_BASE + restore.length - 1);
-    });
+  if (whole) return [singleReq(whole, false)];
+  const reqs = parseWith(text, false);
+  // 'Java8(Stream/Lambda)' の Lambda はラムダ式（AWS の文脈が無く、ラムダ式のある言語と並ぶとき）
+  const members = new Set(reqs.flatMap((r) => r.members.map((m) => m.toLowerCase())));
+  const awsContext =
+    /aws|amazon/i.test(text) || [...members].some((m) => m !== 'lambda' && (m === 'aws' || impliesSkill(m, 'AWS')));
+  if (members.has('lambda') && !awsContext && [...members].some((m) => LAMBDA_EXPRESSION_LANGS.has(m))) {
+    return parseWith(text, true);
   }
+  return reqs;
+}
 
-  // 括弧は内側から取り出し、外側（親）も残す
-  const parts: string[] = [];
-  for (let m = s.match(BRACKET_GROUP); m && m.index !== undefined; m = s.match(BRACKET_GROUP)) {
-    parts.push(m[1]);
-    s = `${s.slice(0, m.index)}${SEP}${s.slice(m.index + m[0].length)}`;
-  }
-  parts.unshift(s);
+const reqCache = new Map<string, SkillRequirement[]>();
+const TOKEN_CACHE_MAX = 20_000;
 
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const part of parts) {
-    for (const rawPiece of part.replace(STRAY_BRACKET, SEP).replace(SEPARATOR, SEP).split(SEP)) {
-      const restored = rawPiece.replace(/[-]/g, (ch) => restore[ch.charCodeAt(0) - PLACEHOLDER_BASE] ?? '');
-      const piece = cleanPiece(restored);
-      if (!piece) continue;
-      const name = resolve(piece) ?? (keepUnknown(piece) ? piece : null);
-      if (!name) continue;
-      const key = name.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(name);
-    }
+// 1つの記載 → 要件の配列（必須・尚可スキル用。選択肢・括弧の補足は1要件にまとめる）
+export function parseRequirements(raw: string): SkillRequirement[] {
+  let cached = reqCache.get(raw);
+  if (!cached) {
+    cached = parseUncached(raw);
+    if (reqCache.size >= TOKEN_CACHE_MAX) reqCache.clear();
+    reqCache.set(raw, cached);
   }
-  return out;
+  return cached.map((r) => ({ ...r, members: [...r.members] }));
+}
+
+// 1つの記載 → 正規化したスキル名の配列（辞書にあれば正規形、無ければ正規化した表記）。
+// 要員のスキル・同義辞書・集計用で、選択肢や括弧の補足も1語ずつに分ける
+export function tokenizeSkill(raw: string): string[] {
+  return uniqueCi(parseRequirements(raw).flatMap((r) => r.members));
 }
 
 // 1つのスキル名として正規化する（同義辞書の照合キー用）。複数の技術に分かれる記載は分けずに
@@ -386,19 +545,38 @@ export function normalizeSkill(raw: string): string {
   return raw.normalize('NFKC').replace(/\s+/g, ' ').trim();
 }
 
-// スキルの配列を正規化する（各要素を分割・正規化し、大文字小文字を無視して重複を除く。出現順は保つ）
+// スキルの配列を正規化する（各要素を分割・正規化し、大文字小文字を無視して重複を除く。出現順は保つ）。要員のスキル用
 export function normalizeSkills(raw: string[]): string[] {
-  const out: string[] = [];
+  return uniqueCi(raw.flatMap((item) => tokenizeSkill(item)));
+}
+
+// 案件の必須・尚可スキルを要件の表記の配列にする。必須の欄に「尚可」「歓迎」の印がある要件は尚可へ移す
+// （抽出・DB読出の両方で使う。既存の行も読出時に救済される）
+export function normalizeRequirementLists(requiredRaw: string[], preferredRaw: string[]): { required: string[]; preferred: string[] } {
   const seen = new Set<string>();
-  for (const item of raw) {
-    for (const token of tokenizeSkill(item)) {
-      const key = token.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(token);
+  const required: string[] = [];
+  const preferred: string[] = [];
+  const add = (list: string[], label: string) => {
+    const k = label.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    list.push(label);
+  };
+  const moved: string[] = [];
+  for (const item of requiredRaw) {
+    for (const r of parseRequirements(item)) {
+      if (r.preferred) moved.push(r.label);
+      else add(required, r.label);
     }
   }
-  return out;
+  for (const label of moved) add(preferred, label);
+  for (const item of preferredRaw) for (const r of parseRequirements(item)) add(preferred, r.label);
+  return { required, preferred };
+}
+
+// 要件の表記の配列 → 含まれる技術名（集計・表示用に1語ずつ）
+export function requirementMembers(labels: string[]): string[] {
+  return uniqueCi(labels.flatMap((l) => parseRequirements(l).flatMap((r) => r.members)));
 }
 
 // 辞書にある正規形か（tokenizeSkill の出力に対して使う）
@@ -419,6 +597,7 @@ export function skillDictionaryIssues(): string[] {
 }
 
 const HONORIFIC = /(様|さん|氏|殿|御中|君)$/;
+const PERSON_NAME_LIKE = /^(?:[\u4E00-\u9FFF\u3005]{2,4}|[ァ-ヺー]{2,3})$/;
 
 function nameKey(s: string): string {
   return s.normalize('NFKC').toLowerCase().replace(/[\s.・]/g, '');
@@ -429,6 +608,9 @@ function nameKey(s: string): string {
 export function isNameLikeToken(token: string, names: string[]): boolean {
   if (isKnownSkill(token)) return false;
   if (HONORIFIC.test(token)) return true;
+  // 表示名はイニシャルだけのため、氏名そのものとは照合できない。辞書に無い漢字2〜4文字・カタカナ3文字以下の語は
+  // 氏名の混入の恐れがあるため数えない（「山田」「佐々木」「ヤマダ」。技術名の未知語はほぼ英字か長いカタカナ）
+  if (PERSON_NAME_LIKE.test(token.normalize('NFKC').replace(/\s+/g, ''))) return true;
   const key = nameKey(token);
   if (!key) return true;
   return names.some((n) => {
@@ -441,4 +623,10 @@ export function isNameLikeToken(token: string, names: string[]): boolean {
 export function classifySkillTokens(tokens: string[], names: string[]): { counted: string[]; unknown: string[] } {
   const counted = tokens.filter((t) => !isNameLikeToken(t, names));
   return { counted, unknown: counted.filter((t) => !isKnownSkill(t)) };
+}
+
+// DB読出用: 案件の必須・尚可スキルのセル（またはマルチセレクト）を要件の表記に（Project のフィールド名で返す）
+export function requirementsOf(requiredRaw: string[], preferredRaw: string[]): { requiredSkills: string[]; preferredSkills: string[] } {
+  const r = normalizeRequirementLists(requiredRaw, preferredRaw);
+  return { requiredSkills: r.required, preferredSkills: r.preferred };
 }

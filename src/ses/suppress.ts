@@ -1,6 +1,7 @@
 // 再提案抑制。営業がステータスを「見送り」にした組・評価で「ズレ」にした組は、どちらかの側の再送（名寄せで同じと
 // みなせる案件・要員。単金・日付の違いは問わない）が届いても提案し直さない（サマリには件数だけを載せる）。
-// 単金・リモート条件が大きく変わった再送は、改めて検討する価値があるため「以前見送り」の注意を付けて通す。
+// 単金・リモート条件が有利な方へ大きく変わった再送（「ズレ」はスキルが変わった再送）は、改めて検討する価値があるため
+// 「以前見送り」の注意を付けて通す。
 // 照合（buildSuppressionIndex 以下）は純関数。読み込み（loadSuppressionIndex）は失敗しても抑制なしで続ける
 import { sameProjectIgnoringRate, sameEngineerIgnoringRate } from './store.js';
 import { fmtMan } from './pricing.js';
@@ -36,22 +37,51 @@ function rateOf(p: Project): number | null {
   return p.rateMax ?? p.rateMin;
 }
 
-function rateChange(label: string, before: number | null, after: number | null): string | null {
-  if (before === null || after === null || Math.abs(after - before) < MATERIAL_RATE_CHANGE_MAN) return null;
-  return `${label} ${fmtMan(before)}→${fmtMan(after)}万円`;
+// 単金の有利な変更（案件単金は上がった・希望単金は下がった）だけを数える
+function rateChange(label: string, before: number | null, after: number | null, favorable: 'up' | 'down'): string | null {
+  if (before === null || after === null) return null;
+  const delta = favorable === 'up' ? after - before : before - after;
+  return delta >= MATERIAL_RATE_CHANGE_MAN ? `${label} ${fmtMan(before)}→${fmtMan(after)}万円` : null;
 }
 
-function remoteChange(label: string, before: RemoteOption, after: RemoteOption): string | null {
-  return before !== 'unknown' && after !== 'unknown' && before !== after ? `${label}の変更` : null;
+const REMOTE_LEVEL: Record<Exclude<RemoteOption, 'unknown'>, number> = { none: 0, partial: 1, full: 2 };
+
+// リモート条件の有利な変更（案件は緩んだ: 出社→一部→フル、要員の希望は緩んだ: フル→一部→出社可）だけを数える
+function remoteChange(label: string, before: RemoteOption, after: RemoteOption, favorable: 'up' | 'down'): string | null {
+  if (before === 'unknown' || after === 'unknown' || before === after) return null;
+  const up = REMOTE_LEVEL[after] > REMOTE_LEVEL[before];
+  return up === (favorable === 'up') ? `${label}の変更` : null;
 }
 
-// 見送りにしたときから、単金・リモート条件が大きく変わったか（変わった点の短い記述。変わっていなければ空）
-export function materialChanges(before: { project: Project; engineer: Engineer }, project: Project, engineer: Engineer): string[] {
+function skillSet(labels: string[]): Set<string> {
+  return new Set(labels.map((s) => s.toLowerCase()));
+}
+
+// 要員のスキルが増えた・案件の必須スキルが変わったか（評価で「ズレ」にした組はスキルが変わったときだけ提案し直す）
+function skillChanges(before: { project: Project; engineer: Engineer }, project: Project, engineer: Engineer): string[] {
+  const out: string[] = [];
+  const had = skillSet(before.engineer.skills);
+  if (engineer.skills.some((s) => !had.has(s.toLowerCase()))) out.push('要員のスキルの追加');
+  const req = skillSet(before.project.requiredSkills);
+  const now = skillSet(project.requiredSkills);
+  if (req.size !== now.size || [...now].some((r) => !req.has(r))) out.push('案件の必須スキルの変更');
+  return out;
+}
+
+// 見送り・ズレにしたときから、条件が有利な方へ大きく変わったか（変わった点の短い記述。変わっていなければ空）。
+// 不利な変更（案件単金の値下げ・要員の希望単金の値上げ・リモート条件の厳格化）では提案し直さない。
+// 評価で「ズレ」にした組はスキルの不一致が理由のため、単金・リモート条件ではなくスキルの変更だけを見る
+export function materialChanges(
+  before: { project: Project; engineer: Engineer; source?: RejectedPair['source'] },
+  project: Project,
+  engineer: Engineer,
+): string[] {
+  if (before.source === 'bad') return skillChanges(before, project, engineer);
   return [
-    rateChange('案件単金', rateOf(before.project), rateOf(project)),
-    rateChange('希望単金', before.engineer.desiredRate, engineer.desiredRate),
-    remoteChange('案件のリモート条件', before.project.remote, project.remote),
-    remoteChange('要員のリモート希望', before.engineer.remoteWish, engineer.remoteWish),
+    rateChange('案件単金', rateOf(before.project), rateOf(project), 'up'),
+    rateChange('希望単金', before.engineer.desiredRate, engineer.desiredRate, 'down'),
+    remoteChange('案件のリモート条件', before.project.remote, project.remote, 'up'),
+    remoteChange('要員のリモート希望', before.engineer.remoteWish, engineer.remoteWish, 'down'),
   ].filter((x): x is string => x !== null);
 }
 

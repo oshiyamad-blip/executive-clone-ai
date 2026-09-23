@@ -18,7 +18,7 @@ import {
   sesTargetGmail,
   draftSigningKey,
 } from './config.js';
-import { materializeReplyDraft } from './draft.js';
+import { materializeReplyDraft, hasNonInitialsEngineerLabel } from './draft.js';
 import { replyDraftReady, replyDraftExistsViaMail } from './mail/index.js';
 import { recordHealEvent } from './heal/events.js';
 import { safeErr, errKind, SafeLogError } from './redact.js';
@@ -187,6 +187,8 @@ export function planDraftRequest(
       );
     } else if (tampered) errors[side] = errorState('下書きデータが書き換えられているため作成しません');
     else if (!data[side]) errors[side] = errorState('下書きの文面データがありません');
+    // 表示名をイニシャルにする前の版で保存した文面に氏名が残っていれば作らず、次回のバッチで文面を作り直す
+    else if (row.tab !== PROPER_CANDIDATE_TAB && hasNonInitialsEngineerLabel(data[side]!)) errors[side] = DRAFT_STATE.genFailed;
     else create.push(side);
   }
   return { sender, data, create, errors };

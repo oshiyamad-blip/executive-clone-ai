@@ -14,7 +14,7 @@ import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
 import { redactable, safeErr } from './redact.js';
 import { recordHealEvent, recordStat } from './heal/events.js';
-import { hasKnownInitials } from './pii.js';
+import { hasKnownInitials, toInitials, UNKNOWN_INITIALS } from './pii.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
@@ -301,6 +301,25 @@ export const MISSING_ENGINEER_INITIALS = '《要員のイニシャルを記入�
 
 function engineerLabel(engineer: Engineer): string {
   return hasKnownInitials(engineer.displayName) ? engineer.displayName : MISSING_ENGINEER_INITIALS;
+}
+
+// 文面の中で要員の表示名を差し込む位置（件名・導入文・表の「表示名」）
+const ENGINEER_LABEL_SPOTS = [/【ご提案】(.+?)様のご紹介/g, / - (.+?)様向け/g, /要員「(.+?)」様/g, /表示名\s*[:：]\s*([^\n\r]+)/g];
+
+// 表示名の位置にイニシャル（または差し込みの表記）以外が入った文面か。表示名にイニシャルを徹底する前の版で保存した
+// 下書きデータに氏名が残っていれば、そのまま社外へ出さない（pendingDrafts が作り直しに回す）
+export function hasNonInitialsEngineerLabel(d: { subject: string; body?: string }): boolean {
+  const text = `${d.subject}\n${d.body ?? ''}`.normalize('NFKC');
+  for (const re of ENGINEER_LABEL_SPOTS) {
+    for (const m of text.matchAll(re)) {
+      const label = m[1].trim();
+      if (label === MISSING_ENGINEER_INITIALS.normalize('NFKC')) continue;
+      if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(label) || toInitials(label) === UNKNOWN_INITIALS || label.replace(/[^A-Za-z]/g, '').length > 3) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 interface RecipientView {

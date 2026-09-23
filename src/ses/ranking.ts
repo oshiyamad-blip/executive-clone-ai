@@ -33,7 +33,7 @@ export function skillFitScore(skill: PairBreakdown['skill'], freshness: Freshnes
   return Math.round(skill.rate * 100) - FRESHNESS_PENALTY[freshness.level];
 }
 
-// 同じ適合度なら、完全一致の多い組 → 同義で満たした組 → 含意（推定）で満たした組 の順
+// 同じ適合度なら、完全一致の多い組 → 同等（同義・確実な含意）で満たした組 → 推定の含意で満たした組 の順
 export function directnessKeys(skill: PairBreakdown['skill']): [number, number] {
   if (skill.total === 0) return [0, 0];
   return [skill.exact / skill.total, (skill.exact + skill.equiv) / skill.total];
@@ -84,7 +84,7 @@ export function formatBreakdown(b: PairBreakdown, grossMarginJpy: number, result
   const how =
     covered === s.exact
       ? `一致${s.exact}/${s.total}`
-      : `${covered}/${s.total}: ${[`一致${s.exact}`, s.equiv > 0 ? `同義${s.equiv}` : '', s.implied > 0 ? `推定${s.implied}` : ''].filter(Boolean).join('・')}`;
+      : `${covered}/${s.total}: ${[`一致${s.exact}`, s.equiv > 0 ? `同等${s.equiv}` : '', s.implied > 0 ? `推定${s.implied}` : ''].filter(Boolean).join('・')}`;
   const parts: string[] = [];
   if (s.basis === 'unknown') parts.push('必須スキル不明（案件名に要員のスキルあり）');
   else parts.push(`${s.basis === 'preferred' ? '尚可スキルで判定' : 'スキル'}${pct}%（${how}）`);

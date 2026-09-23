@@ -6,7 +6,10 @@
 // - 保存できなかったマッチ・文面を用意できなかったマッチのある案件・要員は突合済にしない（次回判定し直す）
 // - 次回の実行では突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れる案件・要員を先に突合し、それでも残れば異常終了で知らせる
 // - 判定の予算（SES_JUDGE_BUDGET_JPY）に達した後の組・AI判定が一時的に失敗した組は「未判定」で保存し、その組の案件・要員は
-//   突合済にしない（次回の実行で判定し、下書きは判定を通った組にだけ作る）
+//   突合済にしない（次回の実行で判定し、下書きは判定を通った組にだけ作る）。未判定の組は次回以降、一次選抜で選ばれ直さなくても
+//   判定し直す（相手が対象期間を外れていれば ID で読み込む）。案件・要員が終わった等で判定できなくなった組は閉じる。
+//   次回の実行では対象期間を外れる案件・要員の組は予算に達していても判定する
+// - 上限であふれた組は、同じ案件・要員の組が不適合・低評価になって枠が空けば、同じ実行のうちに次点として判定する
 import {
   primarySelectDetailed,
   prepareJudging,
@@ -16,13 +19,14 @@ import {
   startJudgeBudget,
   reportJudgeTally,
   judgeTallySnapshot,
+  DEFERRED_BUDGET_CAUSE,
   type PairScope,
   type PrimarySelectStats,
 } from './match.js';
 import type { SuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
-import { markItemsMatched } from '../database/index.js';
+import { markItemsMatched, closeDeferredMatches } from '../database/index.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
 import { pastRunDeadline, isLastChance } from './schedule.js';
 import { matchLookbackDays } from './config.js';
@@ -46,6 +50,7 @@ export interface IncrementalMatchResult {
   saved: MatchResult[]; // 保存できたマッチ（サマリに載せる）
   deferredItems: number; // 期限切れ・失敗で突合し終えず次回に回した案件・要員の数
   primaryStats: PrimarySelectStats; // 一次選抜の除外理由・上限の内訳
+  closedPending: number; // 判定待ちのまま対象外になり閉じた組
 }
 
 export interface IncrementalMatchOptions {
@@ -55,6 +60,8 @@ export interface IncrementalMatchOptions {
   checkpoint?: (saved: MatchResult[]) => Promise<void>;
   // 以前「見送り」「ズレ」にした組（再提案抑制）
   suppression?: SuppressionIndex;
+  // 判定待ちの組の相手のうち、突合の対象期間を外れた案件・要員
+  pendingItems?: { projects: Project[]; engineers: Engineer[] };
 }
 
 // 候補ペアを「その組を受け持つ突合前の案件・要員」ごとにまとめる（案件が突合前ならその案件、そうでなければ要員）
@@ -100,6 +107,11 @@ async function markMatched(groups: Group[]): Promise<void> {
   }
 }
 
+// 一次選抜を選び直す回数の上限（不適合・低評価で空いた枠を、上限であふれた次点の組で同じ実行のうちに埋める）
+const MAX_SELECTION_ROUNDS = 3;
+
+type UnfinishedCause = 'budget' | 'transient' | 'draft' | 'deadline' | 'backfill';
+
 export async function matchIncrementally(
   projects: Project[],
   engineers: Engineer[],
@@ -107,17 +119,17 @@ export async function matchIncrementally(
   opts: IncrementalMatchOptions = {},
 ): Promise<IncrementalMatchResult> {
   const fewShot = await prepareJudging();
-  const primary = primarySelectDetailed(projects, engineers, scope, { suppression: opts.suppression });
   // 最終判定と紹介文面の生成のコストを、この突合の開始から数える
   const budget = startJudgeBudget();
   const tallyBefore = judgeTallySnapshot();
-  const groups = groupPairs(projects, engineers, scope, primary.pairs);
-  const pairCount = groups.reduce((n, g) => n + g.pairs.length, 0);
-  console.log(`SESマッチング: ${formatPrimaryStats(primary.stats)}`);
-  console.log(`SESマッチング: 突合前の案件・要員${groups.length}件・判定するペア${pairCount}件`);
+  // この実行で判定した組を控え、選び直しの一次選抜で判定済み・枠を使わない組として扱う
+  const judged = new Set(scope.judgedMatchIds);
+  const capFree = new Set(scope.capFreeMatchIds ?? []);
+  const pending = new Set(scope.pendingMatchIds ?? []);
+  const roundScope = (): PairScope => ({ ...scope, judgedMatchIds: judged, capFreeMatchIds: capFree, pendingMatchIds: pending });
 
   const saved = opts.saved ?? [];
-  const completed = new Set<Group>();
+  const causes = new Map<string, UnfinishedCause>(); // 突合し終えなかった案件・要員 → 理由
   let unmarked: Group[] = [];
   let lastCheckpoint = Date.now();
   const checkpoint = async (): Promise<void> => {
@@ -134,51 +146,154 @@ export async function matchIncrementally(
     lastCheckpoint = Date.now();
   };
 
+  let firstStats: PrimarySelectStats | null = null;
+  let closedPending = 0;
+  let lastGroups: Group[] = [];
   try {
-    let index = 0;
-    while (index < groups.length) {
-      if (pastRunDeadline()) break;
-      // 候補の無いグループは判定なしで突合済にする。候補のあるグループは目安の件数までまとめて判定・保存する
-      const step: Group[] = [];
-      let pairsInStep = 0;
-      while (index < groups.length && (step.length === 0 || pairsInStep + groups[index].pairs.length <= PAIRS_PER_STEP)) {
-        step.push(groups[index]);
-        pairsInStep += groups[index].pairs.length;
-        index += 1;
+    for (let round = 0; round < MAX_SELECTION_ROUNDS; round += 1) {
+      if (round > 0 && pastRunDeadline()) break;
+      const primary = primarySelectDetailed(projects, engineers, roundScope(), {
+        suppression: opts.suppression,
+        pendingItems: opts.pendingItems,
+      });
+      if (round === 0) {
+        firstStats = primary.stats;
+        closedPending = await closePending(primary.closedPending);
+        for (const id of primary.closedPending) pending.delete(id);
       }
-      // 期限を過ぎたら判定し残したペアは次回へ（そのペアを持つ案件・要員は突合済にしない）
-      const judged = await judgePairs(step.flatMap((g) => g.pairs), fewShot, { stopAtDeadline: true, budget });
-      const drafted = await createDrafts(judged, projects, engineers);
-      const { saved: stepSaved } = await persistMatches(drafted, projects, engineers);
-      saved.push(...stepSaved);
-      // 文面を用意できなかった組・AI判定を次回に回した組のある案件・要員は突合済にしない（次回判定し直す）
-      const ok = new Set(stepSaved.filter((m) => !m.draftFailed && m.category !== 'deferred').map((m) => m.id));
-      for (const g of step) {
-        if (!g.pairs.every((p) => ok.has(matchIdOf(p.project.id, p.engineer.id)))) continue;
-        completed.add(g);
-        unmarked.push(g);
+      // 選び直しの回は、空いた枠の次点を待つ案件・要員のグループだけを扱う（予算・失敗で残った組は次回の実行に回す）
+      const groups = groupPairs(projects, engineers, scope, primary.pairs).filter(
+        (g) => round === 0 || causes.get(groupKey(g)) === 'backfill',
+      );
+      lastGroups = round === 0 ? groups : lastGroups;
+      if (round === 0) {
+        const pairCount = groups.reduce((n, g) => n + g.pairs.length, 0);
+        console.log(`SESマッチング: ${formatPrimaryStats(primary.stats)}`);
+        console.log(`SESマッチング: 突合前の案件・要員${groups.length}件・判定するペア${pairCount}件`);
+      } else if (groups.some((g) => g.pairs.length > 0)) {
+        console.log(`SESマッチング: 不適合・低評価で空いた枠に次点の組${groups.reduce((n, g) => n + g.pairs.length, 0)}件を判定します`);
       }
-      if (Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) await checkpoint();
+      let freedSlots = false;
+      let index = 0;
+      while (index < groups.length) {
+        if (pastRunDeadline()) {
+          for (const g of groups.slice(index)) causes.set(groupKey(g), 'deadline');
+          break;
+        }
+        // 候補の無いグループは判定なしで突合済にする。候補のあるグループは目安の件数までまとめて判定・保存する
+        const step: Group[] = [];
+        let pairsInStep = 0;
+        while (index < groups.length && (step.length === 0 || pairsInStep + groups[index].pairs.length <= PAIRS_PER_STEP)) {
+          step.push(groups[index]);
+          pairsInStep += groups[index].pairs.length;
+          index += 1;
+        }
+        // 次回の実行では対象期間を外れる案件・要員の組は、判定の予算に達していても判定する（取りこぼさない）
+        const exempt = step.filter((g) => isLastChance(new Date(g.receivedAt), matchLookbackDays())).flatMap((g) => g.pairs);
+        const normal = step.filter((g) => !isLastChance(new Date(g.receivedAt), matchLookbackDays())).flatMap((g) => g.pairs);
+        // 期限を過ぎたら判定し残したペアは次回へ（そのペアを持つ案件・要員は突合済にしない）
+        const judgedStep = [
+          ...(await judgePairs(exempt, fewShot, { stopAtDeadline: true })),
+          ...(await judgePairs(normal, fewShot, { stopAtDeadline: true, budget })),
+        ];
+        const drafted = await createDrafts(judgedStep, projects, engineers);
+        const { saved: stepSaved } = await persistMatches(drafted, projects, engineers);
+        saved.push(...stepSaved);
+        const byId = new Map(stepSaved.map((m) => [m.id, m] as const));
+        for (const m of stepSaved) {
+          if (m.category === 'deferred') continue;
+          judged.add(m.id);
+          pending.delete(m.id);
+          if (m.verdict === 'rejected' || m.verdict === 'low') capFree.add(m.id);
+        }
+        // 文面を用意できなかった組・AI判定を次回に回した組のある案件・要員は突合済にしない（次回判定し直す）。
+        // 上限であふれた組のある案件・要員は、自分の組が不適合・低評価で枠を空けたら、次点の組を判定するまで突合済にしない
+        for (const g of step) {
+          const results = g.pairs.map((p) => byId.get(matchIdOf(p.project.id, p.engineer.id)));
+          const cause = unfinishedCause(results);
+          if (cause) {
+            causes.set(groupKey(g), cause);
+            continue;
+          }
+          if (primary.cappedItems.has(groupKey(g)) && results.some((r) => r?.verdict === 'rejected' || r?.verdict === 'low')) {
+            causes.set(groupKey(g), 'backfill');
+            freedSlots = true;
+            continue;
+          }
+          causes.delete(groupKey(g));
+          unmarked.push(g);
+        }
+        if (Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) await checkpoint();
+      }
+      if (!freedSlots) break;
     }
   } finally {
     await checkpoint();
     reportJudgeTally(tallyBefore);
   }
 
-  const unfinished = groups.filter((g) => !completed.has(g));
-  if (unfinished.length > 0 && pastRunDeadline()) {
+  const unfinished = [...causes.entries()];
+  if (unfinished.some(([, c]) => c === 'deadline')) {
     recordHealEvent(
       'warn',
       `1回の実行時間の上限（SES_RUN_DEADLINE_MINUTES）に達したため、案件・要員${unfinished.length}件の突合を次回の実行に回しました`,
     );
   }
   // 次回の実行では突合の対象期間を外れる（＝今回が最後の機会だった）のに突合し終えなかったもの
-  const expiring = unfinished.filter((g) => isLastChance(new Date(g.receivedAt), matchLookbackDays())).length;
-  if (expiring > 0) {
+  const receivedByKey = new Map(lastGroups.map((g) => [groupKey(g), g.receivedAt] as const));
+  const expiring = unfinished.filter(([key]) => isLastChance(new Date(receivedByKey.get(key) ?? Date.now()), matchLookbackDays()));
+  if (expiring.length > 0) {
+    const kinds = new Set(expiring.map(([, c]) => c));
+    const advice = [
+      kinds.has('deadline') ? 'SES_RUN_DEADLINE_MINUTES・SES_MAX_MAILS_PER_RUN を見直す' : '',
+      kinds.has('budget') ? 'SES_JUDGE_BUDGET_JPY を上げる' : '',
+      kinds.has('transient') || kinds.has('draft') ? 'AI判定・文面の生成の失敗（混雑・通信）を確かめる' : '',
+    ].filter(Boolean);
+    const causeText = [
+      kinds.has('deadline') ? '実行時間の上限' : '',
+      kinds.has('budget') ? '判定の予算' : '',
+      kinds.has('transient') ? 'AI判定の一時的な失敗' : '',
+      kinds.has('draft') ? '文面の生成の失敗' : '',
+      kinds.has('backfill') ? '空いた枠の次点の判定待ち' : '',
+    ].filter(Boolean);
     recordFatal(
-      `突合し終えなかった案件・要員のうち${expiring}件は、次回の実行時には突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れます` +
-        '（実行時間の上限・判定の失敗が続いています。SES_RUN_DEADLINE_MINUTES・SES_MAX_MAILS_PER_RUN を見直すか、SES_MATCH_LOOKBACK_DAYS を広げて手動で再実行してください）',
+      `突合し終えなかった案件・要員のうち${expiring.length}件は、次回の実行時には突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れます` +
+        `（理由: ${causeText.join('・')}。${advice.length > 0 ? `${advice.join('か、')}か、` : ''}SES_MATCH_LOOKBACK_DAYS を広げて手動で再実行してください）`,
     );
   }
-  return { saved, deferredItems: unfinished.length, primaryStats: primary.stats };
+  return {
+    saved,
+    deferredItems: unfinished.length,
+    primaryStats: firstStats ?? primarySelectDetailed([], [], scope).stats,
+    closedPending,
+  };
+}
+
+function groupKey(g: Group): string {
+  return `${g.kind}:${g.id}`;
+}
+
+// グループの組の保存結果から、突合し終えなかった理由（無ければ null）
+function unfinishedCause(results: Array<MatchResult | undefined>): UnfinishedCause | null {
+  if (results.some((r) => r === undefined)) return 'deadline';
+  if (results.some((r) => r!.category === 'deferred' && r!.reason.startsWith(DEFERRED_BUDGET_CAUSE))) return 'budget';
+  if (results.some((r) => r!.category === 'deferred')) return 'transient';
+  if (results.some((r) => r!.draftFailed)) return 'draft';
+  return null;
+}
+
+// 判定待ちのまま対象から外れた組を閉じる（失敗しても次回また閉じ直すだけ）
+async function closePending(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  try {
+    const n = await closeDeferredMatches(ids);
+    if (n > 0) {
+      console.log(`SESマッチング: 判定待ちのまま募集・稼働の終了やルールの不一致で対象外になった組${n}件を「ルールのみ」で閉じました`);
+      recordHealEvent('info', `判定待ちの組${n}件は対象外になったため、AI判定をせずに閉じました`);
+    }
+    return n;
+  } catch (err) {
+    console.warn(`SESマッチング: 判定待ちの組を閉じられませんでした（次回の実行で閉じ直します）: ${safeErr(err)}`);
+    return 0;
+  }
 }

@@ -165,7 +165,7 @@ export function formatMetricsLines(m: BatchMetrics): string[] {
       ` / 必須スキル空 ${show(m.requiredEmptyPct)} / 辞書にないスキル語 ${m.unknownSkillTokens}語（${show(m.unknownSkillPct)}）`,
     `一次選抜: 評価${m.pairsEvaluated}組 → 判定対象${m.pairsSelected}組 / 候補0件の案件 ${show(m.noCandidatePct)}（${m.projectsConsidered}件中） / 除外: ${exclusions || 'なし'}`,
     `AI判定: ${m.judged}組（平均${show(m.avgScore, '点')}） / 基準未満で降格 ${m.demoted} / 不適合 ${m.rejected} / 再提案抑制 ${m.suppressed} / 判定繰越 ${m.deferred} / 判定失敗（ルールの結果で保存）${m.heuristicFallback}`,
-    `コスト: 約${m.costJpy}円（キャッシュ読込率 ${show(m.cacheReadPct)}） / 紹介文面 ${m.drafts}通 / 担当者指定の下書き ${m.requestedDrafts}件`,
+    `コスト: 約${m.costJpy}円（キャッシュ読込率 ${m.cacheReadPct === null ? '未使用' : show(m.cacheReadPct)}） / 紹介文面 ${m.drafts}通 / 担当者指定の下書き ${m.requestedDrafts}件`,
   ];
   if (m.extractModelFallback) {
     lines.push(`抽出モデル: ${extractModel()} で代替中（設定: ${configuredExtractModel()}。ANTHROPIC_MODEL_EXTRACT を後継のモデルに変更してください）`);

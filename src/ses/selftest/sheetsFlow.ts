@@ -38,6 +38,8 @@ import {
   fetchOpenProjects,
   fetchAvailableEngineers,
   fetchJudgedMatchIds,
+  fetchMatchLedger,
+  fetchItemsByIds,
 } from '../../database/index.js';
 import { setDemoOverride } from '../config.js';
 import { startRunClock, stopRunClock } from '../schedule.js';
@@ -535,7 +537,7 @@ async function testJudgeGateAndSuppression(): Promise<void> {
     calls.push(pair.engineer.id);
     judgedProjects.push(pair.project.id);
     recordLlmUsage('claude-sonnet-5', 5000, 0);
-    return pair.engineer.id === 'eng_gate_ng'
+    return pair.engineer.id === 'eng_gate_ng' || pair.project.id.startsWith('proj_bf_ng')
       ? { score: 30, reason: '年齢の上限を超えています', dealBreakers: ['age'], questions: [] }
       : { score: 82, reason: '条件に合っています', dealBreakers: [], questions: ['面談の日程は調整できますか？'] };
   });
@@ -640,7 +642,7 @@ async function testJudgeGateAndSuppression(): Promise<void> {
     await saveMatch({ ...makeMatch(p1, e1, 'confirmed'), verdict: 'passed' });
     check('「判定待ち」の側は判定後に文面が入ると「未作成」になる', row(p1.id, e1.id)?.['案件側下書き状態'] === '未作成');
 
-    // 4回目: 見送り（マッチタブのステータス）とズレ（評価）の組の再送。単金がほぼ同じ再送は載せず、大きく変わった再送は注意つきで通す
+    // 4回目: 見送り（マッチタブのステータス）とズレ（評価）の組の再送。単金がほぼ同じ再送は載せず、見送りの組で有利に大きく変わった再送は注意つきで通す
     sheets.setByKey(JUDGE_BOOK, 'マッチ', 'ID', matchIdOf('proj_gate', 'eng_gate_ok'), 'ステータス', '見送り');
     await recordFeedback({
       matchId: matchIdOf('proj_budget', 'eng_gate_ok'),
@@ -659,14 +661,14 @@ async function testJudgeGateAndSuppression(): Promise<void> {
     const r4 = await matchIncrementally(fourth.projects, fourth.engineers, fourth.scope, { suppression });
     check(
       '見送り・ズレの組の再送（単金の差が小さい）は判定も保存もしない（再提案抑制）',
-      r4.primaryStats.suppressed === 2 && !row('proj_gate', 'eng_gate_ok2') && !row('proj_budget', 'eng_gate_ok2') && !calls.includes('eng_gate_ok2'),
+      r4.primaryStats.suppressed === 3 && !row('proj_gate', 'eng_gate_ok2') && !row('proj_budget', 'eng_gate_ok2') && !calls.includes('eng_gate_ok2'),
       JSON.stringify(r4.primaryStats),
     );
     const changed = row('proj_gate', 'eng_gate_ok3')?.['判定根拠'] ?? '';
     check(
-      '単金が大きく変わった再送は「以前見送り」の注意つきで判定する',
-      r4.primaryStats.resuggested === 2 && changed.includes('以前「見送り」にした組の再送です（希望単金 50→45万円）') &&
-        (row('proj_budget', 'eng_gate_ok3')?.['判定根拠'] ?? '').includes('以前評価で「ズレ」にした組の再送です'),
+      '見送りの組で単金が有利に大きく変わった再送は「以前見送り」の注意つきで判定し、ズレの組は単金が変わっても載せない（スキルの不一致は変わらない）',
+      r4.primaryStats.resuggested === 1 && changed.includes('以前「見送り」にした組の再送です（希望単金 50→45万円）') &&
+        !row('proj_budget', 'eng_gate_ok3'),
       changed,
     );
 
@@ -694,9 +696,73 @@ async function testJudgeGateAndSuppression(): Promise<void> {
         injectedRows.every((r) => r[JUDGE_COLUMN] === 'ルールのみ' && r['案件側下書き状態'] === '不要' && r['判定根拠'].includes(INJECTION_REVIEW_REASON)),
       JSON.stringify(injectedRows.map((r) => [r[JUDGE_COLUMN], r['案件側下書き状態']])),
     );
+
+    // 6回目: 要員ごとの上限（1件）であふれた組は、上位の組が不適合になって枠が空けば同じ実行のうちに判定する
+    process.env.MAX_PROJECTS_PER_ENGINEER = '1';
+    newRun();
+    const cobol = (id: string, rateMax: number) =>
+      project(id, { ...gateProject(id), requiredSkills: ['COBOL', 'JCL'], rateMax, businessFlow: '' });
+    await saveProject(cobol('proj_bf_ng1', 80));
+    await saveProject(cobol('proj_bf_ok', 70));
+    await markItemsMatchedSheets('project', ['proj_bf_ng1', 'proj_bf_ok']);
+    await saveEngineer(gateEngineer('eng_bf', 'T.C.', { skills: ['COBOL', 'JCL'] }));
+    calls.length = 0;
+    const sixth = await load();
+    await matchIncrementally(sixth.projects, sixth.engineers, sixth.scope);
+    delete process.env.MAX_PROJECTS_PER_ENGINEER;
+    check(
+      '上限であふれた次点の組を、上位の組が不適合で空けた枠で同じ実行のうちに判定し、要員を突合済にする',
+      row('proj_bf_ng1', 'eng_bf')?.[JUDGE_COLUMN] === '不適合' && row('proj_bf_ok', 'eng_bf')?.[JUDGE_COLUMN] === '通過' &&
+        calls.filter((c) => c === 'eng_bf').length === 2 && Boolean(sheets.record(JUDGE_BOOK, '要員', 'ID', 'eng_bf')?.[MATCHED_COLUMN]),
+      JSON.stringify([row('proj_bf_ng1', 'eng_bf')?.[JUDGE_COLUMN], row('proj_bf_ok', 'eng_bf')?.[JUDGE_COLUMN], calls]),
+    );
+
+    // 7回目: 判定待ちの組は、相手が突合の対象期間を外れても（プールに無くても）IDで読んで判定する
+    process.env.SES_JUDGE_BUDGET_JPY = '1';
+    newRun();
+    const abap = (id: string, name: string) => gateEngineer(id, name, { skills: ['ABAP'], agentEmail: `${id}@theta-gate.example.jp` });
+    await saveEngineer(abap('eng_pend1', 'T.D.'));
+    await saveEngineer(abap('eng_pend2', 'T.E.'));
+    await markItemsMatchedSheets('engineer', ['eng_pend1', 'eng_pend2']);
+    await saveProject(project('proj_pend', { ...gateProject('proj_pend'), requiredSkills: ['ABAP'], businessFlow: '' }));
+    const seventh = await load();
+    const r7 = await matchIncrementally(seventh.projects, seventh.engineers, seventh.scope);
+    const pendingPair = r7.saved.find((m) => m.category === 'deferred');
+    delete process.env.SES_JUDGE_BUDGET_JPY;
+    newRun();
+    await markItemsMatchedSheets('project', ['proj_pend']); // 案件の組がほかに無くなり突合済になった状態
+    const ledger = await fetchMatchLedger();
+    const partnerId = pendingPair?.engineerId ?? '';
+    const eighth = await load();
+    const outOfPool = eighth.engineers.filter((e) => e.id !== partnerId); // 相手は対象期間の外
+    const extra = await fetchItemsByIds(new Set(), new Set([partnerId]));
+    calls.length = 0;
+    await matchIncrementally(eighth.projects, outOfPool, { ...eighth.scope, capFreeMatchIds: ledger.capFree, pendingMatchIds: ledger.deferred }, {
+      pendingItems: extra,
+    });
+    check(
+      '判定待ちの組は、案件・要員が突合済で相手がプールに無くても次の回で判定する',
+      Boolean(pendingPair) && ledger.deferred.has(pendingPair!.id) && calls.includes(partnerId) && row('proj_pend', partnerId)?.[JUDGE_COLUMN] === '通過',
+      JSON.stringify([pendingPair?.id, [...ledger.deferred], calls, row('proj_pend', partnerId)?.[JUDGE_COLUMN]]),
+    );
+
+    // 8回目: 判定待ちのまま相手が見つからなくなった組は「ルールのみ」で閉じ、判定待ちの状態を「不要」にする
+    newRun();
+    const lost = { ...makeMatch(gateProject('proj_lost'), abap('eng_lost', 'T.F.'), 'deferred'), verdict: 'deferred' as const };
+    await saveMatch(lost);
+    const ledger8 = await fetchMatchLedger();
+    const ninth = await load();
+    const r9 = await matchIncrementally(ninth.projects, ninth.engineers, { ...ninth.scope, pendingMatchIds: ledger8.deferred });
+    const lostRow = sheets.record(JUDGE_BOOK, 'マッチ', 'ID', lost.id);
+    check(
+      '相手の見つからない判定待ちの組は閉じる（判定「ルールのみ」・下書き状態「不要」）',
+      r9.closedPending === 1 && lostRow?.[JUDGE_COLUMN] === 'ルールのみ' && lostRow?.['案件側下書き状態'] === '不要' && !(await fetchMatchLedger()).deferred.has(lost.id),
+      JSON.stringify([r9.closedPending, lostRow?.[JUDGE_COLUMN], lostRow?.['案件側下書き状態']]),
+    );
   } finally {
     __setMatchJudgeForTest(null);
     delete process.env.SES_JUDGE_BUDGET_JPY;
+    delete process.env.MAX_PROJECTS_PER_ENGINEER;
     process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;
   }
 }
