@@ -53,8 +53,15 @@ export function skillSheetFormat(file: Pick<SkillSheetFile, 'name' | 'mimeType'>
 }
 
 let client: drive_v3.Drive | null = null;
+// オフライン自己検証（npm run ses:flow:check）用の差し替え口（本番コードからは呼ばない）
+let testDrive: drive_v3.Drive | null = null;
+
+export function __setDriveForTest(drive: drive_v3.Drive | null): void {
+  testDrive = drive;
+}
 
 function driveApi(): drive_v3.Drive {
+  if (testDrive) return testDrive;
   if (client) return client;
   const auth = properGoogleAuth(DRIVE_SCOPES);
   if (!auth) {

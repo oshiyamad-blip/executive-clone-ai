@@ -180,6 +180,15 @@ export function failureOutcome(prevMemo: string, err: unknown, stage: 'load' | '
   return { kind: 'error', memo: `エラー: ${reason}（${attempts}回目）— ${next}`, retry };
 }
 
+type SkillSheetExtractor = typeof extractSkillSheet;
+
+// オフライン自己検証（npm run ses:flow:check）用のLLM抽出の差し替え口（本番コードからは呼ばない）
+let testExtractor: SkillSheetExtractor | null = null;
+
+export function __setSkillSheetExtractorForTest(fn: SkillSheetExtractor | null): void {
+  testExtractor = fn;
+}
+
 async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<ExtractionOutcome> {
   let content: SkillSheetContent;
   try {
@@ -195,10 +204,11 @@ async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<Extr
       retry: false,
     };
   }
+  const extract = testExtractor ?? extractSkillSheet;
   try {
-    return { kind: 'ok', profile: await extractSkillSheet(content) };
+    return { kind: 'ok', profile: await extract(content) };
   } catch (err) {
-    const healed = await healLlmCall(`プロパー抽出(file ${file.id})`, err, (a) => extractSkillSheet(content, a));
+    const healed = await healLlmCall(`プロパー抽出(file ${file.id})`, err, (a) => extract(content, a));
     if (healed) return { kind: 'ok', profile: healed };
     console.error(`プロパー: スキルシートの抽出に失敗 (file ${file.id}): ${safeErr(err)}`);
     return failureOutcome(prevMemo, err, 'extract');
@@ -227,14 +237,6 @@ function emptySyncResult(): ProperSyncResult {
     listed: 0, added: 0, updated: 0, unchanged: 0, extracted: 0, failed: 0, deferred: 0, missing: 0, writeFailed: 0,
     unsupportedNames: [], presentFileIds: null,
   };
-}
-
-async function readMasterRows(): Promise<CachedRow[]> {
-  const rows = await book.readRows(PROPER_MASTER_TAB);
-  if (book.hasHeaderConflict(PROPER_MASTER_TAB)) {
-    throw new SafeLogError(`プロパー管理: 「${PROPER_MASTER_TAB}」タブのヘッダー行が定義と異なるため読み書きしません`);
-  }
-  return rows;
 }
 
 async function writeMasterRow(file: SkillSheetFile, known: boolean, outcome: ExtractionOutcome): Promise<'added' | 'updated'> {
@@ -293,7 +295,7 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
   result.listed = supported.length;
   result.presentFileIds = new Set(supported.map((f) => f.id));
 
-  const rows = await readMasterRows();
+  const rows = await book.readRows(PROPER_MASTER_TAB);
   const knownFiles = rows.filter((r) => cell(r.cells, 'ファイルID').trim()).length;
   if (supported.length === 0 && knownFiles > 0) {
     // フォルダIDの設定違い・共有の解除などで空に見えている可能性が高いため、全員を所在不明にせず前回までの内容で続ける
@@ -387,11 +389,20 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   };
 }
 
-// 突合対象の自社社員。presentFileIds があれば、フォルダから消えたスキルシートの行は除く
+// 突合対象の自社社員。presentFileIds があれば、フォルダから消えたスキルシートの行は除く。
+// 人が行を複製して同じファイルIDの行が複数あるときは、同期が更新する行と同じく先頭の行だけを使う
 export async function loadProperEngineers(presentFileIds: Set<string> | null): Promise<ProperEngineer[]> {
   if (!book.configured()) return [];
-  const rows = await readMasterRows();
-  return rows
+  const rows = await book.readRows(PROPER_MASTER_TAB);
+  const seen = new Set<string>();
+  const firstRows = rows.filter((r) => {
+    const id = cell(r.cells, 'ファイルID').trim();
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  return firstRows
     .map((r) => rowToProperEngineer(r.cells))
     .filter((e): e is ProperEngineer => e !== null && (!presentFileIds || presentFileIds.has(e.fileId)));
 }

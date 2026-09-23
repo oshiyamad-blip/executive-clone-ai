@@ -31,7 +31,12 @@ export function buildProperCandidates(engineers: ProperEngineer[], projects: Pro
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
   const projectById = new Map(projects.map((p) => [p.id, p]));
   const candidates: ProperCandidate[] = [];
+  const seen = new Set<string>();
   for (const m of matchOwnEngineersToProjects(engineers, projects)) {
+    // 人がシートの行を複製していても、同じ社員×案件の候補は1件にする（同じIDの行が2つあると
+    // 担当者メールを入れた側の行が下書き依頼として読まれない）
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;

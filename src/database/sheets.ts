@@ -131,6 +131,15 @@ function rawCell(cells: string[], idx: number): string {
   return idx < 0 ? '' : (cells[idx] ?? '');
 }
 
+// 人が進めたステータス（案件の終了・要員の決定済など）は再保存で巻き戻さない。同じメールを再抽出して
+// 同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。既存が空欄なら機械の値を入れる
+function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[] {
+  const col = colIndex(tab, 'ステータス');
+  const prev = existing ? cellStr(existing, col) : '';
+  if (prev) row[col] = prev;
+  return row;
+}
+
 // ===== 案件 =====
 
 function projectToRow(p: Project): Cell[] {
@@ -144,7 +153,7 @@ function projectToRow(p: Project): Cell[] {
 
 export async function saveProjectSheets(project: Project): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('案件', 'ID', project.id, () => projectToRow(project));
+  await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(project), existing));
   return project.id;
 }
 
@@ -211,7 +220,7 @@ function engineerToRow(e: Engineer): Cell[] {
 
 export async function saveEngineerSheets(engineer: Engineer): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('要員', 'ID', engineer.id, () => engineerToRow(engineer));
+  await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(engineer), existing));
   return engineer.id;
 }
 
@@ -350,14 +359,11 @@ function toDraftRequestRow(tab: string, cells: string[]): DraftRequestRow {
   };
 }
 
-// 担当者メールが入っている行（行キャッシュから。状態による絞り込みは呼び出し側）
+// 担当者メールが入っている行（行キャッシュから。状態による絞り込みは呼び出し側）。
+// ヘッダー行が定義と食い違うタブは例外（列を取り違えて別の行・列の依頼として扱わないため）
 export async function listDraftRequestRowsSheets(tab: string): Promise<DraftRequestRow[]> {
   if (!configured() || !draftRequestTabs().includes(tab)) return [];
   const rows = await readRows(tab);
-  if (book.hasHeaderConflict(tab)) {
-    console.warn(`SheetsDB: 「${tab}」タブのヘッダー行が定義と異なるため、担当者メールによる下書き依頼を処理しません`);
-    return [];
-  }
   return rows.map((r) => toDraftRequestRow(tab, r.cells)).filter((r) => r.id && r.senderEmail);
 }
 
@@ -417,10 +423,7 @@ function properCandidateRow(c: ProperCandidate, existing: string[] | null): Cell
 export async function saveProperCandidatesSheets(candidates: ProperCandidate[]): Promise<number> {
   if (!configured() || candidates.length === 0) return 0;
   const tab = PROPER_CANDIDATE_TAB;
-  await readRows(tab); // タブの自動生成とヘッダー検証を先に済ませる
-  if (book.hasHeaderConflict(tab)) {
-    throw new SafeLogError(`SheetsDB: 「${tab}」タブのヘッダー行が定義と異なるため、プロパー候補を保存しません`);
-  }
+  await readRows(tab); // タブの自動生成とヘッダー検証（食い違いは例外）を先に済ませる
   const fresh: Cell[][] = [];
   let written = 0;
   for (const c of candidates) {
@@ -441,11 +444,17 @@ export async function saveProperCandidatesSheets(candidates: ProperCandidate[]):
 
 export async function saveOwnEngineerSheets(own: OwnEngineer): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('自社社員', 'ID', own.id, () => [
-    own.id, own.displayName, joinList(own.skills), own.experienceYears, own.requiredProjectRate,
-    own.residence, remoteLabel(own.remoteWish), own.availableFrom ?? '',
-    own.status === 'assigned' ? 'アサイン済' : '稼働可',
-  ]);
+  await upsertRow('自社社員', 'ID', own.id, (existing) =>
+    keepStatus(
+      '自社社員',
+      [
+        own.id, own.displayName, joinList(own.skills), own.experienceYears, own.requiredProjectRate,
+        own.residence, remoteLabel(own.remoteWish), own.availableFrom ?? '',
+        own.status === 'assigned' ? 'アサイン済' : '稼働可',
+      ],
+      existing,
+    ),
+  );
   return own.id;
 }
 

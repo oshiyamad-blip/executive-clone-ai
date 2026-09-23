@@ -1,0 +1,1095 @@
+// スプレッドシート運用（DB_PROVIDER=sheets）の結合自己検証（npm run ses:flow:check）。
+// Google Sheets / Drive・メール送受信・スキルシートのLLM抽出をインメモリの偽物（fakeGoogle.ts）に差し替え、
+// 外部には一切接続しない（fetch も遮断し、呼ばれたら失敗にする）。毎回まっさらな環境で動く定時実行を
+// 「行キャッシュを捨てて同じ処理をもう一度」で再現し、タブの自動生成・ヘッダー移行、upsert の冪等性、
+// 人が編集する列の保持、処理済みメールID・隔離リストの持ち越し、担当者メールによる下書き作成、
+// プロパー管理表の同期とプロパー候補の保存、ログ秘匿を検証する。
+// テストデータの氏名・会社・アドレスはすべて架空（example ドメイン）。
+import { rmSync } from 'fs';
+import { join } from 'path';
+import { __setSheetsApiForTest } from '../../database/sheetBook.js';
+import {
+  resetSheetsCache,
+  listDraftRequestRowsSheets,
+  saveProperCandidatesSheets,
+  PROPER_CANDIDATE_TAB,
+  DRAFT_REQUEST_COLUMNS,
+} from '../../database/sheets.js';
+import {
+  saveProject,
+  saveEngineer,
+  saveMatch,
+  fetchOpenProjects,
+  fetchAvailableEngineers,
+  fetchJudgedMatchIds,
+} from '../../database/index.js';
+import { setDemoOverride } from '../config.js';
+import { __setMailTransportForTest } from '../mail/index.js';
+import { __setDriveForTest, type SkillSheetContent } from '../proper/drive.js';
+import {
+  __setSkillSheetExtractorForTest,
+  syncProperMaster,
+  resetProperMasterCache,
+  loadProperEngineers,
+  PROPER_MASTER_TAB,
+  MISSING_FILE_MEMO,
+} from '../proper/master.js';
+import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
+import { runProperFlow } from '../proper/index.js';
+import { collectSesMail } from '../collect.js';
+import { markMailProcessed } from '../store.js';
+import { recordFailure, recordSuccess, listQuarantined } from '../heal/quarantine.js';
+import { resetHealEvents } from '../heal/events.js';
+import { materializePendingDrafts } from '../pendingDrafts.js';
+import { persistAndNotify } from '../notify.js';
+import { buildReplyRef } from '../draft.js';
+import { matchIdOf } from '../match.js';
+import { SafeLogError } from '../redact.js';
+import { FakeSheets, FakeDrive, FakeMailTransport, type FakeDriveFile } from './fakeGoogle.js';
+import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail } from '../../types/index.js';
+
+// ===== 実行環境の隔離（外部の設定・鍵を一切拾わない） =====
+
+const WORK_DIR = 'data/ses-flow-selftest';
+const SES_BOOK = 'fakeSesBook';
+const PROPER_BOOK = 'fakeProperBook';
+const CONFLICT_BOOK = 'fakeConflictBook';
+const OWN_DOMAIN = 'ourco.example.jp';
+const SALES = `sales@${OWN_DOMAIN}`;
+
+const ENV_PREFIXES = [
+  'SES_', 'PROPER_', 'XSERVER_', 'SHEETS_', 'NOTION_', 'GOOGLE_', 'ANTHROPIC_', 'GEMINI_', 'SKILL_', 'MATCH_',
+  'MIN_GROSS_', 'MAX_CANDIDATES', 'NEGOTIATION_', 'ENABLE_NEGOTIATION', 'HOURLY_', 'MAIL_PROVIDER', 'DB_PROVIDER',
+  'LLM_PROVIDER', 'DEMO_MODE', 'CI', 'GITHUB_ACTIONS', 'WEB_',
+];
+
+function isolateEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (ENV_PREFIXES.some((p) => key === p || key.startsWith(p))) delete process.env[key];
+  }
+  Object.assign(process.env, {
+    DB_PROVIDER: 'sheets',
+    MAIL_PROVIDER: 'xserver',
+    SHEETS_DB_SPREADSHEET_ID: SES_BOOK,
+    PROPER_MASTER_SPREADSHEET_ID: PROPER_BOOK,
+    PROPER_SKILLSHEET_FOLDER_ID: 'folderRoot',
+    PROPER_MAX_EXTRACT_PER_RUN: '2',
+    PROPER_PROJECT_LOOKBACK_DAYS: '14',
+    XSERVER_SHARED_USER: SALES,
+    SES_OWN_DOMAINS: OWN_DOMAIN,
+    SES_ALLOWED_SENDER_DOMAINS: OWN_DOMAIN,
+    SES_HEAL_ENABLED: 'false', // 抽出失敗の再試行の待ち時間を入れない
+    SES_HEAL_MAX_ATTEMPTS: '2',
+    SES_HEAL_DATA_DIR: `${WORK_DIR}/heal`,
+    SES_REVIEW_DATA_DIR: `${WORK_DIR}/review`,
+    SES_LOG_REDACT: 'false',
+    SES_REQUIRE_LIVE: 'false',
+  });
+  setDemoOverride(false); // LLMの鍵が無くても本番経路を通す（LLMは呼ばない）
+}
+
+let networkAttempts = 0;
+
+function blockNetwork(): void {
+  globalThis.fetch = (async () => {
+    networkAttempts += 1;
+    throw new Error('ses:flow:check はオフラインで動作します（ネットワーク呼び出しを遮断）');
+  }) as typeof fetch;
+}
+
+// ===== 判定・出力 =====
+
+let failures = 0;
+
+function check(name: string, cond: boolean, detail = ''): void {
+  if (cond) {
+    console.log(`  ✅ ${name}`);
+  } else {
+    failures += 1;
+    console.log(`  ❌ ${name}${detail ? ` — ${detail}` : ''}`);
+  }
+}
+
+function section(title: string): void {
+  console.log(`\n■ ${title}`);
+}
+
+// 定時実行の1回分の開始（毎回クリーンな環境で動くため、プロセス内の行キャッシュ・イベントを捨てる）
+function newRun(): void {
+  resetSheetsCache();
+  resetProperMasterCache();
+  resetHealEvents();
+}
+
+// ===== 偽物 =====
+
+const sheets = new FakeSheets();
+const drive = new FakeDrive();
+const mail = new FakeMailTransport();
+let extractCalls: string[] = [];
+
+interface ProfileSeed extends SkillSheetProfile {
+  tag: string;
+}
+
+// スキルシートの「中身」はプロフィールのJSON（偽の抽出器がそのまま読む。JSONでなければ抽出失敗）
+async function fakeExtract(content: SkillSheetContent): Promise<SkillSheetProfile> {
+  const text = content.kind === 'pdf' ? Buffer.from(content.base64, 'base64').toString('utf-8') : content.text;
+  const o = JSON.parse(text) as ProfileSeed;
+  extractCalls.push(o.tag);
+  const { tag: _tag, ...extracted } = o;
+  return extracted;
+}
+
+function profileJson(p: ProfileSeed): string {
+  return JSON.stringify(p);
+}
+
+// ===== テストデータ（架空） =====
+
+const NOW = new Date();
+
+function rt(name: string, from: string, subject: string, tag: string): ReplyTarget {
+  return {
+    from: `${name} <${from}>`,
+    to: SALES,
+    cc: '',
+    subject,
+    messageId: `<${tag}@flow.example.jp>`,
+    references: '',
+  };
+}
+
+function project(id: string, over: Partial<Project>): Project {
+  return {
+    id,
+    title: '',
+    requiredSkills: [],
+    preferredSkills: [],
+    rateMin: null,
+    rateMax: null,
+    location: '',
+    prefecture: null,
+    remote: 'unknown',
+    startPeriod: '即日',
+    startDate: null,
+    duration: '6ヶ月',
+    businessFlow: '',
+    agentCompany: '',
+    agentContact: '',
+    agentEmail: '',
+    sourceMailId: `sesmail_${id}`,
+    receivedAt: NOW,
+    status: 'open',
+    ...over,
+  };
+}
+
+function engineer(id: string, over: Partial<Engineer>): Engineer {
+  return {
+    id,
+    displayName: '',
+    age: null,
+    skills: [],
+    experienceYears: 5,
+    desiredRate: null,
+    residence: '',
+    prefecture: null,
+    nearestStation: '',
+    availableDate: '即日',
+    availableFrom: null,
+    utilization: '',
+    remoteWish: 'unknown',
+    agentCompany: '',
+    agentContact: '',
+    agentEmail: '',
+    sourceMailId: `sesmail_${id}`,
+    receivedAt: NOW,
+    status: 'available',
+    ...over,
+  };
+}
+
+const p1 = project('proj_flow_1', {
+  title: '【検証】ECバックエンド刷新案件',
+  requiredSkills: ['PHP', 'MySQL'],
+  preferredSkills: ['AWS'],
+  rateMin: 60,
+  rateMax: 75,
+  location: '東京都港区',
+  prefecture: '東京都',
+  remote: 'partial',
+  agentCompany: '株式会社アルファ検証',
+  agentContact: '検証花子',
+  agentEmail: 'hanako@alpha.example.jp',
+  replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】ECバックエンド刷新（検証）', 'p1'),
+});
+const p2 = project('proj_flow_2', {
+  title: '【検証】Python分析基盤構築案件',
+  requiredSkills: ['Python', 'GCP'],
+  rateMin: 70,
+  rateMax: 80,
+  location: 'フルリモート',
+  remote: 'full',
+  agentCompany: 'ベータ検証株式会社',
+  agentContact: '検証次郎',
+  agentEmail: 'jiro@beta.example.jp',
+  replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【案件】Python分析基盤（検証）', 'p2'),
+});
+const p3 = project('proj_flow_3', {
+  title: '【検証】Go決済API開発案件',
+  requiredSkills: ['Go'],
+  rateMin: 70,
+  rateMax: 85,
+  location: '東京都千代田区',
+  prefecture: '東京都',
+  agentCompany: 'ガンマ検証',
+  agentContact: '検証三子',
+  agentEmail: 'miko@gamma.example.jp',
+  replyTarget: rt('検証三子', 'miko@gamma.example.jp', '【案件】Go決済API（検証）', 'p3'),
+});
+const e1 = engineer('eng_flow_1', {
+  displayName: 'Z.Q.',
+  skills: ['PHP', 'MySQL', 'AWS'],
+  desiredRate: 58,
+  residence: '東京都新宿区',
+  prefecture: '東京都',
+  agentCompany: 'デルタ検証',
+  agentContact: '検証四郎',
+  agentEmail: 'shiro@delta.example.jp',
+  replyTarget: rt('検証四郎', 'shiro@delta.example.jp', '【要員】Z.Q. PHP（検証）', 'e1'),
+});
+const e2 = engineer('eng_flow_2', {
+  displayName: 'W.X.',
+  skills: ['Python', 'GCP'],
+  desiredRate: 62,
+  residence: '千葉県千葉市',
+  prefecture: '千葉県',
+  agentCompany: 'イプシロン検証',
+  agentContact: '検証五郎',
+  agentEmail: 'goro@epsilon.example.jp',
+  replyTarget: rt('検証五郎', 'goro@epsilon.example.jp', '【要員】W.X. Python（検証）', 'e2'),
+});
+const e3 = engineer('eng_flow_3', {
+  displayName: 'V.U.',
+  skills: ['PHP', 'MySQL'],
+  desiredRate: 55,
+  residence: '神奈川県横浜市',
+  prefecture: '神奈川県',
+  agentCompany: 'ゼータ検証',
+  agentContact: '検証六郎',
+  agentEmail: 'rokuro@zeta.example.jp',
+  replyTarget: rt('検証六郎', 'rokuro@zeta.example.jp', '【要員】V.U. PHP（検証）', 'e3'),
+});
+const PROJECTS = [p1, p2, p3];
+const ENGINEERS = [e1, e2, e3];
+
+function makeMatch(p: Project, e: Engineer, category: MatchCategory, reason = '検証用の判定根拠'): MatchResult {
+  const drafts = category === 'confirmed' || category === 'negotiable';
+  return {
+    id: matchIdOf(p.id, e.id),
+    projectId: p.id,
+    engineerId: e.id,
+    title: `${p.title} × ${e.displayName}`,
+    grossMarginJpy: 150000,
+    score: 90,
+    reason,
+    needsReview: category === 'review',
+    band: 'strong',
+    category,
+    status: 'unconfirmed',
+    detectedAt: NOW,
+    ...(drafts
+      ? {
+          draftToProject: buildReplyRef(p.replyTarget, p.agentEmail, `【ご提案】${e.displayName}`, `${p.agentContact}様\n要員${e.displayName}をご提案します。`),
+          draftToEngineer: buildReplyRef(e.replyTarget, e.agentEmail, `【ご紹介】${p.title}`, `${e.agentContact}様\n案件${p.title}をご紹介します。`),
+        }
+      : {}),
+  };
+}
+
+const m11 = () => makeMatch(p1, e1, 'confirmed');
+const m22 = () => makeMatch(p2, e2, 'confirmed');
+const m12 = () => makeMatch(p1, e2, 'confirmed');
+const m21 = () => ({
+  ...makeMatch(p2, e1, 'negotiable'),
+  negotiation: { projectRaiseMan: 2, engineerCutMan: 2, targetProjectRateMan: 82, targetEngineerRateMan: 56, resultingGrossMarginJpy: 260000 },
+});
+const m13 = () => makeMatch(p1, e3, 'confirmed');
+const mR = () => makeMatch(p2, e3, 'review');
+const allMatches = () => [m11(), m22(), m12(), m21(), m13(), mR()];
+
+// 秘匿モードのログに出てはならない文字列（氏名・担当者名・メールアドレス・件名・案件名・要員の表示名）
+const SENSITIVE: string[] = [
+  ...PROJECTS.flatMap((p) => [p.title, p.agentContact, p.agentEmail, p.agentCompany, p.replyTarget!.subject]),
+  ...ENGINEERS.flatMap((e) => [e.displayName, e.agentContact, e.agentEmail, e.agentCompany, e.replyTarget!.subject]),
+  '山田太郎', '佐藤花子', '鈴木一郎', '高橋五月', '伊藤八郎', 'T.Y.', 'H.S.', 'G.T.',
+  `taro@${OWN_DOMAIN}`, `fail@${OWN_DOMAIN}`, `boss@${OWN_DOMAIN}`, 'mallory@evil.example.com',
+  '【要員】秘匿検証メール', 'nana@eta.example.jp', '090-1111-2222',
+];
+
+// 列定義（列順は保存・読出の両方が依存するため、意図しない並び替えをここで検出する）
+const PROJECT_HEADER = [
+  'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
+  '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
+  '元メールID', '返信メタ', '受信日', 'ステータス',
+];
+const ENGINEER_HEADER = [
+  'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
+  '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス',
+];
+const OLD_MATCH_HEADER = [
+  'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
+  '案件側下書きURL', '要員側下書きURL', 'ステータス', '検出日時',
+];
+const ALL_TABS = ['案件', '要員', 'マッチ', '自社社員', '評価', 'スキル同義', '処理済みメール', '_状態', PROPER_CANDIDATE_TAB];
+
+const STAMP = /^作成済 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
+
+// ===== 1. タブの自動生成とヘッダー移行 =====
+
+async function testTabsAndHeaders(): Promise<void> {
+  section('タブの自動生成・ヘッダー移行');
+  sheets.createBook(SES_BOOK);
+  // 旧バージョンのマッチタブ（担当者メール等の列が無い）と、その既存データ1行
+  sheets.seedTab(SES_BOOK, 'マッチ', [
+    OLD_MATCH_HEADER,
+    ['match_legacy_1', '旧マッチ', 100000, 80, '旧根拠', 'proj_legacy', 'eng_legacy', '', '', '紹介済', '2026-01-01T00:00:00.000Z'],
+  ]);
+  // 定義の後ろに人が列を足した要員タブ（互換として扱う）
+  sheets.seedTab(SES_BOOK, '要員', [[...ENGINEER_HEADER, '社内メモ']]);
+
+  newRun();
+  await fetchOpenProjects(10);
+  const missing = ALL_TABS.filter((t) => !sheets.hasTab(SES_BOOK, t));
+  check('不足していたタブを自動生成する', missing.length === 0, `未生成: ${missing.join(', ')}`);
+  check('案件タブのヘッダー行が定義どおり', JSON.stringify(sheets.header(SES_BOOK, '案件')) === JSON.stringify(PROJECT_HEADER));
+  check(
+    '旧マッチタブの末尾に担当者メール等の列を追記する',
+    JSON.stringify(sheets.header(SES_BOOK, 'マッチ')) === JSON.stringify([...OLD_MATCH_HEADER, ...DRAFT_REQUEST_COLUMNS]),
+    sheets.header(SES_BOOK, 'マッチ').join(','),
+  );
+  const legacy = sheets.record(SES_BOOK, 'マッチ', 'ID', 'match_legacy_1');
+  check('ヘッダー移行で既存の行を変えない', legacy?.['ステータス'] === '紹介済' && legacy?.['判定根拠'] === '旧根拠');
+  check(
+    '人が定義の後ろに足した列はそのまま残す',
+    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ']),
+  );
+  const dropdown = sheets.validations.find((v) => v.spreadsheetId === SES_BOOK && v.options.includes('未確認'));
+  check('新規作成した「プロパー候補」タブのステータス列にプルダウンを付ける', Boolean(dropdown) && dropdown!.column === 14);
+
+  const writes = sheets.writeCount(SES_BOOK);
+  const metaCalls = sheets.calls.filter((c) => c.method === 'batchUpdate').length;
+  newRun();
+  await fetchOpenProjects(10);
+  check(
+    '2回目の実行ではタブ・ヘッダーを作り直さない',
+    sheets.writeCount(SES_BOOK) === writes && sheets.calls.filter((c) => c.method === 'batchUpdate').length === metaCalls,
+  );
+  check('既存のマッチIDを判定済みとして読む', (await fetchJudgedMatchIds()).has('match_legacy_1'));
+
+  // 共有されていない等でスプレッドシートを開けない → 原因の分かる例外。次の呼び出しでは開き直す
+  newRun();
+  sheets.failNext('get', 403);
+  let message = '';
+  try {
+    await fetchOpenProjects(10);
+  } catch (err) {
+    message = err instanceof SafeLogError ? err.message : `unexpected: ${String(err)}`;
+  }
+  check('開けないときは共有の確認を促す例外にする', message.includes('共有'), message);
+  check('失敗後の呼び出しではタブの確認をやり直して読める', (await fetchOpenProjects(10)).length === 0);
+}
+
+// ===== 2. upsert の冪等性と人の列の保持 =====
+
+async function saveAll(projects: Project[], engineers: Engineer[], matches: MatchResult[]): Promise<void> {
+  for (const p of projects) await saveProject(p);
+  for (const e of engineers) await saveEngineer(e);
+  for (const m of matches) await saveMatch(m);
+}
+
+async function testUpsertIdempotency(): Promise<void> {
+  section('案件・要員・マッチの upsert（2回の実行で行が増えない・人の列を保持）');
+  newRun();
+  await saveAll(PROJECTS, ENGINEERS, allMatches());
+  const count = (tab: string) => sheets.records(SES_BOOK, tab).length;
+  check('1回目: 案件3行・要員3行・マッチ7行（既存1行＋6行）', count('案件') === 3 && count('要員') === 3 && count('マッチ') === 7);
+  const draftRow = sheets.record(SES_BOOK, 'マッチ', 'ID', m11().id);
+  check(
+    '下書きのあるマッチは状態「未作成」と文面・下書きデータを持つ',
+    draftRow?.['案件側下書き状態'] === '未作成' &&
+      draftRow?.['要員側下書き状態'] === '未作成' &&
+      /^To: .*hanako@alpha\.example\.jp/.test(draftRow?.['案件側文面'] ?? '') &&
+      draftRow?.['下書きデータ'].includes('"project"') === true,
+  );
+  const reviewRow = sheets.record(SES_BOOK, 'マッチ', 'ID', mR().id);
+  check('要確認のマッチは下書き状態「不要」', reviewRow?.['案件側下書き状態'] === '不要' && reviewRow?.['要員側下書き状態'] === '不要');
+
+  // 人の編集（次の実行までの間にシート上で行う操作）
+  sheets.setByKey(SES_BOOK, '案件', 'ID', p3.id, 'ステータス', '終了');
+  sheets.setByKey(SES_BOOK, '要員', 'ID', e3.id, 'ステータス', '決定済');
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m11().id, 'ステータス', '紹介済');
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m11().id, '担当者メール', `taro＠${OWN_DOMAIN}`);
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m21().id, '案件側下書き状態', '不要');
+
+  // 2回目（同じメールを再抽出した等で同じ案件・要員・マッチをもう一度保存する。機械の列は更新）
+  newRun();
+  const p1b = { ...p1, rateMax: 80 };
+  const m11b = { ...m11(), reason: '更新後の判定根拠' };
+  await saveAll([p1b, p2, p3], ENGINEERS, [m11b, m22(), m12(), m21(), m13(), mR()]);
+  check('2回目: 行が増えない（案件3・要員3・マッチ7）', count('案件') === 3 && count('要員') === 3 && count('マッチ') === 7);
+  const ids = sheets.records(SES_BOOK, 'マッチ').map((r) => r['ID']);
+  check('マッチIDの重複行が無い', new Set(ids).size === ids.length);
+  check('機械の列は最新の値に更新する（単金上限）', sheets.record(SES_BOOK, '案件', 'ID', p1.id)?.['単金上限'] === '80');
+  check('案件のステータス（人が付けた「終了」）を再保存で巻き戻さない', sheets.record(SES_BOOK, '案件', 'ID', p3.id)?.['ステータス'] === '終了');
+  check('要員のステータス（人が付けた「決定済」）を再保存で巻き戻さない', sheets.record(SES_BOOK, '要員', 'ID', e3.id)?.['ステータス'] === '決定済');
+  const row11 = sheets.record(SES_BOOK, 'マッチ', 'ID', m11().id);
+  check('マッチのステータス（紹介済）を保持', row11?.['ステータス'] === '紹介済');
+  check('担当者メールを入力どおり保持（正規化もしない）', row11?.['担当者メール'] === `taro＠${OWN_DOMAIN}`);
+  check('マッチの判定根拠は更新する', row11?.['判定根拠'] === '更新後の判定根拠');
+  check('人が付けた下書き状態「不要」を保持', sheets.record(SES_BOOK, 'マッチ', 'ID', m21().id)?.['案件側下書き状態'] === '不要');
+
+  const open = await fetchOpenProjects(100);
+  const available = await fetchAvailableEngineers(100);
+  check('終了にした案件は突合対象から外れる', open.length === 2 && !open.some((p) => p.id === p3.id));
+  check('決定済にした要員は突合対象から外れる', available.length === 2 && !available.some((e) => e.id === e3.id));
+  const back = open.find((p) => p.id === p1.id);
+  check(
+    '案件の読み戻し（スキル・単金・返信メタ）',
+    back !== undefined &&
+      back.requiredSkills.join(',') === 'PHP,MySQL' &&
+      back.rateMax === 80 &&
+      back.replyTarget?.messageId === '<p1@flow.example.jp>' &&
+      back.prefecture === '東京都',
+  );
+}
+
+// ===== 3. 空行を挟んだ表への追記・実行中の行挿入 =====
+
+async function testShiftedRows(): Promise<void> {
+  section('人が空行・行を差し込んでも別の行を上書きしない');
+  newRun();
+  await fetchJudgedMatchIds(); // 行キャッシュを読み込んだ状態にする
+  const before = sheets.records(SES_BOOK, 'マッチ').length;
+  // 実行中に人が3行目へ空行を挿入（以降の行が1行ずつ下がり、キャッシュの行番号はずれる）
+  sheets.insertRowAt(SES_BOOK, 'マッチ', 3, []);
+  const mNew = makeMatch(p3, e1, 'tentative');
+  await saveMatch(mNew); // 追記（表は空行で途切れるため、表の途中に挿入され下の行がさらにずれる）
+  await saveMatch({ ...mR(), reason: '空行の後の更新' }); // キャッシュ上の行番号がずれた既存行の更新
+  const rows = sheets.records(SES_BOOK, 'マッチ');
+  const ids = rows.map((r) => r['ID']);
+  check('追記で1行だけ増え、重複しない', rows.length === before + 1 && new Set(ids).size === ids.length);
+  check(
+    'すべての行でIDと案件ID・要員IDが対応している（別の行を上書きしていない）',
+    rows.every((r) => r['ID'] === 'match_legacy_1' || r['ID'] === matchIdOf(r['案件ID'], r['要員ID'])),
+  );
+  check('ずれた位置の既存行を正しく更新する', sheets.record(SES_BOOK, 'マッチ', 'ID', mR().id)?.['判定根拠'] === '空行の後の更新');
+  newRun();
+  const judged = await fetchJudgedMatchIds();
+  check('次の実行で空行の前後の行をすべて読む', judged.has(mNew.id) && judged.has(mR().id) && judged.has('match_legacy_1'));
+}
+
+// ===== 4. 処理済みメールIDの持ち越し =====
+
+function rawMail(id: string, from: string, subject: string, minutesAgo: number): SesRawMail {
+  return {
+    id,
+    from,
+    to: SALES,
+    cc: '',
+    subject,
+    body: '検証用の本文',
+    messageIdHeader: `<${id}@flow.example.jp>`,
+    references: '',
+    receivedAt: new Date(NOW.getTime() - minutesAgo * 60_000),
+    attachments: [],
+    sheetLinks: [],
+  };
+}
+
+async function testProcessedIds(): Promise<void> {
+  section('処理済みメールIDの持ち越し（次の実行で本文を取得し直さない）');
+  mail.inbox = [
+    rawMail('sesmail_flow_a', '検証花子 <hanako@alpha.example.jp>', '【案件】検証A', 30),
+    rawMail('sesmail_flow_b', '検証次郎 <jiro@beta.example.jp>', '【要員】検証B', 20),
+    rawMail('sesmail_flow_self', SALES, 'SES案件・要員マッチング バッチ実行結果（10:00）', 10),
+    rawMail('sesmail_flow_own', `taro@${OWN_DOMAIN}`, 'Re: 【案件】検証A', 5),
+  ];
+  newRun();
+  const r1 = await collectSesMail();
+  check(
+    '1回目: 外部のメール2件を新しい順に返し、自分たちのメール2件を除外する',
+    r1.mails.map((m) => m.id).join(',') === 'sesmail_flow_b,sesmail_flow_a' && r1.excludedMailIds.length === 2,
+  );
+  const saved =
+    (await markMailProcessed(r1.mails.map((m) => m.id), '抽出済')) && (await markMailProcessed(r1.excludedMailIds, '除外'));
+  const rows = sheets.records(SES_BOOK, '処理済みメール');
+  check('処理済みメールタブに4行（結果つき）', saved && rows.length === 4 && rows.filter((r) => r['結果'] === '除外').length === 2);
+
+  newRun();
+  mail.skippedAsProcessed = [];
+  const r2 = await collectSesMail();
+  check('2回目: 処理済みの4件は本文を取得しない', r2.mails.length === 0 && mail.skippedAsProcessed.length === 4);
+  await markMailProcessed(['sesmail_flow_a'], '抽出済');
+  check('同じIDをもう一度記録しても行は増えない', sheets.records(SES_BOOK, '処理済みメール').length === 4);
+  sheets.failNext('values.append', 429, '処理済みメール');
+  const retried = await markMailProcessed(['sesmail_flow_quota'], '抽出済');
+  check(
+    'クォータ超過（429）は待って再試行し、1行だけ記録する',
+    retried && sheets.records(SES_BOOK, '処理済みメール').filter((r) => r['メールID'] === 'sesmail_flow_quota').length === 1,
+  );
+
+  mail.inbox.push(rawMail('sesmail_flow_c', '検証三子 <miko@gamma.example.jp>', '【案件】検証C', 1));
+  newRun();
+  const r3 = await collectSesMail();
+  check('3回目: 新着の1件だけを返す', r3.mails.map((m) => m.id).join(',') === 'sesmail_flow_c');
+
+  newRun();
+  sheets.failNext('values.get', 403, '処理済みメール');
+  let threw = false;
+  try {
+    await collectSesMail();
+  } catch {
+    threw = true;
+  }
+  check('処理済みIDを読めないときは空とみなさず収集失敗にする（全件の再抽出を防ぐ）', threw);
+}
+
+// ===== 5. 隔離リストの持ち越し =====
+
+async function testQuarantine(): Promise<void> {
+  section('隔離リスト（_状態タブ）の持ち越し');
+  const broken = rawMail('sesmail_flow_broken', '検証七子 <nana@eta.example.jp>', '【要員】検証 090-1111-2222', 60);
+  newRun();
+  const f1 = await recordFailure(broken, new Error('解析失敗 nana@eta.example.jp'));
+  check('1回目の失敗: 1回目・未隔離', f1.attempts === 1 && !f1.quarantined);
+  newRun();
+  const f2 = await recordFailure(broken, new Error('解析失敗 nana@eta.example.jp'));
+  check('2回目の失敗（別の実行）: 回数を引き継いで隔離（上限2回）', f2.attempts === 2 && f2.quarantined);
+  newRun();
+  const writes = sheets.writeCount(SES_BOOK, '_状態');
+  await recordSuccess('sesmail_flow_unknown');
+  check('無関係なメールの成功では状態を書き直さない', sheets.writeCount(SES_BOOK, '_状態') === writes);
+  const list = await listQuarantined();
+  const stateRows = sheets.records(SES_BOOK, '_状態');
+  check('次の実行でも隔離済みとして読める', list.length === 1 && list[0].mailId === broken.id && list[0].attempts === 2);
+  check('_状態タブの行は1つ（キー quarantine）', stateRows.length === 1 && stateRows[0]['キー'] === 'quarantine');
+  const json = stateRows[0]?.['JSON'] ?? '';
+  check(
+    '隔離リストに電話番号・アドレス・氏名を残さない（送信元はドメインのみ）',
+    !json.includes('090-1111-2222') && !json.includes('nana@') && !json.includes('検証七子') && list[0]?.from === '@eta.example.jp',
+  );
+}
+
+// ===== 6. 担当者メールによる下書き作成 =====
+
+async function testPendingDrafts(): Promise<void> {
+  section('担当者メールによる下書き作成（作成済・エラー・不要・許可ドメイン・再作成しない）');
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m22().id, '担当者メール', 'mallory@evil.example.com');
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m12().id, '担当者メール', 'not-an-address');
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m21().id, '担当者メール', `jiro@${OWN_DOMAIN}`);
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m13().id, '担当者メール', `fail@${OWN_DOMAIN}`);
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', mR().id, '担当者メール', `taro@${OWN_DOMAIN}`);
+  mail.failDraftFrom.add(`fail@${OWN_DOMAIN}`);
+  mail.drafts = [];
+
+  newRun();
+  // 一覧を読んだ後・1件目の行の読み直しの直前に、人がデータ行の先頭へ行を挿入する（全行が1行ずつ下がる）
+  sheets.beforeNext('values.get', () =>
+    sheets.beforeNext('values.get', () => sheets.insertRowAt(SES_BOOK, 'マッチ', 2, ['match_human_note', '人が追加した行'])),
+  );
+  const r1 = await materializePendingDrafts();
+  const row = (m: MatchResult) => sheets.record(SES_BOOK, 'マッチ', 'ID', m.id);
+  check('1回目: 作成3件・失敗6件', r1.created === 3 && r1.failed === 6, JSON.stringify(r1));
+  check(
+    '有効な担当者メール（全角＠も可）の行は両側とも「作成済 日時」',
+    STAMP.test(row(m11())?.['案件側下書き状態'] ?? '') && STAMP.test(row(m11())?.['要員側下書き状態'] ?? ''),
+  );
+  const draftsFrom = (addr: string) => mail.drafts.filter((d) => d.from === addr);
+  const taro = draftsFrom(`taro@${OWN_DOMAIN}`);
+  check(
+    '送信元は正規化した担当者メール・宛先は元メールの送信者・Ccに本人を含めない',
+    taro.length === 2 &&
+      taro.some((d) => d.ref.to.includes('hanako@alpha.example.jp')) &&
+      taro.every((d) => !(d.ref.cc ?? '').includes(`taro@${OWN_DOMAIN}`)),
+  );
+  check(
+    '許可されていないドメインはエラー（作成しない）',
+    (row(m22())?.['案件側下書き状態'] ?? '').startsWith('エラー: 送信元ドメインが許可されていません') &&
+      draftsFrom('mallory@evil.example.com').length === 0,
+  );
+  check('形式の誤った担当者メールはエラー', (row(m12())?.['要員側下書き状態'] ?? '').startsWith('エラー: 担当者メールの形式'));
+  check(
+    '「不要」の側は作らず、もう片側だけ作る',
+    row(m21())?.['案件側下書き状態'] === '不要' && STAMP.test(row(m21())?.['要員側下書き状態'] ?? '') && draftsFrom(`jiro@${OWN_DOMAIN}`).length === 1,
+  );
+  check('両側「不要」の行（要確認）は何も作らない', row(mR())?.['案件側下書き状態'] === '不要' && row(mR())?.['要員側下書き状態'] === '不要');
+  const failState = row(m13())?.['案件側下書き状態'] ?? '';
+  check('作成に失敗した側は「エラー: 理由」', failState.startsWith('エラー: 下書きの作成に失敗しました'), failState);
+  const stateCells = sheets
+    .records(SES_BOOK, 'マッチ')
+    .flatMap((r) => [r['案件側下書き状態'], r['要員側下書き状態']]);
+  check('状態列にメールアドレスを書かない', stateCells.every((c) => !c.includes('@')));
+  const note = sheets.record(SES_BOOK, 'マッチ', 'ID', 'match_human_note');
+  check(
+    '実行中に人が挿入した行には書き込まない（行のずれを検知して正しい行へ）',
+    note !== undefined && note['マッチ名'] === '人が追加した行' && note['案件側下書き状態'] === '' && note['要員側下書き状態'] === '',
+  );
+
+  // 2回目: 失敗の原因が解消 → エラーの側だけを再作成。作成済は作り直さず、変わらないエラーは書き直さない
+  mail.failDraftFrom.clear();
+  newRun();
+  const writes = sheets.writeCount(SES_BOOK, 'マッチ');
+  const r2 = await materializePendingDrafts();
+  check('2回目: エラーだった2件だけを作成（作成済は作り直さない）', r2.created === 2 && mail.drafts.length === 5, JSON.stringify(r2));
+  check('2回目: 書き込みは再作成した行の2回（作成中→作成済）だけ', sheets.writeCount(SES_BOOK, 'マッチ') - writes === 2);
+  check('再作成した側は作成済', STAMP.test(row(m13())?.['案件側下書き状態'] ?? ''));
+
+  newRun();
+  const r3 = await materializePendingDrafts();
+  check('3回目: 新たに作成しない', r3.created === 0 && mail.drafts.length === 5);
+
+  // 下書き作成後に状態を書き戻せなかった → 「作成中」のまま残し、次の実行で二重に作らない
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m22().id, '担当者メール', `hanako2@${OWN_DOMAIN}`);
+  newRun();
+  sheets.beforeNext('values.batchUpdate', () =>
+    sheets.beforeNext('values.batchUpdate', () => sheets.failNext('values.batchUpdate', 403, 'マッチ')),
+  );
+  const r4 = await materializePendingDrafts();
+  check(
+    '作成後に状態を書き戻せなければ「作成中」のまま残す',
+    r4.created === 2 && row(m22())?.['案件側下書き状態'] === '作成中' && row(m22())?.['要員側下書き状態'] === '作成中',
+    JSON.stringify(r4),
+  );
+  newRun();
+  const draftsBefore = mail.drafts.length;
+  await materializePendingDrafts();
+  check('「作成中」の行は次の実行で作り直さない（二重作成の防止）', mail.drafts.length === draftsBefore);
+
+  // 作成済になった側の文面・下書きデータは再保存で差し替えない
+  const textBefore = row(m11())?.['案件側文面'];
+  const changed = m11();
+  changed.draftToProject = { ...changed.draftToProject!, body: '差し替え後の本文' };
+  newRun();
+  await saveMatch(changed);
+  check('作成済の側の文面は再保存で差し替えない', row(m11())?.['案件側文面'] === textBefore && STAMP.test(row(m11())?.['案件側下書き状態'] ?? ''));
+}
+
+// ===== 7. プロパー管理表の同期 =====
+
+const FILE_TIME = (day: number) => `2026-09-${String(day).padStart(2, '0')}T00:00:00.000Z`;
+
+function profile(tag: string, over: Partial<ProfileSeed>): ProfileSeed {
+  return {
+    tag,
+    displayName: '',
+    initials: '',
+    skills: [],
+    experienceYears: 5,
+    residence: '',
+    prefecture: null,
+    remoteWish: 'unknown',
+    availableDateText: '',
+    availableFromIso: null,
+    desiredRateMan: null,
+    ...over,
+  };
+}
+
+const PROFILE_A = profile('A', {
+  displayName: '山田太郎',
+  initials: 'T.Y.',
+  skills: ['PHP', 'MySQL', 'AWS'],
+  experienceYears: 8,
+  residence: '東京都世田谷区',
+  prefecture: '東京都',
+  remoteWish: 'partial',
+  availableDateText: '即日',
+});
+const PROFILE_B = profile('B', {
+  displayName: '佐藤花子',
+  initials: 'H.S.',
+  skills: ['Python', 'GCP', 'SQL'],
+  residence: '千葉県千葉市',
+  prefecture: '千葉県',
+  remoteWish: 'full',
+  availableDateText: '2026年10月〜',
+  availableFromIso: '2026-10-01',
+});
+const PROFILE_C = profile('C', { displayName: '鈴木一郎', skills: ['Java'], residence: '大阪府大阪市', prefecture: '大阪府' });
+
+function driveFile(id: string, over: Partial<FakeDriveFile>): FakeDriveFile {
+  return { id, name: `${id}.pdf`, mimeType: 'application/pdf', modifiedTime: FILE_TIME(1), parents: ['folderRoot'], ...over };
+}
+
+const GDOC = 'application/vnd.google-apps.document';
+
+async function testProperMaster(): Promise<void> {
+  section('プロパー管理表の同期（新規・更新・変更なし・抽出上限・所在不明）');
+  sheets.createBook(PROPER_BOOK);
+  drive.put({ id: 'folderSub', name: 'sub', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: ['folderRoot'] });
+  drive.put(driveFile('fileA', { name: 'スキルシート_山田太郎', mimeType: GDOC, modifiedTime: FILE_TIME(1), content: profileJson(PROFILE_A) }));
+  drive.put(driveFile('fileB', { name: 'スキルシート_佐藤花子.pdf', parents: ['folderSub'], modifiedTime: FILE_TIME(2), content: profileJson(PROFILE_B) }));
+  drive.put(driveFile('fileC', { name: '鈴木一郎', mimeType: GDOC, parents: ['folderSub'], modifiedTime: FILE_TIME(3), content: profileJson(PROFILE_C) }));
+  drive.put(driveFile('fileD', { name: 'photo.png', mimeType: 'image/png', content: 'png' }));
+
+  const master = () => sheets.records(PROPER_BOOK, PROPER_MASTER_TAB);
+  const byFile = (id: string) => sheets.record(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', id);
+
+  // 1回目: 抽出上限2件 → 更新の新しい C・B を抽出し、A は次回へ
+  newRun();
+  extractCalls = [];
+  const s1 = await syncProperMaster();
+  check(
+    '1回目: 対応形式3件・新規2件・次回へ保留1件・未対応形式1件',
+    s1.listed === 3 && s1.added === 2 && s1.deferred === 1 && s1.unsupportedNames.length === 1,
+    JSON.stringify({ ...s1, presentFileIds: undefined, unsupportedNames: s1.unsupportedNames.length }),
+  );
+  check('抽出は上限（2件）まで・更新の新しい順', extractCalls.join(',') === 'C,B', extractCalls.join(','));
+  check('サブフォルダとページ送りをたどって一覧を取得する', drive.listCalls >= 3);
+  const rowB = byFile('fileB');
+  check(
+    '新規ファイルは行を追加し、稼働状況「稼働可」・氏名・提案用表記・稼働可能日を埋める',
+    rowB?.['稼働状況'] === '稼働可' && rowB?.['氏名'] === '佐藤花子' && rowB?.['提案用表記'] === 'H.S.' && rowB?.['稼働可能日'] === '2026-10-01',
+  );
+  check('イニシャルを読み取れない行は抽出メモで入力を促す', (byFile('fileC')?.['抽出メモ'] ?? '').includes('イニシャル'));
+  check(
+    '管理表の稼働状況列にプルダウンを付ける',
+    sheets.validations.some((v) => v.spreadsheetId === PROPER_BOOK && v.options.join(',') === '稼働可,アサイン済,対象外'),
+  );
+
+  // 人の入力
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileB', '氏名', '佐藤 花子（確認済）');
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileB', '必要案件単価', '６５万円');
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileC', '稼働状況', 'アサイン済');
+
+  // 2回目: B を更新（氏名・スキルが変わる）。A は初回抽出、C は変更なし
+  drive.put(
+    driveFile('fileB', {
+      name: 'スキルシート_佐藤花子.pdf',
+      parents: ['folderSub'],
+      modifiedTime: FILE_TIME(10),
+      content: profileJson({ ...PROFILE_B, displayName: '佐藤花子（改）', skills: ['Python', 'GCP', 'SQL', 'BigQuery'] }),
+    }),
+  );
+  newRun();
+  extractCalls = [];
+  const s2 = await syncProperMaster();
+  check('2回目: 更新のBと保留していたAだけを抽出（変更のないCは抽出しない）', [...extractCalls].sort().join(',') === 'A,B', extractCalls.join(','));
+  check('2回目: 追加1・更新1・変更なし1', s2.added === 1 && s2.updated === 1 && s2.unchanged === 1);
+  const rowB2 = byFile('fileB');
+  check(
+    '更新時も人が入力した氏名・必要案件単価は書き換えない',
+    rowB2?.['氏名'] === '佐藤 花子（確認済）' && rowB2?.['必要案件単価'] === '６５万円',
+  );
+  check('更新時に機械の列（スキル・ファイル更新日時）は更新する', (rowB2?.['スキル'] ?? '').includes('BigQuery') && rowB2?.['ファイル更新日時'] === FILE_TIME(10));
+  check('人が変えた稼働状況（アサイン済）を保持', byFile('fileC')?.['稼働状況'] === 'アサイン済');
+  check('保留していたファイルは次の実行で追加される', byFile('fileA')?.['稼働状況'] === '稼働可' && master().length === 3);
+
+  // 3回目: 何も変わらない → 抽出も書き込みもしない
+  newRun();
+  extractCalls = [];
+  const writes = sheets.writeCount(PROPER_BOOK);
+  const s3 = await syncProperMaster();
+  check('3回目: 変更が無ければLLM抽出も管理表への書き込みもしない', extractCalls.length === 0 && sheets.writeCount(PROPER_BOOK) === writes && s3.unchanged === 3);
+
+  // 4回目以降: 抽出に失敗するファイル E と、フォルダから消えた C
+  drive.put(driveFile('fileE', { name: 'broken.pdf', modifiedTime: FILE_TIME(11), content: 'これはJSONではない' }));
+  drive.files.get('fileC')!.trashed = true;
+  newRun();
+  extractCalls = [];
+  const s4 = await syncProperMaster();
+  const memoE = byFile('fileE')?.['抽出メモ'] ?? '';
+  check('抽出失敗は抽出メモに回数つきで残し、次回再試行する', s4.failed === 1 && memoE.startsWith('エラー') && memoE.includes('（1回目）') && byFile('fileE')?.['ファイル更新日時'] === '', memoE);
+  check('フォルダから消えたファイルの行に「ファイルが見つかりません」を付ける', s4.missing === 1 && (byFile('fileC')?.['抽出メモ'] ?? '').startsWith(MISSING_FILE_MEMO));
+  const engineers = await loadProperEngineers(s4.presentFileIds);
+  check(
+    '突合対象は稼働可でスキルのある行だけ（所在不明・アサイン済・抽出失敗は除く）',
+    engineers.map((e) => e.fileId).sort().join(',') === 'fileA,fileB',
+    engineers.map((e) => e.fileId).join(','),
+  );
+  const b = engineers.find((e) => e.fileId === 'fileB');
+  check('必要案件単価「６５万円」を65万円として読む', b?.requiredProjectRate === 65);
+
+  newRun();
+  await syncProperMaster();
+  newRun();
+  const s6 = await syncProperMaster();
+  const memoE3 = byFile('fileE')?.['抽出メモ'] ?? '';
+  check('失敗が上限（3回）に達したら再試行をやめる', s6.failed === 1 && memoE3.includes('（3回目）') && memoE3.includes('ファイルを更新すると再抽出'), memoE3);
+  newRun();
+  extractCalls = [];
+  drive.files.get('fileC')!.trashed = false;
+  await syncProperMaster();
+  check('上限に達したファイルは更新されるまで抽出しない', !extractCalls.includes('E') && extractCalls.length === 0);
+  check('フォルダに戻ったファイルは「ファイルが見つかりません」を外す', !(byFile('fileC')?.['抽出メモ'] ?? '').startsWith(MISSING_FILE_MEMO));
+
+  sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileA', '必要案件単価', '60');
+}
+
+// ===== 8. プロパー候補の保存と提案文面 =====
+
+async function testProperCandidates(): Promise<void> {
+  section('プロパー候補（「プロパー候補」タブ・提案文面はイニシャルのみ）');
+  // 人が管理表の行を複製した状態（同じファイルIDの行が2つ）と、イニシャルの無い社員のスキルシート
+  const masterRows = sheets.rawRows(PROPER_BOOK, PROPER_MASTER_TAB);
+  const idCol = masterRows[0].indexOf('ファイルID');
+  const rowOfA = masterRows.find((r) => r[idCol] === 'fileA')!;
+  sheets.insertRowAt(PROPER_BOOK, PROPER_MASTER_TAB, masterRows.length + 1, rowOfA);
+  drive.put(
+    driveFile('fileH', {
+      name: 'スキルシート_伊藤八郎',
+      mimeType: GDOC,
+      modifiedTime: FILE_TIME(15),
+      content: profileJson(profile('H', { displayName: '伊藤八郎', skills: ['PHP', 'MySQL'], residence: '東京都', prefecture: '東京都' })),
+    }),
+  );
+
+  newRun();
+  const r1 = await runProperFlow();
+  const tab = PROPER_CANDIDATE_TAB;
+  const idA = `ownmatch_proper_fileA_${p1.id}`;
+  const idB = `ownmatch_proper_fileB_${p2.id}`;
+  const idH = `ownmatch_proper_fileH_${p1.id}`;
+  const rowA = sheets.record(SES_BOOK, tab, 'ID', idA);
+  const rowB = sheets.record(SES_BOOK, tab, 'ID', idB);
+  const rowH = sheets.record(SES_BOOK, tab, 'ID', idH);
+  check(
+    'プロパー候補を保存する（A×PHP案件・B×Python案件・H×PHP案件）',
+    r1 !== null && Boolean(rowA) && Boolean(rowB) && Boolean(rowH) && r1.saved === r1.candidates.length,
+    `${r1?.candidates.length}`,
+  );
+  const candidateIds = sheets.records(SES_BOOK, tab).map((r) => r['ID']);
+  check(
+    '管理表で行が複製されていても同じ候補を2行にしない',
+    new Set(candidateIds).size === candidateIds.length && r1?.engineers === 3,
+    `${candidateIds.length}行 / 社員${r1?.engineers}名`,
+  );
+  const textH = rowH?.['案件側文面'] ?? '';
+  check(
+    '提案用表記が未入力なら、氏名で代用せず記入を促す差し込みにする',
+    textH.includes('《提案用表記（イニシャル）を記入》') && !textH.includes('伊藤') && rowH?.['プロパー'] === '伊藤八郎',
+  );
+  check('「プロパー」列は社内向けに氏名（提案用表記）', rowA?.['プロパー'] === '山田太郎（T.Y.）' && rowB?.['プロパー'] === '佐藤 花子（確認済）（H.S.）');
+  const text = rowA?.['案件側文面'] ?? '';
+  check(
+    '提案文面はイニシャルを使い、氏名を含めない（下書きデータも同様）',
+    text.includes('T.Y.') &&
+      !text.includes('山田') &&
+      !(rowA?.['下書きデータ'] ?? '').includes('山田') &&
+      /^To: .*hanako@alpha\.example\.jp/.test(text),
+  );
+  check('提案文面に必要案件単価（社内の採算ライン）を書かない', !text.includes('60万') && !text.includes('必要案件単価'));
+  check('初期値: ステータス「未確認」・案件側下書き状態「未作成」', rowA?.['ステータス'] === '未確認' && rowA?.['案件側下書き状態'] === '未作成');
+
+  newRun();
+  const rows = sheets.records(SES_BOOK, tab).length;
+  const writes = sheets.writeCount(SES_BOOK, tab);
+  const r2 = await runProperFlow();
+  check('2回目: 内容が同じなら書き込まず、行も増えない', r2?.saved === 0 && sheets.writeCount(SES_BOOK, tab) === writes && sheets.records(SES_BOOK, tab).length === rows);
+
+  sheets.setByKey(SES_BOOK, tab, 'ID', idA, '担当者メール', `taro@${OWN_DOMAIN}`);
+  sheets.setByKey(SES_BOOK, tab, 'ID', idA, 'ステータス', '紹介済');
+  newRun();
+  const draftsBefore = mail.drafts.length;
+  const d = await materializePendingDrafts();
+  const created = mail.drafts.slice(draftsBefore);
+  check('担当者メールを入れたプロパー候補は案件側の下書きを1件だけ作る', d.created === 1 && created.length === 1);
+  check(
+    '作成した下書きの本文はイニシャルのみ（氏名なし）',
+    (created[0]?.ref.body ?? '').includes('T.Y.') && !(created[0]?.ref.body ?? '').includes('山田'),
+  );
+  check('プロパー候補の状態列を「作成済」にする', STAMP.test(sheets.record(SES_BOOK, tab, 'ID', idA)?.['案件側下書き状態'] ?? ''));
+
+  newRun();
+  await runProperFlow();
+  const after = sheets.record(SES_BOOK, tab, 'ID', idA);
+  check(
+    '再実行でも人のステータス・担当者メール・作成済を保持',
+    after?.['ステータス'] === '紹介済' && after?.['担当者メール'] === `taro@${OWN_DOMAIN}` && STAMP.test(after?.['案件側下書き状態'] ?? ''),
+  );
+}
+
+// ===== 9. ヘッダー行の食い違い =====
+
+async function testHeaderConflict(): Promise<void> {
+  section('ヘッダー行が定義と食い違うタブは書き込み対象から外す');
+  const swapped = ['マッチ名', 'ID', ...OLD_MATCH_HEADER.slice(2), ...DRAFT_REQUEST_COLUMNS];
+  sheets.seedTab(CONFLICT_BOOK, 'マッチ', [swapped, ['人のメモ', 'match_x', 1, 1, '', '', '', '', '', '未確認', '', `taro@${OWN_DOMAIN}`]]);
+  sheets.seedTab(CONFLICT_BOOK, PROPER_CANDIDATE_TAB, [['プロパー', 'ID']]);
+  process.env.SHEETS_DB_SPREADSHEET_ID = CONFLICT_BOOK;
+  try {
+    newRun();
+    let listRefused = false;
+    try {
+      await listDraftRequestRowsSheets('マッチ');
+    } catch (err) {
+      listRefused = err instanceof SafeLogError;
+    }
+    const draftsBefore = mail.drafts.length;
+    const r = await materializePendingDrafts();
+    check(
+      '食い違うマッチタブからは下書き依頼を読まない（担当者メールがあっても作らない）',
+      listRefused && r.created === 0 && mail.drafts.length === draftsBefore,
+    );
+    const writes = sheets.writeCount(CONFLICT_BOOK);
+    let refused = false;
+    try {
+      await saveProperCandidatesSheets([
+        {
+          id: 'ownmatch_x', ownEngineerId: 'proper_x', ownEngineerName: 'x', projectId: p1.id, projectTitle: p1.title,
+          projectRate: 75, requiredProjectRate: 60, rateGapMan: 15, meetsRate: true, skillMatchRate: 1, band: 'strong',
+          locationOk: true, timingOk: true, needsReview: false, score: 100, reason: 'r', agentEmail: p1.agentEmail,
+          detectedAt: NOW, properLabel: 'x',
+        },
+      ]);
+    } catch (err) {
+      refused = err instanceof SafeLogError;
+    }
+    check('食い違うプロパー候補タブには保存しない（例外で知らせる）', refused && sheets.writeCount(CONFLICT_BOOK) === writes);
+    check('食い違うヘッダー行を自動で書き換えない', sheets.header(CONFLICT_BOOK, 'マッチ').join(',') === swapped.join(','));
+
+    // 人が案件タブの途中に列を挿入した（列の位置で読み書きするため、そのまま書くと別の列に値が入る）
+    const inserted = [...PROJECT_HEADER.slice(0, 2), '社内メモ', ...PROJECT_HEADER.slice(2)];
+    sheets.seedTab(CONFLICT_BOOK, '案件', [inserted, ['proj_old', '既存案件', '人のメモ', 'Java']]);
+    newRun();
+    const before = sheets.writeCount(CONFLICT_BOOK, '案件');
+    let saveRefused = false;
+    try {
+      await saveProject(p1);
+    } catch (err) {
+      saveRefused = err instanceof SafeLogError;
+    }
+    check('列が挿入された案件タブには保存しない（列ずれで既存の値を壊さない）', saveRefused && sheets.writeCount(CONFLICT_BOOK, '案件') === before);
+    let readRefused = false;
+    try {
+      await fetchOpenProjects(10);
+    } catch (err) {
+      readRefused = err instanceof SafeLogError;
+    }
+    check('列が挿入された案件タブを列ずれのまま読まない', readRefused);
+    check('人のメモ列の値はそのまま', sheets.record(CONFLICT_BOOK, '案件', 'ID', 'proj_old')?.['社内メモ'] === '人のメモ');
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;
+    newRun();
+  }
+}
+
+// ===== 10. ログ秘匿 =====
+
+function captureConsole(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+  const grab = (...args: unknown[]) => {
+    lines.push(args.map((a) => (typeof a === 'string' ? a : String(a))).join(' '));
+  };
+  console.log = grab;
+  console.warn = grab;
+  console.error = grab;
+  console.info = grab;
+  return { lines, restore: () => Object.assign(console, original) };
+}
+
+async function redactedRun(): Promise<void> {
+  newRun();
+  await materializePendingDrafts();
+  const collected = await collectSesMail();
+  await markMailProcessed(collected.mails.map((m) => m.id), '抽出済');
+  await recordFailure(collected.mails[0] ?? rawMail('x', 'a@b.example.jp', 's', 1), new Error('解析失敗 nana@eta.example.jp 090-1111-2222'));
+  const proper = await runProperFlow();
+  const matches = allMatches();
+  await persistAndNotify(matches, PROJECTS, ENGINEERS, { created: 0, failed: 0 }, proper);
+}
+
+async function testRedaction(): Promise<void> {
+  section('ログ秘匿（公開のActionsログに氏名・アドレス・件名・案件名を出さない）');
+  // ログに出やすい状況を作る: 新しいスキルシート・抽出失敗・下書き作成の失敗（エラー文に宛先を含む）・新着メール
+  drive.put(driveFile('fileF', { name: 'スキルシート_高橋五月', mimeType: GDOC, modifiedTime: FILE_TIME(20), content: profileJson(profile('F', { displayName: '高橋五月', initials: 'G.T.', skills: ['PHP', 'MySQL'], residence: '東京都', prefecture: '東京都' })) }));
+  drive.put(driveFile('fileG', { name: 'スキルシート_壊れ.pdf', modifiedTime: FILE_TIME(21), content: '{壊れたJSON 山田太郎' }));
+  sheets.setByKey(SES_BOOK, 'マッチ', 'ID', m12().id, '担当者メール', `fail@${OWN_DOMAIN}`);
+  mail.failDraftFrom.add(`fail@${OWN_DOMAIN}`);
+  mail.inbox.push(rawMail('sesmail_flow_secret', '検証七子 <nana@eta.example.jp>', '【要員】秘匿検証メール', 1));
+  process.env.SES_NOTIFY_TO = `boss@${OWN_DOMAIN}`;
+  process.env.SES_LOG_REDACT = 'true';
+  const sentBefore = mail.sent.length;
+
+  const cap = captureConsole();
+  let crashed: unknown = null;
+  try {
+    await redactedRun();
+  } catch (err) {
+    crashed = err;
+  } finally {
+    cap.restore();
+  }
+  check('秘匿モードの一連の処理が例外なく完了する', crashed === null, String(crashed));
+  const out = cap.lines.join('\n');
+  console.log('  （秘匿モードで出力されたログ）');
+  for (const line of cap.lines) console.log(`    | ${line}`);
+  const leaked = SENSITIVE.filter((s) => s && out.includes(s));
+  check(`秘匿モードのログに氏名・アドレス・件名・案件名が出ない（検査${SENSITIVE.length}語・出力${cap.lines.length}行）`, leaked.length === 0, `漏れ: ${leaked.join(' / ')}`);
+  check('秘匿モードでもエラーの種別は出す', /Error/.test(out));
+  const summary = mail.sent.slice(sentBefore).find((m) => m.to === `boss@${OWN_DOMAIN}`);
+  check('詳細（案件名・プロパー氏名）は非公開のサマリメールに載せる', Boolean(summary) && summary!.body.includes(p1.title) && summary!.body.includes('山田太郎'));
+
+  // 比較: 秘匿を解除すると同じ処理で案件名が出る（検査がログを捕まえていることの確認）
+  process.env.SES_LOG_REDACT = 'false';
+  const cap2 = captureConsole();
+  try {
+    newRun();
+    await persistAndNotify(allMatches(), PROJECTS, ENGINEERS, { created: 0, failed: 0 }, null);
+  } finally {
+    cap2.restore();
+  }
+  check('（対照）秘匿を解除すると案件名がログに出る', cap2.lines.join('\n').includes(p1.title));
+  mail.failDraftFrom.clear();
+}
+
+async function main(): Promise<void> {
+  console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
+  isolateEnv();
+  blockNetwork();
+  rmSync(join(process.cwd(), WORK_DIR), { recursive: true, force: true });
+  __setSheetsApiForTest(sheets.asApi());
+  __setDriveForTest(drive.asApi());
+  __setMailTransportForTest(mail);
+  __setSkillSheetExtractorForTest(fakeExtract);
+
+  try {
+    await testTabsAndHeaders();
+    await testUpsertIdempotency();
+    await testShiftedRows();
+    await testProcessedIds();
+    await testQuarantine();
+    await testPendingDrafts();
+    await testProperMaster();
+    await testProperCandidates();
+    await testHeaderConflict();
+    await testRedaction();
+  } catch (err) {
+    failures += 1;
+    console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);
+  } finally {
+    __setSheetsApiForTest(null);
+    __setDriveForTest(null);
+    __setMailTransportForTest(null);
+    __setSkillSheetExtractorForTest(null);
+    rmSync(join(process.cwd(), WORK_DIR), { recursive: true, force: true });
+  }
+
+  section('全体');
+  check('実APIなら拒否される呼び方をしていない（RAW以外の書き込み等）', sheets.violations.length === 0, sheets.violations.join(' / '));
+  check('ネットワークに一切接続していない', networkAttempts === 0, `${networkAttempts}回`);
+  console.log(`\nSheets API 呼び出し: ${sheets.callCount()}回`);
+  if (failures > 0) {
+    console.log(`\n❌ ${failures}件の検証に失敗しました`);
+    process.exit(1);
+  }
+  console.log('\n✅ すべての検証に合格しました');
+}
+
+main().catch((err) => {
+  console.error(`ses:flow:check: 予期しないエラー: ${err instanceof Error ? err.stack : String(err)}`);
+  process.exit(1);
+});

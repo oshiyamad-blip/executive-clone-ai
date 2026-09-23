@@ -24,7 +24,15 @@ export interface MailTransport {
   scanMeta(since: Date): Promise<SesMailMeta[]>;
 }
 
+// オフライン自己検証（npm run ses:flow:check）用の差し替え口（本番コードからは呼ばない）
+let testTransport: MailTransport | null = null;
+
+export function __setMailTransportForTest(t: MailTransport | null): void {
+  testTransport = t;
+}
+
 function transport(): MailTransport {
+  if (testTransport) return testTransport;
   return mailProvider() === 'gmail' ? gmail : xserver;
 }
 

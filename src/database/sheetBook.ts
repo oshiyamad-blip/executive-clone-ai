@@ -14,6 +14,14 @@ import { safeErr, SafeLogError } from '../ses/redact.js';
 const MIN_INTERVAL_MS = 1100;
 let lastCall = Promise.resolve();
 
+// オフライン自己検証（npm run ses:flow:check）用の差し替え口。設定中は全インスタンスがこのAPIを使い、
+// クォータ待ちもしない（本番コードからは呼ばない）
+let testApi: sheets_v4.Sheets | null = null;
+
+export function __setSheetsApiForTest(api: sheets_v4.Sheets | null): void {
+  testApi = api;
+}
+
 async function throttle<T>(fn: () => Promise<T>): Promise<T> {
   const prev = lastCall;
   let release: () => void = () => {};
@@ -22,7 +30,7 @@ async function throttle<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await withGoogleRetry(fn);
   } finally {
-    setTimeout(release, MIN_INTERVAL_MS);
+    setTimeout(release, testApi ? 0 : MIN_INTERVAL_MS);
   }
 }
 
@@ -125,7 +133,8 @@ export class SheetBook {
   private warnedUnconfigured = false;
   // 並行に初回アクセスされてもタブを二重作成しないよう、実行中の Promise を共有する
   private tabsEnsured: Promise<void> | null = null;
-  // ヘッダー行が定義と食い違うタブ（列の意味を取り違えるため、呼び出し側で書き込み対象から外す）
+  // ヘッダー行が定義と食い違うタブ（列の位置で読み書きするため、値を別の列に書き込んだり取り違えて読んだりしないよう
+  // このタブへの読み書きはすべて例外にする）
   private readonly headerConflicts = new Set<string>();
   private readonly tabCache = new Map<string, TabCache>();
   private readonly tabLoading = new Map<string, Promise<TabCache>>();
@@ -133,6 +142,7 @@ export class SheetBook {
   constructor(private readonly opts: SheetBookOptions) {}
 
   private api(): sheets_v4.Sheets {
+    if (testApi) return testApi;
     this.client ??= this.opts.createApi();
     if (!this.client) throw new SafeLogError(`${this.opts.label}: ${this.opts.missingAuthMessage}`);
     return this.client;
@@ -144,8 +154,8 @@ export class SheetBook {
 
   // 設定が揃っているか。不足時の警告はプロセス内で初回のみ
   configured(): boolean {
-    this.client ??= this.opts.createApi();
-    const reason = !this.id() ? this.opts.missingIdMessage : !this.client ? this.opts.missingAuthMessage : '';
+    if (!testApi) this.client ??= this.opts.createApi();
+    const reason = !this.id() ? this.opts.missingIdMessage : !(testApi ?? this.client) ? this.opts.missingAuthMessage : '';
     if (!reason) return true;
     if (!this.warnedUnconfigured) {
       this.warnedUnconfigured = true;
@@ -166,8 +176,12 @@ export class SheetBook {
     return this.columns(tab).indexOf(name);
   }
 
-  hasHeaderConflict(tab: string): boolean {
-    return this.headerConflicts.has(tab);
+  private assertHeaderMatches(tab: string): void {
+    if (!this.headerConflicts.has(tab)) return;
+    throw new SafeLogError(
+      `${this.opts.label}: 「${tab}」タブのヘッダー行が定義と異なるため読み書きしません` +
+        '（列の挿入・移動・見出しの変更を元に戻してください。メモ用の列は右端の見出しの後ろに追加できます）',
+    );
   }
 
   // バッチ開始時に呼ぶ（前回実行の状態を持ち越さない）
@@ -295,6 +309,7 @@ export class SheetBook {
 
   private async fetchTab(tab: string): Promise<TabCache> {
     await this.ensureTabs();
+    this.assertHeaderMatches(tab);
     const res = await throttle(() => this.api().spreadsheets.values.get({ spreadsheetId: this.id(), range: quoteTab(tab) }));
     const values = (res.data.values ?? []) as unknown[][];
     const width = this.columns(tab).length;
@@ -336,6 +351,7 @@ export class SheetBook {
   async appendRows(tab: string, rows: Cell[][]): Promise<void> {
     if (rows.length === 0) return;
     await this.ensureTabs();
+    this.assertHeaderMatches(tab);
     const res = await throttle(() =>
       this.api().spreadsheets.values.append({
         spreadsheetId: this.id(),
