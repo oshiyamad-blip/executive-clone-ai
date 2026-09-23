@@ -70,12 +70,15 @@ const INJECTION_MARK = 'あり';
 // バッチごとの健全性の記録（件数・比率だけ。人名・案件名・スキル語そのものは書かない）。1回の実行で1行を追記する。
 // 比率の列は % の値（0〜100。母数が0なら空欄）
 export const METRICS_TAB = 'メトリクス';
+// 同じ内容の再送を抽出せずにスキップしたとき、元の案件・要員が直近の突合の対象から外れないよう更新する最終受信日
+export const LAST_SEEN_COLUMN = '最終受信日';
+
 export const METRICS_COLUMNS = [
   '実行日時', 'モード', 'メール数', '抽出件数(案件)', '抽出件数(要員)',
   'null率(単金)', 'null率(都道府県)', 'null率(開始日)', 'null率(希望単金)', '必須スキル空率', '未知スキル語数',
   '候補0件の案件率', '除外理由内訳(JSON)', '判定数', 'Sonnet平均点', 'ゲート降格数', '不適合数', '再提案抑制数',
   '判定繰越数', 'ヒューリスティック退避数', 'キャッシュ読込率', 'バッチコスト(円)', '下書き作成数',
-  'スキル語数', '評価組数', '判定対象組数', '担当者指定の下書き作成数', '抽出モデル代替',
+  'スキル語数', '評価組数', '判定対象組数', '担当者指定の下書き作成数', '抽出モデル代替', '再送スキップ数',
 ];
 
 // タブ定義（列は見出しの名前で読み書きする。列の追加は末尾のみ＝既存シートは ensureTabs が見出しの右端へ自動で追記する）
@@ -83,12 +86,12 @@ const TABS: Record<string, string[]> = {
   案件: [
     'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
     '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
-    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN,
+    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN,
   ],
   要員: [
     'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
     '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN,
-    '年齢', '稼働率', INJECTION_COLUMN,
+    '年齢', '稼働率', INJECTION_COLUMN, LAST_SEEN_COLUMN,
   ],
   マッチ: [
     'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
@@ -97,7 +100,7 @@ const TABS: Record<string, string[]> = {
   自社社員: ['ID', '表示名', 'スキル', '経験年数', '必要案件単価', '居住地', 'リモート希望', '稼働可能日', 'ステータス'],
   評価: ['日時', '元マッチID', 'マッチ名', '評価', 'メモ', '評価者', 'バンド'],
   スキル同義: ['スキルA', 'スキルB', '追加者', '日時'],
-  処理済みメール: ['メールID', '処理日時', '結果'],
+  処理済みメール: ['メールID', '処理日時', '結果', '指紋', '元メール'],
   _状態: ['キー', 'JSON', '更新日時'],
   [METRICS_TAB]: METRICS_COLUMNS,
   // プロパー（自社社員のスキルシート）× 案件の候補。提案は案件側への1通だけなので要員側の下書き列は持たない
@@ -172,7 +175,7 @@ function rawCell(cells: string[], idx: number): string {
 // 再保存で巻き戻さない。同じメールを再抽出して同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。
 // 既存が空欄なら機械の値を入れる（指示混入疑いを外すのは人だけ）
 function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[] {
-  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN]) {
+  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN]) {
     const col = colIndex(tab, name);
     if (col < 0) continue;
     const prev = existing ? cellStr(existing, col) : '';
@@ -217,6 +220,14 @@ const warnedUnknownReceivedAt = new Set<string>();
 
 function receivedAtOf(raw: string): Date {
   return parseReceivedAt(raw) ?? new Date(UNKNOWN_RECEIVED_AT);
+}
+
+// 受信日と、再送スキップで更新した最終受信日の新しい方（受信日が読めない行は最終受信日があってもそのまま不明扱い）
+function latestReceivedAt(received: string, lastSeen: string): Date {
+  const base = receivedAtOf(received);
+  const seen = lastSeen ? parseReceivedAt(lastSeen) : null;
+  if (base.getTime() === UNKNOWN_RECEIVED_AT || !seen || seen.getTime() <= base.getTime()) return base;
+  return seen;
 }
 
 function warnUnknownReceivedAt(tab: string, items: Array<{ receivedAt: Date }>): void {
@@ -299,7 +310,7 @@ function rowToProject(cells: string[]): Project {
     agentEmail: reply.agentEmail,
     sourceMailId: c('元メールID'),
     replyTarget: reply.replyTarget,
-    receivedAt: receivedAtOf(c('受信日')),
+    receivedAt: latestReceivedAt(c('受信日'), c(LAST_SEEN_COLUMN)),
     status: c('ステータス') === '終了' ? 'closed' : 'open',
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
     matched: c(MATCHED_COLUMN) !== '',
@@ -379,7 +390,7 @@ function rowToEngineer(cells: string[]): Engineer {
     agentEmail: reply.agentEmail,
     sourceMailId: c('元メールID'),
     replyTarget: reply.replyTarget,
-    receivedAt: receivedAtOf(c('受信日')),
+    receivedAt: latestReceivedAt(c('受信日'), c(LAST_SEEN_COLUMN)),
     status: c('ステータス') === '決定済' ? 'assigned' : 'available',
     notionPageId: c('ID'),
     matched: c(MATCHED_COLUMN) !== '',
@@ -1066,7 +1077,14 @@ export async function appendMetricsRowSheets(values: Record<string, Cell>): Prom
 // ===== バッチ横断の状態（スケジュール実行はローカルファイルが残らないためシートに置く） =====
 
 // 除外 = 自分たちのメール（サマリ・自社ドメイン等）として取り込まなかったもの
-export type ProcessedMailResult = '抽出済' | '隔離' | '除外';
+// 再送スキップ = 直近に抽出した内容と同じ再送として、抽出せずに処理済みにしたもの
+export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ';
+
+// 処理済みメールに付ける再送判定用の指紋（本文は含まない）と、元にしたメール
+export interface ProcessedFingerprint {
+  fingerprint: string;
+  rootMailId: string;
+}
 
 export async function loadProcessedMailIdsSheets(): Promise<Set<string>> {
   const rows = await readRows('処理済みメール');
@@ -1133,16 +1151,61 @@ async function migrateMatchedColumn(tab: string): Promise<void> {
   await writeStateJson(key, { state: 'done', at } satisfies MigrationState);
 }
 
-export async function markMailProcessedSheets(ids: string[], result: ProcessedMailResult): Promise<void> {
+export async function markMailProcessedSheets(
+  ids: string[],
+  result: ProcessedMailResult,
+  fingerprints?: Map<string, ProcessedFingerprint>,
+): Promise<void> {
   const known = await loadProcessedMailIdsSheets();
   const fresh = [...new Set(ids)].filter((id) => id && !known.has(id));
   const at = new Date().toISOString();
   for (let i = 0; i < fresh.length; i += APPEND_CHUNK) {
     await appendRows(
       '処理済みメール',
-      fresh.slice(i, i + APPEND_CHUNK).map((id) => [id, at, result]),
+      fresh.slice(i, i + APPEND_CHUNK).map((id) => {
+        const fp = fingerprints?.get(id);
+        return [id, at, result, fp?.fingerprint ?? '', fp && fp.rootMailId !== id ? fp.rootMailId : ''];
+      }),
     );
   }
+}
+
+// 再送の判定に使う、since 以降に抽出済み・再送スキップにしたメールの指紋（隔離・除外は元にしない）
+export async function loadFingerprintRowsSheets(
+  since: Date,
+): Promise<Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }>> {
+  if (!configured()) return [];
+  const tab = '処理済みメール';
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  const out: Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }> = [];
+  for (const r of await readRows(tab)) {
+    const fingerprint = c(r.cells, '指紋');
+    const result = c(r.cells, '結果');
+    const at = new Date(c(r.cells, '処理日時'));
+    if (!fingerprint || (result !== '抽出済' && result !== '再送スキップ')) continue;
+    if (Number.isNaN(at.getTime()) || at.getTime() < since.getTime()) continue;
+    const mailId = c(r.cells, 'メールID');
+    out.push({ mailId, rootMailId: c(r.cells, '元メール') || mailId, at, fingerprint });
+  }
+  return out;
+}
+
+// 再送スキップした元メールの案件・要員の最終受信日を更新する（元メールID → 再送を受信した日時）。更新した行数を返す
+export async function touchLastSeenSheets(seen: Map<string, Date>): Promise<number> {
+  if (!configured() || seen.size === 0) return 0;
+  let updated = 0;
+  for (const tab of ['案件', '要員']) {
+    const mailCol = colIndex(tab, '元メールID');
+    const idCol = colIndex(tab, 'ID');
+    const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+    for (const r of await readRows(tab)) {
+      const at = seen.get(cellStr(r.cells, mailCol));
+      const id = cellStr(r.cells, idCol);
+      if (at && id) updates.push({ key: id, cells: [[LAST_SEEN_COLUMN, at.toISOString()]] });
+    }
+    if (updates.length > 0) updated += await book.writeCellsByKey(tab, 'ID', updates);
+  }
+  return updated;
 }
 
 // 1セルの文字数上限（50,000）に対して余裕を持たせた上限

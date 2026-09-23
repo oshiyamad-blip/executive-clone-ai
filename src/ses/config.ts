@@ -214,6 +214,16 @@ export function maxNegotiationCutMan(): number {
 
 // 通常バッチの突合で、今回の新着と組み合わせる「前回以前に保存した募集中案件・提案可要員」の遡り日数
 // （収集の実行回をまたいで届いた案件と要員を見逃さないため。判定済みのペアはマッチIDで除外する）
+// 再送スキップ: 同じ送信元ドメインから何日前までに届いたメールと比べるか（0で無効）
+export function resendWindowDays(): number {
+  return envNum('SES_RESEND_WINDOW_DAYS', 14, { min: 0, max: 60 });
+}
+
+// 再送スキップ: 本文の近さ（推定Jaccard 0〜1）がこれ以上なら同じ内容の再送として抽出しない（1で完全一致のみ）。本文の数字・添付・項目の見出し数が同じことも条件
+export function resendSimilarity(): number {
+  return envNum('SES_RESEND_SIMILARITY', 0.9, { min: 0.8, max: 1 });
+}
+
 export function matchLookbackDays(): number {
   return envNum('SES_MATCH_LOOKBACK_DAYS', 14, { min: 0 });
 }

@@ -105,6 +105,7 @@ import {
   type RawEngineer,
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
+import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
 import { joinList, splitList } from '../../database/mapping.js';
 import type {
   Project,
@@ -1408,7 +1409,7 @@ async function modelFallbackChecks(): Promise<void> {
 
 function metricsBase(over: Partial<BatchMetrics> = {}): BatchMetrics {
   return {
-    at: NOW.toISOString(), mode: '通常', mails: 0, projects: 0, engineers: 0, rateNullPct: null, prefectureNullPct: null,
+    at: NOW.toISOString(), mode: '通常', mails: 0, resendSkipped: 0, projects: 0, engineers: 0, rateNullPct: null, prefectureNullPct: null,
     startNullPct: null, desiredRateNullPct: null, requiredEmptyPct: null, skillTokens: 0, unknownSkillTokens: 0, unknownSkillPct: null,
     projectsConsidered: 0, noCandidatePct: null, exclusions: { skill: 0, location: 0, timing: 0, rate: 0, remote: 0, sameAgent: 0 },
     pairsEvaluated: 0, pairsSelected: 0, judged: 0, avgScore: null, demoted: 0, rejected: 0, suppressed: 0, deferred: 0,
@@ -2113,6 +2114,46 @@ async function reviewRound4Checks(): Promise<void> {
   }
 }
 
+// ===== 再送スキップ（抽出の前に同じ内容の再送を弾く） =====
+
+function resendChecks(): void {
+  section('再送スキップ: 指紋と判定');
+  const LIST = '各位\nお世話になっております。\n\n【要員1】\n氏名：K.S.\nスキル：Java/Spring Boot\n希望単金：65万\n稼働：10/1〜\n\n【要員2】\n氏名：T.M.\nスキル：PHP/Laravel\n希望単金：60万\n\n配信日時：2026/09/22 10:00\n';
+  const mail = (id: string, over: Partial<SesRawMail> = {}): SesRawMail => ({
+    ...rawMail(), id, from: '"営業部" <eigyo@partner.example>', subject: '【要員情報】即日稼働可', body: LIST,
+    receivedAt: new Date('2026-09-22T01:00:00Z'), ...over,
+  });
+  const since = new Date('2026-09-10T00:00:00Z');
+  const opts = { since, threshold: 0.9 };
+  const base = mail('m1');
+  const rec = (m: SesRawMail, at = new Date('2026-09-22T01:00:00Z')): FingerprintRecord => ({ mailId: m.id, rootMailId: m.id, at, fp: fingerprintOf(m) });
+  const records = [rec(base)];
+  const same = (m: SesRawMail) => splitResends([m], records, opts).skipped.length === 1;
+
+  const resent = mail('m2', {
+    subject: 'Re: 【再送】【要員情報】即日稼働可',
+    body: LIST.replace('配信日時：2026/09/22 10:00', '配信日時：2026/09/24 09:30') + '\n> 前回のメールの引用\n',
+    receivedAt: new Date('2026-09-24T01:00:00Z'),
+  });
+  check('件名の Re:/【再送】・配信日時・引用だけ違う再送はスキップ', same(resent));
+  check('同じ内容でも別の送信元ドメインからなら抽出する', !same(mail('m3', { from: 'x@other.example' })));
+  check('単価が変わった再送は抽出する', !same(mail('m4', { body: LIST.replace('65万', '70万') })));
+  check('要員を1人足した一覧は抽出する', !same(mail('m5', { body: LIST.replace('配信日時', '【要員3】\n氏名：Y.A.\nスキル：Go\n\n配信日時') })));
+  check('添付が差し替わった再送は抽出する', !same(mail('m6', { attachments: [{ filename: 's.xlsx', mimeType: 'application/vnd.ms-excel', data: Buffer.from('new').toString('base64') }] })));
+  const longList = LIST + '\n' + Array.from({ length: 40 }, (_, i) => `備考${i}: ${['面談1回', 'リモート併用', '長期案件', '金融系の経験あり', '要件定義から担当', 'テスト工程のリーダー', '常駐可', '週3出社まで'][i % 8]}（${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i % 26]}${'あいうえおかきくけこ'[i % 10]}）`).join('\n');
+  const longRecords = [rec(mail('L1', { body: longList }))];
+  check('長い一覧で単価だけ変えた再送も抽出する', splitResends([mail('L2', { body: longList.replace('65万', '66万') })], longRecords, opts).skipped.length === 0);
+  check('長い一覧で挨拶だけ変えた再送はスキップ', splitResends([mail('L3', { body: longList.replace('各位', 'パートナー各位 いつもありがとうございます') })], longRecords, opts).skipped.length === 1);
+  check('比較期間より前の記録とは比べない', splitResends([resent], [rec(base, new Date('2026-09-01T00:00:00Z'))], opts).skipped.length === 0);
+  const chained = splitResends([resent], [{ ...rec(base), mailId: 'm1b', rootMailId: 'm0' }], opts);
+  check('再送の再送は最初のメールを元としてたどる', chained.skipped[0]?.rootMailId === 'm0');
+  const fp = fingerprintOf(base);
+  const round = parseFingerprint(serializeFingerprint(fp));
+  check('指紋は1セルの文字列に保存して読み戻せる', !!round && round.exact === fp.exact && round.sig.join() === fp.sig.join() && round.markers === fp.markers);
+  check('指紋に本文・アドレスの文字列を含めない', !/K\.S\.|partner\.example|Java/i.test(serializeFingerprint(fp)));
+  check('壊れた指紋は無視する', parseFingerprint('v1|x|y') === null && parseFingerprint('v0|a|b|c|1|n|AAAA') === null);
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -2143,6 +2184,7 @@ async function main(): Promise<void> {
     privacyAndOpsChecks();
     reviewRound3Checks();
     await reviewRound4Checks();
+    resendChecks();
   } finally {
     setDemoOverride(null);
   }

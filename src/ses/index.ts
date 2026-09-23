@@ -12,6 +12,9 @@ import { runProperFlow, activeProperEngineerIds, type ProperRunResult } from './
 import { resetProperMasterCache } from './proper/master.js';
 import {
   markMailProcessed,
+  loadFingerprintRecords,
+  touchLastSeen,
+  type ProcessedFingerprint,
   writeDemoArtifact,
   readDemoArtifact,
   dedupeProjects,
@@ -46,6 +49,8 @@ import {
   maxCandidatesPerItem,
   repairEnabled,
   matchLookbackDays,
+  resendWindowDays,
+  resendSimilarity,
   matchPoolLimit,
   dbProvider,
   runDeadlineMinutes,
@@ -68,6 +73,7 @@ import {
 import { runRepair } from './heal/repair.js';
 import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule.js';
 import { redactable, safeErr } from './redact.js';
+import { splitResends, serializeFingerprint, type ResendSplit } from './resend.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
 
@@ -416,7 +422,8 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     const failures = pr.failed.size + er.failed.size;
     saveFailures += failures;
     // 保存に失敗した案件・要員の元メールは処理済みにしない（次回再抽出。IDはメールIDと出現順から決まるため同じ行を更新する）
-    if (!(await markMailProcessed(processedMailIds.filter((id) => !failedMailIds.has(id)), '抽出済'))) markFailed = true;
+    const doneIds = processedMailIds.filter((id) => !failedMailIds.has(id));
+    if (!(await markMailProcessed(doneIds, '抽出済', processedFingerprints(parsedMails.resend, doneIds)))) markFailed = true;
     // この回の保存がすべて失敗した（保存先に書けない）なら、これ以上LLMで抽出しても保存できないため止める
     const attempted = projects.length + engineers.length;
     return !markFailed && !(attempted > 0 && failures === attempted);
@@ -433,9 +440,18 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     recordFatal(`抽出した案件・要員${saveFailures}件を保存できませんでした（元のメールは処理済みにせず次回再処理します）`);
   }
   const quarantinedMarked = await markMailProcessed(quarantinedMailIds, '隔離');
+  // 再送スキップ: 抽出せずに処理済みにし、元の案件・要員の最終受信日を更新する（直近の突合の対象から外れないように）
+  const skippedIds = parsedMails.resend.skipped.map((x) => x.mail.id);
+  const skippedMarked = await markMailProcessed(skippedIds, '再送スキップ', processedFingerprints(parsedMails.resend, skippedIds));
+  const lastSeen = new Map<string, Date>();
+  for (const { mail, rootMailId } of parsedMails.resend.skipped) {
+    const prev = lastSeen.get(rootMailId);
+    if (!prev || prev.getTime() < mail.receivedAt.getTime()) lastSeen.set(rootMailId, mail.receivedAt);
+  }
+  await touchLastSeen(lastSeen);
   // 自分たちのメールとして除外した分も記録し、次回から本文を取得し直さない
   const excludedMarked = await markMailProcessed(parsedMails.excludedMailIds, '除外');
-  if (markFailed || !quarantinedMarked || !excludedMarked) {
+  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked) {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
   return stored;
@@ -458,7 +474,7 @@ async function withStableIds(projects: Project[], engineers: Engineer[]): Promis
   };
 }
 
-async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[] }> {
+async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[]; resend: ResendSplit }> {
   let mails: SesRawMail[] = [];
   let excludedMailIds: string[] = [];
   let collectFailed = false;
@@ -474,13 +490,37 @@ async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds
   if (mails.length === 0 && !collectFailed) {
     console.log('SES収集: 未処理の新着メールはありません（続く場合はメーリスの配信・転送設定を確認してください）');
   }
-  let parsedMails = mails;
+  const resend = await splitResendMails(mails);
+  let parsedMails = resend.fresh;
   try {
-    parsedMails = await parseAttachments(mails);
+    parsedMails = await parseAttachments(resend.fresh);
   } catch (err) {
     console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }
-  return { mails: parsedMails, excludedMailIds };
+  return { mails: parsedMails, excludedMailIds, resend };
+}
+
+// 抽出の前に、直近に抽出した内容と同じ再送を分ける（Haikuの抽出を呼ばない。件数だけログに出す）
+async function splitResendMails(mails: SesRawMail[]): Promise<ResendSplit> {
+  const days = resendWindowDays();
+  if (days <= 0 || mails.length === 0) return { fresh: mails, skipped: [], fingerprints: splitResends(mails, [], { since: new Date(), threshold: 1 }).fingerprints };
+  const since = new Date(Date.now() - days * DAY_MS);
+  const records = await loadFingerprintRecords(since);
+  const split = splitResends(mails, records, { since, threshold: resendSimilarity() });
+  if (split.skipped.length > 0) {
+    console.log(`SES再送: 直近${days}日に抽出済みの内容と同じ再送${split.skipped.length}通を抽出せずにスキップします`);
+  }
+  recordStat('resendSkipped', split.skipped.length);
+  return split;
+}
+
+function processedFingerprints(split: ResendSplit, ids: string[]): Map<string, ProcessedFingerprint> {
+  const out = new Map<string, ProcessedFingerprint>();
+  for (const id of ids) {
+    const f = split.fingerprints.get(id);
+    if (f) out.set(id, { fingerprint: serializeFingerprint(f.fp), rootMailId: f.rootMailId });
+  }
+  return out;
 }
 
 function uniqueById<T extends { id: string }>(items: T[]): T[] {

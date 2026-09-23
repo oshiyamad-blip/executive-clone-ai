@@ -22,6 +22,7 @@ import {
   MATCHED_COLUMN,
   JUDGE_COLUMN,
   INJECTION_COLUMN,
+  LAST_SEEN_COLUMN,
   METRICS_TAB,
   METRICS_COLUMNS,
   RETIRED_PROPER_VERDICT,
@@ -58,7 +59,8 @@ import {
 import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
 import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
 import { collectSesMail } from '../collect.js';
-import { markMailProcessed } from '../store.js';
+import { markMailProcessed, loadFingerprintRecords, touchLastSeen } from '../store.js';
+import { splitResends, serializeFingerprint } from '../resend.js';
 import { recordFailure, recordSuccess, listQuarantined } from '../heal/quarantine.js';
 import { resetHealEvents, hasFatal } from '../heal/events.js';
 import { materializePendingDrafts } from '../pendingDrafts.js';
@@ -359,7 +361,7 @@ const OLD_PROJECT_HEADER = [
   '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
   '元メールID', '返信メタ', '受信日', 'ステータス',
 ];
-const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN, INJECTION_COLUMN];
+const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN];
 const ENGINEER_HEADER = [
   'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
   '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス',
@@ -399,12 +401,12 @@ async function testTabsAndHeaders(): Promise<void> {
   check('ヘッダー移行で既存の行を変えない', legacy?.['ステータス'] === '紹介済' && legacy?.['判定根拠'] === '旧根拠');
   check(
     '人が定義の後ろに足した列はそのまま残し、増えた定義の列はその後ろに追記する',
-    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN, '年齢', '稼働率', INJECTION_COLUMN]),
+    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN, '年齢', '稼働率', INJECTION_COLUMN, LAST_SEEN_COLUMN]),
     sheets.header(SES_BOOK, '要員').join(','),
   );
   check(
     '新規作成するタブは定義の列数だけの小さなグリッドにする（セル数の上限を無駄に使わない）',
-    sheets.grid(SES_BOOK, '処理済みメール').columns === 3 && sheets.grid(SES_BOOK, '処理済みメール').rows <= 100,
+    sheets.grid(SES_BOOK, '処理済みメール').columns === 5 && sheets.grid(SES_BOOK, '処理済みメール').rows <= 100,
     JSON.stringify(sheets.grid(SES_BOOK, '処理済みメール')),
   );
   const dropdown = sheets.validations.find((v) => v.spreadsheetId === SES_BOOK && v.options.includes('未確認'));
@@ -1421,7 +1423,7 @@ async function testHeaderByName(): Promise<void> {
     const savedRow = sheets.record(CONFLICT_BOOK, '案件', 'ID', p1.id);
     check(
       '途中にメモ列のある案件タブにも、定義の列へ正しく保存する（増えた列は右端に追記）',
-      header.slice(-2).join(',') === `${MATCHED_COLUMN},${INJECTION_COLUMN}` && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
+      header.slice(-3).join(',') === `${MATCHED_COLUMN},${INJECTION_COLUMN},${LAST_SEEN_COLUMN}` && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
       header.join(','),
     );
     const read = await fetchOpenProjects(10);
@@ -1945,6 +1947,53 @@ async function testRedaction(): Promise<void> {
   mail.failDraftFrom.clear();
 }
 
+const RESEND_BOOK = 'fakeResendBook';
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function testResendSkip(): Promise<void> {
+  section('再送スキップ（抽出の前に同じ内容の再送を弾き、元の案件の最終受信日を更新）');
+  sheets.createBook(RESEND_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = RESEND_BOOK;
+  try {
+    await resendSkipSteps();
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+}
+
+async function resendSkipSteps(): Promise<void> {
+  newRun();
+  const oldAt = new Date(NOW.getTime() - 3 * DAY_MS);
+  const first = { ...rawMail('sesmail_rs_1', '検証一郎 <ichiro@alpha.example.jp>', '【案件】Java 検証', 3 * 24 * 60), body: '案件名：Java 検証\n単金：70万\n場所：東京' };
+  const firstSplit = splitResends([first], [], { since: new Date(NOW.getTime() - 14 * DAY_MS), threshold: 0.9 });
+  const fp = firstSplit.fingerprints.get(first.id)!;
+  await markMailProcessed([first.id], '抽出済', new Map([[first.id, { fingerprint: serializeFingerprint(fp.fp), rootMailId: first.id }]]));
+  await saveProjectsSheets([{ ...p1, id: 'proj_rs', sourceMailId: first.id, receivedAt: oldAt }]);
+
+  newRun();
+  const records = await loadFingerprintRecords(new Date(NOW.getTime() - 14 * DAY_MS));
+  const resent = { ...first, id: 'sesmail_rs_2', subject: 'Re: 【再送】【案件】Java 検証', receivedAt: NOW };
+  const changed = { ...first, id: 'sesmail_rs_3', body: first.body.replace('70万', '75万'), receivedAt: NOW };
+  const split = splitResends([resent, changed], records, { since: new Date(NOW.getTime() - 14 * DAY_MS), threshold: 0.9 });
+  check('処理済みメールタブの指紋を読み、同じ内容の再送だけをスキップ（単価を変えた再送は抽出）', records.length === 1 && split.skipped.map((x) => x.mail.id).join() === 'sesmail_rs_2' && split.fresh.map((m) => m.id).join() === 'sesmail_rs_3');
+  const skippedIds = split.skipped.map((x) => x.mail.id);
+  await markMailProcessed(skippedIds, '再送スキップ', new Map(skippedIds.map((id) => [id, { fingerprint: serializeFingerprint(split.fingerprints.get(id)!.fp), rootMailId: split.fingerprints.get(id)!.rootMailId }])));
+  await touchLastSeen(new Map([[first.id, NOW]]));
+  const row = sheets.records(RESEND_BOOK, '処理済みメール').find((r) => r['メールID'] === 'sesmail_rs_2');
+  check('スキップしたメールは「再送スキップ」と元メールを記録（指紋に本文を含めない）', row?.['結果'] === '再送スキップ' && row?.['元メール'] === first.id && !(row?.['指紋'] ?? '').includes('Java'));
+  newRun();
+  const read = (await fetchOpenProjects(10)).find((p) => p.id === 'proj_rs');
+  check('元の案件の最終受信日を更新し、突合の対象期間では新しい受信として扱う', read?.receivedAt.getTime() === NOW.getTime(), String(read?.receivedAt.toISOString()));
+  await saveProjectsSheets([{ ...p1, id: 'proj_rs', sourceMailId: first.id, receivedAt: oldAt }]);
+  check('抽出し直して保存しても最終受信日は消えない', sheets.record(RESEND_BOOK, '案件', 'ID', 'proj_rs')?.[LAST_SEEN_COLUMN] === NOW.toISOString());
+  newRun();
+  const records2 = await loadFingerprintRecords(new Date(NOW.getTime() - 14 * DAY_MS));
+  const again = splitResends([{ ...resent, id: 'sesmail_rs_4' }], records2, { since: new Date(NOW.getTime() - 14 * DAY_MS), threshold: 0.9 });
+  check('再送の再送も最初のメールを元としてスキップ', again.skipped[0]?.rootMailId === first.id);
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -1969,6 +2018,7 @@ async function main(): Promise<void> {
     await testHeaderByName();
     await testResumeAndDurability();
     await testReviewRegressions();
+    await testResendSkip();
     await testRedaction();
   } catch (err) {
     failures += 1;

@@ -12,11 +12,15 @@ import {
   sheetsDbConfigured,
   loadProcessedMailIdsSheets,
   markMailProcessedSheets,
+  loadFingerprintRowsSheets,
+  touchLastSeenSheets,
   type ProcessedMailResult,
+  type ProcessedFingerprint,
 } from '../database/sheets.js';
+import { parseFingerprint, type FingerprintRecord } from './resend.js';
 import type { Project, Engineer } from '../types/index.js';
 
-export type { ProcessedMailResult };
+export type { ProcessedMailResult, ProcessedFingerprint };
 
 const PROCESSED_FILE = join(process.cwd(), 'data', 'ses-processed-ids.json');
 
@@ -44,11 +48,15 @@ export async function loadProcessedMailIds(): Promise<Set<string>> {
 
 // 処理済みとして記録する。保存できなかった場合は false（次回同じメールを再処理することになる）。
 // demoでは記録しない（毎回fixture全件で決定的に完走させるため）
-export async function markMailProcessed(ids: string[], result: ProcessedMailResult = '抽出済'): Promise<boolean> {
+export async function markMailProcessed(
+  ids: string[],
+  result: ProcessedMailResult = '抽出済',
+  fingerprints?: Map<string, ProcessedFingerprint>,
+): Promise<boolean> {
   if (isDemo() || ids.length === 0) return true;
   if (processedInSheets()) {
     try {
-      await markMailProcessedSheets(ids, result);
+      await markMailProcessedSheets(ids, result, fingerprints);
       return true;
     } catch (err) {
       console.error(`SES: 処理済みメールID(${ids.length}件)のスプレッドシート保存に失敗: ${safeErr(err)}`);
@@ -61,6 +69,7 @@ export async function markMailProcessed(ids: string[], result: ProcessedMailResu
     const processed = loadProcessedLocal();
     ids.forEach((id) => processed.add(id));
     writeFileSync(PROCESSED_FILE, JSON.stringify([...processed], null, 2), 'utf-8');
+    if (fingerprints && (result === '抽出済' || result === '再送スキップ')) saveFingerprintsLocal(ids, fingerprints);
     return true;
   } catch (err) {
     console.warn(`SES: 処理済みメールIDの保存に失敗: ${safeErr(err)}`);
@@ -69,6 +78,69 @@ export async function markMailProcessed(ids: string[], result: ProcessedMailResu
 }
 
 // demo成果物をローカルJSONに書き出す（data/ses-demo/<name>.json）
+// ===== 再送スキップの指紋（sheets 運用は「処理済みメール」タブの列、それ以外はローカルJSON） =====
+
+const FINGERPRINT_FILE = join(process.cwd(), 'data', 'ses-fingerprints.json');
+const FINGERPRINT_LOCAL_MAX = 5000;
+
+interface LocalFingerprintRow {
+  mailId: string;
+  rootMailId: string;
+  at: string;
+  fingerprint: string;
+}
+
+function loadFingerprintsLocal(): LocalFingerprintRow[] {
+  try {
+    if (!existsSync(FINGERPRINT_FILE)) return [];
+    const rows = JSON.parse(readFileSync(FINGERPRINT_FILE, 'utf-8'));
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFingerprintsLocal(ids: string[], fingerprints: Map<string, ProcessedFingerprint>): void {
+  const at = new Date().toISOString();
+  const rows = loadFingerprintsLocal();
+  for (const id of ids) {
+    const fp = fingerprints.get(id);
+    if (fp) rows.push({ mailId: id, rootMailId: fp.rootMailId, at, fingerprint: fp.fingerprint });
+  }
+  writeFileSync(FINGERPRINT_FILE, JSON.stringify(rows.slice(-FINGERPRINT_LOCAL_MAX)), 'utf-8');
+}
+
+// since 以降に抽出済み・再送スキップにしたメールの指紋。読めなければ空（再送スキップをせず、いつも通り抽出する）
+export async function loadFingerprintRecords(since: Date): Promise<FingerprintRecord[]> {
+  if (isDemo()) return [];
+  let rows: Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }>;
+  try {
+    rows = processedInSheets()
+      ? await loadFingerprintRowsSheets(since)
+      : loadFingerprintsLocal().map((r) => ({ ...r, at: new Date(r.at) })).filter((r) => r.at.getTime() >= since.getTime());
+  } catch (err) {
+    console.warn(`SES再送: 指紋を読めないため、今回は再送スキップをせずに抽出します: ${safeErr(err)}`);
+    return [];
+  }
+  const out: FingerprintRecord[] = [];
+  for (const r of rows) {
+    const fp = parseFingerprint(r.fingerprint);
+    if (fp) out.push({ mailId: r.mailId, rootMailId: r.rootMailId, at: r.at, fp });
+  }
+  return out;
+}
+
+// 再送スキップした元メールの案件・要員の最終受信日を更新する（sheets 運用のみ。失敗しても続行）
+export async function touchLastSeen(seen: Map<string, Date>): Promise<void> {
+  if (isDemo() || seen.size === 0 || !processedInSheets()) return;
+  try {
+    const n = await touchLastSeenSheets(seen);
+    if (n > 0) console.log(`SES再送: 元の案件・要員${n}行の最終受信日を更新しました`);
+  } catch (err) {
+    console.warn(`SES再送: 最終受信日を更新できません（次回の突合の対象期間の判定が古い受信日のままになります）: ${safeErr(err)}`);
+  }
+}
+
 export function writeDemoArtifact(name: string, data: unknown): void {
   try {
     const dir = join(process.cwd(), demoDataDir());

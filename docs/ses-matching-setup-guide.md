@@ -491,6 +491,11 @@ npm run ses:match      # マッチのみ
 
 - 処理済みメールIDを記録して**二重処理を防止**します（`DB_PROVIDER=sheets` の本番はシートの「処理済みメール」タブ、それ以外は `data/` 配下）。
   結果列は `抽出済`（保存まで成功）/ `隔離`（再試行の打ち切り）/ `除外`（自分たちのメール）。保存に失敗した案件・要員の元メールは記録せず、次回再処理します。
+- **再送スキップ（API節約）**: 同じ送信元ドメインが直近 `SES_RESEND_WINDOW_DAYS`（既定14日）に送った内容と同じメールは、
+  抽出（Haiku）を呼ばずに「処理済みメール」タブへ `再送スキップ` と記録し、元の案件・要員の `最終受信日` だけを更新します
+  （突合の対象期間・鮮度は最終受信日で数える）。件名の Re:/【再送】等、配信日時・引用・挨拶の違いは同じとみなし、
+  **単価など本文の数字・添付・項目の見出し（【要員2】・氏名: 等）の数が変わった再送は抽出し直します**。
+  判定には本文のハッシュ（指紋）だけを使い、本文そのものは保存しません。件数はサマリのメトリクスと「メトリクス」タブの `再送スキップ数` に出ます
 - 通常バッチは、今回の新着を **直近 `SES_MATCH_LOOKBACK_DAYS`（既定14日）に保存済みの募集中案件・提案可要員とも突合**します
   （別々の実行回に届いた案件と要員の組を見逃さないため）。LLM判定は「新着を含み、まだマッチタブ/DBに無いペア」だけ
   （新着の案件1件あたり最大 `MAX_CANDIDATES_PER_ITEM` 件・要員1名あたり最大 `MAX_PROJECTS_PER_ENGINEER` 件）なので、
@@ -610,6 +615,7 @@ UIでできること:
 - 実行/モデル: `ANTHROPIC_API_KEY` `DEMO_MODE` `SES_REQUIRE_LIVE` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `USE_BATCH_API`
 - メール（共通/切替）: `MAIL_PROVIDER` `SES_NOTIFY_TO` `SES_COLLECT_DAYS` `SES_MAX_MAILS_PER_RUN` `SES_OWN_DOMAINS` `SES_COLLECT_OWN_DOMAIN`
 - 突合の範囲: `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT`
+- 再送スキップ（API節約）: `SES_RESEND_WINDOW_DAYS`（既定14日・0で無効） `SES_RESEND_SIMILARITY`（既定0.9）
 - メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX`
 - メール（Gmail）: `SES_TARGET_GMAIL` `GOOGLE_SA_*`
 - スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`

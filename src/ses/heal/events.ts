@@ -36,6 +36,7 @@ export interface BatchStats {
   prefectureNull: number; // うち都道府県が不明
   engineerRateNull: number; // 希望単金が不明の要員
   draftsCreated: number; // 用意した紹介文面（下書き）の通数
+  resendSkipped: number; // 直近に抽出した内容と同じ再送として抽出しなかったメール
 }
 
 let events: HealEvent[] = [];
@@ -43,6 +44,7 @@ let stats: BatchStats = emptyStats();
 
 function emptyStats(): BatchStats {
   return {
+    resendSkipped: 0,
     collected: 0,
     extractedItems: 0,
     extractFailures: 0,
