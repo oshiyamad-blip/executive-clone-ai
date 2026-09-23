@@ -157,6 +157,7 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
     from,
     to,
     cc,
+    replyTo: header('Reply-To'),
     subject,
     body,
     // 全員に返信のスレッド継続用。Message-ID が取れないメールは擬似スレッド化のみ（実害小）

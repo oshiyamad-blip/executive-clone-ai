@@ -114,12 +114,19 @@ function bigramSimilarity(a: string, b: string): number {
   return union.size === 0 ? 0 : intersection.size / union.size;
 }
 
-function dedupeBySimilarity<T>(items: T[], keyFn: (item: T) => string, label: string): T[] {
+// 同一人物・同一案件でありえない組（別の単金・別の人物属性・同じメール内の別項目）は、文面が似ていても統合しない
+// （統合＝片方の破棄なので、迷ったら残す）
+function dedupeBySimilarity<T>(
+  items: T[],
+  keyFn: (item: T) => string,
+  compatible: (a: T, b: T) => boolean,
+  label: string,
+): T[] {
   const kept: T[] = [];
   const keptKeys: string[] = [];
   for (const item of items) {
     const key = keyFn(item);
-    const isDuplicate = keptKeys.some((k) => bigramSimilarity(k, key) >= DEDUP_THRESHOLD);
+    const isDuplicate = kept.some((k, i) => compatible(k, item) && bigramSimilarity(keptKeys[i], key) >= DEDUP_THRESHOLD);
     if (!isDuplicate) {
       kept.push(item);
       keptKeys.push(key);
@@ -132,20 +139,64 @@ function dedupeBySimilarity<T>(items: T[], keyFn: (item: T) => string, label: st
   return kept;
 }
 
-// 同一案件が複数の営業経路から届いた場合の重複統合
+// 片方が不明なら矛盾なしとみなす
+function sameIfKnown<V>(a: V | null | undefined, b: V | null | undefined, eq: (x: V, y: V) => boolean): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return true;
+  return eq(a, b);
+}
+
+const sameRate = (x: number, y: number) => Math.abs(x - y) < 0.05;
+
+// 表示名・駅名の比較用（全角半角・空白・区切りの記号・大文字小文字の違いを無視）
+function identityText(s: string): string {
+  return s.normalize('NFKC').replace(/[\s.．・_\-]/g, '').replace(/駅$/, '').toLowerCase();
+}
+
+function nonEmpty(s: string): string | null {
+  const t = identityText(s);
+  return t ? t : null;
+}
+
+function projectsCompatible(a: Project, b: Project): boolean {
+  return (
+    a.sourceMailId !== b.sourceMailId &&
+    sameIfKnown(a.rateMax ?? a.rateMin, b.rateMax ?? b.rateMin, sameRate) &&
+    sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y) &&
+    sameIfKnown(nonEmpty(a.agentCompany), nonEmpty(b.agentCompany), (x, y) => x === y)
+  );
+}
+
+function engineersCompatible(a: Engineer, b: Engineer): boolean {
+  const nameA = nonEmpty(a.displayName);
+  const nameB = nonEmpty(b.displayName);
+  return (
+    a.sourceMailId !== b.sourceMailId &&
+    // 表示名（イニシャル）が無い要員は人物を特定できないため統合しない
+    nameA !== null &&
+    nameA === nameB &&
+    sameIfKnown(a.age, b.age, (x, y) => Math.abs(x - y) <= 1) &&
+    sameIfKnown(nonEmpty(a.nearestStation), nonEmpty(b.nearestStation), (x, y) => x === y) &&
+    sameIfKnown(a.desiredRate, b.desiredRate, sameRate) &&
+    sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y)
+  );
+}
+
+// 同一案件が同じ営業元から再送された場合などの重複統合（単金・勤務地・営業元が食い違うものは別案件として残す）
 export function dedupeProjects(projects: Project[]): Project[] {
   return dedupeBySimilarity(
     projects,
     (p) => `${p.title}${p.requiredSkills.join('')}${p.agentCompany}`,
+    projectsCompatible,
     '案件',
   );
 }
 
-// 同一要員が複数の営業経路から届いた場合の重複統合
+// 同一要員が再送・複数経路で届いた場合の重複統合（イニシャル・年齢・最寄駅・希望単金・居住県が食い違うものは別人として残す）
 export function dedupeEngineers(engineers: Engineer[]): Engineer[] {
   return dedupeBySimilarity(
     engineers,
     (e) => `${e.displayName}${e.skills.join('')}${e.agentCompany}`,
+    engineersCompatible,
     '要員',
   );
 }

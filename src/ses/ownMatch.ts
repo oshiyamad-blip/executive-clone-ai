@@ -6,8 +6,8 @@
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
-import { skillMatchRate } from './pricing.js';
-import { isAdjacentOrSame } from './prefecture.js';
+import { assessSkills, fmtMan, roundManDown } from './pricing.js';
+import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace } from './match.js';
 import { writeReviewOwnMatches } from './review.js';
@@ -31,16 +31,26 @@ export function projectRateMan(project: Project): number | null {
 
 // 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
 export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch | null {
-  // スキル: 必須スキルの被覆率が閾値未満なら除外。
-  // 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける
-  const matchRate = skillMatchRate(project.requiredSkills, own.skills);
-  if (matchRate < skillMatchThreshold()) return null;
-  const band: MatchBand = matchRate >= skillMatchStrongThreshold() ? 'strong' : 'tentative';
+  const reviewReasons: string[] = [];
+  // スキル: 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける。
+  // 必須スキルが空の案件は尚可スキルで参考判定、どちらも空なら案件名に社員のスキルが現れる場合だけ要確認
+  const skill = assessSkills(project, own.skills);
+  let band: MatchBand = 'tentative';
+  if (skill.basis === 'unknown') {
+    if (skill.titleHits.length === 0) return null;
+    reviewReasons.push('必須スキル不明');
+  } else {
+    if (skill.rate < skillMatchThreshold()) return null;
+    if (skill.basis === 'required' && skill.rate >= skillMatchStrongThreshold()) band = 'strong';
+  }
 
-  // 勤務地: フルリモート可 または 同一/隣接県。両方不明なら判定不能として通過(要確認)
-  const bothPrefectureUnknown = project.prefecture === null && own.prefecture === null;
-  const locationOk = project.remote === 'full' || isAdjacentOrSame(project.prefecture, own.prefecture);
-  if (!locationOk && !bothPrefectureUnknown) return null;
+  // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
+  const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
+  const locationKnownOk = isAdjacentOrSame(project.prefecture, own.prefecture);
+  const locationUnknown = !fullRemote && (project.prefecture === null || own.prefecture === null);
+  if (!fullRemote && !locationUnknown && !locationKnownOk) return null;
+  if (locationUnknown) reviewReasons.push('勤務地不明');
+  const locationOk = fullRemote || locationKnownOk;
 
   // 時期: どちらか不明なら通過(緩め)
   const timingUnknown = project.startDate === null || own.availableFrom === null;
@@ -54,17 +64,24 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
   const required = own.requiredProjectRate;
   const rateUnknown = rate === null || required === null;
   if (!rateUnknown && (rate as number) < (required as number)) return null; // 単価不足は除外
+  if (rateUnknown) reviewReasons.push('単価不明');
   const meetsRate = !rateUnknown && (rate as number) >= (required as number);
-  const rateGapMan = rateUnknown ? null : (rate as number) - (required as number);
+  // 表示用に0.5万円刻みへ切り下げる（「+5.200000000000003万円」を出さない。多めには見せない）
+  const rateGapMan = rateUnknown ? null : roundManDown((rate as number) - (required as number));
 
-  const needsReview = rateUnknown || bothPrefectureUnknown;
-  const score = Math.round(matchRate * 70 + (locationOk || bothPrefectureUnknown ? 20 : 0) + (timingOk ? 10 : 0));
+  const needsReview = reviewReasons.length > 0;
+  const score = Math.round(skill.rate * 70 + (locationOk ? 20 : 0) + (timingOk ? 10 : 0));
 
-  const pct = Math.round(matchRate * 100);
-  const tentativeNote = band === 'tentative' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '';
+  const pct = Math.round(skill.rate * 100);
+  const notes =
+    (band === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
+    (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
+    (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '');
+  const skillText =
+    skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
   const reason = needsReview
-    ? `${tentativeNote}案件単価または勤務地が不明のため要確認です（スキル一致率${pct}%）。`
-    : `${tentativeNote}必要案件単価${required}万円に対し案件単価${rate}万円（差 +${rateGapMan}万円）・スキル一致率${pct}%・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
+    ? `${notes}${reviewReasons.join('・')}のため要確認です（${skillText}）。`
+    : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 +${fmtMan(rateGapMan as number)}万円）・${skillText}・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
 
   return {
     id: `ownmatch_${own.id}_${project.id}`,
@@ -76,9 +93,9 @@ export function evaluateOwnMatch(own: OwnEngineer, project: Project): OwnMatch |
     requiredProjectRate: required,
     rateGapMan,
     meetsRate,
-    skillMatchRate: matchRate,
+    skillMatchRate: skill.rate,
     band,
-    locationOk: locationOk || bothPrefectureUnknown,
+    locationOk,
     timingOk,
     needsReview,
     score,
@@ -100,10 +117,11 @@ export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Projec
       const m = evaluateOwnMatch(engineer, project);
       if (m) candidates.push(m);
     }
-    // 単価充足(meetsRate) 優先 → 単価差(rateGap)降順 → スキル一致率 降順
+    // 強マッチ → 参考提案 → 要確認 の順（単価差の大きい参考提案が強マッチを押し出さないように）→ 単価差 降順 → スキル一致率 降順
+    const rank = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
     candidates.sort(
       (a, b) =>
-        Number(b.meetsRate) - Number(a.meetsRate) ||
+        rank(a) - rank(b) ||
         (b.rateGapMan ?? -Infinity) - (a.rateGapMan ?? -Infinity) ||
         b.skillMatchRate - a.skillMatchRate,
     );

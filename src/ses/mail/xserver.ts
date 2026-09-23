@@ -171,6 +171,7 @@ function toSesRawMail(p: ParsedMail, uidValidity: string, uid: number): SesRawMa
     from: addrText(p.from),
     to: addrText(p.to),
     cc: addrText(p.cc),
+    replyTo: addrText(p.replyTo),
     subject: p.subject ?? '',
     body,
     messageIdHeader: p.messageId ?? '',

@@ -153,9 +153,9 @@ async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Prom
   const b = text(body, 'b', MAX_SKILL_CHARS);
   const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
   try {
-    const entry = await addSkillEquivalence(a, b, reviewer);
-    if (!entry) return json(res, 400, { error: '異なる2つのスキル名が必要です' });
-    return json(res, 200, { ok: true, entry });
+    const added = await addSkillEquivalence(a, b, reviewer);
+    if (!added) return json(res, 400, { error: '異なる2つのスキル名が必要です' });
+    return json(res, 200, { ok: true, entry: added.entry, degraded: !isDemo() && added.savedTo === 'local' });
   } catch (err) {
     console.error(`SES確認UI: 同義の保存に失敗: ${safeErr(err)}`);
     return json(res, 502, { error: '同義の保存に失敗しました' });
@@ -329,7 +329,7 @@ function renderPage(): string {
   function replySection(m, side, ref, text){
     if (!ref && !text) return '';
     var label = (side === 'project' ? '案件側' : '要員側') + '（元メールへ全員に返信）';
-    var head = ref ? ('<div class="reply-h">To: ' + esc(ref.to) + '<br>Cc: ' + esc(ref.cc || '（なし）') + '<br>From: ' + esc(ref.from || '') + (ref.inReplyTo ? '<br>（元メールにスレッド返信）' : '') + '</div>') : '';
+    var head = ref ? ('<div class="reply-h">To: ' + esc(ref.to) + '<br>Cc: ' + esc(ref.cc || '（なし）') + '<br>From: ' + esc(ref.from || '') + (ref.inReplyTo ? '<br>（元メールにスレッド返信）' : '') + (ref.addressNote ? '<br>※ ' + esc(ref.addressNote) : '') + '</div>') : '';
     var bodyd = text ? ('<details class="drafts"><summary>本文を見る</summary><pre>' + esc(text) + '</pre></details>') : '';
     // http(s) 以外（imap:// やローカルパス）はブラウザで開けないためリンクにせずラベル表示
     var made = '';
@@ -427,7 +427,9 @@ function renderPage(): string {
     if (!a || !b) { msg.textContent = 'スキルA・Bを入力してください'; return; }
     var r = await post('/api/skill-equivalence', { a: a, b: b, reviewer: reviewer() });
     if (!r.ok) { msg.textContent = '失敗: ' + (r.data.error || r.status); return; }
-    msg.textContent = a + ' ≈ ' + b + ' を追加しました（次回マッチから反映）';
+    msg.textContent = r.data.degraded
+      ? (r.data.entry.a + ' ≈ ' + r.data.entry.b + ' はデータベースに保存できなかったため、この端末にだけ退避しました（定期バッチには反映されません。DBの設定・接続をご確認ください）')
+      : (r.data.entry.a + ' ≈ ' + r.data.entry.b + ' を追加しました（次回マッチから反映）');
     document.getElementById('eqA').value = ''; document.getElementById('eqB').value = '';
   });
 

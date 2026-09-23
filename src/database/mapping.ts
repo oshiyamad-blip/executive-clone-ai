@@ -149,7 +149,9 @@ export function parseDraftData(json: string): StoredDraftData {
 
 // 文面列（人が読む用）。宛先・件名を本文の前に付ける
 export function draftDisplayText(d: StoredDraft): string {
-  const header = [`To: ${d.to}`, d.cc ? `Cc: ${d.cc}` : '', `Subject: ${d.subject}`].filter(Boolean).join('\n');
+  const header = [`To: ${d.to}`, d.cc ? `Cc: ${d.cc}` : '', `Subject: ${d.subject}`, d.addressNote ? `※ ${d.addressNote}` : '']
+    .filter(Boolean)
+    .join('\n');
   return `${header}\n\n${d.body ?? ''}`;
 }
 

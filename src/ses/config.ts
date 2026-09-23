@@ -158,6 +158,11 @@ export function hourlyToMonthlyHours(): number {
   return envNum('HOURLY_TO_MONTHLY_HOURS', 160, { min: 1 });
 }
 
+// 最終判定（LLM）のスコアがこれ未満の「成立候補」は「参考提案」に下げる（自動の紹介下書きを作らない）。0で無効
+export function matchMinLlmScore(): number {
+  return envNum('MATCH_MIN_LLM_SCORE', 50, { min: 0, max: 100 });
+}
+
 // 時期整合判定の猶予日数
 export function matchTimingGraceDays(): number {
   return envNum('MATCH_TIMING_GRACE_DAYS', 30, { min: 0 });

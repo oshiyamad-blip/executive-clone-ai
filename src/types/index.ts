@@ -196,6 +196,8 @@ export interface MatchPair {
   locationOk: boolean;
   timingOk: boolean;
   needsReview: boolean; // 単金・勤務地不明などの「要確認」枠
+  reviewReasons: string[]; // 要確認の理由（'単金不明' 等。needsReview のときだけ非空）
+  cautions: string[]; // 判定の前提・注意（例: 案件単金は下限のみの記載）。判定根拠の末尾に付す
   negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
 }
 
@@ -210,6 +212,7 @@ export interface DraftRef {
   inReplyTo?: string; // 元 Message-ID（スレッド継続）
   references?: string; // References ヘッダ
   body?: string; // 返信本文（UIでの送信下書き作成に使用）
+  addressNote?: string; // 宛先の注意（Ccから外した社外・配信用アドレスの件数など。アドレス自体は書かない）
 }
 
 // 最終判定・保存対象のマッチ結果（要件定義 §6.4 マッチ結果DBに対応）
@@ -238,6 +241,7 @@ export interface SesRawMail {
   from: string;
   to: string;
   cc: string; // Cc ヘッダ（全員に返信の宛先組み立て用）
+  replyTo?: string; // Reply-To ヘッダ（あれば返信の To はこちら）
   subject: string;
   body: string; // text/plain 本文
   messageIdHeader: string; // 元メールの Message-ID（In-Reply-To/References 用）
@@ -251,7 +255,8 @@ export interface SesRawMail {
 // 共有メールボックス(sales@)宛に届いた1通に対し、担当営業個人のアドレスから
 // 全員に返信（元の宛先そのまま＝メーリス含む）でスレッド返信するために使う。
 export interface ReplyTarget {
-  from: string; // 元メールの送信者 → 返信の To
+  from: string; // 元メールの送信者 → 返信の To（Reply-To があればそちら）
+  replyTo?: string; // 元メールの Reply-To（配信システム経由のメールは From が送信専用のことが多い）
   to: string; // 元メールの To（sales@ メーリス等） → 返信の Cc に含める
   cc: string; // 元メールの Cc → 返信の Cc に含める
   subject: string; // 元件名（返信は Re: を付与）

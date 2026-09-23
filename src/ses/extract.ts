@@ -308,6 +308,7 @@ function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
 function buildReplyTarget(mail: SesRawMail): ReplyTarget {
   return {
     from: mail.from,
+    ...(mail.replyTo?.trim() ? { replyTo: mail.replyTo.trim() } : {}),
     to: mail.to,
     cc: mail.cc,
     subject: mail.subject,
@@ -465,7 +466,24 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
     ...parsed.projects.map((p) => ({ kind: 'project' as const, project: buildProject(p, mail, numbers) })),
     ...parsed.engineers.map((e) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, numbers) })),
   ];
-  return withReplyTarget(items.length > 0 ? items : [{ kind: 'other' }], mail);
+  return withReplyTarget(items.length > 0 ? disambiguateIds(items) : [{ kind: 'other' }], mail);
+}
+
+// 同じメール内に案件名（要員の表示名）と営業元メールが同じ別項目があると決定的IDが衝突し、保存・下書き・マッチIDで
+// 取り違えるため、2件目以降だけ出現順を加えたIDにする（1件目のIDは従来どおり＝再抽出しても変わらない）
+function disambiguateIds(items: ExtractedItem[]): ExtractedItem[] {
+  const seen = new Map<string, number>();
+  return items.map((item) => {
+    if (item.kind === 'other') return item;
+    const id = item.kind === 'project' ? item.project.id : item.engineer.id;
+    const n = (seen.get(id) ?? 0) + 1;
+    seen.set(id, n);
+    if (n === 1) return item;
+    const newId = hashId(id.slice(0, id.indexOf('_')), [id, String(n)]);
+    return item.kind === 'project'
+      ? { kind: 'project', project: { ...item.project, id: newId } }
+      : { kind: 'engineer', engineer: { ...item.engineer, id: newId } };
+  });
 }
 
 // 原文に現れる数値の集合（全角・桁区切りを正規化）。抽出された単金が原文にあるかの照合に使う
@@ -525,7 +543,16 @@ function buildProject(raw: RawProject, mail: SesRawMail, numbers: Set<string> | 
   };
 }
 
+// 居住地から都道府県が取れず最寄駅から取れる場合は、居住地に最寄駅を添えて保存する
+// （DBには居住地だけを保存するため、読み戻したときも同じ都道府県を推定できるように）
+function residenceWithStation(residence: string, station: string): string {
+  if (normalizePrefecture(residence) !== null || normalizePrefecture(station) === null) return residence;
+  const r = residence.trim();
+  return r ? `${r}（最寄駅: ${station.trim()}）` : `最寄駅: ${station.trim()}`;
+}
+
 function buildEngineer(raw: RawEngineer, mail: SesRawMail, numbers: Set<string> | null): Engineer {
+  const residence = residenceWithStation(raw.residence, raw.nearestStation);
   return {
     id: hashId('eng', [mail.id, raw.displayName, raw.agentEmail]),
     displayName: raw.displayName,
@@ -533,8 +560,8 @@ function buildEngineer(raw: RawEngineer, mail: SesRawMail, numbers: Set<string> 
     skills: skillsOf(raw.skills),
     experienceYears: raw.experienceYears,
     desiredRate: verifiedRate(raw.desiredRate, raw.desiredRateUnit, numbers),
-    residence: raw.residence,
-    prefecture: normalizePrefecture(raw.residence),
+    residence,
+    prefecture: normalizePrefecture(residence),
     nearestStation: raw.nearestStation,
     availableDate: raw.availableDate,
     availableFrom: validIsoDate(raw.availableFromIso),

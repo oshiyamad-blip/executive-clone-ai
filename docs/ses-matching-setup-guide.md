@@ -320,7 +320,17 @@ MIN_GROSS_MARGIN_JPY=100000     # 粗利下限（円/月）
 | `ENABLE_NEGOTIATION` | true | 単金交渉で粗利を作る提案を出すか |
 | `NEGOTIATION_MAX_PROJECT_RAISE_MAN` | 5 | 交渉で案件単金を上げる上限（万円） |
 | `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | 5 | 交渉で要員単金を下げる上限（万円） |
-| `MAX_CANDIDATES_PER_ITEM` | 5 | 1件あたりLLM判定に回す上限（コスト上限保証） |
+| `MAX_CANDIDATES_PER_ITEM` | 5 | 1件あたりLLM判定に回す上限（コスト上限保証）。成立候補→交渉提案→参考提案→要確認の順に残す |
+| `MATCH_MIN_LLM_SCORE` | 50 | AI最終判定のスコアがこれ未満の成立候補は参考提案に下げる（0で無効） |
+
+判定の補足:
+
+- 勤務地は「東京」「都内」「横浜」「品川駅」「梅田」「首都圏」のような表記からも都道府県を推定します（地域名は代表の都道府県に寄せる近似）。
+  要員の居住地から推定できないときは最寄駅で補います。片方でも推定できない組は除外せず「要確認」にします（フルリモート案件は不問）。
+- 案件単金は上限を使い、上限の記載が無い（「60万円〜」等）ときは下限で粗利を計算し、根拠に注意書きを付けます。
+- 必須スキルの記載が無い案件は、尚可スキルで判定して「参考提案」止まりにします。どちらも無い案件は、案件名に要員のスキルが
+  含まれる組だけを「要確認」にします（誰にでも一致する扱いにはしません）。
+- 交渉後の単金は0.5万円刻みで提示します。
 
 ---
 
@@ -422,7 +432,13 @@ UIでできること:
 3. 良いものは自分の会社メールを入れて「下書き作成」。
    - **Sheets運用（`DB_PROVIDER=sheets`）**: 確認UIの代わりにスプレッドシート「マッチ」タブの文面を確認し、
      「担当者メール」に自分のアドレスを入れる → 次回バッチ（10:00／14:00）で下書きが作成される（4-7参照）
-4. 下書き（To=元送信者／Cc=元の宛先＝メーリス含む／Re:件名）を開き、**内容を確認して送信**。
+4. 下書き（To=元メールの Reply-To（無ければ送信者）／Cc=元の宛先のうち自社（メーリス含む）と返信先と同じ会社の宛先／Re:件名）を開き、**内容を確認して送信**。
+   - 他社のドメイン・配信用アドレス（bp-all@ 等）・Bccで届いた一斉配信の宛先一同は Cc に引き継ぎません（最大10件）。
+     外した件数は文面の先頭（`※`）と確認UIに表示されるので、必要な宛先だけ送信前に追加してください。
+     自社かどうかは `SES_OWN_DOMAINS` と共有メールボックスのドメインで判定します。
+   - 紹介文面には、相手に見せない情報（相手方の社名・担当者名、もう一方の単金、粗利、商流メモ、判定根拠）を入れません。
+     単金は交渉提案のときにお願いする額だけを書き、それ以外は「ご相談」とします。
+     AIの生成文面にこれらが混ざった場合は定型文に差し替えます。
    - 送信元プレースホルダ `《送信元：あなたの会社ドメインのアドレスを確認して入力してください》` が本文に残っていると
      未確定サイン。**必ず削除・確定してから送信**してください（誤送信ガード）。
 5. 結果を「妥当／ズレ」で評価 → 精度が継続的に向上。
@@ -458,7 +474,7 @@ UIでできること:
 - スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
 - プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
-- 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
+- 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MATCH_MIN_LLM_SCORE` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
 - 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_REVIEW_DATA_DIR`

@@ -101,14 +101,92 @@ const ADJACENCY: Record<string, string[]> = {
   沖縄県: [],
 };
 
-// 住所文字列から都道府県名を抽出する（前方一致優先、なければ部分一致）。抽出不能は null。
+// 都道府県名の語幹（「都・道・府・県」を除いた表記）。SESメールは「東京」「神奈川」のように語幹だけで書くことが多い
+const STEMS: Record<string, string> = Object.fromEntries(
+  PREFECTURES.filter((p) => p !== '北海道').map((p) => [p.slice(0, -1), p]),
+);
+
+// 地域・市区・駅名など、都道府県名を含まない表記の別名（通勤圏判定用の近似）。
+// 地域名は代表の都道府県に寄せる（首都圏/関東→東京都、関西→大阪府、東海→愛知県、九州→福岡県）。
+// 同名の区（中央区・港区等）は SES の用例が多い東京都に寄せる（「大阪市中央区」のように市名が前にあればそちらが先に一致する）
+const AREA_ALIASES: Record<string, string[]> = {
+  東京都: [
+    '都内', '23区', '都心', '首都圏', '関東', '東京近郊',
+    '千代田区', '中央区', '港区', '新宿', '文京区', '台東区', '墨田区', '江東区', '品川', '目黒', '大田区', '世田谷',
+    '渋谷', '中野', '杉並', '豊島区', '荒川区', '板橋', '練馬', '足立区', '葛飾', '江戸川区',
+    '丸の内', '大手町', '日本橋', '銀座', '新橋', '汐留', '浜松町', '田町', '虎ノ門', '霞が関', '霞ヶ関', '六本木',
+    '赤坂', '青山', '表参道', '恵比寿', '五反田', '大崎', '大井町', '天王洲', '豊洲', '有明', 'お台場', '池袋',
+    '秋葉原', '神田', '御茶ノ水', '飯田橋', '市ヶ谷', '四ツ谷', '高田馬場', '上野', '錦糸町', '蒲田', '北千住',
+    '八王子', '立川', '町田', '吉祥寺', '三鷹', '調布', '府中', '多摩市',
+  ],
+  神奈川県: [
+    '横浜', 'みなとみらい', '関内', '桜木町', '石川町', '川崎', '武蔵小杉', '溝の口', '宮崎台', '新百合ヶ丘',
+    '相模原', '厚木', '藤沢', '鎌倉', '小田原', '海老名', '大和市', '横須賀', '平塚', '茅ヶ崎', '多摩区', '金沢区',
+    '金沢八景',
+  ],
+  埼玉県: ['さいたま', '大宮', '浦和', '川口市', '所沢', '川越', '越谷', '和光市'],
+  千葉県: ['幕張', '船橋', '柏市', '柏駅', '松戸', '浦安', '舞浜', '市川市', '成田', '木更津'],
+  茨城県: ['つくば', '水戸', '日立市'],
+  栃木県: ['宇都宮'],
+  群馬県: ['高崎', '前橋'],
+  愛知県: ['名古屋', '名駅', '東海', '中京', '豊田市', '刈谷', '岡崎市', '豊橋'],
+  静岡県: ['浜松', '沼津'],
+  大阪府: [
+    '関西', '京阪神', '近畿', '梅田', '難波', 'なんば', '心斎橋', '本町', '淀屋橋', '北浜', '天王寺', '新大阪',
+    '江坂', '堺市', '中之島', '肥後橋', '福島区',
+  ],
+  京都府: ['烏丸', '四条'],
+  兵庫県: ['神戸', '三宮', '三ノ宮', '姫路', '尼崎', '西宮', '明石'],
+  福岡県: ['九州', '博多', '天神', '北九州', '小倉'],
+  宮城県: ['仙台'],
+  北海道: ['札幌', '函館', '旭川'],
+  広島県: ['福山市'],
+  石川県: ['金沢'],
+  長野県: ['松本市'],
+  沖縄県: ['那覇'],
+  香川県: ['高松市'],
+  愛媛県: ['松山市'],
+  岡山県: ['倉敷'],
+  新潟県: ['長岡市'],
+};
+
+// 正式名・語幹・別名 → 都道府県。長い表記から順に照合できるよう、キー長の降順に並べておく
+const LOCATION_KEYS: Array<[string, string]> = (() => {
+  const map = new Map<string, string>();
+  for (const [stem, pref] of Object.entries(STEMS)) map.set(stem, pref);
+  for (const [pref, aliases] of Object.entries(AREA_ALIASES)) for (const a of aliases) map.set(a, pref);
+  for (const p of PREFECTURES) map.set(p, p);
+  return [...map.entries()].sort((a, b) => b[0].length - a[0].length);
+})();
+
+// 表記ゆれを吸収する前処理（全角英数・半角カナを NFKC で揃え、空白を除く）
+function prepare(text: string): string {
+  return text.normalize('NFKC').replace(/\s+/g, '');
+}
+
+// 勤務地・居住地の文字列から都道府県名を推定する。先に現れた地名を採り（「東京/大阪」→東京都）、同じ位置では
+// 長い表記を優先する（「東京都」の中の「京都」、「石川町」の中の「石川」を誤って拾わない）。
+// 語幹（東京・神奈川）・主要な市区・駅名（品川駅・横浜・梅田）・地域名（都内・首都圏・関西）にも対応する。
+// 「フルリモート」「リモート」だけで地名を含まない場合や、推定できない場合は null
 export function normalizePrefecture(location: string): string | null {
-  const trimmed = location.trim();
-  if (!trimmed) return null;
-  const startsWith = PREFECTURES.find((p) => trimmed.startsWith(p));
-  if (startsWith) return startsWith;
-  const includes = PREFECTURES.find((p) => trimmed.includes(p));
-  return includes ?? null;
+  const text = prepare(location ?? '');
+  if (!text) return null;
+  for (let i = 0; i < text.length; i++) {
+    for (const [key, pref] of LOCATION_KEYS) {
+      if (text.startsWith(key, i)) return pref;
+    }
+  }
+  return null;
+}
+
+// 勤務地の記載自体がフルリモートを示すか（抽出の remote が unknown でも勤務地判定を不要にするため）。
+// 「リモート（月1出社）」のように出社の記載があるもの・地名を含むものは対象外
+export function isFullRemoteLocation(location: string): boolean {
+  const text = prepare(location ?? '');
+  if (!text) return false;
+  if (/(フルリモ|完全リモート|全リモート|フル在宅|完全在宅|リモートのみ|在宅のみ)/.test(text)) return !/出社|常駐/.test(text);
+  const rest = text.replace(/[()（）【】「」・、,/／:：]/g, '').replace(/(リモートワーク|リモート|在宅勤務|在宅|テレワーク)(可|可能|勤務|中心)?/g, '');
+  return rest === '' && normalizePrefecture(text) === null;
 }
 
 // 同一 または 陸続き隣接（通勤圏の近似）なら true。どちらかが null なら false（呼び出し側で要確認扱いにする）

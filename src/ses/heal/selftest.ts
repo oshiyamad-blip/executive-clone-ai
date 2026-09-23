@@ -2,7 +2,8 @@
 // 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスク・異常終了判定・
 // ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定・
 // プロパー（スキルシート）管理表の行の組み立てと提案文面、
-// 設定値の解釈・実行モード判定・自己メール除外・抽出値の検証・添付の形式判定・突合範囲・Web UIの要求拒否を検証する。
+// 設定値の解釈・実行モード判定・自己メール除外・抽出値の検証・添付の形式判定・突合範囲・Web UIの要求拒否、
+// 勤務地の正規化・突合ルール（勤務地不明・単金下限・候補上限・交渉額の丸め・必須スキル空）・名寄せ・返信宛先・紹介文面の開示検査を検証する。
 import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { LlmOutputError, isTruncationError } from '../../llm/errors.js';
@@ -12,6 +13,11 @@ import { ownMailReason, type OwnMailPolicy } from '../mail/ownMail.js';
 import { sourceNumbers, verifiedRate, validIsoDate, inspectPdf } from '../extract.js';
 import { spreadsheetKind, spreadsheetBufferToText } from '../parse.js';
 import { primarySelect, matchIdOf } from '../match.js';
+import { normalizePrefecture, isFullRemoteLocation } from '../prefecture.js';
+import { evaluateOwnMatch } from '../ownMatch.js';
+import { dedupeProjects, dedupeEngineers } from '../store.js';
+import { planReplyAddresses, removeAddress, disclosureIssues } from '../draft.js';
+import { equivalenceKey } from '../skillEquiv.js';
 import { sanitizeListItem, joinList, splitList } from '../../database/mapping.js';
 import { rejectReason } from '../../web/httpSecurity.js';
 import type { IncomingMessage } from 'http';
@@ -50,7 +56,16 @@ import {
 import { skillSheetFormat, type SkillSheetFile } from '../proper/drive.js';
 import { buildProperProposalBody, buildProperProposalDraft, MISSING_INITIALS_PLACEHOLDER } from '../proper/proposal.js';
 import { properSummaryLines, type ProperRunResult } from '../proper/index.js';
-import type { SesRawMail, DraftRef, Project, Engineer, ProperEngineer, ProperCandidate } from '../../types/index.js';
+import type {
+  SesRawMail,
+  DraftRef,
+  Project,
+  Engineer,
+  ProperEngineer,
+  ProperCandidate,
+  OwnEngineer,
+  MatchResult,
+} from '../../types/index.js';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -352,6 +367,7 @@ async function main(): Promise<void> {
   check('プロパー: コンソール用のサマリは件数のみ（氏名・案件名なし）', consoleLines.includes('1件') && !consoleLines.includes('山田') && !consoleLines.includes('Java案件'));
 
   await reviewFindingChecks(project);
+  matchingAndDraftChecks(project);
 
   console.log('');
   if (failures > 0) {
@@ -505,6 +521,119 @@ async function reviewFindingChecks(project: Project): Promise<void> {
       rejectReason(req('127.0.0.1:8788', 'POST', 'http://127.0.0.1:8788'), { tokenRequired: false }) === null &&
       rejectReason(req('10.0.0.5:8788'), { tokenRequired: true }) === null,
   );
+}
+
+// 全体レビューの確定指摘（マッチ精度・下書き）への修正の回帰確認
+function matchingAndDraftChecks(base: Project): void {
+  // 24. 勤務地の正規化（語幹・市区・駅名・地域名。「東京都」の中の「京都」を拾わない）
+  const prefCases: Array<[string, string | null]> = [
+    ['東京（品川）', '東京都'], ['都内', '東京都'], ['東京23区', '東京都'], ['神奈川', '神奈川県'], ['横浜', '神奈川県'],
+    ['大阪市内', '大阪府'], ['名古屋', '愛知県'], ['渋谷駅', '東京都'], ['リモート（月1出社：東京）', '東京都'],
+    ['東京/大阪', '東京都'], ['京都市', '京都府'], ['東京都港区', '東京都'], ['梅田', '大阪府'], ['博多', '福岡県'],
+    ['首都圏', '東京都'], ['最寄駅: 町田駅', '東京都'], ['フルリモート', null], ['', null],
+  ];
+  const prefNg = prefCases.filter(([input, want]) => normalizePrefecture(input) !== want).map(([input]) => input);
+  check('勤務地: 語幹・市区・駅名・地域名から都道府県を推定', prefNg.length === 0, prefNg.join(','));
+  check(
+    '勤務地: 「フルリモート」「リモート」だけの記載はフルリモート扱い、出社・地名ありは対象外',
+    isFullRemoteLocation('フルリモート') && isFullRemoteLocation('リモート') && !isFullRemoteLocation('リモート（月1出社：東京）') && !isFullRemoteLocation('東京都港区'),
+  );
+
+  const eng = (id: string, over: Partial<Engineer> = {}): Engineer => ({
+    id, displayName: 'K.S.', age: 30, skills: ['Java'], experienceYears: 5, desiredRate: 60, residence: '東京都',
+    prefecture: '東京都', nearestStation: '', availableDate: '', availableFrom: null, utilization: '', remoteWish: 'partial',
+    agentCompany: 'B社', agentContact: '鈴木', agentEmail: 'suzuki@b.example', sourceMailId: `m_${id}`, receivedAt: new Date(),
+    status: 'available', ...over,
+  });
+  const proj = (id: string, over: Partial<Project> = {}): Project => ({ ...base, id, rateMin: null, rateMax: 80, startDate: null, sourceMailId: `m_${id}`, ...over });
+  const one = (p: Project, e: Engineer) => primarySelect([p], [e])[0];
+
+  // 25. 片側だけ勤務地不明のペアは落とさず要員確認へ（フルリモートなら不問、両方わかって隣接外なら除外）
+  const unknownLoc = one(proj('p1'), eng('e1', { residence: '', prefecture: null }));
+  check('突合: 片側の勤務地不明は除外せず要確認', Boolean(unknownLoc?.needsReview) && unknownLoc!.reviewReasons.includes('勤務地不明'));
+  check('突合: 両方わかって隣接外は除外', one(proj('p2'), eng('e2', { prefecture: '福岡県' })) === undefined);
+  const remote = one(proj('p3', { remote: 'unknown', location: 'フルリモート', prefecture: null }), eng('e3', { prefecture: null }));
+  check('突合: 勤務地の記載がフルリモートなら都道府県不明でも要確認にしない', Boolean(remote) && !remote!.needsReview);
+
+  // 26. 案件単金が下限だけでも粗利を計算する（注意書き付き）
+  const lower = one(proj('p4', { rateMin: 75, rateMax: null }), eng('e4', { desiredRate: 60 }));
+  check('粗利: 上限が無ければ下限で計算し注意を付ける', lower?.grossMarginJpy === 150000 && !lower.needsReview && lower.cautions.length === 1);
+  check('粗利: 下限で交渉幅を超える組は除外', one(proj('p5', { rateMin: 50, rateMax: null }), eng('e5', { desiredRate: 80 })) === undefined);
+
+  // 27. 候補の上限は区分優先（粗利の大きい参考提案が成立候補を押し出さない）
+  const many = [
+    ...['t1', 't2', 't3', 't4', 't5', 't6'].map((id) => eng(id, { skills: ['Java', 'SQL'], desiredRate: 55 })),
+    eng('strong', { skills: ['Java', 'Spring', 'SQL'], desiredRate: 64 }),
+  ];
+  const capped = primarySelect([proj('p6', { requiredSkills: ['Java', 'Spring', 'SQL'], rateMax: 75 })], many);
+  check('候補上限: 強マッチの成立候補が残る', capped.some((p) => p.engineer.id === 'strong'), capped.map((p) => p.engineer.id).join(','));
+
+  // 28. 交渉後の単金は0.5万円刻み、粗利下限と交渉上限を守る
+  const hourly = one(proj('p7', { rateMax: 60.48 }), eng('e7', { desiredRate: 57.6 }));
+  const n = hourly?.negotiation;
+  check(
+    '交渉: 端数を0.5万円刻みにし粗利下限を満たす',
+    Boolean(n) && Number.isInteger(n!.targetProjectRateMan * 2) && Number.isInteger(n!.targetEngineerRateMan * 2) &&
+      n!.resultingGrossMarginJpy >= 100000 && n!.projectRaiseMan <= 5 && n!.engineerCutMan <= 5,
+    JSON.stringify(n),
+  );
+  const own: OwnEngineer = {
+    id: 'own1', displayName: 'A', skills: ['Java'], experienceYears: 5, requiredProjectRate: 64.8, residence: '東京都',
+    prefecture: '東京都', availableDate: '', availableFrom: null, remoteWish: 'partial', status: 'available',
+  };
+  const ownMatch = evaluateOwnMatch(own, proj('p8', { rateMax: 70 }));
+  check('自社社員: 単価差は0.5万円刻み（端数を表示しない）', ownMatch?.rateGapMan === 5 && !ownMatch.reason.includes('000000'), ownMatch?.reason);
+
+  // 29. 必須スキルが空の案件を「誰にでも100%一致」にしない
+  const noSkill = proj('p9', { title: '【Java】金融系開発', requiredSkills: [], preferredSkills: [] });
+  check('スキル不明: 案件名に要員のスキルが無ければ候補にしない', one(noSkill, eng('e9', { skills: ['COBOL'] })) === undefined);
+  const noSkillJava = one(noSkill, eng('e10'));
+  check('スキル不明: 案件名に要員のスキルがあれば要確認（強マッチにしない）', Boolean(noSkillJava?.needsReview) && noSkillJava!.band === 'tentative');
+  const prefOnly = one(proj('p11', { requiredSkills: [], preferredSkills: ['Java'] }), eng('e11'));
+  check('スキル不明: 必須が空なら尚可スキルで判定し参考提案止まり', prefOnly?.band === 'tentative' && !prefOnly.needsReview);
+  check('同義辞書: 正規化後の表記で照合（vue→Vue.js・JS→JavaScript）', equivalenceKey('vue') === equivalenceKey('Vue.js') && equivalenceKey('JS') === 'javascript');
+
+  // 30. 名寄せは単金・人物属性・同一メールの別項目を統合しない
+  const ks = eng('ks', { displayName: 'K.S.', skills: ['PHP', 'MySQL', 'AWS'] });
+  const ys = eng('ys', { displayName: 'Y.S.', skills: ['PHP', 'MySQL', 'AWS'] });
+  const resent = eng('ks2', { displayName: 'K.S.', skills: ['PHP', 'MySQL', 'AWS'] });
+  const sameMail = eng('ks3', { displayName: 'K.S.', skills: ['PHP', 'MySQL', 'AWS'], sourceMailId: 'm_ks' });
+  const dedupedEngineers = dedupeEngineers([ks, ys, resent, sameMail]).map((e) => e.id).join(',');
+  check('名寄せ: 別イニシャル・同一メールの別項目は残し、同一人物の再送だけ統合', dedupedEngineers === 'ks,ys,ks3', dedupedEngineers);
+  const pg = proj('pg', { title: '【Java】金融系開発（PG）', rateMax: 60 });
+  const pl = proj('pl', { title: '【Java】金融系開発（PL）', rateMax: 75 });
+  check('名寄せ: 単金の違う案件は統合しない', dedupeProjects([pg, pl]).length === 2);
+
+  // 31. 全員に返信: Reply-To を宛先に、他社・配信用アドレスは Cc に引き継がない、自社は重複なく1回
+  const policy = { ourDomains: ['ours.example'] };
+  const viaHaishin = planReplyAddresses(
+    { from: 'noreply@haishin.example', replyTo: '田中 <tanaka@partner.example>', to: 'bp-all@partner.example', cc: 'sales@ours.example, x@competitor.example', subject: 's', messageId: '', references: '' },
+    '',
+    policy,
+  );
+  check(
+    '返信宛先: Reply-To を To にし、配信リスト・他社は Cc から外して件数を注記',
+    viaHaishin.to === '田中 <tanaka@partner.example>' && viaHaishin.cc === 'sales@ours.example' && viaHaishin.note.includes('1件') && !viaHaishin.note.includes('@'),
+    JSON.stringify(viaHaishin),
+  );
+  const normal = planReplyAddresses(
+    { from: 'tanaka@partner.example', to: 'sales@ours.example', cc: 'boss@partner.example, "営業" <SALES@ours.example>, taro@ours.example', subject: 's', messageId: '', references: '' },
+    '',
+    policy,
+  );
+  check('返信宛先: 自社・返信先と同じ会社の宛先は重複なく引き継ぐ', normal.cc === 'sales@ours.example, boss@partner.example, taro@ours.example' && normal.note === '', normal.cc);
+  const bcc = planReplyAddresses({ from: 'tanaka@partner.example', to: 'tanaka-team@partner.example', cc: '', subject: 's', messageId: '', references: '' }, '', policy);
+  check('返信宛先: Bccで受け取った一斉配信は宛先一同を Cc にしない', bcc.cc === '' && bcc.note !== '');
+  check('返信宛先: 下書き作成時は送信者本人を Cc から外す', removeAddress(normal.cc, 'Taro <TARO@ours.example>') === 'sales@ours.example, boss@partner.example');
+
+  // 32. 紹介文面: 相手方の社名・担当者名・単金・粗利・URL が混ざったら検出する
+  const dp = proj('dp', { rateMin: 70, rateMax: 78, agentCompany: '株式会社アルファ', agentContact: '田中' });
+  const de = eng('de', { desiredRate: 70, agentCompany: '株式会社ベータ', agentContact: '鈴木花子' });
+  const match = { id: 'match_dp_de', grossMarginJpy: 80000, negotiation: undefined } as unknown as MatchResult;
+  check('紹介文面: 問題のない文面は通す', disclosureIssues('田中様\nK.S.をご提案します。単金はご相談させてください。', 'project', dp, de, match).length === 0);
+  const leaked = disclosureIssues('田中様\nベータ所属の鈴木 花子様の要員（希望７０万円）です。粗利8万円。https://evil.example', 'project', dp, de, match);
+  check('紹介文面: 相手方の社名・単金・粗利・URLを検出', ['相手方の社名・担当者名', '相手方の単金', '粗利', 'URL'].every((x) => leaked.includes(x)), leaked.join(','));
+  check('紹介文面: 要員側宛に案件の単金（上限）を書いたら検出', disclosureIssues('鈴木花子様\n単価780,000円の案件です', 'engineer', dp, de, match).includes('相手方の単金'));
 }
 
 main().catch((err) => {
