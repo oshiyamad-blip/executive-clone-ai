@@ -4,9 +4,16 @@ import '../env.js';
 // （demoは fixture の自社社員で突合と提案文面の作成だけ。件数のみ表示）。
 import { runOwnMatch } from './ownMatch.js';
 import { runProperFlow } from './proper/index.js';
+import { liveConfigError } from './config.js';
 import { safeErr } from './redact.js';
 
 async function main(): Promise<void> {
+  const configError = liveConfigError();
+  if (configError) {
+    console.error(`自社社員探し: 🚨 ${configError}`);
+    process.exitCode = 1;
+    return;
+  }
   const { projects } = await runOwnMatch();
   try {
     await runProperFlow(projects);

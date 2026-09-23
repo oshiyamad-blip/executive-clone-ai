@@ -62,10 +62,20 @@ export function parseReplyMeta(json: string): ReplyTarget | undefined {
   }
 }
 
+// スキル等の1要素から区切り文字（カンマ・全角カンマ・読点）を除く。'Java(Spring, MyBatis)' のような値が
+// Sheetsの読み戻しで2要素に割れたり、Notionの multi_select（カンマ不可）で保存全体が失敗したりしないように、
+// 区切り文字は '/' に置き換える（抽出直後と保存時の両方で通し、経路によって値が変わらないようにする）
+export function sanitizeListItem(item: string): string {
+  return item
+    .replace(/\s*[,，、]\s*/g, '/')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // スキル等の配列⇄テキスト（カンマ区切り）変換。Sheetsのセルや人手編集と相互運用するため
 // 全角読点・カンマの両方を受け付ける。
 export function joinList(items: string[]): string {
-  return items.join(', ');
+  return items.map(sanitizeListItem).filter(Boolean).join(', ');
 }
 
 export function splitList(cell: string | undefined): string[] {

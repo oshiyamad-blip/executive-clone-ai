@@ -1,8 +1,24 @@
 import '../env.js';
 import { existsSync } from 'fs';
 import { generateText } from '../llm/index.js';
+import { google } from 'googleapis';
 import { fetchRecentSignals, fetchRecentStories } from '../database/index.js';
-import { logRedact } from '../ses/config.js';
+import {
+  logRedact,
+  isDemo,
+  demoModeExplicit,
+  liveConfigError,
+  requireLive,
+  mailProvider as sesMailProvider,
+  dbProvider as sesDbProvider,
+  sheetsDbSpreadsheetId,
+  sheetsDbImpersonate,
+  ownDomains,
+  collectDays,
+} from '../ses/config.js';
+import { getServiceAccountAuth } from '../collectors/googleAuth.js';
+import { probeImap, probeSmtp } from '../ses/mail/xserver.js';
+import { probeGmail } from '../ses/mail/gmail.js';
 
 // 環境診断（セットアップ確認用）
 // 使い方: npm run doctor
@@ -62,7 +78,7 @@ async function main(): Promise<void> {
     try {
       const answer = await generateText('診断用の疎通確認です。', [
         { role: 'user', content: '「OK」とだけ返してください。' },
-      ], { maxTokens: 1000 });
+      ], { maxTokens: 2000, strict: true }); // 空応答・打ち切りを「疎通OK」と扱わない
       ok(`疎通OK — 応答: ${answer.trim().slice(0, 40)}`);
     } catch (err) {
       bad(`疎通に失敗しました: ${String(err).slice(0, 200)}`);
@@ -93,30 +109,73 @@ async function main(): Promise<void> {
   console.log(`  ・Slack:           ${envSet('SLACK_USER_TOKEN', 'SLACK_TARGET_USER_ID') ? '設定済み' : '未設定（スキップされます）'}`);
   console.log(`  ・Google Workspace: ${serviceAccountSet() && envSet('GOOGLE_TARGET_EMAIL') ? '設定済み' : '未設定（スキップされます）'}`);
 
-  // 5. SESマッチング（任意 — 使う場合のみ）
+  // 5. SESマッチング（任意 — 使う場合のみ。関連の設定が1つでもあれば「使う」とみなし、不足は ❌）
   section('SESマッチング（任意）');
-  const mailProvider = (process.env.MAIL_PROVIDER ?? 'xserver').toLowerCase();
-  console.log(`  ・メールプロバイダ: ${mailProvider}`);
+  const sesInUse = ['MAIL_PROVIDER', 'DB_PROVIDER', 'XSERVER_IMAP_HOST', 'SES_TARGET_GMAIL', 'SHEETS_DB_SPREADSHEET_ID', 'SES_NOTIFY_TO'].some(
+    (n) => envSet(n),
+  );
+  const need = (msg: string) => (sesInUse ? bad(msg) : warn(msg));
+  // バッチが実際に使う判定（isDemo）で実行モードを示す。本番のつもりで demo（fixture）が動く状態を見逃さない
+  const liveError = liveConfigError();
+  if (liveError) bad(`実行モード: 停止（${liveError}）`);
+  else if (isDemo()) {
+    const why = demoModeExplicit() ? 'DEMO_MODE=true' : 'LLM_PROVIDER に応じたLLMの鍵が未設定';
+    if (sesInUse || requireLive()) bad(`実行モード: DEMO（${why}）— npm run ses は実メールを収集せず fixture で動きます`);
+    else console.log(`  ・実行モード:      DEMO（${why}）`);
+  } else ok('実行モード: 本番（npm run ses は実メールを収集します）');
+
+  const mailProvider = sesMailProvider();
+  console.log(`  ・メールプロバイダ: ${mailProvider}（収集期間 ${collectDays()}日）`);
   if (mailProvider === 'gmail') {
-    if (serviceAccountSet() && envSet('SES_TARGET_GMAIL')) ok('Gmail(DWD)設定あり');
-    else warn('Gmail設定が不足（GOOGLE_SA_* / SES_TARGET_GMAIL）— SES収集はスキップされます');
+    if (!(serviceAccountSet() && envSet('SES_TARGET_GMAIL'))) {
+      need('Gmail設定が不足（GOOGLE_SA_KEY_JSON 等 / SES_TARGET_GMAIL=SES専用メールボックスの実ユーザー）');
+    } else {
+      const problem = await probeGmail();
+      if (problem) bad(`Gmail: ${problem}`);
+      else ok('Gmail: SES専用メールボックスとして収集・送信のトークンを取得できました');
+    }
   } else {
-    if (envSet('XSERVER_IMAP_HOST', 'XSERVER_SHARED_USER', 'XSERVER_SHARED_PASS')) ok('Xserver IMAP設定あり');
-    else warn('Xserver設定が不足（XSERVER_IMAP_HOST/SHARED_USER/SHARED_PASS）— SES収集はスキップされます');
-    if (!envSet('XSERVER_SMTP_HOST')) warn('XSERVER_SMTP_HOST 未設定 — サマリメール送信はスキップされます');
+    if (!envSet('XSERVER_IMAP_HOST', 'XSERVER_SHARED_USER', 'XSERVER_SHARED_PASS')) {
+      need('Xserver設定が不足（XSERVER_IMAP_HOST/SHARED_USER/SHARED_PASS）');
+    } else {
+      const imap = await probeImap();
+      if (imap) bad(`Xserver IMAP: ${imap}`);
+      else ok('Xserver IMAP: ログインと下書きフォルダを確認しました');
+    }
+    if (!envSet('XSERVER_SMTP_HOST')) {
+      (envSet('SES_NOTIFY_TO') ? bad : warn)('XSERVER_SMTP_HOST 未設定 — サマリメールを送信できません');
+    } else if (envSet('XSERVER_SHARED_USER', 'XSERVER_SHARED_PASS')) {
+      const smtp = await probeSmtp();
+      if (smtp) bad(`Xserver SMTP: ${smtp}`);
+      else ok('Xserver SMTP: 接続と認証を確認しました');
+    }
   }
-  const dbProvider = (process.env.DB_PROVIDER ?? 'notion').toLowerCase();
+  if (ownDomains().length === 0) {
+    warn('SES_OWN_DOMAINS 未設定 — 自社ドメインから共有メーリスに届いた紹介メール等も案件・要員として取り込みます（自社ドメインの設定を推奨）');
+  }
+  const dbProvider = sesDbProvider();
   if (dbProvider === 'sheets') {
-    console.log(
-      `  ・データ保存先:    sheets（スプレッドシート ${envSet('SHEETS_DB_SPREADSHEET_ID') ? '設定済み' : '未設定 — SHEETS_DB_SPREADSHEET_ID が必要'}／Google認証 ${serviceAccountSet() ? '設定済み（シートをサービスアカウントのメールに共有してください）' : '未設定'}）`,
-    );
+    if (!envSet('SHEETS_DB_SPREADSHEET_ID') || !serviceAccountSet()) {
+      need('SheetsDB設定が不足（SHEETS_DB_SPREADSHEET_ID / GOOGLE_SA_KEY_JSON 等）');
+    } else {
+      try {
+        const auth = getServiceAccountAuth(['https://www.googleapis.com/auth/spreadsheets'], sheetsDbImpersonate() || undefined);
+        await google.sheets({ version: 'v4', auth: auth! }).spreadsheets.get({
+          spreadsheetId: sheetsDbSpreadsheetId(),
+          fields: 'properties.title',
+        });
+        ok('データ保存先: sheets（スプレッドシートに接続できました）');
+      } catch {
+        bad('データ保存先: sheets — スプレッドシートを開けません（IDと、サービスアカウントのメールへの編集者共有を確認）');
+      }
+    }
     if (!envSet('SES_ALLOWED_SENDER_DOMAINS')) {
       warn('SES_ALLOWED_SENDER_DOMAINS 未設定 — 「担当者メール」列で任意の送信元の下書きを作れます（自社ドメインの設定を推奨）');
     }
   } else {
-    console.log(
-      `  ・データ保存先:    notion（${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '案件/要員/マッチDB 設定済み' : 'DB未設定 — 保存はスキップされます'}）`,
-    );
+    const dbs = envSet('NOTION_TOKEN', 'NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID');
+    if (dbs) console.log('  ・データ保存先:    notion（案件/要員/マッチDB 設定済み）');
+    else need('データ保存先: notion のDB設定が不足（NOTION_TOKEN / NOTION_PROJECT_DB_ID / NOTION_ENGINEER_DB_ID / NOTION_MATCH_DB_ID）');
   }
   // プロパー（自社社員のスキルシート）連携。既定はメインのサービスアカウントで読む（同じWorkspace内で共有）
   if (envSet('PROPER_SKILLSHEET_FOLDER_ID', 'PROPER_MASTER_SPREADSHEET_ID')) {

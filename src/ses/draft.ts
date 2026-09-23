@@ -293,15 +293,12 @@ async function createProdDraftPair(
   engineer: Engineer,
   match: MatchResult,
 ): Promise<[DraftRef, DraftRef]> {
+  // strict: 出力上限での打ち切り・拒否・空応答を例外にする（途中で切れた文面や案内文を紹介メールの本文にしない）。
+  // 上位モデルは adaptive thinking の思考も出力上限に数えるため、本文の長さより大きめに取る
+  const opts = { model: matchModel(), maxTokens: 8000, strict: true };
   const [bodyToProject, bodyToEngineer] = await Promise.all([
-    generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt('project', project, engineer, match) }], {
-      model: matchModel(),
-      maxTokens: 2000,
-    }),
-    generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt('engineer', project, engineer, match) }], {
-      model: matchModel(),
-      maxTokens: 2000,
-    }),
+    generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt('project', project, engineer, match) }], opts),
+    generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt('engineer', project, engineer, match) }], opts),
   ]);
 
   return [

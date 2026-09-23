@@ -65,7 +65,15 @@ export function capQuarantine(list: QuarantineEntry[], maxChars = STATE_JSON_MAX
   return sorted;
 }
 
-async function save(list: QuarantineEntry[]): Promise<void> {
+// 隔離前（再試行中）のまま一定期間更新のない記録は捨てる（成功・窓落ちで二度と更新されないものが溜まるため）
+const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function dropStalePending(list: QuarantineEntry[], now = Date.now()): QuarantineEntry[] {
+  return list.filter((e) => e.quarantinedAt !== null || now - new Date(e.lastFailedAt).getTime() < PENDING_TTL_MS);
+}
+
+async function save(input: QuarantineEntry[]): Promise<void> {
+  const list = dropStalePending(input);
   if (inSheets()) {
     try {
       await writeStateJson(STATE_KEY, capQuarantine(list));
@@ -83,20 +91,31 @@ async function save(list: QuarantineEntry[]): Promise<void> {
   }
 }
 
-// メールアドレス・電話番号らしき並びをマスクする（診断ログ・repairプロンプトに載せる前に必ず通す）
+// メールアドレス・電話番号らしき並びをマスクする（診断ログ・repairプロンプトに載せる前に必ず通す）。
+// 全角（０９０−…）・括弧（03(1234)5678）・区切りなし（09012345678）・+81 表記も拾えるよう先に NFKC で正規化する
 export function maskPii(s: string): string {
   return s
+    .normalize('NFKC')
     .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<メールアドレス>')
-    .replace(/0\d{1,4}-\d{1,4}-\d{3,4}/g, '<電話番号>');
+    .replace(/(?<![\d])(?:\+81[\s-]?\(?0?\)?|0)\d{1,4}[\s-]*\(?[\s-]*\d{1,4}[\s-]*\)?[\s-]*\d{3,4}(?![\d])/g, '<電話番号>')
+    .replace(/(?<![\d])0\d{9,10}(?![\d])/g, '<電話番号>');
+}
+
+// 送信者はドメインだけを残す（表示名の氏名やローカル部を隔離リスト・修復レポートに持ち込まない）
+export function senderDomainOnly(from: string): string {
+  const m = from.normalize('NFKC').match(/@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/);
+  return m ? `@${m[1].toLowerCase()}` : '';
 }
 
 // 失敗を記録する。countTowardQuarantine=false のときはカウンタを増やさない
 // （バッチ内の過半数が失敗＝基盤障害の可能性が高い場合の誤隔離防止）。
+// lastChance=true は「次回の実行ではもう収集の窓から外れる」メール。回数に達していなくても隔離して
+// サマリに載せる（黙って窓から落ちて消えるのを防ぐ。基盤障害中でも同様）。
 // 履歴を読めなかった場合は記録も隔離もしない（次回バッチで再試行される）。
 export async function recordFailure(
   mail: SesRawMail,
   err: unknown,
-  opts: { countTowardQuarantine: boolean } = { countTowardQuarantine: true },
+  opts: { countTowardQuarantine: boolean; lastChance?: boolean } = { countTowardQuarantine: true },
 ): Promise<{ attempts: number; quarantined: boolean }> {
   const list = await load();
   if (!list) return { attempts: 0, quarantined: false };
@@ -106,7 +125,7 @@ export async function recordFailure(
     entry = {
       mailId: mail.id,
       subject: maskPii(mail.subject).slice(0, 120),
-      from: maskPii(mail.from).slice(0, 80),
+      from: senderDomainOnly(mail.from),
       attempts: 0,
       lastError: '',
       firstFailedAt: now,
@@ -118,10 +137,17 @@ export async function recordFailure(
   if (opts.countTowardQuarantine) entry.attempts += 1;
   entry.lastError = maskPii(String(err)).slice(0, 300);
   entry.lastFailedAt = now;
-  const quarantined = entry.attempts >= healMaxAttempts();
+  const quarantined = entry.attempts >= healMaxAttempts() || Boolean(opts.lastChance);
   if (quarantined && !entry.quarantinedAt) entry.quarantinedAt = now;
   await save(list);
   return { attempts: entry.attempts, quarantined };
+}
+
+// 次回の実行時にはメールが収集の窓（collectDays）から外れているか。週末・祝日で実行が空く分として
+// runGapDays（既定3.5日）を見込む。窓の方が短い設定では常に最後の機会とみなす
+export function isLastChance(receivedAt: Date, collectDays: number, now = new Date(), runGapDays = 3.5): boolean {
+  const ageDays = (now.getTime() - receivedAt.getTime()) / (24 * 60 * 60 * 1000);
+  return ageDays + runGapDays >= collectDays;
 }
 
 // 成功したら失敗履歴を消す（一時障害からの回復）
@@ -132,8 +158,11 @@ export async function recordSuccess(mailId: string): Promise<void> {
   if (next.length !== list.length) await save(next);
 }
 
+// 隔離済みの記録を新しい順に返す（修復レポートは直近の失敗を分析対象にするため）
 export async function listQuarantined(): Promise<QuarantineEntry[]> {
-  return ((await load()) ?? []).filter((e) => e.quarantinedAt !== null);
+  return ((await load()) ?? [])
+    .filter((e) => e.quarantinedAt !== null)
+    .sort((a, b) => (b.quarantinedAt ?? '').localeCompare(a.quarantinedAt ?? ''));
 }
 
 export async function quarantineCount(): Promise<number> {

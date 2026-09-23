@@ -1,11 +1,24 @@
 // 自己修復レイヤーと本番実行基盤のオフライン自己検証（npm run ses:heal:check）。外部API呼び出しゼロ。
 // 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスク・異常終了判定・
 // ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定・
-// プロパー（スキルシート）管理表の行の組み立てと提案文面を検証する。
+// プロパー（スキルシート）管理表の行の組み立てと提案文面、
+// 設定値の解釈・実行モード判定・自己メール除外・抽出値の検証・添付の形式判定・突合範囲・Web UIの要求拒否を検証する。
+import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
-import { isRetryableLlmError } from './retry.js';
+import { LlmOutputError, isTruncationError } from '../../llm/errors.js';
+import { isRetryableLlmError, healLlmCall, type HealAttempt } from './retry.js';
+import { parseNumberSetting, decideRunMode, setDemoOverride } from '../config.js';
+import { ownMailReason, type OwnMailPolicy } from '../mail/ownMail.js';
+import { sourceNumbers, verifiedRate, validIsoDate, inspectPdf } from '../extract.js';
+import { spreadsheetKind, spreadsheetBufferToText } from '../parse.js';
+import { primarySelect, matchIdOf } from '../match.js';
+import { sanitizeListItem, joinList, splitList } from '../../database/mapping.js';
+import { rejectReason } from '../../web/httpSecurity.js';
+import type { IncomingMessage } from 'http';
 import {
   maskPii,
+  senderDomainOnly,
+  isLastChance,
   recordFailure,
   recordSuccess,
   listQuarantined,
@@ -37,7 +50,7 @@ import {
 import { skillSheetFormat, type SkillSheetFile } from '../proper/drive.js';
 import { buildProperProposalBody, buildProperProposalDraft, MISSING_INITIALS_PLACEHOLDER } from '../proper/proposal.js';
 import { properSummaryLines, type ProperRunResult } from '../proper/index.js';
-import type { SesRawMail, DraftRef, Project, ProperEngineer, ProperCandidate } from '../../types/index.js';
+import type { SesRawMail, DraftRef, Project, Engineer, ProperEngineer, ProperCandidate } from '../../types/index.js';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -338,6 +351,8 @@ async function main(): Promise<void> {
   const consoleLines = properSummaryLines(run, false).join('\n');
   check('プロパー: コンソール用のサマリは件数のみ（氏名・案件名なし）', consoleLines.includes('1件') && !consoleLines.includes('山田') && !consoleLines.includes('Java案件'));
 
+  await reviewFindingChecks(project);
+
   console.log('');
   if (failures > 0) {
     console.log(`❌ ${failures}件の検証に失敗しました`);
@@ -345,6 +360,151 @@ async function main(): Promise<void> {
   } else {
     console.log('✅ すべての自己検証を通過しました');
   }
+}
+
+// 全体レビューの確定指摘への修正の回帰確認
+async function reviewFindingChecks(project: Project): Promise<void> {
+  // 16. 設定値: 空文字は未設定・桁区切り/全角を許す・数値でない/範囲外は既定値
+  check(
+    '設定値: 空文字は既定値・カンマ区切り/全角を解釈・NaNや範囲外は既定値',
+    parseNumberSetting('', 5, { min: 1 }).value === 5 &&
+      parseNumberSetting('100,000', 1).value === 100000 &&
+      parseNumberSetting('１０', 1).value === 10 &&
+      !parseNumberSetting('50円', 50).valid &&
+      parseNumberSetting('50円', 50).value === 50 &&
+      parseNumberSetting('0', 3, { min: 1 }).value === 3 &&
+      parseNumberSetting('1.5', 3, { int: true }).value === 3,
+  );
+  check(
+    '実行モード: CIで鍵が無ければdemoにせず停止・明示DEMO_MODEはdemo・鍵があれば本番',
+    decideRunMode({ demoExplicit: false, keyConfigured: false, requireLive: true }) === 'error' &&
+      decideRunMode({ demoExplicit: false, keyConfigured: false, requireLive: false }) === 'demo' &&
+      decideRunMode({ demoExplicit: true, keyConfigured: false, requireLive: true }) === 'demo' &&
+      decideRunMode({ demoExplicit: false, keyConfigured: true, requireLive: true }) === 'live',
+  );
+
+  // 17. 自己メール除外（自分の送信元・サマリ件名・自社ドメイン）
+  const policy: OwnMailPolicy = { selfAddresses: ['sales@example.co.jp'], ownDomains: ['example.co.jp'], collectOwnDomain: false };
+  check(
+    '自己メール除外: 自分の送信元・サマリ/修復レポート（転送含む）・自社ドメインを除外し、社外は通す',
+    ownMailReason('"営業" <Sales@Example.co.jp>', '案件', policy) === 'self' &&
+      ownMailReason('x@partner.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', policy) === 'report' &&
+      ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', policy) === 'ownDomain' &&
+      ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', { ...policy, collectOwnDomain: true }) === null &&
+      ownMailReason('partner@agent.jp', '【案件】Java', policy) === null,
+  );
+
+  // 18. PIIマスクの拡張と送信者のドメイン化
+  const pii = maskPii('TEL:０３（１２３４）５６７８ / 09012345678 / +81-90-1234-5678 / 2026-09-23');
+  check(
+    'PIIマスク: 全角・括弧・区切りなし・+81の電話番号を伏せ、日付は残す',
+    !/1234|5678|9012345678/.test(pii) && pii.includes('2026-09-23'),
+    pii,
+  );
+  check('隔離リスト: 送信者はドメインのみ', senderDomainOnly('山田 太郎 <taro@Partner.co.jp>') === '@partner.co.jp');
+  const now = new Date('2026-09-23T01:00:00Z');
+  check(
+    '隔離: 次回の実行時に収集期間を外れるメールは最後の機会と判定',
+    isLastChance(new Date('2026-09-19T01:00:00Z'), 7, now) && !isLastChance(new Date('2026-09-22T01:00:00Z'), 7, now),
+  );
+
+  // 19. 抽出値の検証（単金は原文にある数値・妥当な範囲のみ、日付は実在する YYYY-MM-DD のみ）
+  const nums = sourceNumbers('単価：７０～８０万円（税別）/ 時給4,500円 / 月額800,000円');
+  check(
+    '抽出検証: 原文にある単金だけを採用し、原文に無い値・範囲外は null',
+    verifiedRate(80, 'manYenPerMonth', nums) === 80 &&
+      verifiedRate(800000, 'yenPerMonth', nums) === 80 &&
+      verifiedRate(4500, 'yenPerHour', nums) === 72 &&
+      verifiedRate(150, 'manYenPerMonth', nums) === null &&
+      verifiedRate(900, 'manYenPerMonth', null) === null &&
+      verifiedRate(65, 'manYenPerMonth', null) === 65,
+  );
+  check(
+    '抽出検証: 日付は実在する YYYY-MM-DD のみ',
+    validIsoDate('2026-10-01') === '2026-10-01' && validIsoDate('2026-10') === null && validIsoDate('2026/11/01') === null && validIsoDate('2026-02-30') === null,
+  );
+  check(
+    'スキル名: 区切り文字を除き、保存→読み戻しで要素が割れない',
+    sanitizeListItem('Java(Spring, MyBatis)') === 'Java(Spring/MyBatis)' &&
+      splitList(joinList(['Java(Spring, MyBatis)', 'AWS'])).join('|') === 'Java(Spring/MyBatis)|AWS',
+  );
+
+  // 20. 添付の形式判定（先頭バイト）と表計算の安全な解析
+  const wb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(wb, xlsxUtils.aoa_to_sheet([['案件名', '単価'], ['Java開発', 80]]), '案件');
+  const xlsxBuf = writeXlsx(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  check('添付: xlsx(ZIP)・xls(OLE)は先頭バイトで判定し、それ以外は拒否', spreadsheetKind(xlsxBuf) === 'xlsx' &&
+    spreadsheetKind(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0])) === 'xls' &&
+    spreadsheetKind(Buffer.from('<html>')) === null);
+  check('添付: xlsxをCSVテキスト化できる', spreadsheetBufferToText(xlsxBuf).includes('Java開発,80'));
+  let rejected = false;
+  try {
+    spreadsheetBufferToText(Buffer.from('not a spreadsheet'));
+  } catch (err) {
+    rejected = err instanceof SafeLogError;
+  }
+  check('添付: Excel形式でないバイト列は解析しない', rejected);
+  const b64 = (t: string) => Buffer.from(t, 'latin1').toString('base64');
+  check(
+    '添付PDF: パスワード保護・PDFでないものは送らない',
+    inspectPdf(b64('%PDF-1.7\n1 0 obj << /Type /Page >>\ntrailer << /Encrypt 5 0 R >>')) === 'encrypted' &&
+      inspectPdf(b64('hello')) === 'not_pdf' &&
+      inspectPdf(b64('%PDF-1.4\n1 0 obj << /Type /Pages /Kids [2 0 R] >>\n2 0 obj << /Type /Page >>')) === 'ok',
+  );
+
+  // 21. LLM応答の打ち切りと自動修復（出力上限を拡大し、SDKの自動再試行は0にする。予算超過の見積もりなら試行しない）
+  check('LLM: 打ち切りは型付きエラー・413は再試行しない', isTruncationError(new LlmOutputError('max_tokens', 'm')) && !isRetryableLlmError({ status: 413 }));
+  setDemoOverride(false);
+  try {
+    let seen: HealAttempt | null = null;
+    const healed = await healLlmCall('selftest', new LlmOutputError('max_tokens', 'm'), async (a) => {
+      seen = a;
+      return 'ok';
+    });
+    const s = seen as HealAttempt | null;
+    check('自動修復: 打ち切りからの再試行は出力上限2倍・SDK再試行0', healed === 'ok' && s?.maxTokensFactor === 2 && s.sdkRetries === 0);
+    let called = false;
+    const skipped = await healLlmCall(
+      'selftest',
+      new Error('ECONNRESET'),
+      async () => {
+        called = true;
+        return 'x';
+      },
+      () => 1_000_000,
+    );
+    check('自動修復: 見積もりが残り予算を超える試行はしない', skipped === null && !called);
+  } finally {
+    setDemoOverride(null);
+    resetHealEvents();
+  }
+
+  // 22. 通常バッチの突合範囲（新着を含み未判定のペアだけ。既存×既存・判定済みは除外）
+  const eng = (id: string): Engineer => ({
+    id, displayName: 'A.B.', age: null, skills: ['Java'], experienceYears: 5, desiredRate: 60, residence: '東京都',
+    prefecture: '東京都', nearestStation: '', availableDate: '', availableFrom: null, utilization: '', remoteWish: 'partial',
+    agentCompany: '', agentContact: '', agentEmail: '', sourceMailId: 'm', receivedAt: new Date(), status: 'available',
+  });
+  const proj = (id: string): Project => ({ ...project, id, rateMax: 80, startDate: null });
+  const pairs = primarySelect([proj('pNew'), proj('pOld')], [eng('eNew'), eng('eOld'), eng('eJudged')], {
+    newProjectIds: new Set(['pNew']),
+    newEngineerIds: new Set(['eNew']),
+    judgedMatchIds: new Set([matchIdOf('pNew', 'eJudged')]),
+  });
+  const ids = pairs.map((p) => `${p.project.id}×${p.engineer.id}`).sort().join(',');
+  check('突合範囲: 新着を含む未判定のペアのみ（既存×既存・判定済みは除外）', ids === 'pNew×eNew,pNew×eOld,pOld×eNew', ids);
+
+  // 23. Web UI: トークン無しではループバック以外のHostを拒否、他サイトからのPOSTを拒否
+  const req = (host: string, method = 'GET', origin?: string) =>
+    ({ method, headers: { host, ...(origin ? { origin } : {}) } }) as unknown as IncomingMessage;
+  check(
+    'Web UI: DNSリバインディング・他サイトからの送信を拒否',
+    rejectReason(req('evil.example:8788'), { tokenRequired: false })?.status === 403 &&
+      rejectReason(req('127.0.0.1:8788'), { tokenRequired: false }) === null &&
+      rejectReason(req('127.0.0.1:8788', 'POST', 'http://evil.example'), { tokenRequired: false })?.status === 403 &&
+      rejectReason(req('127.0.0.1:8788', 'POST', 'http://127.0.0.1:8788'), { tokenRequired: false }) === null &&
+      rejectReason(req('10.0.0.5:8788'), { tokenRequired: true }) === null,
+  );
 }
 
 main().catch((err) => {

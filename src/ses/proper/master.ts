@@ -198,7 +198,7 @@ async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<Extr
   try {
     return { kind: 'ok', profile: await extractSkillSheet(content) };
   } catch (err) {
-    const healed = await healLlmCall(`プロパー抽出(file ${file.id})`, err, (model) => extractSkillSheet(content, model));
+    const healed = await healLlmCall(`プロパー抽出(file ${file.id})`, err, (a) => extractSkillSheet(content, a));
     if (healed) return { kind: 'ok', profile: healed };
     console.error(`プロパー: スキルシートの抽出に失敗 (file ${file.id}): ${safeErr(err)}`);
     return failureOutcome(prevMemo, err, 'extract');

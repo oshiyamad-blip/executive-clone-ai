@@ -177,7 +177,16 @@ function rowToProject(cells: string[]): Project {
   };
 }
 
-// receivedSince 指定時はその日時以降に受信した案件に絞り、新しい順に limit 件まで返す
+// 新しい順に並べ、受信日時が since 以降のものに絞って limit 件まで返す（追記順＝古い順のタブから最新を取るため）
+function newestFirst<T extends { receivedAt: Date }>(items: T[], limit: number, since?: Date): T[] {
+  const sinceMs = since ? since.getTime() : -Infinity;
+  return items
+    .filter((x) => x.receivedAt.getTime() >= sinceMs)
+    .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
+    .slice(0, limit);
+}
+
+// 募集中の案件を新しい順に limit 件まで返す。receivedSince 指定時はその日時以降に受信した案件に絞る
 export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date): Promise<Project[]> {
   if (!configured()) {
     console.warn('SheetsDB: 案件なしで継続します');
@@ -186,12 +195,7 @@ export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date)
   const rows = await readRows('案件');
   const stCol = colIndex('案件', 'ステータス');
   const open = rows.filter((r) => cellStr(r.cells, stCol) !== '終了').map((r) => rowToProject(r.cells));
-  if (!receivedSince) return open.slice(0, limit);
-  const since = receivedSince.getTime();
-  return open
-    .filter((p) => p.receivedAt.getTime() >= since)
-    .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
-    .slice(0, limit);
+  return newestFirst(open, limit, receivedSince);
 }
 
 // ===== 要員 =====
@@ -240,17 +244,16 @@ function rowToEngineer(cells: string[]): Engineer {
   };
 }
 
-export async function fetchAvailableEngineersSheets(limit = 100): Promise<Engineer[]> {
+// 提案可の要員を新しい順に limit 件まで返す。receivedSince 指定時はその日時以降に受信した要員に絞る
+export async function fetchAvailableEngineersSheets(limit = 100, receivedSince?: Date): Promise<Engineer[]> {
   if (!configured()) {
     console.warn('SheetsDB: 要員なしで継続します');
     return [];
   }
   const rows = await readRows('要員');
   const stCol = colIndex('要員', 'ステータス');
-  return rows
-    .filter((r) => cellStr(r.cells, stCol) !== '決定済')
-    .slice(0, limit)
-    .map((r) => rowToEngineer(r.cells));
+  const available = rows.filter((r) => cellStr(r.cells, stCol) !== '決定済').map((r) => rowToEngineer(r.cells));
+  return newestFirst(available, limit, receivedSince);
 }
 
 // ===== マッチ結果 =====
@@ -269,9 +272,10 @@ function readDraftColumns(tab: string, cells: string[]): DraftColumns {
 export async function saveMatchSheets(match: MatchResult): Promise<string> {
   if (!configured()) return '';
   const idCol = colIndex('マッチ', 'ID');
-  // 再実行で行が増殖しないよう、同タイトルの既存行があれば更新（upsert）。
+  // 再実行で行が増殖しないよう、同じペアのマッチID（案件ID×要員IDから作る安定ID）の既存行があれば更新（upsert）。
+  // タイトル（案件名×イニシャル）は別ペアと重なり得るため鍵にしない。
   // 人が編集する列（ステータス・担当者メール・下書き状態）は既存値を保持し、機械の初期値で巻き戻さない
-  const row = await upsertRow('マッチ', 'マッチ名', match.title, (existing) => {
+  const row = await upsertRow('マッチ', 'ID', match.id, (existing) => {
     const keep = (name: string) => (existing ? cellStr(existing, colIndex('マッチ', name)) : '');
     const senderEmail = existing?.[colIndex('マッチ', '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
     const drafts = mergeDraftColumns(
@@ -287,6 +291,14 @@ export async function saveMatchSheets(match: MatchResult): Promise<string> {
     ];
   });
   return String(row[idCol]);
+}
+
+// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）
+export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
+  if (!configured()) return new Set();
+  const rows = await readRows('マッチ');
+  const idCol = colIndex('マッチ', 'ID');
+  return new Set(rows.map((r) => cellStr(r.cells, idCol)).filter(Boolean));
 }
 
 export async function updateMatchStatusSheets(id: string, status: MatchStatus): Promise<void> {
@@ -509,7 +521,8 @@ export async function fetchSkillEquivalencesSheets(limit = 500): Promise<SkillEq
   if (!configured()) return [];
   const rows = await readRows('スキル同義');
   const c = (cells: string[], name: string) => cellStr(cells, colIndex('スキル同義', name));
-  return rows.slice(0, limit).map((r) => ({
+  // 追記順（古い順）なので反転し、上限に達したときは新しい登録を優先する
+  return rows.reverse().slice(0, limit).map((r) => ({
     a: c(r.cells, 'スキルA'),
     b: c(r.cells, 'スキルB'),
     addedBy: c(r.cells, '追加者'),
@@ -519,7 +532,8 @@ export async function fetchSkillEquivalencesSheets(limit = 500): Promise<SkillEq
 
 // ===== バッチ横断の状態（スケジュール実行はローカルファイルが残らないためシートに置く） =====
 
-export type ProcessedMailResult = '抽出済' | '隔離';
+// 除外 = 自分たちのメール（サマリ・自社ドメイン等）として取り込まなかったもの
+export type ProcessedMailResult = '抽出済' | '隔離' | '除外';
 
 export async function loadProcessedMailIdsSheets(): Promise<Set<string>> {
   const rows = await readRows('処理済みメール');

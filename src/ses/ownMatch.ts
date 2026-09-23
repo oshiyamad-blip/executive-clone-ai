@@ -129,7 +129,7 @@ async function loadProjects(): Promise<Project[]> {
     if (cached && cached.length > 0) {
       return cached.map((p) => ({ ...p, receivedAt: new Date(p.receivedAt) }));
     }
-    const mails = await parseAttachments(await collectSesMail());
+    const mails = await parseAttachments((await collectSesMail()).mails);
     const { items } = await extractItems(mails);
     return items.filter(isProjectItem).map((i) => i.project);
   }

@@ -1,8 +1,8 @@
 // プロパー（自社社員）のスキルシート1ファイル → 提案に必要な項目の抽出（1ファイル1コール・抽出用モデル）。
 // PDFはdocumentブロックでそのまま、Excel/Word/Googleドキュメントはテキスト化して渡す。構造化出力でJSONを受ける。
 // 住所の番地・電話番号・生年月日などは抽出しない（管理表に載せる必要が無い個人情報のため）。
-import { generateJson } from '../../llm/index.js';
-import { anthropicJsonWithDocuments } from '../../llm/anthropic.js';
+import { generateJsonWithDocuments } from '../../llm/index.js';
+import type { HealAttempt } from '../heal/retry.js';
 import { isDemo, extractModel } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
@@ -81,26 +81,32 @@ function coarseResidence(raw: string): string {
   return raw.normalize('NFKC').replace(/\d.*$/, '').trim();
 }
 
-// modelOverride は自動修復（heal/retry.ts）の上位モデル昇格用
-export async function extractSkillSheet(content: SkillSheetContent, modelOverride?: string): Promise<SkillSheetProfile> {
+// attempt は自動修復（heal/retry.ts）の再試行・上位モデル昇格用（出力上限の拡大・SDK再試行の抑止を含む）
+export async function extractSkillSheet(content: SkillSheetContent, attempt?: HealAttempt): Promise<SkillSheetProfile> {
   if (isDemo()) throw new SafeLogError('プロパー: demoではスキルシートの抽出を行いません');
-  const model = modelOverride ?? extractModel();
+  const opts = {
+    model: attempt?.model ?? extractModel(),
+    maxTokens: 4000 * (attempt?.maxTokensFactor ?? 1),
+    ...(attempt ? { maxRetries: attempt.sdkRetries } : {}),
+  };
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const system = systemPrompt(todayJst);
   const raw =
     content.kind === 'pdf'
-      ? ((await anthropicJsonWithDocuments(
+      ? await generateJsonWithDocuments<RawSkillSheet>(
           system,
           '添付のスキルシートから項目を抽出してください。',
           SKILL_SHEET_SCHEMA,
           [{ mediaType: 'application/pdf', dataBase64: content.base64 }],
-          2000,
-          model,
-        )) as RawSkillSheet)
-      : await generateJson<RawSkillSheet>(system, `以下のスキルシートから項目を抽出してください。\n\n${content.text}`, SKILL_SHEET_SCHEMA, {
-          model,
-          maxTokens: 2000,
-        });
+          opts,
+        )
+      : await generateJsonWithDocuments<RawSkillSheet>(
+          system,
+          `以下のスキルシートから項目を抽出してください。\n\n${content.text}`,
+          SKILL_SHEET_SCHEMA,
+          [],
+          opts,
+        );
 
   const exp = raw.experienceYears;
   const rate = raw.desiredRateMan;

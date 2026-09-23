@@ -5,35 +5,46 @@ import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData,
 import { recordFeedback, loadFeedback } from './feedback.js';
 import { addSkillEquivalence } from './skillEquiv.js';
 import { computeBandMetrics } from './metrics.js';
-import { sesWebPort, sesWebHost, webAccessToken, isDemo, allowedSenderDomains } from './config.js';
+import {
+  sesWebPort,
+  sesWebHost,
+  webAccessToken,
+  isDemo,
+  allowedSenderDomains,
+  setDemoOverride,
+  demoModeExplicit,
+} from './config.js';
 import { senderDomainAllowed } from './pendingDrafts.js';
+import { safeErr } from './redact.js';
+import {
+  HttpError,
+  readJsonObject,
+  rejectReason,
+  runHandler,
+  securityHeaders,
+  sendJson as json,
+  unsafeBind,
+} from '../web/httpSecurity.js';
 import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 
 // SESマッチ確認UI（複数人運用）。バッチ/自社社員探しが書き出したレビュー成果を一覧表示し、
 // 紹介メール下書きを確認し、ステータス更新・妥当/ズレ評価・スキル同義追加を行う。
-// 評価と操作には「名前」を添えて誰の操作かを記録する（共有の正は本番=Notion / demo=ローカルJSON）。
+// 評価と操作には「名前」を添えて誰の操作かを記録する（共有の正は本番=Notion/Sheets / demo=ローカルJSON）。
 // アクセス制御: WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証。ホストは SES_WEB_HOST（既定ローカル）。
+// UIはLLMを呼ばないため、demoかどうかは LLM の鍵の有無ではなく DEMO_MODE の明示だけで決める
+// （本番のUIを鍵無しで起動したときに、評価や下書きがdemo扱いでローカルに消えないように）
+setDemoOverride(demoModeExplicit());
+
 const HOST = sesWebHost();
 const PORT = sesWebPort();
 const ACCESS_TOKEN = webAccessToken();
 const VALID_STATUSES: MatchStatus[] = ['unconfirmed', 'introduced', 'closed_won', 'dropped'];
 
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 1_000_000) req.destroy();
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
-
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(body));
-}
+// 入力の長さ上限（メモはLLM最終判定の参考として毎回プロンプトに載るため短く保つ）
+const MAX_NOTE_CHARS = 500;
+const MAX_SKILL_CHARS = 60;
+const MAX_REVIEWER_CHARS = 50;
+const MAX_BODY_BYTES = 64 * 1024;
 
 function safeEqual(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
@@ -47,12 +58,13 @@ function authorized(req: IncomingMessage): boolean {
   return safeEqual(header, `Bearer ${ACCESS_TOKEN}`);
 }
 
-async function parseJson(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  try {
-    return JSON.parse(await readBody(req));
-  } catch {
-    return null;
-  }
+function text(body: Record<string, unknown>, key: string, max: number): string {
+  const v = body[key];
+  if (v === undefined || v === null) return '';
+  if (typeof v !== 'string') throw new HttpError(400, `${key} は文字列で指定してください`);
+  const t = v.trim();
+  if (t.length > max) throw new HttpError(400, `${key} は${max}文字以内にしてください`);
+  return t;
 }
 
 async function handleData(res: ServerResponse): Promise<void> {
@@ -63,11 +75,10 @@ async function handleData(res: ServerResponse): Promise<void> {
 }
 
 async function handleStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
-  const id = String(body.id ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const id = text(body, 'id', 200);
   const status = body.status as MatchStatus;
-  const reviewer = String(body.reviewer ?? '').trim();
+  const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
   if (!id || !VALID_STATUSES.includes(status)) {
     return json(res, 400, { error: 'id と有効な status が必要です' });
   }
@@ -76,43 +87,45 @@ async function handleStatus(req: IncomingMessage, res: ServerResponse): Promise<
     if (!updated) return json(res, 404, { error: '該当マッチが見つかりません' });
     return json(res, 200, { ok: true, match: updated });
   } catch (err) {
-    return json(res, 502, { error: `更新に失敗しました: ${String(err)}` });
+    console.error(`SES確認UI: ステータス更新に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '更新に失敗しました' });
   }
 }
 
 async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
-  const matchId = String(body.matchId ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const matchId = text(body, 'matchId', 200);
   const verdict = body.verdict === 'bad' ? 'bad' : body.verdict === 'good' ? 'good' : null;
   if (!matchId || !verdict) return json(res, 400, { error: 'matchId と verdict(good/bad) が必要です' });
-  const bandRaw = body.band;
-  const band: MatchBand | undefined = bandRaw === 'strong' || bandRaw === 'tentative' ? bandRaw : undefined;
+  // マッチ名・バンドはクライアントの申告ではなく、保存済みのマッチから取る（任意の文言を学習データに混ぜない）
+  const match = readReviewMatches().find((m) => m.id === matchId);
+  if (!match) return json(res, 404, { error: '該当マッチが見つかりません' });
+  const band: MatchBand | undefined = match.band === 'strong' || match.band === 'tentative' ? match.band : undefined;
   const fb: MatchFeedback = {
     matchId,
-    matchTitle: String(body.matchTitle ?? matchId),
+    matchTitle: match.title,
     verdict,
-    note: String(body.note ?? ''),
-    reviewer: String(body.reviewer ?? '').trim() || '(不明)',
+    note: text(body, 'note', MAX_NOTE_CHARS),
+    reviewer: text(body, 'reviewer', MAX_REVIEWER_CHARS) || '(不明)',
     band,
     at: new Date().toISOString(),
   };
   try {
     const savedTo = await recordFeedback(fb);
-    // 本番でNotionに書けずローカル退避した場合はUIに知らせる（黙って握りつぶさない）
+    // 本番でDBに書けずローカル退避した場合はUIに知らせる（黙って握りつぶさない）
     const degraded = !isDemo() && savedTo === 'local';
     return json(res, 200, { ok: true, degraded });
   } catch (err) {
-    return json(res, 502, { error: `評価の保存に失敗しました: ${String(err)}` });
+    console.error(`SES確認UI: 評価の保存に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '評価の保存に失敗しました' });
   }
 }
 
 async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
-  const matchId = String(body.matchId ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const matchId = text(body, 'matchId', 200);
   const side = body.side === 'engineer' ? 'engineer' : body.side === 'project' ? 'project' : null;
-  const fromEmail = String(body.fromEmail ?? '').trim();
+  const fromEmail = text(body, 'fromEmail', 254);
   if (!matchId || !side) return json(res, 400, { error: 'matchId と side が必要です' });
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) {
     return json(res, 400, { error: '送信元となるあなたの会社メールアドレスを入力してください' });
@@ -121,70 +134,70 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
     return json(res, 400, { error: '送信元ドメインが許可されていません' });
   }
   try {
-    const ref = await createReplyDraftForSender(matchId, side, fromEmail);
-    if (!ref) return json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
-    return json(res, 200, { ok: true, ref });
+    const result = await createReplyDraftForSender(matchId, side, fromEmail);
+    if (!result.ok) {
+      return result.reason === 'already_created'
+        ? json(res, 409, { error: 'この側の下書きは作成済み（または作成中）です' })
+        : json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
+    }
+    return json(res, 200, { ok: true, ref: result.ref });
   } catch (err) {
-    return json(res, 502, { error: `下書き作成に失敗しました: ${String(err)}` });
+    console.error(`SES確認UI: 下書き作成に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '下書き作成に失敗しました（設定・接続を確認してください）' });
   }
 }
 
 async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const body = await parseJson(req);
-  if (!body) return json(res, 400, { error: 'JSONの形式が不正です' });
-  const a = String(body.a ?? '').trim();
-  const b = String(body.b ?? '').trim();
-  const reviewer = String(body.reviewer ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const a = text(body, 'a', MAX_SKILL_CHARS);
+  const b = text(body, 'b', MAX_SKILL_CHARS);
+  const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
   try {
     const entry = await addSkillEquivalence(a, b, reviewer);
     if (!entry) return json(res, 400, { error: '異なる2つのスキル名が必要です' });
     return json(res, 200, { ok: true, entry });
   } catch (err) {
-    return json(res, 502, { error: `同義の保存に失敗しました: ${String(err)}` });
+    console.error(`SES確認UI: 同義の保存に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '同義の保存に失敗しました' });
   }
 }
 
+type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+const API_ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler }> = {
+  '/api/data': { method: 'GET', handler: (_req, res) => handleData(res) },
+  '/api/status': { method: 'POST', handler: handleStatus },
+  '/api/feedback': { method: 'POST', handler: handleFeedback },
+  '/api/skill-equivalence': { method: 'POST', handler: handleSkillEquiv },
+  '/api/make-draft': { method: 'POST', handler: handleMakeDraft },
+};
+
 function main(): void {
+  if (unsafeBind(HOST, ACCESS_TOKEN)) {
+    console.error(`❌ SES_WEB_HOST=${HOST} で公開するには WEB_ACCESS_TOKEN の設定が必要です（ローカルのみなら 127.0.0.1）。起動を中止します`);
+    process.exitCode = 1;
+    return;
+  }
   if (!hasReviewData()) {
     console.warn('⚠️  レビュー成果がまだありません。先に `npm run ses:demo`（本番は `npm run ses`）や `npm run ses:own-match` を実行してください。');
   }
   if (!ACCESS_TOKEN) {
-    console.warn(`⚠️  WEB_ACCESS_TOKEN が未設定です。${HOST === '127.0.0.1' ? 'ローカル(127.0.0.1)以外に公開しないでください。' : 'ネットワーク公開する場合は必ずトークンを設定してください。'}`);
+    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。ローカル(127.0.0.1)からのみ利用できます。');
   }
 
   const page = renderPage();
   const server = createServer((req, res) => {
+    const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
+    if (blocked) return json(res, blocked.status, { error: blocked.message });
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() });
       res.end(page);
       return;
     }
-    if (req.url === '/api/data' && req.method === 'GET') {
-      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
-      void handleData(res);
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/status') {
-      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
-      void handleStatus(req, res);
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/feedback') {
-      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
-      void handleFeedback(req, res);
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/skill-equivalence') {
-      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
-      void handleSkillEquiv(req, res);
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/make-draft') {
-      if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
-      void handleMakeDraft(req, res);
-      return;
-    }
-    json(res, 404, { error: '不明なパスです' });
+    const route = API_ROUTES[req.url ?? ''];
+    if (!route || route.method !== req.method) return json(res, 404, { error: '不明なパスです' });
+    if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
+    runHandler(res, () => route.handler(req, res));
   });
 
   server.listen(PORT, HOST, () => {

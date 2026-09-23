@@ -9,9 +9,24 @@ import { materializePendingDrafts, type PendingDraftResult } from './pendingDraf
 import { runProperFlow, type ProperRunResult } from './proper/index.js';
 import { resetProperMasterCache } from './proper/master.js';
 import { markMailProcessed, writeDemoArtifact, readDemoArtifact, dedupeProjects, dedupeEngineers } from './store.js';
-import { saveProject, saveEngineer, fetchOpenProjects, fetchAvailableEngineers } from '../database/index.js';
+import {
+  saveProject,
+  saveEngineer,
+  fetchOpenProjects,
+  fetchAvailableEngineers,
+  fetchJudgedMatchIds,
+} from '../database/index.js';
 import { resetSheetsCache } from '../database/sheets.js';
-import { isDemo, minGrossMarginJpy, maxCandidatesPerItem, repairEnabled } from './config.js';
+import {
+  isDemo,
+  liveConfigError,
+  minGrossMarginJpy,
+  maxCandidatesPerItem,
+  repairEnabled,
+  matchLookbackDays,
+  matchPoolLimit,
+} from './config.js';
+import type { PairScope } from './match.js';
 import { startHealBatch } from './heal/budget.js';
 import {
   resetHealEvents,
@@ -37,6 +52,13 @@ export interface SesBatchOptions {
 
 export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   console.log('=== SES案件・要員マッチングバッチ開始 ===');
+  // CI等で鍵が渡っていないのに demo（fixture）で「成功」しないよう、設定不備はここで異常終了にする
+  const configError = liveConfigError();
+  if (configError) {
+    console.error(`SESバッチ: 🚨 ${configError}`);
+    process.exitCode = 1;
+    return;
+  }
   console.log(
     `モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'} / 粗利下限: ${minGrossMarginJpy()}円/月 / 候補上限: ${maxCandidatesPerItem()}件`,
   );
@@ -70,6 +92,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
     recordFatal('担当者指定の下書き作成段が例外で停止しました');
   }
 
+  let scope: PairScope | undefined;
   if (opts.matchOnly) {
     ({ projects, engineers } = await loadExisting());
   } else {
@@ -81,7 +104,9 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   }
 
   const proper = await runProperStage(projects);
-  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts, proper);
+  // 通常バッチは、今回の新着に加えて前回以前に保存した案件・要員とも突合する（別々の実行回に届いた組を見逃さない）
+  if (!opts.matchOnly && !isDemo()) ({ projects, engineers, scope } = await withRecentPool(projects, engineers));
+  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts, proper, scope);
   console.log(`=== SESバッチ完了: マッチ候補 計${matches.length}件 ===`);
 
   // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）
@@ -105,9 +130,10 @@ function isEngineerItem(item: ExtractedItem): item is { kind: 'engineer'; engine
 // ①〜④: 収集 → 展開 → 抽出 → 保存（名寄せ込み）
 async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engineer[] }> {
   let mails: SesRawMail[] = [];
+  let excludedMailIds: string[] = [];
   let collectFailed = false;
   try {
-    mails = await collectSesMail();
+    ({ mails, excludedMailIds } = await collectSesMail());
   } catch (err) {
     collectFailed = true;
     console.error(`SES収集: 失敗: ${safeErr(err)}`);
@@ -116,7 +142,7 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
   console.log(`SES収集: 未処理メール${mails.length}件`);
   recordStat('collected', mails.length);
   if (mails.length === 0 && !collectFailed) {
-    console.warn('SES収集: 受信0件です（Xserverからの転送設定をご確認ください）');
+    console.log('SES収集: 未処理の新着メールはありません（続く場合はメーリスの配信・転送設定を確認してください）');
   }
 
   let parsedMails = mails;
@@ -148,7 +174,9 @@ async function collectAndStore(): Promise<{ projects: Project[]; engineers: Engi
   const toMark = processedMailIds.filter((id) => !failedMailIds.has(id));
   const extractedMarked = await markMailProcessed(toMark, '抽出済');
   const quarantinedMarked = await markMailProcessed(quarantinedMailIds, '隔離');
-  if (!extractedMarked || !quarantinedMarked) {
+  // 自分たちのメールとして除外した分も記録し、次回から本文を取得し直さない
+  const excludedMarked = await markMailProcessed(excludedMailIds, '除外');
+  if (!extractedMarked || !quarantinedMarked || !excludedMarked) {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
 
@@ -209,12 +237,56 @@ async function loadExisting(): Promise<{ projects: Project[]; engineers: Enginee
     };
   }
   try {
-    const [projects, engineers] = await Promise.all([fetchOpenProjects(), fetchAvailableEngineers()]);
+    const [projects, engineers] = await Promise.all([
+      fetchOpenProjects(matchPoolLimit()),
+      fetchAvailableEngineers(matchPoolLimit()),
+    ]);
     return { projects, engineers };
   } catch (err) {
     console.error(`SES: 既存データの読み込みに失敗: ${safeErr(err)}`);
     recordFatal('既存の案件・要員データを読み込めませんでした');
     return { projects: [], engineers: [] };
+  }
+}
+
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Map<string, T>();
+  for (const item of items) if (!seen.has(item.id)) seen.set(item.id, item);
+  return [...seen.values()];
+}
+
+// 今回の新着に、直近 SES_MATCH_LOOKBACK_DAYS 日に保存済みの募集中案件・提案可要員を加え、
+// 「新着を含み、まだ判定していないペア」だけを突合する範囲を作る。
+// 読み込みに失敗した場合は新着同士だけで突合する（判定済みのIDが分からないまま既存と組むと二重判定になるため）
+async function withRecentPool(
+  newProjects: Project[],
+  newEngineers: Engineer[],
+): Promise<{ projects: Project[]; engineers: Engineer[]; scope: PairScope }> {
+  const scope: PairScope = {
+    newProjectIds: new Set(newProjects.map((p) => p.id)),
+    newEngineerIds: new Set(newEngineers.map((e) => e.id)),
+    judgedMatchIds: new Set(),
+  };
+  if (newProjects.length === 0 && newEngineers.length === 0) return { projects: [], engineers: [], scope };
+  const since = new Date(Date.now() - matchLookbackDays() * 24 * 60 * 60 * 1000);
+  try {
+    const [poolProjects, poolEngineers, judged] = await Promise.all([
+      fetchOpenProjects(matchPoolLimit(), { receivedSince: since }),
+      fetchAvailableEngineers(matchPoolLimit(), { receivedSince: since }),
+      fetchJudgedMatchIds(since),
+    ]);
+    scope.judgedMatchIds = judged;
+    const projects = uniqueById([...newProjects, ...poolProjects]);
+    const engineers = uniqueById([...newEngineers, ...poolEngineers]);
+    console.log(
+      `SESマッチング: 新着 案件${newProjects.length}件・要員${newEngineers.length}件を、直近${matchLookbackDays()}日の` +
+        `案件${projects.length - newProjects.length}件・要員${engineers.length - newEngineers.length}件とも突合します（判定済み${judged.size}組は除外）`,
+    );
+    return { projects, engineers, scope };
+  } catch (err) {
+    console.error(`SESマッチング: 既存の案件・要員の読み込みに失敗: ${safeErr(err)}`);
+    recordHealEvent('warn', '既存の案件・要員を読み込めなかったため、今回の新着同士だけで突合しました');
+    return { projects: newProjects, engineers: newEngineers, scope };
   }
 }
 
@@ -235,10 +307,11 @@ async function matchDraftAndNotify(
   engineers: Engineer[],
   requestedDrafts: PendingDraftResult,
   proper: ProperRunResult | null,
+  scope?: PairScope,
 ): Promise<MatchResult[]> {
   let matches: MatchResult[] = [];
   try {
-    matches = await matchAll(projects, engineers);
+    matches = await matchAll(projects, engineers, scope);
   } catch (err) {
     console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
     recordFatal('マッチング段が例外で停止しました');

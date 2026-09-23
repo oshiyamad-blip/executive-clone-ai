@@ -4,8 +4,9 @@
 import nodemailer from 'nodemailer';
 import type { DraftRef } from '../../types/index.js';
 
+// 改行はCRLF（RFC 5322。IMAP APPEND ではLFだけの行を受け付けないサーバーがある。Gmail APIもCRLFで問題ない）
 function builder() {
-  return nodemailer.createTransport({ streamTransport: true, newline: 'unix', buffer: true });
+  return nodemailer.createTransport({ streamTransport: true, newline: 'windows', buffer: true });
 }
 
 // 全員に返信（To/Cc/Re:件名/In-Reply-To/References付き）のMIMEを組み立てる

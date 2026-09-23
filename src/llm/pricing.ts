@@ -1,7 +1,7 @@
 // LLM使用量（トークン）→ 概算コスト（円）換算。
 // 自動修復（src/ses/heal/）の「一定のAPI予算内」制御と、サマリのコスト表示に使う。
 // 単価は $/MTok。モデル追加時はここに1行足す（未知モデルは安全側にSonnet相当で見積もる）。
-import { getLlmUsageLog, type LlmUsage } from './anthropic.js';
+import { getLlmUsageLog, type LlmUsage } from './usage.js';
 
 interface UsdPerMTok {
   input: number;
@@ -15,6 +15,8 @@ const PRICING_USD_PER_MTOK: Array<{ match: string; price: UsdPerMTok }> = [
   { match: 'opus-4-8', price: { input: 5, output: 25 } },
   { match: 'opus-4-7', price: { input: 5, output: 25 } },
   { match: 'opus-4-6', price: { input: 5, output: 25 } },
+  // Gemini（LLM_PROVIDER=gemini）。Flash系の公開単価に基づく概算
+  { match: 'gemini', price: { input: 0.3, output: 2.5 } },
 ];
 
 const FALLBACK_PRICE: UsdPerMTok = { input: 3, output: 15 }; // 未知モデルはSonnet相当で概算
@@ -24,8 +26,15 @@ function usdPerMTok(model: string): UsdPerMTok {
   return hit ? hit.price : FALLBACK_PRICE;
 }
 
+// 数値でない・0以下の値（例: '160円'）は既定に戻す（NaNで予算判定が素通りにならないように）
 export function jpyPerUsd(): number {
-  return Number(process.env.JPY_PER_USD ?? '160');
+  const n = Number((process.env.JPY_PER_USD ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? n : 160;
+}
+
+// 呼び出し前のコスト見積もり（円）。自動修復が「次の1回で予算を超えるか」を判定するのに使う
+export function estimateCallJpy(model: string, inputTokens: number, outputTokens: number): number {
+  return usageCostJpy({ model, inputTokens, outputTokens });
 }
 
 export function usageCostJpy(usage: LlmUsage): number {

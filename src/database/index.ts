@@ -21,6 +21,7 @@ import {
   parseAgentInfo,
   replyMetaJson,
   parseReplyMeta,
+  sanitizeListItem,
 } from './mapping.js';
 import type {
   Signal,
@@ -204,7 +205,112 @@ export async function saveStory(story: Story): Promise<string> {
 // ラベル変換・返信メタ・営業元の結合/分解は DBプロバイダ共通のため ./mapping.ts に集約
 // （Sheets版バックエンド ./sheets.ts と同じ表記で保存・復元するための単一の変換層）
 
-// SES案件をNotion案件DBに保存する
+// Notion APIの1ページあたりの取得上限
+const NOTION_PAGE_SIZE = 100;
+
+type QueryArgs = Omit<Parameters<typeof notion.dataSources.query>[0], 'data_source_id' | 'start_cursor' | 'page_size'>;
+
+// has_more/next_cursor を辿って最大 limit 件まで取得する（page_size は常に100以下）
+async function queryAll(dataSourceId: string, args: QueryArgs, limit: number): Promise<unknown[]> {
+  const results: unknown[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await throttle(() =>
+      notion.dataSources.query({
+        ...args,
+        data_source_id: dataSourceId,
+        page_size: Math.min(NOTION_PAGE_SIZE, Math.max(1, limit - results.length)),
+        ...(cursor ? { start_cursor: cursor } : {}),
+      } as never),
+    );
+    const page = res as { results: unknown[]; has_more: boolean; next_cursor: string | null };
+    results.push(...page.results);
+    cursor = page.has_more && page.next_cursor ? page.next_cursor : undefined;
+  } while (cursor && results.length < limit);
+  return results.slice(0, limit);
+}
+
+// SESで後から追加したテキスト列（安定ID）を、既存のDBにも自動で追加する（プロセス内で1回。
+// 既存の列は型を変えない。権限不足等で追加できなければ警告のみ — 保存時に失敗し、元メールは次回再処理される）
+const ensuredProps = new Map<string, Promise<void>>();
+
+function ensureTextProperties(dataSourceId: string, names: string[]): Promise<void> {
+  const key = `${dataSourceId}:${names.join(',')}`;
+  let pending = ensuredProps.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const ds = (await throttle(() => notion.dataSources.retrieve({ data_source_id: dataSourceId }))) as {
+          properties?: Record<string, unknown>;
+        };
+        const missing = names.filter((n) => !(n in (ds.properties ?? {})));
+        if (missing.length === 0) return;
+        await throttle(() =>
+          notion.dataSources.update({
+            data_source_id: dataSourceId,
+            properties: Object.fromEntries(missing.map((n) => [n, { rich_text: {} }])),
+          } as never),
+        );
+        console.log(`Notion: SES用のテキスト列を追加しました（${missing.join(', ')}）`);
+      } catch (err) {
+        ensuredProps.delete(key); // 次回呼び出しで再試行
+        console.warn(`Notion: SES用の列（${names.join(', ')}）の確認・追加に失敗: ${safeErr(err)}`);
+      }
+    })();
+    ensuredProps.set(key, pending);
+  }
+  return pending;
+}
+
+// 安定IDの列で既存ページを探す（見つからなければ null）
+async function findPageIdByText(dataSourceId: string, property: string, value: string): Promise<string | null> {
+  if (!value) return null;
+  const res = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      filter: { property, rich_text: { equals: value } },
+      page_size: 1,
+    } as never),
+  );
+  const first = (res as { results: Array<{ id?: string }> }).results[0];
+  return first?.id ?? null;
+}
+
+// multi_select の選択肢名はカンマを含められず100文字まで（LLMの抽出値でページ作成全体が失敗しないように整える）
+function multiSelect(values: string[]): { multi_select: Array<{ name: string }> } {
+  const names = [...new Set(values.map((v) => sanitizeListItem(v).slice(0, 100)).filter(Boolean))];
+  return { multi_select: names.map((name) => ({ name })) };
+}
+
+// 実在する YYYY-MM-DD だけを日付型に入れる（それ以外はプロパティ自体を省く）
+function dateOnly(s: string | null | undefined): string | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s ? s : null;
+}
+
+// 安定IDで upsert する。人が進めたステータスは再保存で巻き戻さない（更新時はステータスを送らない）
+async function upsertByStableId(
+  dataSourceId: string,
+  idProperty: string,
+  id: string,
+  properties: Record<string, unknown>,
+  bodyBlocks: Array<Record<string, unknown>>,
+): Promise<string> {
+  await ensureTextProperties(dataSourceId, [idProperty]);
+  const existingId = await findPageIdByText(dataSourceId, idProperty, id);
+  if (existingId) {
+    const { ステータス: _status, ...rest } = properties;
+    await throttle(() => notion.pages.update({ page_id: existingId, properties: rest } as never));
+    return existingId;
+  }
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    bodyBlocks,
+  );
+}
+
+// SES案件をNotion案件DBに保存する（案件ID=抽出時の決定的IDで upsert。再実行で重複ページを作らない）
 export async function saveProject(project: Project): Promise<string> {
   if (dbProvider() === 'sheets') return sheetsDb.saveProjectSheets(project);
   if (!PROJECT_DB_ID) {
@@ -214,8 +320,9 @@ export async function saveProject(project: Project): Promise<string> {
   const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
   const properties: Record<string, unknown> = {
     案件名: { title: toRichText(project.title) },
-    必須スキル: { multi_select: project.requiredSkills.map((s) => ({ name: s })) },
-    尚可スキル: { multi_select: project.preferredSkills.map((s) => ({ name: s })) },
+    案件ID: { rich_text: toRichText(project.id) },
+    必須スキル: multiSelect(project.requiredSkills),
+    尚可スキル: multiSelect(project.preferredSkills),
     単金下限: { number: project.rateMin },
     単金上限: { number: project.rateMax },
     勤務地: { rich_text: toRichText(project.location) },
@@ -231,14 +338,18 @@ export async function saveProject(project: Project): Promise<string> {
     受信日: { date: { start: project.receivedAt.toISOString() } },
     ステータス: { select: { name: project.status === 'closed' ? '終了' : '募集中' } },
   };
-  if (project.startDate) properties['開始日'] = { date: { start: project.startDate } };
-  return createPageWithBody(
-    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
-    toParagraphBlocks(`期間: ${project.duration}\n開始日(正規化): ${project.startDate ?? '不明'}`),
+  const startDate = dateOnly(project.startDate);
+  if (startDate) properties['開始日'] = { date: { start: startDate } };
+  return upsertByStableId(
+    dataSourceId,
+    '案件ID',
+    project.id,
+    properties,
+    toParagraphBlocks(`期間: ${project.duration}\n開始日(正規化): ${startDate ?? '不明'}`),
   );
 }
 
-// SES要員をNotion要員DBに保存する
+// SES要員をNotion要員DBに保存する（要員ID=抽出時の決定的IDで upsert）
 export async function saveEngineer(engineer: Engineer): Promise<string> {
   if (dbProvider() === 'sheets') return sheetsDb.saveEngineerSheets(engineer);
   if (!ENGINEER_DB_ID) {
@@ -248,7 +359,8 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
   const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
   const properties: Record<string, unknown> = {
     表示名: { title: toRichText(engineer.displayName) },
-    スキル: { multi_select: engineer.skills.map((s) => ({ name: s })) },
+    要員ID: { rich_text: toRichText(engineer.id) },
+    スキル: multiSelect(engineer.skills),
     経験年数: { number: engineer.experienceYears },
     希望単金: { number: engineer.desiredRate },
     居住地: { rich_text: toRichText(engineer.residence) },
@@ -260,18 +372,21 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
     受信日: { date: { start: engineer.receivedAt.toISOString() } },
     ステータス: { select: { name: engineer.status === 'assigned' ? '決定済' : '提案可' } },
   };
-  if (engineer.availableFrom) {
-    properties['稼働開始可能日'] = { date: { start: engineer.availableFrom } };
-  }
-  return createPageWithBody(
-    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+  const availableFrom = dateOnly(engineer.availableFrom);
+  if (availableFrom) properties['稼働開始可能日'] = { date: { start: availableFrom } };
+  return upsertByStableId(
+    dataSourceId,
+    '要員ID',
+    engineer.id,
+    properties,
     toParagraphBlocks(
       `最寄り駅: ${engineer.nearestStation}\n稼働開始可能日(原文): ${engineer.availableDate}\n稼働率: ${engineer.utilization}`,
     ),
   );
 }
 
-// マッチ結果をNotionマッチDBに保存する。案件・要員のNotionページIDが分かればrelationも張る
+// マッチ結果をNotionマッチDBに保存する。案件・要員のNotionページIDが分かればrelationも張る。
+// マッチID（案件ID×要員IDから作る安定ID）で upsert する（タイトルは表示用で、別ペアと重なり得るため鍵にしない）
 export async function saveMatch(
   match: MatchResult,
   refs?: { projectNotionPageId?: string; engineerNotionPageId?: string },
@@ -284,6 +399,7 @@ export async function saveMatch(
   const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
   const properties: Record<string, unknown> = {
     マッチ名: { title: toRichText(match.title) },
+    マッチID: { rich_text: toRichText(match.id) },
     粗利額: { number: match.grossMarginJpy },
     適合スコア: { number: match.score },
     判定根拠: { rich_text: toRichText(match.reason) },
@@ -294,40 +410,28 @@ export async function saveMatch(
   };
   if (refs?.projectNotionPageId) properties['案件'] = { relation: [{ id: refs.projectNotionPageId }] };
   if (refs?.engineerNotionPageId) properties['要員'] = { relation: [{ id: refs.engineerNotionPageId }] };
+  return upsertByStableId(dataSourceId, 'マッチID', match.id, properties, toParagraphBlocks(match.reason));
+}
 
-  // 再実行で同一ペアのページが増殖しないよう、同タイトルの既存ページがあれば更新（upsert）。
-  // 人がNotion上で進めたステータスを機械の「未確認」で巻き戻さないため、更新時はステータスを除く。
-  const existingId = await findMatchPageIdByTitle(dataSourceId, match.title);
-  if (existingId) {
-    delete properties['ステータス'];
-    await throttle(() => notion.pages.update({ page_id: existingId, properties } as never));
-    return existingId;
-  }
-  return createPageWithBody(
-    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
-    toParagraphBlocks(match.reason),
+// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。since 以降に検出したものに絞る
+export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchJudgedMatchIdsSheets();
+  if (!MATCH_DB_ID) return new Set();
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  await ensureTextProperties(dataSourceId, ['マッチID']);
+  const pages = await queryAll(
+    dataSourceId,
+    since ? { filter: { property: '検出日時', date: { on_or_after: since.toISOString() } } } : {},
+    10_000,
   );
+  const ids = pages
+    .map((page) => readRichText(((page as { properties?: Record<string, unknown> }).properties ?? {})['マッチID']))
+    .filter(Boolean);
+  return new Set(ids);
 }
 
-async function findMatchPageIdByTitle(dataSourceId: string, title: string): Promise<string | null> {
-  try {
-    const res = await throttle(() =>
-      notion.dataSources.query({
-        data_source_id: dataSourceId,
-        filter: { property: 'マッチ名', title: { equals: title } },
-        page_size: 1,
-      }),
-    );
-    const first = res.results[0] as { id?: string } | undefined;
-    return first?.id ?? null;
-  } catch (err) {
-    console.warn(`SES保存: マッチ既存ページの検索に失敗（新規作成にフォールバック）: ${safeErr(err)}`);
-    return null;
-  }
-}
-
-// 突合対象の案件（募集中のみ）を取得する（match --match-only・プロパー候補探しで使用）。
-// receivedSince 指定時はその日時以降に受信した案件に絞る（新しい順）
+// 突合対象の案件（募集中のみ）を新しい順に取得する（通常バッチの突合プール・--match-only・プロパー候補探しで使用）。
+// receivedSince 指定時はその日時以降に受信した案件に絞る
 export async function fetchOpenProjects(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Project[]> {
   if (dbProvider() === 'sheets') return sheetsDb.fetchOpenProjectsSheets(limit, opts.receivedSince);
   if (!PROJECT_DB_ID) {
@@ -337,35 +441,38 @@ export async function fetchOpenProjects(limit = 100, opts: { receivedSince?: Dat
   const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
   const open = { property: 'ステータス', select: { equals: '募集中' } };
   const since = opts.receivedSince;
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      filter: since
-        ? { and: [open, { property: '受信日', date: { on_or_after: since.toISOString() } }] }
-        : open,
-      ...(since ? { sorts: [{ property: '受信日', direction: 'descending' as const }] } : {}),
-      page_size: Math.min(limit, 100), // Notion APIの1ページ上限
-    }),
+  const pages = await queryAll(
+    dataSourceId,
+    {
+      filter: since ? { and: [open, { property: '受信日', date: { on_or_after: since.toISOString() } }] } : open,
+      sorts: [{ property: '受信日', direction: 'descending' }],
+    } as QueryArgs,
+    limit,
   );
-  return response.results.map((page) => projectFromPage(page));
+  return pages.map((page) => projectFromPage(page));
 }
 
-// 突合対象の要員（提案可のみ）を取得する（match --match-only で使用）
-export async function fetchAvailableEngineers(limit = 100): Promise<Engineer[]> {
-  if (dbProvider() === 'sheets') return sheetsDb.fetchAvailableEngineersSheets(limit);
+// 突合対象の要員（提案可のみ）を新しい順に取得する。receivedSince 指定時はその日時以降に受信した要員に絞る
+export async function fetchAvailableEngineers(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Engineer[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchAvailableEngineersSheets(limit, opts.receivedSince);
   if (!ENGINEER_DB_ID) {
     console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員なしで継続します');
     return [];
   }
   const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      filter: { property: 'ステータス', select: { equals: '提案可' } },
-      page_size: limit,
-    }),
+  const available = { property: 'ステータス', select: { equals: '提案可' } };
+  const since = opts.receivedSince;
+  const pages = await queryAll(
+    dataSourceId,
+    {
+      filter: since
+        ? { and: [available, { property: '受信日', date: { on_or_after: since.toISOString() } }] }
+        : available,
+      sorts: [{ property: '受信日', direction: 'descending' }],
+    } as QueryArgs,
+    limit,
   );
-  return response.results.map((page) => engineerFromPage(page));
+  return pages.map((page) => engineerFromPage(page));
 }
 
 function projectFromPage(page: unknown): Project {
@@ -373,7 +480,8 @@ function projectFromPage(page: unknown): Project {
   const props = p.properties ?? {};
   const location = readRichText(props['勤務地']);
   return {
-    id: p.id,
+    // 収集経路と同じ決定的ID（マッチIDの一致に必要）。列が無い古いページだけページIDで代用する
+    id: readRichText(props['案件ID']) || p.id,
     title: readTitle(props['案件名']),
     // 人がNotion上で直接編集したスキル（'JS'/'k8s' 等の表記ゆれ）もマッチングに乗るよう読出時に正規化する
     requiredSkills: normalizeSkills(readMultiSelect(props['必須スキル'])),
@@ -404,7 +512,7 @@ function engineerFromPage(page: unknown): Engineer {
   const residence = readRichText(props['居住地']);
   const agentInfo = parseAgentInfo(readRichText(props['営業元']));
   return {
-    id: p.id,
+    id: readRichText(props['要員ID']) || p.id,
     displayName: readTitle(props['表示名']),
     age: null,
     skills: normalizeSkills(readMultiSelect(props['スキル'])),
@@ -438,14 +546,15 @@ export async function saveOwnEngineer(own: OwnEngineer): Promise<string> {
   const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
   const properties: Record<string, unknown> = {
     表示名: { title: toRichText(own.displayName) },
-    スキル: { multi_select: own.skills.map((s) => ({ name: s })) },
+    スキル: multiSelect(own.skills),
     経験年数: { number: own.experienceYears },
     必要案件単価: { number: own.requiredProjectRate },
     居住地: { rich_text: toRichText(own.residence) },
     リモート希望: { select: { name: remoteLabel(own.remoteWish) } },
     ステータス: { select: { name: own.status === 'assigned' ? 'アサイン済' : '稼働可' } },
   };
-  if (own.availableFrom) properties['稼働可能日'] = { date: { start: own.availableFrom } };
+  const availableFrom = dateOnly(own.availableFrom);
+  if (availableFrom) properties['稼働可能日'] = { date: { start: availableFrom } };
   return createPageWithBody(
     { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
     toParagraphBlocks(`稼働可能時期(原文): ${own.availableDate}`),
@@ -460,14 +569,8 @@ export async function fetchOwnEngineers(limit = 100): Promise<OwnEngineer[]> {
     return [];
   }
   const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      filter: { property: 'ステータス', select: { equals: '稼働可' } },
-      page_size: limit,
-    }),
-  );
-  return response.results.map((page) => ownEngineerFromPage(page));
+  const pages = await queryAll(dataSourceId, { filter: { property: 'ステータス', select: { equals: '稼働可' } } } as QueryArgs, limit);
+  return pages.map((page) => ownEngineerFromPage(page));
 }
 
 function ownEngineerFromPage(page: unknown): OwnEngineer {
@@ -530,14 +633,8 @@ export async function fetchRecentFeedback(limit = 200): Promise<MatchFeedback[]>
   if (dbProvider() === 'sheets') return sheetsDb.fetchRecentFeedbackSheets(limit);
   if (!FEEDBACK_DB_ID) return [];
   const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({
-      data_source_id: dataSourceId,
-      sorts: [{ property: '日時', direction: 'descending' }],
-      page_size: limit,
-    }),
-  );
-  return response.results.map((page) => {
+  const pages = await queryAll(dataSourceId, { sorts: [{ property: '日時', direction: 'descending' }] } as QueryArgs, limit);
+  return pages.map((page) => {
     const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
     const bandRaw = readSelect(props['バンド']);
     return {
@@ -578,10 +675,8 @@ export async function fetchSkillEquivalences(limit = 500): Promise<SkillEquivale
   if (dbProvider() === 'sheets') return sheetsDb.fetchSkillEquivalencesSheets(limit);
   if (!SKILL_EQUIV_DB_ID) return [];
   const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
-  const response = await throttle(() =>
-    notion.dataSources.query({ data_source_id: dataSourceId, page_size: limit }),
-  );
-  return response.results.map((page) => {
+  const pages = await queryAll(dataSourceId, { sorts: [{ property: '日時', direction: 'descending' }] } as QueryArgs, limit);
+  return pages.map((page) => {
     const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
     return {
       a: readTitle(props['スキルA']),

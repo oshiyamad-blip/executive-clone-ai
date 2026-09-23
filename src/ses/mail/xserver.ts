@@ -1,12 +1,11 @@
 // Xserver（IMAP/SMTP）プロバイダ。@自社を Xserver で運用している場合の既定。
 // 共有メーリス(sales@)を IMAP で収集し、全員に返信の下書きを下書きフォルダに APPEND、
 // サマリは SMTP で送信する。Google Workspace 不要。
-// 設定不足時は warn して縮退（他機能は継続）。実サーバ接続は本番でのみ疎通する。
+// 設定不足時の扱い（CIでは異常終了・手元ではスキップ）は呼び出し側（collect.ts / notify.ts）が決める。
 import { ImapFlow } from 'imapflow';
 import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { extractSheetLinks, isSupportedAttachment } from '../../collectors/email.js';
-import { loadProcessedMailIds } from '../store.js';
 import { buildReplyMime } from './mime.js';
 import { safeErr, SafeLogError } from '../redact.js';
 import {
@@ -29,27 +28,79 @@ function smtpConfigured(): boolean {
   return Boolean(xserverSmtpHost() && xserverSharedUser() && xserverSharedPass());
 }
 
-function imapClient(): ImapFlow {
+function imapClient(timeoutMs?: number): ImapFlow {
   return new ImapFlow({
     host: xserverImapHost(),
     port: xserverImapPort(),
     secure: true,
     auth: { user: xserverSharedUser(), pass: xserverSharedPass() },
     logger: false,
+    ...(timeoutMs ? { connectionTimeout: timeoutMs, greetingTimeout: timeoutMs, socketTimeout: timeoutMs * 3 } : {}),
   });
 }
 
-export async function collect(): Promise<SesRawMail[]> {
+function smtpTransport(timeoutMs?: number) {
+  const implicitTls = xserverSmtpPort() === 465;
+  return nodemailer.createTransport({
+    host: xserverSmtpHost(),
+    port: xserverSmtpPort(),
+    secure: implicitTls,
+    // 587等（STARTTLS）では暗号化を必須にする（STARTTLSを剥がされて共有メールボックスのパスワードを平文で送らないため）
+    requireTLS: !implicitTls,
+    tls: { minVersion: 'TLSv1.2' },
+    auth: { user: xserverSharedUser(), pass: xserverSharedPass() },
+    ...(timeoutMs ? { connectionTimeout: timeoutMs, greetingTimeout: timeoutMs, socketTimeout: timeoutMs } : {}),
+  });
+}
+
+// 診断（npm run doctor）用の疎通確認: IMAPへのログインと下書きフォルダの存在、SMTPの認証。
+// 問題があれば理由（固定文言＋エラー種別）を返し、問題なければ null
+export async function probeImap(timeoutMs = 10_000): Promise<string | null> {
+  if (!imapConfigured()) return 'IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了です';
+  const client = imapClient(timeoutMs);
+  try {
+    await client.connect();
+    const boxes = await client.list();
+    const drafts = xserverDraftsMailbox();
+    if (!boxes.some((b) => b.path === drafts)) {
+      const special = boxes.find((b) => b.specialUse === '\\Drafts')?.path;
+      return `下書きフォルダ「${drafts}」が見つかりません${special ? `（このサーバーの下書きフォルダは「${special}」です。XSERVER_DRAFTS_MAILBOX に設定してください）` : ''}`;
+    }
+    return null;
+  } catch (err) {
+    return `IMAPに接続・ログインできません（${safeErr(err)}。ポート${xserverImapPort()}への外向き通信とパスワードを確認）`;
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+export async function probeSmtp(timeoutMs = 10_000): Promise<string | null> {
+  if (!smtpConfigured()) return 'SMTP設定(XSERVER_SMTP_HOST/USER/PASS)が未完了です';
+  try {
+    await smtpTransport(timeoutMs).verify();
+    return null;
+  } catch (err) {
+    return `SMTPに接続・認証できません（${safeErr(err)}。ポート${xserverSmtpPort()}への外向き通信とパスワードを確認）`;
+  }
+}
+
+export function collectReady(): boolean {
+  return imapConfigured();
+}
+
+export async function collect(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]> {
   if (!imapConfigured()) {
-    console.warn(
-      'Xserver収集: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了のためスキップ' +
-        '（Google Workspace 運用の場合は MAIL_PROVIDER=gmail を設定してください）',
+    throw new SafeLogError(
+      'Xserver収集: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了です（Google Workspace 運用の場合は MAIL_PROVIDER=gmail）',
     );
-    return [];
   }
   const client = imapClient();
   const mails: SesRawMail[] = [];
-  // 接続・検索・処理済みID読込の失敗は呼び出し側へ伝える（収集失敗としてバッチを異常終了扱いにするため）
+  // 接続・認証・検索の失敗は呼び出し側へ伝える（収集失敗としてバッチを異常終了扱いにするため）
   try {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
@@ -61,8 +112,7 @@ export async function collect(): Promise<SesRawMail[]> {
         // 別メールとの誤同一視（誤スキップ）を防ぐ
         const uidValidity = String((client.mailbox as { uidValidity?: bigint }).uidValidity ?? '0');
         // 処理済みのUIDは本文ダウンロード前に除外する（毎回全件を再取得しない）
-        const processed = await loadProcessedMailIds();
-        const targets = uids.filter((uid) => !processed.has(mailId(uidValidity, uid)));
+        const targets = uids.filter((uid) => !isProcessed(mailId(uidValidity, uid)));
         if (targets.length < uids.length) {
           console.log(`Xserver収集: ${uids.length - targets.length}件は処理済みのため取得をスキップ`);
         }
@@ -159,16 +209,13 @@ export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promis
   return { ...finalized, url: `imap://${xserverSharedUser()}/${xserverDraftsMailbox()}` };
 }
 
+export function sendReady(): boolean {
+  return smtpConfigured();
+}
+
 export async function sendPlainMail(to: string, subject: string, body: string): Promise<void> {
   if (!smtpConfigured()) {
-    console.warn('Xserverサマリ送信: SMTP設定が未完了のためスキップ');
-    return;
+    throw new SafeLogError('Xserver送信: SMTP設定(XSERVER_SMTP_HOST/USER/PASS)が未完了です');
   }
-  const transporter = nodemailer.createTransport({
-    host: xserverSmtpHost(),
-    port: xserverSmtpPort(),
-    secure: xserverSmtpPort() === 465,
-    auth: { user: xserverSharedUser(), pass: xserverSharedPass() },
-  });
-  await transporter.sendMail({ from: xserverSharedUser(), to, subject, text: body });
+  await smtpTransport().sendMail({ from: xserverSharedUser(), to, subject, text: body });
 }

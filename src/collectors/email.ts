@@ -1,5 +1,5 @@
 import { google, gmail_v1 } from 'googleapis';
-import { getGoogleAuth } from './googleAuth.js';
+import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
 import type { RawLog, SesRawMail, SesAttachment } from '../types/index.js';
 
@@ -89,44 +89,54 @@ function decodeBase64Url(data: string): string {
 // 込みで取得する別関数を追加する（要件: 既存呼び出し側への影響ゼロ）。
 
 // SES専用: 指定クエリでメールを取得し、添付(Excel/PDF)をダウンロードして返す。
-export async function collectSesRawMail(query: string): Promise<SesRawMail[]> {
-  const auth = getGoogleAuth();
-  if (!auth) {
-    console.warn('SESメール収集: Google サービスアカウント設定が未完了');
-    return [];
-  }
-
+// 認証は呼び出し側が用意する（SES専用メールボックスとしてのDWD）。一覧取得の失敗は例外で返す
+// （「メールが0件」と区別し、収集失敗としてバッチを異常終了扱いにするため）。
+// isProcessed で処理済みのメッセージは本文・添付をダウンロードしない（毎回全件を取り直さない）
+export async function collectSesRawMail(
+  auth: GoogleJwt,
+  query: string,
+  isProcessed: (mailId: string) => boolean = () => false,
+): Promise<SesRawMail[]> {
   const gmail = google.gmail({ version: 'v1', auth });
   const mails: SesRawMail[] = [];
+  let skipped = 0;
+  let failed = 0;
 
-  try {
-    let pageToken: string | undefined;
-    do {
-      const list = await gmail.users.messages.list({
-        userId: 'me',
-        q: query,
-        maxResults: 100,
-        pageToken,
-      });
+  let pageToken: string | undefined;
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 100,
+      pageToken,
+    });
 
-      for (const ref of list.data.messages ?? []) {
-        if (!ref.id) continue;
-        try {
-          const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
-          mails.push(await buildSesRawMail(gmail, msg.data));
-        } catch (err) {
-          console.error(`SESメール収集: メッセージ取得に失敗 (${ref.id}): ${safeErr(err)}`);
-        }
+    for (const ref of list.data.messages ?? []) {
+      if (!ref.id) continue;
+      if (isProcessed(sesMailId(ref.id))) {
+        skipped += 1;
+        continue;
       }
+      try {
+        const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
+        mails.push(await buildSesRawMail(gmail, msg.data));
+      } catch (err) {
+        failed += 1;
+        console.error(`SESメール収集: メッセージ取得に失敗 (${ref.id}): ${safeErr(err)}`);
+      }
+    }
 
-      pageToken = list.data.nextPageToken ?? undefined;
-    } while (pageToken);
-  } catch (err) {
-    console.error(`SESメール収集: 収集中にエラー: ${safeErr(err)}`);
-  }
+    pageToken = list.data.nextPageToken ?? undefined;
+  } while (pageToken);
 
+  if (skipped > 0) console.log(`SESメール収集: ${skipped}件は処理済みのため取得をスキップ`);
+  if (failed > 0) console.warn(`SESメール収集: ${failed}件は取得に失敗しました（次回の実行で再取得します）`);
   console.log(`SESメール収集: ${mails.length}件を収集`);
   return mails;
+}
+
+function sesMailId(gmailMessageId: string): string {
+  return `sesmail_${gmailMessageId}`;
 }
 
 async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Message): Promise<SesRawMail> {
@@ -143,7 +153,7 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
   const attachments = await collectAttachments(gmail, msg.id ?? '', msg.payload);
 
   return {
-    id: `sesmail_${msg.id}`,
+    id: sesMailId(msg.id ?? ''),
     from,
     to,
     cc,

@@ -2,9 +2,13 @@
 // レビュー用ローカルJSON(reviewDataDir())を系のstore(Notion)とは別のレビュー作業領域として持つ。
 // バッチ(notify.ts)と自社社員探し(ownMatch.ts)がここへ成果を書き出し、UIが読んでステータスを更新する。
 // demo/本番のどちらでもこのローカル領域を使うため、UIはNotion接続なしでも動く。
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+// ※ スケジュール実行（GitHub Actions・DB_PROVIDER=sheets）ではこのローカル領域は実行ごとに消えるため、
+//   本番の正はスプレッドシートの「マッチ」タブ（ステータス・担当者メール・下書き状態・文面）。ここは手元のUI用の写し。
+// 書き込みは一時ファイル→rename で行い（途中で止まっても壊れたJSONを残さない）、読み込みに失敗した既存ファイルは
+// 退避してから書き直す（壊れたファイルを空とみなして人のステータスを黙って消さない）。
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, copyFileSync } from 'fs';
 import { join } from 'path';
-import { reviewDataDir, demoDataDir } from './config.js';
+import { reviewDataDir, demoDataDir, isDemo, matchLookbackDays } from './config.js';
 import { updateMatchStatus } from '../database/index.js';
 import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
 import { safeErr } from './redact.js';
@@ -24,20 +28,39 @@ function writeJson(name: string, data: unknown): void {
   try {
     const dir = join(process.cwd(), reviewDataDir());
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(reviewPath(name), JSON.stringify(data, null, 2), 'utf-8');
+    const tmp = `${reviewPath(name)}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
+    renameSync(tmp, reviewPath(name));
   } catch (err) {
     console.warn(`SESレビュー: 書き出しに失敗 (${name}): ${safeErr(err)}`);
   }
 }
 
-function readJson<T>(name: string, fallback: T): T {
+// 配列のJSONを読む。ファイルが無ければ []、壊れていれば null（呼び出し側で上書きの扱いを決める）
+function readArray<T>(name: string): T[] | null {
   try {
     const filePath = reviewPath(name);
-    if (!existsSync(filePath)) return fallback;
-    return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
+    if (!existsSync(filePath)) return [];
+    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf-8'));
+    return Array.isArray(parsed) ? (parsed as T[]) : null;
   } catch (err) {
     console.warn(`SESレビュー: 読み込みに失敗 (${name}): ${safeErr(err)}`);
-    return fallback;
+    return null;
+  }
+}
+
+function readJson<T>(name: string): T[] {
+  return readArray<T>(name) ?? [];
+}
+
+// 壊れた既存ファイルを退避する（書き直しで人のステータスの手掛かりまで消さないため）
+function backupCorrupt(name: string): void {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    copyFileSync(reviewPath(name), `${reviewPath(name)}.corrupt-${stamp}`);
+    console.warn(`SESレビュー: ${name}.json を読めなかったため退避してから書き直します`);
+  } catch {
+    /* 退避できなくても書き出しは続ける */
   }
 }
 
@@ -58,16 +81,18 @@ function readDemoDraftText(url: string | undefined): string | null {
 }
 
 // MatchResult[] を表示用 ReviewMatch[] に変換して書き出す（notify.ts が呼ぶ）。
-// 既存ファイルとIDまたはタイトルでマージし、人が付けたステータス・確定済み下書きを再実行で消さない。
-// 再生成されなかった過去分も、人が触ったもの（未確認以外）は履歴として残す。
+// 既存ファイルとマッチID（案件ID×要員IDから作る安定ID）でマージし、人が付けたステータス・確定済み下書きを再実行で消さない。
+// タイトル（案件名×イニシャル）は別ペアと重なり得るため突き合わせに使わない。
+// 再生成されなかった過去分は、人が触ったもの（未確認以外）は履歴として、未確認でも直近
+// SES_MATCH_LOOKBACK_DAYS 日以内に検出したものは確認待ちとして残す（次の実行で新着が無くても一覧から消さない）
 export function writeReviewMatches(matches: MatchResult[]): void {
-  const existing = readReviewMatches();
+  const read = readArray<ReviewMatch>('matches');
+  if (read === null) backupCorrupt('matches');
+  const existing = read ?? [];
   const prevById = new Map(existing.map((m) => [m.id, m]));
-  // マッチIDは収集経路と--match-only経路で体系が異なるため、タイトルでも既存分を引けるようにする
-  const prevByTitle = new Map(existing.map((m) => [m.title, m]));
 
   const fresh: ReviewMatch[] = matches.map((m) => {
-    const prev = prevById.get(m.id) ?? prevByTitle.get(m.title);
+    const prev = prevById.get(m.id);
     // UIで送信元を確定済みの下書きは温存。未確定なら今回の生成物（最新の本文）を採用
     const draftProject = isFinalizedDraft(prev?.draftProject) ? prev!.draftProject : m.draftToProject;
     const draftEngineer = isFinalizedDraft(prev?.draftEngineer) ? prev!.draftEngineer : m.draftToEngineer;
@@ -93,19 +118,23 @@ export function writeReviewMatches(matches: MatchResult[]): void {
       draftProject,
       draftEngineer,
       notionPageId: m.notionPageId ?? prev?.notionPageId,
+      detectedAt: prev?.detectedAt ?? m.detectedAt.toISOString(),
     };
   });
 
   const freshIds = new Set(fresh.map((f) => f.id));
-  const freshTitles = new Set(fresh.map((f) => f.title));
-  const carried = existing.filter(
-    (m) => !freshIds.has(m.id) && !freshTitles.has(m.title) && m.status !== 'unconfirmed',
-  );
+  const keepUnconfirmedSince = Date.now() - matchLookbackDays() * 24 * 60 * 60 * 1000;
+  const carried = existing.filter((m) => {
+    if (freshIds.has(m.id)) return false;
+    if (m.status !== 'unconfirmed') return true;
+    const detected = m.detectedAt ? new Date(m.detectedAt).getTime() : NaN;
+    return Number.isFinite(detected) && detected >= keepUnconfirmedSince;
+  });
   writeJson('matches', [...fresh, ...carried]);
 }
 
 export function readReviewMatches(): ReviewMatch[] {
-  return readJson<ReviewMatch[]>('matches', []);
+  return readJson<ReviewMatch>('matches');
 }
 
 export function writeReviewOwnMatches(matches: OwnMatch[]): void {
@@ -113,7 +142,7 @@ export function writeReviewOwnMatches(matches: OwnMatch[]): void {
 }
 
 export function readReviewOwnMatches(): OwnMatch[] {
-  return readJson<OwnMatch[]>('own-matches', []);
+  return readJson<OwnMatch>('own-matches');
 }
 
 // UIからのステータス更新。レビュー領域を更新し、notionPageIdがあればNotionへも反映(best-effort)。
@@ -130,7 +159,8 @@ export async function setMatchStatus(
   target.lastActionBy = reviewer || '(不明)';
   target.lastActionAt = new Date().toISOString();
   writeReviewMatches2(matches);
-  if (target.notionPageId) {
+  // demoのレビューデータは本番DBと無関係のため、DBへは反映しない
+  if (target.notionPageId && !isDemo()) {
     try {
       await updateMatchStatus(target.notionPageId, status);
     } catch (err) {
@@ -146,31 +176,48 @@ function writeReviewMatches2(matches: ReviewMatch[]): void {
 }
 
 // 確認UIから「送信元＝担当営業本人の会社アドレス」で全員に返信の下書きを作成する。
-// demo=Fromを入れてローカル保存、prod=本人のGmailにスレッド返信下書きを作成。
+// demo=Fromを入れてローカル保存、prod=本人のGmail／共有の下書きフォルダにスレッド返信下書きを作成。
+// 同じ側の下書きが作成済みなら作らない（二重の紹介メール防止）。作成の待ち時間中に他の操作・バッチが
+// 書いた内容を古い写しで上書きしないよう、作成後に読み直してこのマッチのこの側だけを書き換える
+export type DraftCreateResult = { ok: true; ref: DraftRef } | { ok: false; reason: 'not_found' | 'already_created' };
+
 export async function createReplyDraftForSender(
   matchId: string,
   side: 'project' | 'engineer',
   fromEmail: string,
-): Promise<DraftRef | null> {
-  const matches = readReviewMatches();
-  const target = matches.find((m) => m.id === matchId);
-  if (!target) return null;
-  const ref = side === 'project' ? target.draftProject : target.draftEngineer;
-  if (!ref) return null;
+): Promise<DraftCreateResult> {
+  const target = readReviewMatches().find((m) => m.id === matchId);
+  const ref = target && (side === 'project' ? target.draftProject : target.draftEngineer);
+  if (!target || !ref) return { ok: false, reason: 'not_found' };
+  if (isFinalizedDraft(ref) || inFlight.has(`${matchId}:${side}`)) return { ok: false, reason: 'already_created' };
 
-  const finalized = await materializeReplyDraft(ref, fromEmail);
-  if (side === 'project') {
-    target.draftProject = finalized;
-    target.draftToProjectUrl = finalized.url;
-    target.draftToProjectText = finalized.body ?? target.draftToProjectText;
-  } else {
-    target.draftEngineer = finalized;
-    target.draftToEngineerUrl = finalized.url;
-    target.draftToEngineerText = finalized.body ?? target.draftToEngineerText;
+  inFlight.add(`${matchId}:${side}`);
+  let finalized: DraftRef;
+  try {
+    finalized = await materializeReplyDraft(ref, fromEmail);
+  } finally {
+    inFlight.delete(`${matchId}:${side}`);
   }
-  writeReviewMatches2(matches);
-  return finalized;
+
+  const latest = readReviewMatches();
+  const current = latest.find((m) => m.id === matchId);
+  if (current) {
+    if (side === 'project') {
+      current.draftProject = finalized;
+      current.draftToProjectUrl = finalized.url;
+      current.draftToProjectText = finalized.body ?? current.draftToProjectText;
+    } else {
+      current.draftEngineer = finalized;
+      current.draftToEngineerUrl = finalized.url;
+      current.draftToEngineerText = finalized.body ?? current.draftToEngineerText;
+    }
+    writeReviewMatches2(latest);
+  }
+  return { ok: true, ref: finalized };
 }
+
+// 同じプロセス内で同じ側の下書きを同時に作らないための印（UIの連打・複数人の同時操作）
+const inFlight = new Set<string>();
 
 // レビュー領域に何か成果があるか（UI起動時の案内用）
 export function hasReviewData(): boolean {

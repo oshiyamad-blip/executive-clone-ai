@@ -5,8 +5,9 @@
 // 基本設計I/F（persistAndNotify(matches): Promise<void>）に対し、実装ではマッチ結果DBのrelation
 // （案件・要員）を張るため projects/engineers を追加引数にしている（draft.tsと同様の変更点）。
 import { saveMatch } from '../database/index.js';
-import { sendPlainMailViaMail } from './mail/index.js';
-import { isDemo, sesNotifyTo, logRedact, mailProvider } from './config.js';
+import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
+import { SUMMARY_SUBJECT } from './mail/ownMail.js';
+import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
@@ -73,8 +74,20 @@ function countLine(matches: MatchResult[], proper: ProperRunResult | null = null
 
 // Sheets運用では下書きは担当者メールの入力で次回バッチが作るため、URLの代わりに文面の在りかを示す
 function draftLine(label: string, ref: DraftRef): string {
-  if (ref.url || !draftRequestsEnabled()) return `  ${label}: ${ref.url}`;
-  return `  ${label}: 文面はスプレッドシート「マッチ」タブにあります（担当者メール入力で作成）`;
+  if (ref.url) return `  ${label}: ${ref.url}`;
+  if (draftRequestsEnabled()) return `  ${label}: 文面はスプレッドシート「マッチ」タブにあります（担当者メール入力で作成）`;
+  return `  ${label}: 未作成（確認UIで送信元のアドレスを入力すると作成されます）`;
+}
+
+// 利用者向けの日時は日本時間で表記する（UTCのランナーでも10:00/14:00の実行と一致させる）
+function jstNow(): string {
+  return new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+}
+
+// 件名に実行時刻（JST）を添え、1日2回のサマリを見分けられるようにする
+function summarySubject(): string {
+  const hm = new Date().toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
+  return `${SUMMARY_SUBJECT}（${hm}）`;
 }
 
 // 担当者メールによる下書き依頼の結果と使い方（Sheets運用の本番のみ）
@@ -105,7 +118,7 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
 
   const lines: string[] = [];
   lines.push('=== SESマッチング結果サマリ ===');
-  lines.push(`検出日時: ${new Date().toLocaleString('ja-JP')}`);
+  lines.push(`検出日時: ${jstNow()}`);
   lines.push(countLine(matches));
   lines.push('');
   lines.push(...draftRequestSection(requestedDrafts));
@@ -166,8 +179,15 @@ async function notifySummary(summary: string, consoleSummary: string, counts: st
     console.warn('SES通知: SES_NOTIFY_TO が未設定のためサマリメール送信をスキップ');
     return;
   }
+  if (!sendMailReady()) {
+    // 宛先があるのに送れない設定は、スケジュール実行では結果が誰にも届かないため異常終了扱いにする
+    const message = 'サマリメールの送信設定（XSERVER_SMTP_* または SES_TARGET_GMAIL と Google認証）が未完了です';
+    if (requireLive()) recordFatal(message);
+    else console.warn(`SES通知: ${message} — 送信をスキップします`);
+    return;
+  }
   try {
-    await sendPlainMailViaMail(to, 'SES案件・要員マッチング バッチ実行結果', summary);
+    await sendPlainMailViaMail(to, summarySubject(), summary);
   } catch (err) {
     console.error(`SES通知: サマリメール送信に失敗: ${safeErr(err)}`);
     recordFatal('サマリメールの送信に失敗しました');

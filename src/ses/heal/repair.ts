@@ -7,7 +7,8 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { generateJson } from '../../llm/index.js';
 import { totalLlmCostJpy } from '../../llm/pricing.js';
-import { sendPlainMailViaMail } from '../mail/index.js';
+import { sendPlainMailViaMail, sendMailReady } from '../mail/index.js';
+import { REPAIR_REPORT_SUBJECT } from '../mail/ownMail.js';
 import {
   isDemo,
   healDataDir,
@@ -87,6 +88,7 @@ function readSourceCapped(relPath: string, capChars = 12000): string {
   }
 }
 
+// quarantined は新しい順（listQuarantined）。直近10件だけを渡す（古い・解決済みの原因に引きずられないため）
 function buildRepairPrompt(quarantined: QuarantineEntry[], diagnosis: LastBatchDiagnosis | null): string {
   const qLines = quarantined
     .slice(0, 10)
@@ -101,8 +103,13 @@ function buildRepairPrompt(quarantined: QuarantineEntry[], diagnosis: LastBatchD
   return `【隔離されたメール（本文は共有していません）】\n${qLines || '（なし）'}\n\n【直近バッチの診断イベント】\n${eLines || '（なし）'}\n\n【関連ソースコード】\n${sources}`;
 }
 
+// 日付・時刻は利用者向けに日本時間で扱う（UTCのランナーでも10:00/14:00の実行と一致させる）
+function jstDate(d = new Date()): string {
+  return new Date(d.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 function reportPath(): string {
-  const d = new Date().toISOString().slice(0, 10);
+  const d = jstDate();
   return join(process.cwd(), healDataDir(), `repair-${d}.md`);
 }
 
@@ -124,7 +131,7 @@ async function ranToday(): Promise<boolean> {
       : existsSync(lastRepairPath())
         ? (JSON.parse(readFileSync(lastRepairPath(), 'utf-8')) as { at: string })
         : null;
-    return last?.at?.slice(0, 10) === new Date().toISOString().slice(0, 10);
+    return Boolean(last?.at) && jstDate(new Date(last!.at)) === jstDate();
   } catch {
     return false;
   }
@@ -156,7 +163,7 @@ function renderReport(proposal: RepairProposal, costJpy: number): string {
 > ⚠️ このパッチ案は自動生成されたものであり、**自動適用はされません**。
 > 必ず人がレビューし、\`npm run build\` と \`npm run ses:demo\` で確認のうえ適用してください。
 
-- 生成日時: ${new Date().toLocaleString('ja-JP')}
+- 生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}
 - 確信度: ${proposal.confidence}
 - 種別: ${proposal.isConfigIssue ? '設定の問題（コード修正不要の可能性）' : 'コードの問題の可能性'}
 - 生成コスト概算: 約${costJpy.toFixed(1)}円
@@ -237,7 +244,7 @@ export async function runRepair(auto = false): Promise<void> {
       REPAIR_SYSTEM,
       buildRepairPrompt(quarantined, diagnosis),
       REPAIR_SCHEMA,
-      { model: repairModel(), maxTokens: 8000 },
+      { model: repairModel(), maxTokens: 16000 },
     );
     const costJpy = totalLlmCostJpy() - before;
     if (costJpy > repairBudgetJpy()) {
@@ -251,9 +258,9 @@ export async function runRepair(auto = false): Promise<void> {
     console.log(`パッチ案レポートを生成しました → ${p}（コスト約${costJpy.toFixed(1)}円）`);
 
     const to = sesNotifyTo();
-    if (to) {
+    if (to && sendMailReady()) {
       try {
-        await sendPlainMailViaMail(to, 'SES自己修復: 修正パッチ案レポート', md);
+        await sendPlainMailViaMail(to, REPAIR_REPORT_SUBJECT, md);
       } catch (err) {
         console.warn(`SES修復: レポートメールの送信に失敗: ${safeErr(err)}`);
       }

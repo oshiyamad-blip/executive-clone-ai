@@ -12,11 +12,11 @@ import { google } from 'googleapis';
 // ⚠️ 個人 @gmail.com では不可（Workspace の Super Admin 承認が前提）。
 // ⚠️ 登録していないスコープを要求すると 403。
 //
-// スコープは呼び出し側で選ぶ2段構え:
-// - BASE_SCOPES: 既存コレクター用（readonly のみ）。SES用スコープを混ぜると、
-//   DWD側に旧スコープしか登録していない既存環境で全コレクターの認証が壊れるため分離している。
-// - SES_SCOPES: SESマッチング用（BASE + 下書き作成/サマリ送信/スプレッドシート読取）。
-//   使う場合は DWD 側にも追加スコープの登録が必要。
+// スコープは呼び出し側で選ぶ:
+// - BASE_SCOPES: 既存コレクター用（readonly のみ）。
+// - SES_GMAIL_*_SCOPES: SESマッチングのGmail運用（MAIL_PROVIDER=gmail）用。呼び出しごとに必要な1スコープだけを
+//   要求する（収集=gmail.readonly / 下書き作成=gmail.compose / サマリ送信=gmail.send）。DWDに登録するのもこの3つだけでよい。
+//   登録していないスコープを1つでも要求するとトークン取得自体が失敗するため、余分なスコープを混ぜない
 const BASE_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/calendar.readonly',
@@ -24,14 +24,11 @@ const BASE_SCOPES = [
   'https://www.googleapis.com/auth/meetings.space.readonly',
 ];
 
-export const SES_SCOPES = [
-  ...BASE_SCOPES,
-  'https://www.googleapis.com/auth/gmail.compose',
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/spreadsheets.readonly',
-];
+export const SES_GMAIL_COLLECT_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+export const SES_GMAIL_DRAFT_SCOPES = ['https://www.googleapis.com/auth/gmail.compose'];
+export const SES_GMAIL_SEND_SCOPES = ['https://www.googleapis.com/auth/gmail.send'];
 
-type GoogleJwt = InstanceType<typeof google.auth.JWT>;
+export type GoogleJwt = InstanceType<typeof google.auth.JWT>;
 
 export interface ServiceAccountCredentials {
   clientEmail: string;
@@ -66,8 +63,8 @@ export function loadServiceAccountCredentials(prefix = 'GOOGLE_SA_'): ServiceAcc
       console.warn(`Google認証: ${prefix}KEY_JSON を解釈できません（client_email / private_key を含むJSON鍵全体を設定してください）`);
     }
   }
-  const clientEmail = process.env[`${prefix}CLIENT_EMAIL`];
-  const privateKey = process.env[`${prefix}PRIVATE_KEY`]?.replace(/\\n/g, '\n');
+  const clientEmail = process.env[`${prefix}CLIENT_EMAIL`]?.trim();
+  const privateKey = process.env[`${prefix}PRIVATE_KEY`]?.trim().replace(/\\n/g, '\n');
   if (clientEmail && privateKey) return { clientEmail, privateKey };
   return null;
 }
@@ -87,7 +84,7 @@ export function getServiceAccountAuth(
 // 認証クライアントを返す。設定不足なら null（呼び出し側で縮退動作）。
 // 型は googleapis 同梱の JWT に合わせるため google.auth.JWT を使う。
 export function getGoogleAuth(scopes: string[] = BASE_SCOPES): GoogleJwt | null {
-  return getGoogleAuthAs(process.env.GOOGLE_TARGET_EMAIL, scopes);
+  return getGoogleAuthAs(process.env.GOOGLE_TARGET_EMAIL?.trim(), scopes);
 }
 
 // 指定ユーザーを impersonate した認証クライアントを返す（SES: 担当営業本人のGmailに

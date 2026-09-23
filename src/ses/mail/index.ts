@@ -7,13 +7,18 @@ import * as xserver from './xserver.js';
 import type { SesRawMail, DraftRef } from '../../types/index.js';
 
 export interface MailTransport {
-  // 共有メールボックス（メーリス）から未整理のメールを収集する
-  collect(): Promise<SesRawMail[]>;
+  // 収集に必要な設定が揃っているか
+  collectReady(): boolean;
+  // 共有メールボックス（メーリス）から収集期間内のメールを取得する。isProcessed が真のメールは本文を取得しない。
+  // 接続・認証・検索の失敗は例外（「0件」と区別するため）
+  collect(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]>;
   // 下書き作成に必要な設定が揃っているか（揃っていなければ依頼を消化せず次回に回す）
   draftReady(): boolean;
   // 全員に返信の下書きを、担当営業本人の会社アドレス(fromEmail)で作成する。作成できなければ例外
   createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef>;
-  // サマリ等のプレーンメールを送信する
+  // サマリ送信に必要な設定が揃っているか
+  sendReady(): boolean;
+  // サマリ等のプレーンメールを送信する。送れなければ例外
   sendPlainMail(to: string, subject: string, body: string): Promise<void>;
 }
 
@@ -21,8 +26,12 @@ function transport(): MailTransport {
   return mailProvider() === 'gmail' ? gmail : xserver;
 }
 
-export function collectMail(): Promise<SesRawMail[]> {
-  return transport().collect();
+export function collectMailReady(): boolean {
+  return transport().collectReady();
+}
+
+export function collectMail(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]> {
+  return transport().collect(isProcessed);
 }
 
 export function replyDraftReady(): boolean {
@@ -31,6 +40,10 @@ export function replyDraftReady(): boolean {
 
 export function createReplyDraftViaMail(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   return transport().createReplyDraft(ref, fromEmail);
+}
+
+export function sendMailReady(): boolean {
+  return transport().sendReady();
 }
 
 export function sendPlainMailViaMail(to: string, subject: string, body: string): Promise<void> {

@@ -64,8 +64,10 @@ npm run ses:web:demo        # 確認UI（http://127.0.0.1:8788）
 `ses:demo` で「成立候補／交渉提案／参考提案／要確認」が表示され、
 `data/ses-demo/` に下書きテキストが生成されれば正常です。
 
-> demo は `DEMO_MODE=true`（または `ANTHROPIC_API_KEY` 未設定）で有効になり、
-> メール・Notion・LLMいずれも呼びません。本番設定を汚しません。
+> demo は `DEMO_MODE=true`（または手元で `ANTHROPIC_API_KEY` 未設定）で有効になり、
+> メール・Notion・LLMいずれも呼びません。本番設定を汚しません（成果は `data/ses-demo/`、確認UI用は `data/ses-demo/review/`）。
+> ただし **CI（GitHub Actions）上や `SES_REQUIRE_LIVE=true` では、鍵が無いとdemoに切り替えずエラー終了**します
+> （Secretsの渡し忘れで fixture の結果を「成功」として出さないため）。
 
 ---
 
@@ -83,12 +85,14 @@ Notion を使う場合: 内部インテグレーションを作成し、対象�
 | 案件名 | タイトル |
 | 必須スキル / 尚可スキル | マルチセレクト |
 | 単金下限 / 単金上限 | 数値 |
-| 勤務地 / 開始時期 / 商流メモ / 営業元会社 / 営業元担当 / 営業元メール / 元メールID / **返信メタ** | テキスト |
+| **案件ID** / 勤務地 / 開始時期 / 商流メモ / 営業元会社 / 営業元担当 / 営業元メール / 元メールID / **返信メタ** | テキスト |
 | リモート / ステータス | セレクト |
 | 受信日 / **開始日** | 日付 |
 
 > **返信メタ**は「全員に返信」のスレッド情報（元メールの宛先・Message-ID）を保持する内部用プロパティです。
 > これが無いと `--match-only` 実行時の下書きがスレッド返信になりません。**開始日**は時期マッチ判定に使います。
+> **案件ID / 要員ID / マッチID** は再実行で重複ページを作らないための安定IDです（案件ID×要員IDでマッチIDが決まる）。
+> 無ければバッチが初回に自動で追加します（インテグレーションにDBの編集権限が必要）。
 
 ### 4-2. 要員DB（`NOTION_ENGINEER_DB_ID`）
 | プロパティ | 型 |
@@ -96,7 +100,7 @@ Notion を使う場合: 内部インテグレーションを作成し、対象�
 | 表示名 | タイトル |
 | スキル | マルチセレクト |
 | 経験年数 / 希望単金 | 数値 |
-| 居住地 / 営業元 / 元メールID / **返信メタ** | テキスト |
+| **要員ID** / 居住地 / 営業元 / 元メールID / **返信メタ** | テキスト |
 | リモート希望 / ステータス | セレクト |
 | 受信日 / 稼働開始可能日 | 日付 |
 
@@ -105,7 +109,7 @@ Notion を使う場合: 内部インテグレーションを作成し、対象�
 | --- | --- |
 | マッチ名 | タイトル |
 | 粗利額 / 適合スコア | 数値 |
-| 判定根拠 / 案件側下書きURL / 要員側下書きURL | テキスト |
+| **マッチID** / 判定根拠 / 案件側下書きURL / 要員側下書きURL | テキスト |
 | ステータス | セレクト |
 | 検出日時 | 日付 |
 | 案件 / 要員 | リレーション（案件DB / 要員DB へ） |
@@ -244,10 +248,19 @@ XSERVER_SMTP_PORT=465
 XSERVER_SHARED_USER=sales@yourcompany.co.jp
 XSERVER_SHARED_PASS=********
 XSERVER_DRAFTS_MAILBOX=Drafts      # サーバにより INBOX.Drafts / 下書き 等
-SES_COLLECT_DAYS=1                 # 収集の遡り日数（旧名 XSERVER_COLLECT_DAYS も可。月曜に週末分を拾うなら4等）
+SES_COLLECT_DAYS=7                 # 収集の遡り日数（既定7日。旧名 XSERVER_COLLECT_DAYS も可）
+SES_OWN_DOMAINS=yourcompany.co.jp  # 自社ドメイン（ここからのメールは案件・要員として取り込まない）
 ```
 
-- 収集: `INBOX` を直近 `SES_COLLECT_DAYS` 日で検索（処理済みメールIDで重複除外）。
+- 収集: `INBOX` を直近 `SES_COLLECT_DAYS` 日で検索し、処理済みメールIDで重複除外（処理済みは本文を取得しない）。
+  週末明けの実行や、抽出に失敗したメールの次回以降の再試行が窓から外れないよう広めに取ります。
+  1回に抽出するのは新しい順に `SES_MAX_MAILS_PER_RUN`（既定150）件まで（残りは次回）。
+- 自己ループ防止: 本バッチ自身の送信元（`XSERVER_SHARED_USER`）・サマリ/修復レポートの件名・`SES_OWN_DOMAINS` からのメールは
+  収集しません（営業が共有メーリスをCcに入れた紹介メールやサマリを、案件・要員として取り込み直さないため。件数だけログに出ます）。
+  社内の営業が共有メーリスに案件を流す運用なら `SES_COLLECT_OWN_DOMAIN=true`。
+- 接続・ログインに失敗した場合は「0件」ではなく**収集失敗としてバッチを異常終了**（終了コード1）にします。
+- SMTP を 587（STARTTLS）にする場合も暗号化を必須にしています（STARTTLSを使えないサーバーには送信しません）。
+- `npm run doctor` が IMAP ログイン・下書きフォルダの存在・SMTP 認証を実際に確認します（フォルダ名が違えば正しい名前を案内）。
 - 下書き: 「全員に返信」MIMEを組み立て、共有の**下書きフォルダに APPEND**。営業は共有下書きを開いて送信。
 - `XSERVER_DRAFTS_MAILBOX` はサーバの下書きフォルダ名に合わせてください（不明ならメールソフトで確認）。
 
@@ -256,16 +269,18 @@ SES_COLLECT_DAYS=1                 # 収集の遡り日数（旧名 XSERVER_COLL
 
 ```
 MAIL_PROVIDER=gmail
-SES_TARGET_GMAIL=sales@yourcompany.co.jp   # 共有メーリス
-# ドメイン全体委任(DWD)用のサービスアカウント認証（既存 GOOGLE_SA_* を使用）
-GOOGLE_SA_CLIENT_EMAIL=...
-GOOGLE_SA_PRIVATE_KEY=...
+SES_TARGET_GMAIL=ses-inbox@yourcompany.co.jp   # SES専用メールボックス（グループではなく実ユーザー）
+# ドメイン全体委任(DWD)用のサービスアカウント認証
+GOOGLE_SA_KEY_JSON={...}                         # または GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY
 ```
 
-- DWDで共有メーリスを収集し、**担当営業本人を impersonate** して本人のGmailにスレッド返信下書きを作成します。
-- Workspace管理コンソールのDWD登録に、既存のreadonly系スコープに加えて
-  `gmail.compose`・`gmail.send`・`spreadsheets.readonly` の追加が必要です
-  （SES機能側だけがこの追加スコープを要求するため、**既存コレクターは旧スコープ登録のままでも動き続けます**）。
+- **SES専用メールボックス（`SES_TARGET_GMAIL`）としてDWDで収集・サマリ送信**します（経営者の `GOOGLE_TARGET_EMAIL` にはなりすましません）。
+  共有メーリス（グループ）を受け取るSES専用ユーザーを用意し、そのアドレスを設定してください。宛先(to:)で絞らないため、BCC・転送で届いたメールも拾います。
+- 下書きは**担当営業本人を impersonate** して本人のGmailにスレッド返信として作成します。
+- Workspace管理コンソールのDWD登録に必要なスコープは `gmail.readonly`・`gmail.compose`・`gmail.send` の3つだけです
+  （呼び出しごとに必要な1つだけを要求します）。
+- メール本文のスプレッドシートリンクは**サービスアカウント自身**で読みます（なりすましなし）。
+  送り主がサービスアカウントに共有したシート・一般公開のシートだけが読め、読めないリンクは件数だけ記録して無視します。
 
 ---
 
@@ -334,7 +349,12 @@ cron 例（毎日 9:00 と 18:00）:
 ```
 
 - 処理済みメールIDを記録して**二重処理を防止**します（`DB_PROVIDER=sheets` の本番はシートの「処理済みメール」タブ、それ以外は `data/` 配下）。
-- `data/` は再作成される作業領域です。サーバ移設時は Notion が正となります。
+  結果列は `抽出済`（保存まで成功）/ `隔離`（再試行の打ち切り）/ `除外`（自分たちのメール）。保存に失敗した案件・要員の元メールは記録せず、次回再処理します。
+- 通常バッチは、今回の新着を **直近 `SES_MATCH_LOOKBACK_DAYS`（既定14日）に保存済みの募集中案件・提案可要員とも突合**します
+  （別々の実行回に届いた案件と要員の組を見逃さないため）。LLM判定は「新着を含み、まだマッチタブ/DBに無いペア」だけ
+  （新着1件あたり最大 `MAX_CANDIDATES_PER_ITEM` 件）なので、同じペアを毎回判定・通知し直すことはありません。
+- `data/` は再作成される作業領域です。サーバ移設時は Notion／スプレッドシートが正となります。
+- 異常（収集失敗・抽出の過半数失敗・保存やサマリ送信の失敗・LLM鍵の未設定など）があると**終了コード1**で終わります（スケジューラの失敗通知に使えます）。
 
 ### 8-2. 自動検証・自己修復（うまく動かない時の自動リカバリ）
 
@@ -342,8 +362,12 @@ cron 例（毎日 9:00 と 18:00）:
 
 **Phase A: 実行時の自動修復（`SES_HEAL_ENABLED=true` 既定）**
 - 抽出に失敗したメールは、**2秒後に再試行 → それでも失敗なら上位モデル（Sonnet）へ昇格**して再抽出
+  （出力上限で途中打ち切りになった場合は、同じ依頼を繰り返さず**出力上限を2倍にして**再試行。各試行は事前にコストを見積もり、残り予算を超えるなら行いません）
+- 添付PDFは送る前にサイズ・パスワード保護・ページ数を確認し、APIが受け付けない場合は**本文と表計算の添付だけで抽出**します（本文の案件・要員を失わない）
+- 認証・レート制限・障害などの基盤起因の失敗が5件続いたら、残りのメールの抽出を打ち切って次回に回します（異常終了扱い）
 - 修復に使うLLMコストは**実測トークンから円換算**され、`SES_HEAL_BUDGET_JPY`（既定50円/バッチ）で頭打ち。超えた分は次回バッチへ繰越
-- 同じメールが累計 `SES_HEAL_MAX_ATTEMPTS`（既定3回）失敗したら**隔離**（`DB_PROVIDER=sheets` はシートの「_状態」タブ、それ以外は `data/ses-heal/quarantine.json`）し、無限再試行を打ち切り
+- 同じメールが累計 `SES_HEAL_MAX_ATTEMPTS`（既定3回）失敗したら**隔離**（`DB_PROVIDER=sheets` はシートの「_状態」タブ、それ以外は `data/ses-heal/quarantine.json`）し、無限再試行を打ち切り。
+  回数に達していなくても、**次回の実行時には収集期間を外れるメールはその時点で隔離**してサマリに載せます（黙って消えないように）
 - バッチ内の**過半数が失敗**した場合は基盤障害（APIキー・Anthropic障害等）とみなし、誤隔離を防ぐためカウントを保留
 - サマリメール末尾に**診断レポート**（コスト概算・救済件数・異常検知・隔離状況）が付きます
 
@@ -359,8 +383,9 @@ npm run ses:repair    # 手動実行（いつでも可）
 > PII対策として**メール本文はAPIへ送らず**、件名・エラー文中のメールアドレス・電話番号はマスクされます。
 
 **隔離メールの復帰手順**（原因を直した後）:
-1. `data/ses-heal/quarantine.json` から該当エントリを削除
-2. `data/ses-processed-ids.json` から該当メールIDを削除 → 次回バッチで再処理されます
+1. 隔離リスト（Sheets運用は「_状態」タブの quarantine、それ以外は `data/ses-heal/quarantine.json`）から該当エントリを削除
+2. 処理済みの記録（Sheets運用は「処理済みメール」タブの該当行、それ以外は `data/ses-processed-ids.json`）から該当メールIDを削除
+   → 次回バッチで再処理されます（収集期間 `SES_COLLECT_DAYS` 内のメールに限る。古い場合は一時的に日数を広げる）
 
 **動作確認**: `npm run ses:heal:check`（外部呼び出しゼロのオフライン自己検証）
 
@@ -372,7 +397,8 @@ npm run ses:repair    # 手動実行（いつでも可）
 npm run ses:web        # http://<host>:8788
 ```
 
-複数人でLAN共有する場合は、**必ずトークンを設定**してください。
+複数人でLAN共有する場合は、**必ずトークンを設定**してください（トークン無しで `127.0.0.1` 以外に公開しようとすると起動を中止します。
+トークン無しの運用では `localhost`/`127.0.0.1` 以外のホスト名での要求と、他サイトからの送信を拒否します）。
 
 ```
 SES_WEB_HOST=0.0.0.0
@@ -407,8 +433,8 @@ UIでできること:
 
 | 症状 | 対処 |
 | --- | --- |
-| demoは動くが本番で何も起きない | `ANTHROPIC_API_KEY` 未設定だと自動でdemo化。設定を確認 |
-| メール収集が0件 | `XSERVER_*`（特にHOST/USER/PASS）とネットワーク、`XSERVER_COLLECT_DAYS` を確認 |
+| demoは動くが本番で何も起きない | 手元では `ANTHROPIC_API_KEY` 未設定だと自動でdemo化（CIではエラー終了）。`npm run doctor` の「実行モード」を確認 |
+| メール収集が0件 | `npm run doctor` で IMAP/Gmail の疎通を確認。`SES_COLLECT_DAYS`、自社ドメイン除外（`SES_OWN_DOMAINS`）の件数ログも確認 |
 | 下書きが作られない | `XSERVER_DRAFTS_MAILBOX` がサーバの実フォルダ名と一致しているか確認 |
 | 下書き状態が `エラー: …` | 担当者メールの形式（アドレス1件のみ）・`SES_ALLOWED_SENDER_DOMAINS`・IMAP/DWD設定を確認。直せば次回バッチで再試行 |
 | Notionに保存されない | DB IDと**プロパティ名の完全一致**、インテグレーションのDB共有を確認 |
@@ -416,7 +442,7 @@ UIでできること:
 | 自社社員突合が空 | `NOTION_OWN_ENGINEER_DB_ID` 設定と、ステータス`稼働可`の社員有無を確認 |
 | プロパー候補が0件 | 管理表の稼働状況が `稼働可` か、スキル列が埋まっているか（「抽出メモ」を確認）、直近の案件があるか |
 | プロパーのフォルダ・管理表を読めない | フォルダ（閲覧者）と管理表（編集者）をサービスアカウントのメールに共有したか。共有ドライブの場合はメンバー追加でも可 |
-| GWSへ移行した | `MAIL_PROVIDER=gmail` に変更し `SES_TARGET_GMAIL`＋`GOOGLE_SA_*` を設定（他は不要） |
+| GWSへ移行した | `MAIL_PROVIDER=gmail` に変更し `SES_TARGET_GMAIL`（SES専用メールボックス）＋`GOOGLE_SA_*` を設定（他は不要） |
 
 ---
 
@@ -424,14 +450,15 @@ UIでできること:
 
 すべて `.env.example` にコメント付きで記載しています。代表的なもの:
 
-- 実行/モデル: `ANTHROPIC_API_KEY` `DEMO_MODE` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `USE_BATCH_API`
-- メール（共通/切替）: `MAIL_PROVIDER` `SES_NOTIFY_TO`
-- メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX` `SES_COLLECT_DAYS`
+- 実行/モデル: `ANTHROPIC_API_KEY` `DEMO_MODE` `SES_REQUIRE_LIVE` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `USE_BATCH_API`
+- メール（共通/切替）: `MAIL_PROVIDER` `SES_NOTIFY_TO` `SES_COLLECT_DAYS` `SES_MAX_MAILS_PER_RUN` `SES_OWN_DOMAINS` `SES_COLLECT_OWN_DOMAIN`
+- 突合の範囲: `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT`
+- メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX`
 - メール（Gmail）: `SES_TARGET_GMAIL` `GOOGLE_SA_*`
 - スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
 - プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
-- 事業ルール: `MIN_GROSS_MARGIN_JPY` `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
+- 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
 - 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_REVIEW_DATA_DIR`

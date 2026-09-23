@@ -331,6 +331,7 @@ export interface ReviewMatch {
   notionPageId?: string; // あればステータス更新をNotionへ反映
   lastActionBy?: string; // 直近にステータスを変更した人（複数人運用の記録）
   lastActionAt?: string; // その日時 ISO
+  detectedAt?: string; // 初回検出日時 ISO（未確認のまま一覧に残す期間の判定用）
 }
 
 // 自社社員と案件のマッチ（金額条件は「案件単価 ≥ 必要案件単価」）

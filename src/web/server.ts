@@ -10,44 +10,35 @@ import {
   type CloneMode,
 } from '../clone/engine.js';
 import type { LlmMessage } from '../llm/index.js';
+import {
+  HttpError,
+  readJsonObject,
+  rejectReason,
+  runHandler,
+  securityHeaders,
+  sendJson,
+  unsafeBind,
+} from './httpSecurity.js';
 
 // ② Web チャットUI（要件3.4 意思決定シミュレーション対話 / 4.1 アクセス制御）
 // 経営企画・役員がブラウザで壁打ちできる軽量ローカルサーバー。
 // アクセス制御: WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証を要求する。
 // 既定では 127.0.0.1（ローカルのみ）にバインドする。
 
-const HOST = process.env.WEB_HOST ?? '127.0.0.1';
-const PORT = Number(process.env.WEB_PORT ?? '8787');
-const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
-
-interface ChatRequest {
-  message: string;
-  history: Array<{ role: 'user' | 'assistant'; content: string }>;
-  mode?: CloneMode;
-}
+// 空文字の設定は未設定扱い（空のホストは全インターフェースで待ち受けてしまうため）
+const HOST = process.env.WEB_HOST?.trim() || '127.0.0.1';
+const PORT = Number(process.env.WEB_PORT?.trim() || '8787') || 8787;
+const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN?.trim() ?? '';
 
 // JSONボディの mode は型保証がないため、既知のモードのみ受け付けて chat に縮退する
 function normalizeMode(mode: unknown): CloneMode {
   return CLONE_MODES.includes(mode as CloneMode) ? (mode as CloneMode) : 'chat';
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 1_000_000) req.destroy(); // 1MB 上限
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
+const json = sendJson;
 
-function json(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(payload);
-}
+// 会話履歴は直近 MAX_HISTORY 件しか使わないため、本文の上限は長文の貼り付け（履歴書等）数回分に抑える
+const MAX_BODY_BYTES = 2_000_000;
 
 // 定数時間比較（トークンのタイミング攻撃対策）。長さ差を隠すため両者をハッシュ化して比較。
 function safeEqual(a: string, b: string): boolean {
@@ -87,21 +78,32 @@ async function getContext(): Promise<CloneContext> {
   return cachedCtx;
 }
 
+// 本文の形は保証されないため、型を確かめてから使う（不正な形でプロセスを落とさない）
+function parseHistory(raw: unknown): LlmMessage[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new HttpError(400, 'history は配列で指定してください');
+  return raw
+    .filter(
+      (m): m is LlmMessage =>
+        Boolean(m) &&
+        typeof m === 'object' &&
+        ((m as LlmMessage).role === 'user' || (m as LlmMessage).role === 'assistant') &&
+        typeof (m as LlmMessage).content === 'string' &&
+        (m as LlmMessage).content !== '',
+    )
+    .slice(-MAX_HISTORY)
+    .map((m) => ({ role: m.role, content: m.content }));
+}
+
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
 
-  let body: ChatRequest;
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    return json(res, 400, { error: 'invalid json' });
-  }
-  const message = (body.message ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  if (typeof body.message !== 'string') return json(res, 400, { error: 'message is required' });
+  const message = body.message.trim();
   if (!message) return json(res, 400, { error: 'message is required' });
 
-  const history: LlmMessage[] = (body.history ?? [])
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
-    .map((m) => ({ role: m.role, content: m.content }));
+  const history = parseHistory(body.history);
   history.push({ role: 'user', content: message });
 
   // 直近 MAX_HISTORY 件に制限し、先頭が user になるよう調整（Messages APIの制約）
@@ -125,6 +127,11 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
 }
 
 async function main(): Promise<void> {
+  if (unsafeBind(HOST, ACCESS_TOKEN)) {
+    console.error(`❌ WEB_HOST=${HOST} で公開するには WEB_ACCESS_TOKEN の設定が必要です（ローカルのみなら 127.0.0.1）。起動を中止します`);
+    process.exitCode = 1;
+    return;
+  }
   console.log('経営者クローンAI — Web対話サーバーを起動中...');
   const ctx = await getContext();
   console.log(`✅ コンテキスト読込（シグナル${ctx.signals.length}件 / ストーリー${ctx.stories.length}件）`);
@@ -135,13 +142,15 @@ async function main(): Promise<void> {
   const page = renderPage(ctx.profile.name);
 
   const server = createServer((req, res) => {
+    const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
+    if (blocked) return json(res, blocked.status, { error: blocked.message });
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() });
       res.end(page);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/chat') {
-      void handleChat(req, res);
+      runHandler(res, () => handleChat(req, res));
       return;
     }
     json(res, 404, { error: 'not found' });
@@ -267,7 +276,8 @@ function renderPage(name: string): string {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value },
-        body: JSON.stringify({ message: msg, history: histories[m], mode: m })
+        // サーバーは直近40件しか使わないため、送るのも直近分だけにする（長い会話で本文の上限に達しないように）
+        body: JSON.stringify({ message: msg, history: histories[m].slice(-40), mode: m })
       });
       const data = await res.json();
       if (!res.ok) { add(m, 'bot', '[エラー] ' + (data.error || res.status)); return; }

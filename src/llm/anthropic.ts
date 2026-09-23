@@ -1,30 +1,23 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { LlmMessage } from './index.js';
+import type { LlmMessage, GenOptions } from './index.js';
+import { recordLlmUsage, getLlmUsageLog, type LlmUsage } from './usage.js';
+import { LlmOutputError } from './errors.js';
+
+export { getLlmUsageLog, type LlmUsage };
 
 // Anthropic（Claude）バックエンド。従来どおり adaptive thinking + 構造化出力を使う。
 // クライアントは遅延生成（Gemini運用時にAnthropicキーが無くても import で落ちないように）。
+// SDKの自動再試行は1回に抑える（SESの自動修復が自前で再試行するため、既定の2回と掛け算にならないように）。
+// タイムアウトを明示すると、SDKが大きな max_tokens の非ストリーミング呼び出しを事前に拒否する判定も外れる
+// （出力上限を増やしての再試行で使う）
 let _client: Anthropic | null = null;
 function client(): Anthropic {
-  return (_client ??= new Anthropic());
+  return (_client ??= new Anthropic({ maxRetries: 1, timeout: 10 * 60 * 1000 }));
 }
-const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
-
-// --- 使用量の記録（コスト概算・自動修復の予算制御用） ---
-// 呼び出しごとの usage をプロセス内に蓄積する。llm/pricing.ts が円換算に使う。
-export interface LlmUsage {
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-}
-
-const usageLog: LlmUsage[] = [];
-
-export function getLlmUsageLog(): readonly LlmUsage[] {
-  return usageLog;
-}
+const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-opus-4-8';
 
 function recordUsage(model: string, usage: { input_tokens: number; output_tokens: number }): void {
-  usageLog.push({ model, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens });
+  recordLlmUsage(model, usage.input_tokens, usage.output_tokens);
 }
 
 // adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）でのみ有効で、
@@ -38,28 +31,54 @@ function thinkingParam(model: string): { type: 'adaptive' } | undefined {
   return supportsAdaptiveThinking(model) ? { type: 'adaptive' } : undefined;
 }
 
+// 呼び出し単位のSDKオプション（再試行回数・タイムアウト）
+function requestOptions(opts: GenOptions): { maxRetries?: number; timeout?: number } {
+  const o: { maxRetries?: number; timeout?: number } = {};
+  if (opts.maxRetries !== undefined) o.maxRetries = opts.maxRetries;
+  if (opts.timeoutMs !== undefined) o.timeout = opts.timeoutMs;
+  return o;
+}
+
+// 構造化出力の本文を取り出す。途中打ち切り・拒否は壊れた/空のJSONを黙って受け取らず型付きエラーにする
+function jsonText(response: Anthropic.Messages.Message, model: string): string {
+  if (response.stop_reason === 'max_tokens') throw new LlmOutputError('max_tokens', model);
+  if (response.stop_reason === 'refusal') throw new LlmOutputError('refusal', model);
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text' || !textBlock.text.trim()) throw new LlmOutputError('empty', model);
+  return textBlock.text;
+}
+
 export async function anthropicText(
   system: string,
   messages: LlmMessage[],
   maxTokens: number,
-  model?: string,
+  opts: GenOptions = {},
 ): Promise<string> {
-  const resolvedModel = model ?? MODEL;
-  const response = await client().messages.create({
-    model: resolvedModel,
-    max_tokens: maxTokens,
-    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
-    system,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-  });
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await client().messages.create(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    },
+    requestOptions(opts),
+  );
   recordUsage(resolvedModel, response.usage);
   const textBlock = response.content.find((b) => b.type === 'text');
-  let answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  const answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  // バッチ用途（strict）では、途中で切れた文面や拒否・空応答を正常な回答として返さない
+  if (opts.strict) {
+    if (response.stop_reason === 'max_tokens') throw new LlmOutputError('max_tokens', resolvedModel);
+    if (response.stop_reason === 'refusal') throw new LlmOutputError('refusal', resolvedModel);
+    if (!answer.trim()) throw new LlmOutputError('empty', resolvedModel);
+    return answer;
+  }
   if (!answer.trim()) {
-    answer =
-      response.stop_reason === 'max_tokens'
-        ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
-        : '（うまく回答を生成できませんでした。もう一度お試しください。）';
+    return response.stop_reason === 'max_tokens'
+      ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
+      : '（うまく回答を生成できませんでした。もう一度お試しください。）';
   }
   return answer;
 }
@@ -69,21 +88,27 @@ export async function anthropicJson(
   user: string,
   schema: object,
   maxTokens: number,
-  model?: string,
+  opts: GenOptions = {},
 ): Promise<unknown> {
-  const resolvedModel = model ?? MODEL;
-  const response = await client().messages.create({
-    model: resolvedModel,
-    max_tokens: maxTokens,
-    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
-    system,
-    output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
-    messages: [{ role: 'user', content: user }],
-  });
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await client().messages.create(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system,
+      output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+      messages: [{ role: 'user', content: user }],
+    },
+    requestOptions(opts),
+  );
   recordUsage(resolvedModel, response.usage);
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
-  return JSON.parse(textBlock.text);
+  return JSON.parse(jsonText(response, resolvedModel));
+}
+
+export interface PdfDocument {
+  mediaType: 'application/pdf';
+  dataBase64: string;
 }
 
 // PDF読解用（documentブロック）。SES案件のスキルシートPDFなどをClaudeに直接読ませる用途。
@@ -92,9 +117,9 @@ export async function anthropicJsonWithDocuments(
   system: string,
   user: string,
   schema: object,
-  documents: Array<{ mediaType: 'application/pdf'; dataBase64: string }>,
+  documents: PdfDocument[],
   maxTokens: number,
-  model?: string,
+  opts: GenOptions = {},
 ): Promise<unknown> {
   const content: Array<Anthropic.Messages.DocumentBlockParam | Anthropic.Messages.TextBlockParam> = [
     ...documents.map((d) => ({
@@ -103,17 +128,18 @@ export async function anthropicJsonWithDocuments(
     })),
     { type: 'text' as const, text: user },
   ];
-  const resolvedModel = model ?? MODEL;
-  const response = await client().messages.create({
-    model: resolvedModel,
-    max_tokens: maxTokens,
-    ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
-    system,
-    output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
-    messages: [{ role: 'user', content }],
-  });
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await client().messages.create(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system,
+      output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+      messages: [{ role: 'user', content }],
+    },
+    requestOptions(opts),
+  );
   recordUsage(resolvedModel, response.usage);
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
-  return JSON.parse(textBlock.text);
+  return JSON.parse(jsonText(response, resolvedModel));
 }
