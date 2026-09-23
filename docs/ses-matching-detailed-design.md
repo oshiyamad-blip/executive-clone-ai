@@ -189,9 +189,11 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
 
 **最終判定**: `pair.needsReview` の場合は `buildHeuristicResult`（LLM不使用・判定「ルールのみ」）。demo は
 `demoJudgment`（商流メモの年齢上限・常駐必須等と要員の突き合わせだけを真似る決定的な代用判定）、本番は `judgeWithLlm`
-（Sonnet 5、`matchModel()`、`effort: low`、構造化出力 {score, reason, dealBreakers, questions}）の結果を
+（Sonnet 5、`matchModel()`、`effort: low`、構造化出力 {score, reason, dealBreakers, questions, injectionSuspected, injectionSource}）の結果を
 `finishJudgement` → `gateJudgement` で区分にする: 即NG（dealBreakers）またはスコアが `MATCH_REJECT_LLM_SCORE`（既定40）未満 → `rejected`
 （下書きなし・サマリは件数だけ）、`MATCH_MIN_LLM_SCORE`（既定60）未満 → 成立候補・交渉提案を `tentative` に、それ以外はルールの区分のまま。
+商流メモの年齢の上限は `ageCondition`（要員の実年齢）で照合し、上限内ならAIの `age` を外し、超えれば `age` を足す（AIには照合の結果だけを渡す）。
+AIが `injectionSuspected` を返した側の案件・要員は同じ実行の残りの組を要確認にし、DB の「指示混入疑い」に保存する。
 交渉提案もこの関門を通る。1回の実行の予算 `SES_JUDGE_BUDGET_JPY` に達した後の組と、一時的な失敗（429/5xx/通信）の組は
 `deferred`（判定「未判定」。判定済みに数えず、案件・要員を突合済にしないため次回判定）、やり直しても通らない失敗の組は
 下書きを作らない `tentative`（判定「判定失敗」）にする（1ペアの判定失敗がバッチ全体を止めない）。ヒューリスティックのスコア式:

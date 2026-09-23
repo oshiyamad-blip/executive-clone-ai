@@ -4,7 +4,8 @@
 // 「以前見送り」の注意を付けて通す。
 // 照合（buildSuppressionIndex 以下）は純関数。読み込み（loadSuppressionIndex）は失敗しても抑制なしで続ける
 import { sameProjectIgnoringRate, sameEngineerIgnoringRate } from './store.js';
-import { fmtMan } from './pricing.js';
+import { fmtMan, skillMatch } from './pricing.js';
+import { requirementMembers } from './skillDict.js';
 import { loadFeedback } from './feedback.js';
 import { parseMatchId } from './match.js';
 import { isDemo } from './config.js';
@@ -53,18 +54,27 @@ function remoteChange(label: string, before: RemoteOption, after: RemoteOption, 
   return up === (favorable === 'up') ? `${label}の変更` : null;
 }
 
-function skillSet(labels: string[]): Set<string> {
-  return new Set(labels.map((s) => s.toLowerCase()));
+function memberSet(labels: string[]): Set<string> {
+  return new Set(requirementMembers(labels).map((s) => s.toLowerCase()));
 }
 
-// 要員のスキルが増えた・案件の必須スキルが変わったか（評価で「ズレ」にした組はスキルが変わったときだけ提案し直す）
+// 判定に使うスキルの要件（必須、無ければ尚可）で満たせなかった要件
+function missingRequirements(project: Project, skills: string[]): Set<string> {
+  const m = skillMatch(project.requiredSkills, skills) ?? skillMatch(project.preferredSkills, skills);
+  return new Set((m?.breakdown.missing ?? []).map((r) => r.toLowerCase()));
+}
+
+// 以前足りなかった要件を満たすようになった・案件の必須スキルの中身が変わったか（評価で「ズレ」にした組はスキルが
+// 変わったときだけ提案し直す。関係の無いスキルの追加・抽出の揺れ・表記だけの違いでは提案し直さない）
 function skillChanges(before: { project: Project; engineer: Engineer }, project: Project, engineer: Engineer): string[] {
   const out: string[] = [];
-  const had = skillSet(before.engineer.skills);
-  if (engineer.skills.some((s) => !had.has(s.toLowerCase()))) out.push('要員のスキルの追加');
-  const req = skillSet(before.project.requiredSkills);
-  const now = skillSet(project.requiredSkills);
-  if (req.size !== now.size || [...now].some((r) => !req.has(r))) out.push('案件の必須スキルの変更');
+  const req = memberSet(before.project.requiredSkills);
+  const now = memberSet(project.requiredSkills);
+  const requirementChanged = req.size !== now.size || [...now].some((r) => !req.has(r));
+  if (requirementChanged) out.push('案件の必須スキルの変更');
+  const wasMissing = missingRequirements(before.project, before.engineer.skills);
+  const stillMissing = missingRequirements(before.project, engineer.skills);
+  if ([...wasMissing].some((r) => !stillMissing.has(r))) out.push('不足していたスキルの追加');
   return out;
 }
 

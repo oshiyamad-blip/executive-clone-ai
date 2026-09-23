@@ -3,7 +3,7 @@ import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
 import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
-import { matchIncrementally } from './matchRun.js';
+import { matchIncrementally, persistInjectionFlags } from './matchRun.js';
 import { loadSuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
@@ -609,6 +609,7 @@ async function matchDraftAndNotify(
   try {
     matches = await matchAll(projects, engineers, undefined, { suppression: await loadSuppressionIndex({ projects, engineers }) });
     matches = await withoutDeferredOverwrites(matches);
+    await persistInjectionFlags();
   } catch (err) {
     console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
     recordFatal('マッチング段が例外で停止しました');

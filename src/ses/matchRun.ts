@@ -20,13 +20,15 @@ import {
   reportJudgeTally,
   judgeTallySnapshot,
   DEFERRED_BUDGET_CAUSE,
+  addSelectedToTally,
+  takeInjectionFlags,
   type PairScope,
   type PrimarySelectStats,
 } from './match.js';
 import type { SuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
-import { markItemsMatched, closeDeferredMatches } from '../database/index.js';
+import { markItemsMatched, closeDeferredMatches, markItemsInjectionSuspected } from '../database/index.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
 import { pastRunDeadline, isLastChance } from './schedule.js';
 import { matchLookbackDays } from './config.js';
@@ -64,12 +66,21 @@ export interface IncrementalMatchOptions {
   pendingItems?: { projects: Project[]; engineers: Engineer[] };
 }
 
-// 候補ペアを「その組を受け持つ突合前の案件・要員」ごとにまとめる（案件が突合前ならその案件、そうでなければ要員）
-export function groupPairs(projects: Project[], engineers: Engineer[], scope: PairScope, pairs: MatchPair[], now = new Date()): Group[] {
+// 候補ペアを「その組を受け持つ突合前の案件・要員」ごとにまとめる（案件が突合前ならその案件、そうでなければ要員）。
+// どちらも突合済の判定待ちの組は、突合の対象期間の内にある側で受け持つ（期間外の相手で受け持つと、毎回「最後の機会」扱いになる）
+export function groupPairs(
+  projects: Project[],
+  engineers: Engineer[],
+  scope: PairScope,
+  pairs: MatchPair[],
+  now = new Date(),
+  pendingItems: { projects: Project[]; engineers: Engineer[] } = { projects: [], engineers: [] },
+): Group[] {
   const groups = new Map<string, Group>();
+  const inPool = new Set([...projects.map((p) => `project:${p.id}`), ...engineers.map((e) => `engineer:${e.id}`)]);
   const received = new Map<string, number>([
-    ...projects.map((p) => [`project:${p.id}`, p.receivedAt.getTime()] as const),
-    ...engineers.map((e) => [`engineer:${e.id}`, e.receivedAt.getTime()] as const),
+    ...[...pendingItems.projects, ...projects].map((p) => [`project:${p.id}`, receivedMsOf(p.receivedAt)] as const),
+    ...[...pendingItems.engineers, ...engineers].map((e) => [`engineer:${e.id}`, receivedMsOf(e.receivedAt)] as const),
   ]);
   const ensure = (kind: Group['kind'], id: string): Group => {
     const key = `${kind}:${id}`;
@@ -84,13 +95,41 @@ export function groupPairs(projects: Project[], engineers: Engineer[], scope: Pa
   for (const p of projects) if (scope.newProjectIds.has(p.id) && p.status === 'open') ensure('project', p.id);
   for (const e of engineers) if (scope.newEngineerIds.has(e.id) && e.status === 'available') ensure('engineer', e.id);
   for (const pair of pairs) {
-    if (scope.newProjectIds.has(pair.project.id)) ensure('project', pair.project.id).pairs.push(pair);
+    const byProject =
+      scope.newProjectIds.has(pair.project.id) ||
+      (!scope.newEngineerIds.has(pair.engineer.id) && !inPool.has(`engineer:${pair.engineer.id}`) && inPool.has(`project:${pair.project.id}`));
+    if (byProject) ensure('project', pair.project.id).pairs.push(pair);
     else ensure('engineer', pair.engineer.id).pairs.push(pair);
   }
   // 次回の実行では突合の対象期間を外れるものを先に、残りは新しく届いたものから（期限で打ち切られても、
   // 取りこぼしを防ぎつつ鮮度の高い組を先に判定する）
   const lastChance = (g: Group) => (isLastChance(new Date(g.receivedAt), matchLookbackDays(), now) ? 1 : 0);
   return [...groups.values()].sort((a, b) => lastChance(b) - lastChance(a) || b.receivedAt - a.receivedAt);
+}
+
+function receivedMsOf(d: Date): number {
+  const t = new Date(d).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  return [...new Map(items.map((x) => [x.id, x] as const)).values()];
+}
+
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に印を付ける（次回以降の実行でもAI判定・自動の下書きに回さない）
+export async function persistInjectionFlags(): Promise<void> {
+  const flags = takeInjectionFlags();
+  for (const [kind, ids] of [['project', flags.projects], ['engineer', flags.engineers]] as const) {
+    if (ids.length === 0) continue;
+    const label = kind === 'project' ? '案件' : '要員';
+    try {
+      await markItemsInjectionSuspected(kind, ids);
+      recordHealEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を付けました（内容を人が確かめてください）`);
+    } catch (err) {
+      console.error(`SESマッチング: 指示混入疑いの記録に失敗: ${safeErr(err)}`);
+      recordHealEvent('warn', `AI判定がAIへの指示らしき記載を見つけた${label}${ids.length}件に「指示混入疑い」を記録できませんでした（この実行の残りの組は要確認にしました）`);
+    }
+  }
 }
 
 async function markMatched(groups: Group[]): Promise<void> {
@@ -129,6 +168,10 @@ export async function matchIncrementally(
   const roundScope = (): PairScope => ({ ...scope, judgedMatchIds: judged, capFreeMatchIds: capFree, pendingMatchIds: pending });
 
   const saved = opts.saved ?? [];
+  // 判定待ちの組の相手（対象期間の外）も、文面の作成・保存で案件・要員を引けるようにする
+  const pendingItems = opts.pendingItems ?? { projects: [], engineers: [] };
+  const allProjects = uniqueById([...projects, ...pendingItems.projects]);
+  const allEngineers = uniqueById([...engineers, ...pendingItems.engineers]);
   const causes = new Map<string, UnfinishedCause>(); // 突合し終えなかった案件・要員 → 理由
   let unmarked: Group[] = [];
   let lastCheckpoint = Date.now();
@@ -152,9 +195,11 @@ export async function matchIncrementally(
   try {
     for (let round = 0; round < MAX_SELECTION_ROUNDS; round += 1) {
       if (round > 0 && pastRunDeadline()) break;
+      // 集計（メトリクス）は最初の回だけ数える。選び直しの回は追加で判定に回す組の数だけ足す
       const primary = primarySelectDetailed(projects, engineers, roundScope(), {
         suppression: opts.suppression,
         pendingItems: opts.pendingItems,
+        tally: round === 0,
       });
       if (round === 0) {
         firstStats = primary.stats;
@@ -162,9 +207,10 @@ export async function matchIncrementally(
         for (const id of primary.closedPending) pending.delete(id);
       }
       // 選び直しの回は、空いた枠の次点を待つ案件・要員のグループだけを扱う（予算・失敗で残った組は次回の実行に回す）
-      const groups = groupPairs(projects, engineers, scope, primary.pairs).filter(
+      const groups = groupPairs(projects, engineers, scope, primary.pairs, new Date(), pendingItems).filter(
         (g) => round === 0 || causes.get(groupKey(g)) === 'backfill',
       );
+      if (round > 0) addSelectedToTally(groups.reduce((n, g) => n + g.pairs.length, 0));
       lastGroups = round === 0 ? groups : lastGroups;
       if (round === 0) {
         const pairCount = groups.reduce((n, g) => n + g.pairs.length, 0);
@@ -196,8 +242,8 @@ export async function matchIncrementally(
           ...(await judgePairs(exempt, fewShot, { stopAtDeadline: true })),
           ...(await judgePairs(normal, fewShot, { stopAtDeadline: true, budget })),
         ];
-        const drafted = await createDrafts(judgedStep, projects, engineers);
-        const { saved: stepSaved } = await persistMatches(drafted, projects, engineers);
+        const drafted = await createDrafts(judgedStep, allProjects, allEngineers);
+        const { saved: stepSaved } = await persistMatches(drafted, allProjects, allEngineers);
         saved.push(...stepSaved);
         const byId = new Map(stepSaved.map((m) => [m.id, m] as const));
         for (const m of stepSaved) {
@@ -229,6 +275,7 @@ export async function matchIncrementally(
     }
   } finally {
     await checkpoint();
+    await persistInjectionFlags();
     reportJudgeTally(tallyBefore);
   }
 
@@ -241,7 +288,16 @@ export async function matchIncrementally(
   }
   // 次回の実行では突合の対象期間を外れる（＝今回が最後の機会だった）のに突合し終えなかったもの
   const receivedByKey = new Map(lastGroups.map((g) => [groupKey(g), g.receivedAt] as const));
-  const expiring = unfinished.filter(([key]) => isLastChance(new Date(receivedByKey.get(key) ?? Date.now()), matchLookbackDays()));
+  const lastChanceKeys = unfinished.filter(([key]) => isLastChance(new Date(receivedByKey.get(key) ?? Date.now()), matchLookbackDays()));
+  // 空いた枠の次点を選び直しの回数の上限まで判定したもの（判定・保存は正常に終わっている）は異常にしない
+  const backfillOnly = lastChanceKeys.filter(([, c]) => c === 'backfill');
+  if (backfillOnly.length > 0) {
+    recordHealEvent(
+      'warn',
+      `不適合・低評価で空いた枠の次点の判定を${MAX_SELECTION_ROUNDS}回まで行いましたが、次回の実行で突合の対象期間を外れる案件・要員${backfillOnly.length}件の残りの候補は判定しませんでした`,
+    );
+  }
+  const expiring = lastChanceKeys.filter(([, c]) => c !== 'backfill');
   if (expiring.length > 0) {
     const kinds = new Set(expiring.map(([, c]) => c));
     const advice = [
@@ -254,7 +310,6 @@ export async function matchIncrementally(
       kinds.has('budget') ? '判定の予算' : '',
       kinds.has('transient') ? 'AI判定の一時的な失敗' : '',
       kinds.has('draft') ? '文面の生成の失敗' : '',
-      kinds.has('backfill') ? '空いた枠の次点の判定待ち' : '',
     ].filter(Boolean);
     recordFatal(
       `突合し終えなかった案件・要員のうち${expiring.length}件は、次回の実行時には突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れます` +

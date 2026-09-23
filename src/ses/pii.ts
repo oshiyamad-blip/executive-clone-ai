@@ -3,6 +3,8 @@
 // - toInitials: 抽出した要員の表示名をイニシャル（「K.S.」の形）だけにする。フルネームは保存・判定・文面に流さない
 //   （IDはメール由来のハッシュのままで、表示名を結合のキーにしない）
 
+import { isKnownSkill, tokenizeSkill } from './skillDict.js';
+
 // ===== maskPii =====
 
 const NAME_MASK = '<氏名>';
@@ -23,8 +25,21 @@ const HONORIFIC_NAME = new RegExp(
   'g',
 );
 
-// 件名の「【要員】山田太郎 30歳」「[人材]佐藤」: 見出しの直後の漢字の並び
-const LISTING_NAME = new RegExp(`([【\\[](?:要員|人材|技術者|エンジニア)(?:情報|紹介|のご紹介)?[】\\]]\\s*)(${KANJI}{2,5})(?!${KANJI})`, 'g');
+// 件名の「【要員】山田太郎 30歳」「【要員】鈴木 一郎」「[人材]佐藤」: 見出しの直後の漢字の並び
+const LISTING_HEAD = `([【\\[](?:要員|人材|技術者|エンジニア)(?:情報|紹介|のご紹介)?[】\\]]\\s*)`;
+const LISTING_NAME = new RegExp(`${LISTING_HEAD}(${KANJI}{1,3}[ \\u3000]${KANJI}{1,3}|${KANJI}{2,5})(?!${KANJI})`, 'g');
+// 見出しの直後のローマ字の2語（「【要員】Yamada Taro Java」。技術名の2語は伏せない）
+const LISTING_ROMAJI = new RegExp(`${LISTING_HEAD}([A-Z][a-z]+ [A-Z][a-z]+)(?![A-Za-z])`, 'g');
+// 「要員: 山田 太郎」「要員情報：鈴木一郎 35歳」「技術者: …」: 値の先頭の氏名らしい並びだけを伏せる（「要員: PG 2名」は伏せない）
+const LOOSE_NAME_LABEL = new RegExp(
+  `((?:要員情報|要員|技術者)\\s*[:：]\\s*)(${KANJI}{1,3} ${KANJI}{1,3}|${KANJI}{2,5}(?!${KANJI})|[A-Z][a-z]+ [A-Z][a-z]+(?![A-Za-z]))`,
+  'g',
+);
+// イニシャルの直後の括弧の中の氏名（「T.Y(山田太郎)」「K.S.（すずき けん）」）
+const INITIALS_BRACKET_NAME = new RegExp(
+  `((?:^|[^A-Za-z])[A-Za-z]\\s?[.・･]\\s?[A-Za-z]\\.?\\s*)\\((${KANJI}{1,3} ?${KANJI}{1,3}|[ぁ-ゖァ-ヺー]{2,8}(?: [ぁ-ゖァ-ヺー]{1,8})?)\\)`,
+  'g',
+);
 
 // 組織・役割の語の末尾（「営業部山田様」の「部」）。この後ろの2〜4文字だけを氏名とみなす
 const ORG_TAIL = /^(.*[部課社室局店所会係班])(.{2,4})$/;
@@ -43,6 +58,11 @@ function maskNameValue(value: string): string {
   const name = head.trim();
   if (!name || INITIALS_ONLY.test(name) || name.startsWith('<')) return value;
   return value.replace(name, NAME_MASK);
+}
+
+// 英字2語のどちらかが技術名（「Java Spring」「Spring Boot」）なら氏名ではない
+function romajiSkillPair(s: string): boolean {
+  return /^[A-Za-z]/.test(s) && s.split(' ').some((w) => isKnownSkill(w) || tokenizeSkill(w).some((t) => isKnownSkill(t)));
 }
 
 function nameLike(s: string): boolean {
@@ -73,7 +93,10 @@ export function maskPii(s: string): string {
     .replace(/(?<![\d])0\d{9,10}(?![\d])/g, '<電話番号>')
     .replace(NAME_LABEL, (_m, label: string, sep: string, value: string) => `${label}${sep}${maskNameValue(value)}`)
     .replace(NAME_LABEL_SPACED, (_m, label: string, sep: string, value: string) => `${label}${sep}${maskNameValue(value)}`)
+    .replace(LOOSE_NAME_LABEL, (m, head: string, name: string) => (nameLike(name) && !romajiSkillPair(name) ? `${head}${NAME_MASK}` : m))
     .replace(LISTING_NAME, (m, head: string, name: string) => (nameLike(name) ? `${head}${NAME_MASK}` : m))
+    .replace(LISTING_ROMAJI, (m, head: string, name: string) => (romajiSkillPair(name) ? m : `${head}${NAME_MASK}`))
+    .replace(INITIALS_BRACKET_NAME, (m, head: string, name: string) => (nameLike(name) ? `${head}(${NAME_MASK})` : m))
     .replace(HONORIFIC_NAME, maskHonorificName);
 }
 

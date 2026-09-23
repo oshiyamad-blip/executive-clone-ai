@@ -532,6 +532,16 @@ export async function markItemsMatchedSheets(kind: 'project' | 'engineer', ids: 
   );
 }
 
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける。付けた行数を返す
+export async function markItemsInjectionSuspectedSheets(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (!configured() || ids.length === 0) return 0;
+  return book.writeCellsByKey(
+    kind === 'project' ? '案件' : '要員',
+    'ID',
+    [...new Set(ids)].map((id) => ({ key: id, cells: [[INJECTION_COLUMN, INJECTION_MARK]] })),
+  );
+}
+
 // ===== マッチ結果 =====
 
 function readDraftColumns(tab: string, cells: string[]): DraftColumns {
@@ -621,19 +631,25 @@ export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
   return (await fetchMatchLedgerSheets()).judged;
 }
 
-// 判定待ちのまま対象から外れた組（案件の終了・要員の稼働終了・ルールを通らなくなった等）を閉じる:
-// 判定を「ルールのみ」にし、「判定待ち」の下書き状態を「不要」にする（人が変えた状態は変えない）。閉じた行数を返す
+// 判定待ち・文面の作り直し待ちのまま対象から外れた組（案件の終了・要員の稼働終了・ルールを通らなくなった等）を閉じる:
+// 未判定の行は判定を「ルールのみ」にし、「判定待ち」「文面を用意できませんでした」の下書き状態を「不要」にする
+// （作り直し待ちの行の判定は残す。人が変えた状態は変えない）。閉じた行数を返す
 export async function closeDeferredMatchesSheets(ids: string[]): Promise<number> {
   if (!configured() || ids.length === 0) return 0;
   const want = new Set(ids);
   const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
   const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  const draftCols = ['案件側下書き状態', '要員側下書き状態'];
   for (const r of await readRows('マッチ')) {
     const id = c(r.cells, 'ID');
-    if (!want.has(id) || c(r.cells, JUDGE_COLUMN) !== JUDGE_VERDICT_LABEL.deferred) continue;
-    const cells: Array<[string, Cell]> = [[JUDGE_COLUMN, JUDGE_VERDICT_LABEL.rule]];
-    for (const col of ['案件側下書き状態', '要員側下書き状態']) {
-      if (c(r.cells, col).startsWith(DRAFT_STATE.awaitingJudge)) cells.push([col, DRAFT_STATE.notNeeded]);
+    if (!want.has(id)) continue;
+    const deferred = c(r.cells, JUDGE_COLUMN) === JUDGE_VERDICT_LABEL.deferred;
+    const regen = draftCols.some((col) => isDraftRegenerationPending(c(r.cells, col)));
+    if (!deferred && !regen) continue;
+    const cells: Array<[string, Cell]> = deferred ? [[JUDGE_COLUMN, JUDGE_VERDICT_LABEL.rule]] : [];
+    for (const col of draftCols) {
+      const state = c(r.cells, col);
+      if (state.startsWith(DRAFT_STATE.awaitingJudge) || isDraftRegenerationPending(state)) cells.push([col, DRAFT_STATE.notNeeded]);
     }
     updates.push({ key: id, cells });
     want.delete(id);

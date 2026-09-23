@@ -506,6 +506,29 @@ export async function markItemsMatched(kind: 'project' | 'engineer', ids: string
   return 0;
 }
 
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける（次回以降もAI判定・自動の下書きに回さない）。
+// Notion は列を追加できなければ、印が消えないよう突合の対象外（終了・決定済）にする。付けた件数を返す
+export async function markItemsInjectionSuspected(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (dbProvider() === 'sheets') return sheetsDb.markItemsInjectionSuspectedSheets(kind, ids);
+  const dbId = kind === 'project' ? PROJECT_DB_ID : ENGINEER_DB_ID;
+  if (!dbId || ids.length === 0) return 0;
+  const dataSourceId = await resolveDataSourceId(dbId);
+  const label = kind === 'project' ? '案件' : '要員';
+  const hasColumn = await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN]);
+  if (!hasColumn) injectionColumnMissing(label);
+  let marked = 0;
+  for (const id of new Set(ids)) {
+    const pageId = await findPageIdByText(dataSourceId, `${label}ID`, id);
+    if (!pageId) continue;
+    const properties = hasColumn
+      ? { [sheetsDb.INJECTION_COLUMN]: { rich_text: toRichText('あり') } }
+      : { ステータス: { select: { name: kind === 'project' ? '終了' : '決定済' } } };
+    await throttle(() => notion.pages.update({ page_id: pageId, properties } as never));
+    marked += 1;
+  }
+  return marked;
+}
+
 // マッチの判定の控え（判定済み・枠を使わない判定済み・判定待ちの組）。since 以降に検出したものに絞る（Notion）。
 // AI判定を次回に回した組（判定「未判定」）は判定済みに含めず、判定待ちの作業の列として返す
 export async function fetchMatchLedger(since?: Date): Promise<sheetsDb.MatchLedger> {

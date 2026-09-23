@@ -78,6 +78,8 @@ const IMPLIES: Record<string, string[]> = {
   Jenkins: ['CI/CD'],
   'GitLab CI': ['CI/CD'],
   'GitHub Actions': ['CI/CD'],
+  要件定義: ['上流工程'],
+  基本設計: ['上流工程'],
 };
 
 // 推定にとどまる含意（子→親）。これ以外の辺は確実な含意

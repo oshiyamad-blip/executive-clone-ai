@@ -5,7 +5,8 @@ import { join } from 'path';
 import { isDemo, reviewDataDir } from './config.js';
 import { saveMatchFeedback, fetchRecentFeedback } from '../database/index.js';
 import { safeErr } from './redact.js';
-import { maskPii } from './pii.js';
+import { maskPii, toInitials, UNKNOWN_INITIALS } from './pii.js';
+import { looksLikeInjection, dataSafe } from './injection.js';
 import type { MatchFeedback } from '../types/index.js';
 
 function localPath(): string {
@@ -85,17 +86,20 @@ const FEWSHOT_TITLE_CHARS = 80;
 const FEWSHOT_NOTE_CHARS = 200;
 
 function oneLine(s: string, max: number): string {
-  const t = s.replace(/\s+/g, ' ').replace(/[<>]/g, '').trim();
+  const t = dataSafe(s.normalize('NFKC')).replace(/\s+/g, ' ').replace(/[<>＜＞]/g, '').trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
 }
 
-// 評価のタイトル（「案件名 × 要員の表示名」）の要員の表示名は、イニシャルの形のときだけ残す
-// （表示名に氏名が入っている場合に、最終判定の入力へ氏名を渡さないため）
+// 評価のタイトル（「案件名 × 要員の表示名」）の要員の表示名は、イニシャル（toInitials と同じ決め方。3文字まで）のときだけ
+// 整えたイニシャルで残す（'KEN' 'Lee' のような短い名前や、表示名に入った氏名を最終判定の入力へ渡さないため）
 export function fewShotTitle(title: string): string {
   const i = title.lastIndexOf(' × ');
   if (i < 0) return title;
   const name = title.slice(i + 3).normalize('NFKC').trim();
-  return `${title.slice(0, i)} × ${/^(?:[A-Za-z]\.?\s?){1,3}$/.test(name) ? name : '要員'}`;
+  const letters = name.replace(/[\s.・･]/g, '');
+  const initials = toInitials(name);
+  const keep = /^[A-Za-z]{1,3}$/.test(letters) && initials !== UNKNOWN_INITIALS;
+  return `${title.slice(0, i)} × ${keep ? initials : '要員'}`;
 }
 
 // 評価のメモ（人の自由記述）は氏名・連絡先を伏せてから渡す（最終判定には判定に要る情報だけを渡す）
@@ -107,9 +111,14 @@ export function fewShotNote(note: string): string {
 // 評価のメモは人が自由に書く文字列のため、システムプロンプトではなく「参考データ」の区切りの中に置く
 // （メモに書かれた文言を指示として扱わせない）
 export async function buildFeedbackFewShot(max = 6): Promise<string> {
-  const all = await loadFeedback(50);
-  if (all.length === 0) return '';
-  const recent = all.slice(0, max); // loadFeedbackは新しい順のため先頭が最新
+  return formatFeedbackFewShot(await loadFeedback(50), max);
+}
+
+// few-shot の本文（純関数）。list は新しい順。案件名は社外のメール由来・メモは人の自由記述のため、
+// AIへの指示らしき記載のある評価は使わず、区切りのタグを値の側から閉じられないようにする
+export function formatFeedbackFewShot(list: MatchFeedback[], max = 6): string {
+  const recent = list.filter((f) => !looksLikeInjection(`${f.matchTitle}\n${f.note ?? ''}`)).slice(0, max);
+  if (recent.length === 0) return '';
   const lines = recent.map((f) => {
     const note = f.note ? `（メモ: ${fewShotNote(f.note)}）` : '';
     return `- 「${oneLine(fewShotTitle(f.matchTitle), FEWSHOT_TITLE_CHARS)}」→ ${f.verdict === 'good' ? '妥当' : 'ズレ'}${note}`;

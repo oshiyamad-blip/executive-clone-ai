@@ -695,8 +695,8 @@ export function buildProject(raw: RawProject, mail: SesRawMail, index: number, n
     requirementItems(raw.requiredSkills),
     requirementItems(raw.preferredSkills),
   );
-  // 未知語の集計（営業元の会社名・担当者名と同じ語は人名・社名の混入として数えない）
-  tallySkillTokens(requirementMembers([...requiredSkills, ...preferredSkills]), [raw.agentCompany, raw.agentContact]);
+  // 未知語の集計（営業元の会社名・担当者名・メールアドレスと同じ語は人名・社名の混入として数えない）
+  tallySkillTokens(requirementMembers([...requiredSkills, ...preferredSkills]), [raw.agentCompany, raw.agentContact, raw.agentEmail]);
   return {
     id: itemIdOf('proj', mail.id, index),
     title: raw.title,
@@ -730,7 +730,7 @@ function residenceWithStation(residence: string, station: string): string {
 export function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number, numbers: Set<string> | null): Engineer {
   const residence = residenceWithStation(raw.residence, raw.nearestStation);
   const skills = skillsOf(raw.skills);
-  tallySkillTokens(skills, [raw.displayName, raw.agentCompany, raw.agentContact]);
+  tallySkillTokens(skills, [raw.displayName, raw.agentCompany, raw.agentContact, raw.agentEmail]);
   return {
     id: itemIdOf('eng', mail.id, index),
     // AIへの指示に反してフルネームが返っても、イニシャルだけを残す（決められなければ「（イニシャル不明）」）

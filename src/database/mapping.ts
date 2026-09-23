@@ -343,6 +343,8 @@ function mergeDraftSide(
   if (flags.deferred && (s === '' || awaiting) && !prevStored) {
     return { state: DRAFT_STATE.awaitingJudge, text, stored: undefined };
   }
+  // 作り直し待ちの側がAI判定の見送り（予算・一時的な失敗）になった: 作り直し待ちのまま残す（「不要」にすると判定し直しても作らない）
+  if (flags.deferred && isDraftRegenerationPending(s)) return { state, text, stored: prevStored };
   if (flags.failed && (s === '' || awaiting || isDraftRegenerationPending(s)) && !prevStored) {
     return { state: DRAFT_STATE.genFailed, text, stored: undefined };
   }

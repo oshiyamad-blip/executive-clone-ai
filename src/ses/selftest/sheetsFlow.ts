@@ -745,6 +745,12 @@ async function testJudgeGateAndSuppression(): Promise<void> {
       Boolean(pendingPair) && ledger.deferred.has(pendingPair!.id) && calls.includes(partnerId) && row('proj_pend', partnerId)?.[JUDGE_COLUMN] === '通過',
       JSON.stringify([pendingPair?.id, [...ledger.deferred], calls, row('proj_pend', partnerId)?.[JUDGE_COLUMN]]),
     );
+    const pendState = row('proj_pend', partnerId)?.['案件側下書き状態'] ?? '';
+    check(
+      '相手がプールに無い判定待ちの組も文面を用意できる（「文面を用意できませんでした」にしない）・次回の作業の列に残さない',
+      pendState !== '' && !pendState.startsWith(DRAFT_STATE.genFailed) && !(await fetchMatchLedger()).deferred.has(pendingPair?.id ?? ''),
+      pendState,
+    );
 
     // 8回目: 判定待ちのまま相手が見つからなくなった組は「ルールのみ」で閉じ、判定待ちの状態を「不要」にする
     newRun();
@@ -758,6 +764,54 @@ async function testJudgeGateAndSuppression(): Promise<void> {
       '相手の見つからない判定待ちの組は閉じる（判定「ルールのみ」・下書き状態「不要」）',
       r9.closedPending === 1 && lostRow?.[JUDGE_COLUMN] === 'ルールのみ' && lostRow?.['案件側下書き状態'] === '不要' && !(await fetchMatchLedger()).deferred.has(lost.id),
       JSON.stringify([r9.closedPending, lostRow?.[JUDGE_COLUMN], lostRow?.['案件側下書き状態']]),
+    );
+
+    // 9回目: 文面の作り直し待ちの組も、相手が見つからなくなれば閉じる（判定は残し、下書き状態を「不要」に）
+    newRun();
+    const regen: MatchResult = {
+      ...makeMatch(gateProject('proj_regen'), abap('eng_regen', 'T.G.'), 'confirmed'),
+      draftToProject: undefined,
+      draftToEngineer: undefined,
+      draftFailed: true,
+      verdict: 'passed',
+    };
+    await saveMatch(regen);
+    const ledgerR = await fetchMatchLedger();
+    const tenth = await load();
+    const r10 = await matchIncrementally(tenth.projects, tenth.engineers, { ...tenth.scope, pendingMatchIds: ledgerR.deferred });
+    const regenRow = sheets.record(JUDGE_BOOK, 'マッチ', 'ID', regen.id);
+    check(
+      '相手の見つからない作り直し待ちの組は閉じる（判定「通過」は残し・下書き状態「不要」・作業の列から外す）',
+      ledgerR.deferred.has(regen.id) && r10.closedPending === 1 && regenRow?.[JUDGE_COLUMN] === '通過' &&
+        regenRow?.['案件側下書き状態'] === '不要' && !(await fetchMatchLedger()).deferred.has(regen.id),
+      JSON.stringify([r10.closedPending, regenRow?.[JUDGE_COLUMN], regenRow?.['案件側下書き状態']]),
+    );
+
+    // 10回目: 最終判定のAIが指示らしき記載を見つけた案件は「指示混入疑い」を保存し、次の実行の組はAI判定・自動の下書きに回さない
+    newRun();
+    const taintCalls: string[] = [];
+    __setMatchJudgeForTest(async (pair) => {
+      taintCalls.push(pair.engineer.id);
+      const tainted = pair.project.id === 'proj_taint';
+      return { score: 90, reason: '条件に合っています', dealBreakers: [], questions: [], injectionSuspected: tainted, injectionSource: tainted ? 'project' : 'unknown' };
+    });
+    await saveProject(project('proj_taint', { ...gateProject('proj_taint'), requiredSkills: ['Rust'], businessFlow: '' }));
+    await saveEngineer(gateEngineer('eng_taint1', 'T.H.', { skills: ['Rust'], agentEmail: 'h@lambda-gate.example.jp' }));
+    const eleventh = await load();
+    await matchIncrementally(eleventh.projects, eleventh.engineers, eleventh.scope);
+    const taint1 = row('proj_taint', 'eng_taint1');
+    newRun();
+    await saveEngineer(gateEngineer('eng_taint2', 'T.I.', { skills: ['Rust'], agentEmail: 'i@mu-gate.example.jp' }));
+    taintCalls.length = 0;
+    const twelfth = await load();
+    await matchIncrementally(twelfth.projects, twelfth.engineers, twelfth.scope);
+    const taint2 = row('proj_taint', 'eng_taint2');
+    check(
+      'AI判定が指示を見つけた案件に「指示混入疑い」を保存し（要員には付けない）、次の実行の組はAI判定を呼ばず要確認・下書きなし',
+      taint1?.['案件側下書き状態'] === '不要' && sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_taint')?.[INJECTION_COLUMN] === 'あり' &&
+        sheets.record(JUDGE_BOOK, '要員', 'ID', 'eng_taint1')?.[INJECTION_COLUMN] === '' && !taintCalls.includes('eng_taint2') &&
+        (taint2?.['判定根拠'] ?? '').includes(INJECTION_REVIEW_REASON) && taint2?.['案件側下書き状態'] === '不要',
+      JSON.stringify([taint1?.['案件側下書き状態'], taintCalls, taint2?.[JUDGE_COLUMN], taint2?.['案件側下書き状態']]),
     );
   } finally {
     __setMatchJudgeForTest(null);

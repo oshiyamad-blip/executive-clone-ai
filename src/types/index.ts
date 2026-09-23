@@ -208,6 +208,7 @@ export type DealBreakerCode =
   | 'age'
   | 'onsite'
   | 'utilization'
+  | 'skill'
   | 'skill_years'
   | 'timing'
   | 'rate'

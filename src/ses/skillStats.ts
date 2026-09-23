@@ -29,9 +29,9 @@ interface UnknownSkillState {
 // 今回のバッチで数えた未知語（小文字 → 表記と件数）
 const pending = new Map<string, { t: string; n: number }>();
 
-// 連絡先・URLらしい語や長すぎる語は保存しない（件数には数える）
-function storable(token: string): boolean {
-  return token.length <= MAX_TOKEN_CHARS && !/@|https?:|www\.|\d{6,}/i.test(token);
+// 連絡先・URLらしい語（区切りつきの電話番号 '03-1234-5678' を含む）や長すぎる語は保存しない（件数には数える）
+export function storableUnknownToken(token: string): boolean {
+  return token.length <= MAX_TOKEN_CHARS && !/@|https?:|www\.|\d{6,}|\d{2,4}[-‐－ー()（）\s.]\d{2,4}[-‐－ー()（）\s.]\d{3,4}/i.test(token);
 }
 
 // 抽出した1件分のスキル語を数える。names は表示名・営業元の会社名・担当者名（その語は人名・社名として数えない）
@@ -40,7 +40,7 @@ export function tallySkillTokens(tokens: string[], names: string[]): void {
   if (counted.length > 0) recordStat('skillTokens', counted.length);
   if (unknown.length > 0) recordStat('unknownSkillTokens', unknown.length);
   for (const t of unknown) {
-    if (!storable(t)) continue;
+    if (!storableUnknownToken(t)) continue;
     const key = t.toLowerCase();
     const cur = pending.get(key);
     pending.set(key, { t: cur?.t ?? t, n: (cur?.n ?? 0) + 1 });
