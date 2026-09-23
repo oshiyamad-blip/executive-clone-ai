@@ -25,8 +25,8 @@ import { equivalenceKey } from '../skillEquiv.js';
 import { sanitizeListItem, joinList, splitList } from '../../database/mapping.js';
 import { rejectReason } from '../../web/httpSecurity.js';
 import type { IncomingMessage } from 'http';
+import { maskPii } from '../pii.js';
 import {
-  maskPii,
   senderDomainOnly,
   isLastChance,
   recordFailure,

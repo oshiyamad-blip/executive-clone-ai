@@ -16,7 +16,11 @@ import {
   ownDomains,
   collectDays,
   properMasterSpreadsheetId,
+  extractModel,
+  matchModel,
+  llmProviderName,
 } from '../ses/config.js';
+import { retirementNotice } from '../llm/modelLifecycle.js';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { inspectServiceAccountJson } from '../ses/settingsFormat.js';
 import { SafeLogError } from '../ses/redact.js';
@@ -145,6 +149,16 @@ async function main(): Promise<void> {
     else console.log(`  ・実行モード:      DEMO（${why}）`);
   } else ok('実行モード: 本番（npm run ses は実メールを収集します）');
 
+  if (llmProviderName() === 'anthropic') {
+    console.log(`  ・モデル:          抽出 ${extractModel()} / 最終判定・紹介文面 ${matchModel()}`);
+    const retire = retirementNotice(extractModel());
+    if (retire) {
+      (retire.soon ? warn : (m: string) => console.log(`  ・${m}`))(
+        `抽出モデル ${extractModel()} は ${retire.notBefore} より後に退役予定（公表）です。退役後は判定用モデルで代替して費用が増えます。` +
+          '後継のモデルに切り替えるときは ANTHROPIC_MODEL_EXTRACT を変更してください',
+      );
+    }
+  }
   const mailProvider = sesMailProvider();
   console.log(`  ・メールプロバイダ: ${mailProvider}（収集期間 ${collectDays()}日）`);
   if (mailProvider === 'gmail') {

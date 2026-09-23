@@ -1,6 +1,7 @@
 // Googleスプレッドシート版のSESデータ保存層（DB_PROVIDER=sheets）。
 // 1つのスプレッドシートにデータ7タブ（案件/要員/マッチ/自社社員/評価/スキル同義/プロパー候補）と
-// バッチ横断の状態2タブ（処理済みメール/_状態）を持ち、タブとヘッダー行は初回アクセス時に自動生成する
+// バッチ横断の状態2タブ（処理済みメール/_状態）、バッチごとの件数・比率を1行ずつ残す「メトリクス」タブを持ち、
+// タブとヘッダー行は初回アクセス時に自動生成する
 // （タブ・行キャッシュ・クォータ制御の汎用部分は sheetBook.ts）。
 // 認証は既定でサービスアカウント自身（シートをSAのメールアドレスに編集者として共有するだけでよい）。
 // SHEETS_DB_IMPERSONATE 指定時のみDWDでそのユーザーになりすます。
@@ -11,6 +12,7 @@ import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
 import { normalizeSkills } from '../ses/skillDict.js';
 import { normalizePrefecture } from '../ses/prefecture.js';
+import { toInitials } from '../ses/pii.js';
 import { SafeLogError } from '../ses/redact.js';
 import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
 import {
@@ -61,17 +63,32 @@ export const MATCHED_COLUMN = '突合済';
 // AI最終判定の結果（通過・低評価・不適合・未判定 等。JUDGE_VERDICT_LABEL）。「未判定」の行は次回の実行で判定し直す
 export const JUDGE_COLUMN = '判定';
 
+// 元のメールにAIへの指示らしき記載がある案件・要員（値は「あり」）。この行の組は要確認にし、自動の下書きを作らない
+export const INJECTION_COLUMN = '指示混入疑い';
+const INJECTION_MARK = 'あり';
+
+// バッチごとの健全性の記録（件数・比率だけ。人名・案件名・スキル語そのものは書かない）。1回の実行で1行を追記する。
+// 比率の列は % の値（0〜100。母数が0なら空欄）
+export const METRICS_TAB = 'メトリクス';
+export const METRICS_COLUMNS = [
+  '実行日時', 'モード', 'メール数', '抽出件数(案件)', '抽出件数(要員)',
+  'null率(単金)', 'null率(都道府県)', 'null率(開始日)', 'null率(希望単金)', '必須スキル空率', '未知スキル語数',
+  '候補0件の案件率', '除外理由内訳(JSON)', '判定数', 'Sonnet平均点', 'ゲート降格数', '不適合数', '再提案抑制数',
+  '判定繰越数', 'ヒューリスティック退避数', 'キャッシュ読込率', 'バッチコスト(円)', '下書き作成数',
+  'スキル語数', '評価組数', '判定対象組数', '担当者指定の下書き作成数', '抽出モデル代替',
+];
+
 // タブ定義（列は見出しの名前で読み書きする。列の追加は末尾のみ＝既存シートは ensureTabs が見出しの右端へ自動で追記する）
 const TABS: Record<string, string[]> = {
   案件: [
     'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
     '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
-    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN,
+    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN,
   ],
   要員: [
     'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
     '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN,
-    '年齢', '稼働率',
+    '年齢', '稼働率', INJECTION_COLUMN,
   ],
   マッチ: [
     'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
@@ -82,6 +99,7 @@ const TABS: Record<string, string[]> = {
   スキル同義: ['スキルA', 'スキルB', '追加者', '日時'],
   処理済みメール: ['メールID', '処理日時', '結果'],
   _状態: ['キー', 'JSON', '更新日時'],
+  [METRICS_TAB]: METRICS_COLUMNS,
   // プロパー（自社社員のスキルシート）× 案件の候補。提案は案件側への1通だけなので要員側の下書き列は持たない
   [PROPER_CANDIDATE_TAB]: [
     'ID', 'プロパー', '案件名', '案件単価', '必要案件単価', '単価差', 'スキル一致率', 'バンド', '判定',
@@ -247,7 +265,7 @@ function projectToRow(p: Project): Cell[] {
     p.location, remoteLabel(p.remote), p.startPeriod, p.startDate ?? '', p.duration, p.businessFlow,
     p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId,
     replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail)),
-    p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '',
+    p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '', p.injectionSuspected ? INJECTION_MARK : '',
   ];
 }
 
@@ -285,6 +303,7 @@ function rowToProject(cells: string[]): Project {
     status: c('ステータス') === '終了' ? 'closed' : 'open',
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
     matched: c(MATCHED_COLUMN) !== '',
+    ...(c(INJECTION_COLUMN) !== '' ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -325,7 +344,7 @@ function engineerToRow(e: Engineer): Cell[] {
     e.id, e.displayName, joinList(e.skills), e.experienceYears, e.desiredRate, e.residence,
     remoteLabel(e.remoteWish), e.availableFrom ?? '', e.agentCompany, e.agentContact, e.agentEmail,
     e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail)), e.receivedAt.toISOString(),
-    e.status === 'assigned' ? '決定済' : '提案可', '', e.age, e.utilization,
+    e.status === 'assigned' ? '決定済' : '提案可', '', e.age, e.utilization, e.injectionSuspected ? INJECTION_MARK : '',
   ];
 }
 
@@ -342,7 +361,8 @@ function rowToEngineer(cells: string[]): Engineer {
   const reply = trustedReply('要員', cells);
   return {
     id: c('ID'),
-    displayName: c('表示名'),
+    // 以前の版で保存したフルネーム・人が手で入れた氏名も、読み出しの時点でイニシャルだけにする（判定・文面に流さない）
+    displayName: toInitials(c('表示名')),
     age: n('年齢'),
     skills: normalizeSkills(splitList(c('スキル'))),
     experienceYears: n('経験年数'),
@@ -363,6 +383,7 @@ function rowToEngineer(cells: string[]): Engineer {
     status: c('ステータス') === '決定済' ? 'assigned' : 'available',
     notionPageId: c('ID'),
     matched: c(MATCHED_COLUMN) !== '',
+    ...(c(INJECTION_COLUMN) !== '' ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -968,6 +989,14 @@ export async function fetchSkillEquivalencesSheets(limit = 500): Promise<SkillEq
     addedBy: c(r.cells, '追加者'),
     at: c(r.cells, '日時') || new Date().toISOString(),
   }));
+}
+
+// ===== メトリクス（バッチごとの件数・比率を1行ずつ追記） =====
+
+// 列の名前 → 値。定義に無い名前は書かない（人名・案件名を渡さないこと）
+export async function appendMetricsRowSheets(values: Record<string, Cell>): Promise<void> {
+  if (!configured()) return;
+  await appendRows(METRICS_TAB, [METRICS_COLUMNS.map((name) => values[name] ?? '')]);
 }
 
 // ===== バッチ横断の状態（スケジュール実行はローカルファイルが残らないためシートに置く） =====

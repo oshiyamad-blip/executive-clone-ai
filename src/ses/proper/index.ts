@@ -46,7 +46,9 @@ export function buildProperCandidates(engineers: ProperEngineer[], projects: Pro
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
-    candidates.push({ ...m, properLabel: properLabelOf(engineer), draftToProject: buildProperProposalDraft(engineer, project) });
+    // 元のメールにAIへの指示らしき記載がある案件には、提案文面（下書きの元）を用意しない（要確認で人が確かめる）
+    const draftToProject = project.injectionSuspected ? undefined : buildProperProposalDraft(engineer, project);
+    candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}) });
   }
   return candidates;
 }

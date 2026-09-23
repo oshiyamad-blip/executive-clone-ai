@@ -146,12 +146,14 @@ export interface Project {
   // 候補ペアの判定・保存まで済んだか（Sheets運用の「突合済」列）。false の間は次回以降のバッチでも突合する。
   // 未定義（Notion等、記録しない保存先）は突合済みとして扱い、その回の新着だけを突合する
   matched?: boolean;
+  // 元のメールにAIへの指示らしき記載がある（抽出のAIの印・コードの検知）。この案件の組は要確認にし、AI判定・自動の下書きをしない
+  injectionSuspected?: boolean;
 }
 
 // SES要員（エンジニア）。氏名・年齢等はPII（CLAUDE.md §非機能要件）
 export interface Engineer {
   id: string; // 'eng_<hash>' 決定的ID
-  displayName: string; // イニシャル推奨
+  displayName: string; // イニシャルのみ（「K.S.」。決められなければ「（イニシャル不明）」。抽出・読み出しで toInitials を通す）
   age: number | null;
   skills: string[]; // 正規化済み
   experienceYears: number | null;
@@ -172,6 +174,7 @@ export interface Engineer {
   status: EngineerStatus;
   notionPageId?: string;
   matched?: boolean; // Project.matched と同じ
+  injectionSuspected?: boolean; // Project.injectionSuspected と同じ
 }
 
 // 交渉提案。粗利が下限に届かないペアを、案件単金の値上げ交渉と要員単金の値下げ交渉で

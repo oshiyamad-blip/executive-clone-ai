@@ -16,8 +16,13 @@ function client(): Anthropic {
 }
 const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-opus-4-8';
 
-function recordUsage(model: string, usage: { input_tokens: number; output_tokens: number }): void {
-  recordLlmUsage(model, usage.input_tokens, usage.output_tokens);
+// キャッシュの書き込み・読み込みは input_tokens に含まれず単価の倍率も違うため、別に記録する
+function recordUsage(model: string, usage: Anthropic.Messages.Usage): void {
+  recordLlmUsage(model, usage.input_tokens, usage.output_tokens, {
+    creation: usage.cache_creation_input_tokens,
+    creation1h: usage.cache_creation?.ephemeral_1h_input_tokens,
+    read: usage.cache_read_input_tokens,
+  });
 }
 
 // adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）でのみ有効で、

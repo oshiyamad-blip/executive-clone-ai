@@ -21,3 +21,28 @@ export class LlmOutputError extends SafeLogError {
 export function isTruncationError(err: unknown): boolean {
   return err instanceof LlmOutputError && err.problem === 'max_tokens';
 }
+
+function errorText(err: unknown): string {
+  const e = (err ?? {}) as { message?: unknown; error?: unknown };
+  let body = '';
+  try {
+    body = e.error === undefined ? '' : JSON.stringify(e.error);
+  } catch {
+    body = '';
+  }
+  return `${typeof e.message === 'string' ? e.message : ''} ${body}`;
+}
+
+const RETIRED_WORDS = /deprecat|retire|no longer (?:available|supported)|end[- ]of[- ]life|has been (?:removed|sunset)|not available/i;
+
+// モデルそのものが使えない（退役・提供終了・存在しないモデルID）ことを示すAPIエラーか。
+// 404 not_found_error は「model: …」を含むときだけ（ファイル・バッチ等の別リソースの404と取り違えない）
+export function isModelUnavailableError(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status !== 'number') return false;
+  const text = errorText(err);
+  if (!/model/i.test(text)) return false;
+  if (status === 404) return /not_found_error|not[_ ]found/i.test(text);
+  if (status === 400 || status === 410) return RETIRED_WORDS.test(text);
+  return false;
+}

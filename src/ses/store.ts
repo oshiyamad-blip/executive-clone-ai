@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { isDemo, demoDataDir, durableStateInSheets } from './config.js';
 import { safeErr } from './redact.js';
+import { hasKnownInitials } from './pii.js';
 import {
   sheetsDbConfigured,
   loadProcessedMailIdsSheets,
@@ -172,11 +173,11 @@ function projectsCompatible(a: Project, b: Project): boolean {
 
 // 希望単金以外の属性（別のメール・イニシャル・年齢・最寄駅・居住県）が同じ人物でありえるか
 function engineersCompatibleIgnoringRate(a: Engineer, b: Engineer): boolean {
-  const nameA = nonEmpty(a.displayName);
-  const nameB = nonEmpty(b.displayName);
+  const nameA = hasKnownInitials(a.displayName) ? a.displayName.trim() : null;
+  const nameB = hasKnownInitials(b.displayName) ? b.displayName.trim() : null;
   return (
     a.sourceMailId !== b.sourceMailId &&
-    // 表示名（イニシャル）が無い要員は人物を特定できないため統合しない
+    // 表示名（イニシャル）が無い・決められなかった要員は人物を特定できないため統合しない
     nameA !== null &&
     nameA === nameB &&
     sameIfKnown(a.age, b.age, (x, y) => Math.abs(x - y) <= 1) &&

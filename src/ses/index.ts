@@ -49,8 +49,10 @@ import {
   dbProvider,
   runDeadlineMinutes,
   logRedact,
+  resetExtractModelFallback,
   COLLECT_DAYS_MAX,
 } from './config.js';
+import { setMetricsMode, recordBatchMetrics, collectBatchMetrics } from './batchMetrics.js';
 import { startHealBatch } from './heal/budget.js';
 import { persistUnknownSkillTokens, resetSkillTokenTally } from './skillStats.js';
 import {
@@ -102,6 +104,8 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   resetJudgeTally();
   resetSheetsCache();
   resetProperMasterCache();
+  resetExtractModelFallback();
+  setMetricsMode(isDemo() ? 'demo' : opts.matchOnly ? '突合のみ' : opts.collectOnly ? '収集のみ' : '通常');
   if (!isDemo()) startRunClock();
 
   let lease: string | null = null;
@@ -171,6 +175,8 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   if (pool) {
     stored = await collectAndStoreLive(pool);
     if (opts.collectOnly) {
+      // サマリは送らないが、抽出の不明率等は「メトリクス」タブに残す
+      await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
       console.log(`=== --collect-only指定のため収集・保存のみで終了（案件${stored.projects.length}件・要員${stored.engineers.length}件） ===`);
       return;
     }

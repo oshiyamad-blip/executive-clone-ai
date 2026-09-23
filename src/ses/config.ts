@@ -371,9 +371,30 @@ export function repairModel(): string {
   return envStr('ANTHROPIC_MODEL_REPAIR', matchModel());
 }
 
-// 抽出用モデル（全メール最多コール。既定Haiku）
-export function extractModel(): string {
+// 設定された抽出用モデル（全メール最多コール。既定Haiku）
+export function configuredExtractModel(): string {
   return envStr('ANTHROPIC_MODEL_EXTRACT', 'claude-haiku-4-5');
+}
+
+// 設定された抽出用モデルが退役・提供終了で使えないと分かった後は、このプロセスの残りを判定用モデルで代替する
+// （extractModelFallback.ts が切り替える。費用は増えるが抽出を止めない）
+let extractFallbackActive = false;
+
+export function activateExtractModelFallback(): void {
+  extractFallbackActive = true;
+}
+
+export function extractModelFallbackActive(): boolean {
+  return extractFallbackActive;
+}
+
+export function resetExtractModelFallback(): void {
+  extractFallbackActive = false;
+}
+
+// 抽出に使うモデル（代替中なら判定用モデル）
+export function extractModel(): string {
+  return extractFallbackActive ? matchModel() : configuredExtractModel();
 }
 
 // 最終判定・メール生成用モデル（候補ペアのみ。既定Sonnet）

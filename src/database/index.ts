@@ -1,6 +1,7 @@
 import { Client } from '@notionhq/client';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { normalizeSkills } from '../ses/skillDict.js';
+import { toInitials } from '../ses/pii.js';
 import {
   dbProvider,
   notionProjectDbId,
@@ -345,6 +346,10 @@ export async function saveProject(project: Project): Promise<string> {
   };
   const startDate = dateOnly(project.startDate);
   if (startDate) properties['開始日'] = { date: { start: startDate } };
+  // 指示混入疑いの列を追加できない（権限不足等）ときは書かずに保存する（保存そのものを失敗させない）
+  if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
+    properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(project.injectionSuspected ? 'あり' : '') };
+  }
   return upsertByStableId(
     dataSourceId,
     '案件ID',
@@ -379,6 +384,9 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
   };
   const availableFrom = dateOnly(engineer.availableFrom);
   if (availableFrom) properties['稼働開始可能日'] = { date: { start: availableFrom } };
+  if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
+    properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(engineer.injectionSuspected ? 'あり' : '') };
+  }
   return upsertByStableId(
     dataSourceId,
     '要員ID',
@@ -607,6 +615,7 @@ function projectFromPage(page: unknown): Project {
     receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
     status: readSelect(props['ステータス']) === '終了' ? 'closed' : 'open',
     notionPageId: p.id,
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -617,7 +626,8 @@ function engineerFromPage(page: unknown): Engineer {
   const agentInfo = parseAgentInfo(readRichText(props['営業元']));
   return {
     id: readRichText(props['要員ID']) || p.id,
-    displayName: readTitle(props['表示名']),
+    // 以前の版で保存したフルネーム・人が手で入れた氏名も、読み出しの時点でイニシャルだけにする
+    displayName: toInitials(readTitle(props['表示名'])),
     age: null,
     skills: normalizeSkills(readMultiSelect(props['スキル'])),
     experienceYears: readNumber(props['経験年数']) ?? null,
@@ -637,6 +647,7 @@ function engineerFromPage(page: unknown): Engineer {
     receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
     status: readSelect(props['ステータス']) === '決定済' ? 'assigned' : 'available',
     notionPageId: p.id,
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) ? { injectionSuspected: true } : {}),
   };
 }
 

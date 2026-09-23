@@ -3,15 +3,23 @@
 // 「修復のために追加で使った分」だけを inHealScope() の前後差分で計上する。
 // 前提: SESバッチのLLM呼び出しは逐次実行（並行呼び出しがあると差分帰属が崩れる）。
 import { totalLlmCostJpy } from '../../llm/pricing.js';
+import { getLlmUsageLog, type LlmUsage } from '../../llm/usage.js';
 import { healBudgetJpy } from '../config.js';
 
 let batchStartCostJpy = 0;
+let batchStartUsageIndex = 0;
 let healSpent = 0;
 
 // バッチ冒頭で呼ぶ（コスト集計と修復消費をリセット）
 export function startHealBatch(): void {
   batchStartCostJpy = totalLlmCostJpy();
+  batchStartUsageIndex = getLlmUsageLog().length;
   healSpent = 0;
+}
+
+// このバッチのLLM呼び出しごとの使用量（キャッシュ読込率の集計用）
+export function batchUsage(): readonly LlmUsage[] {
+  return getLlmUsageLog().slice(batchStartUsageIndex);
 }
 
 // このバッチで使ったLLMコスト概算（修復以外も含む全体）

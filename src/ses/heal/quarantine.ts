@@ -8,6 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { healDataDir, healMaxAttempts, durableStateInSheets } from '../config.js';
 import { safeErr } from '../redact.js';
+import { maskPii } from '../pii.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, STATE_JSON_MAX_CHARS } from '../../database/sheets.js';
 import type { SesRawMail } from '../../types/index.js';
 
@@ -92,16 +93,6 @@ async function save(input: QuarantineEntry[]): Promise<void> {
   } catch (err) {
     console.warn(`SES修復: 隔離リストの保存に失敗: ${safeErr(err)}`);
   }
-}
-
-// メールアドレス・電話番号らしき並びをマスクする（診断ログ・repairプロンプトに載せる前に必ず通す）。
-// 全角（０９０−…）・括弧（03(1234)5678）・区切りなし（09012345678）・+81 表記も拾えるよう先に NFKC で正規化する
-export function maskPii(s: string): string {
-  return s
-    .normalize('NFKC')
-    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<メールアドレス>')
-    .replace(/(?<![\d])(?:\+81[\s-]?\(?0?\)?|0)\d{1,4}[\s-]*\(?[\s-]*\d{1,4}[\s-]*\)?[\s-]*\d{3,4}(?![\d])/g, '<電話番号>')
-    .replace(/(?<![\d])0\d{9,10}(?![\d])/g, '<電話番号>');
 }
 
 // 送信者はドメインだけを残す（表示名の氏名やローカル部を隔離リスト・修復レポートに持ち込まない）

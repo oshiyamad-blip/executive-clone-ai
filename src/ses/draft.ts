@@ -13,7 +13,8 @@ import { isDemo, matchModel, demoDataDir } from './config.js';
 import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
 import { redactable, safeErr } from './redact.js';
-import { recordHealEvent } from './heal/events.js';
+import { recordHealEvent, recordStat } from './heal/events.js';
+import { hasKnownInitials } from './pii.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
@@ -255,6 +256,7 @@ export async function createDrafts(
         ? createDemoDraftPair(project, engineer, match)
         : await createProdDraftPair(project, engineer, match, counts);
       if (isDemo()) demoRecords.push({ matchId: match.id, title: match.title, draftToProject, draftToEngineer });
+      recordStat('draftsCreated', 2);
       return { ...match, draftToProject, draftToEngineer };
     } catch (err) {
       console.error(`SES下書き: 生成に失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
@@ -294,6 +296,13 @@ export async function createDrafts(
 
 type Side = 'project' | 'engineer';
 
+// イニシャルを決められなかった要員は、文面に差し込みの表記を入れて送信前に記入してもらう（氏名で補わない）
+export const MISSING_ENGINEER_INITIALS = '《要員のイニシャルを記入》';
+
+function engineerLabel(engineer: Engineer): string {
+  return hasKnownInitials(engineer.displayName) ? engineer.displayName : MISSING_ENGINEER_INITIALS;
+}
+
 interface RecipientView {
   addressee: string; // 宛名の担当者名
   intro: string;
@@ -311,7 +320,7 @@ function recipientView(side: Side, project: Project, engineer: Engineer, match: 
       intro: `貴社ご案内の案件「${project.title}」につきまして、以下の要員をご提案いたします。`,
       heading: '■ご提案要員',
       lines: [
-        ['表示名', engineer.displayName],
+        ['表示名', engineerLabel(engineer)],
         ['スキル', engineer.skills.join('、') || '（記載なし）'],
         ['経験年数', engineer.experienceYears !== null ? `${engineer.experienceYears}年` : '（記載なし）'],
         ['稼働開始可能日', engineer.availableDate || '別途ご相談'],
@@ -326,7 +335,7 @@ function recipientView(side: Side, project: Project, engineer: Engineer, match: 
   }
   return {
     addressee: engineer.agentContact || 'ご担当',
-    intro: `貴社ご登録の要員「${engineer.displayName}」様に合う案件がございますので、ご紹介いたします。`,
+    intro: `貴社ご登録の要員「${engineerLabel(engineer)}」様に合う案件がございますので、ご紹介いたします。`,
     heading: '■ご紹介案件',
     lines: [
       ['案件名', project.title],
@@ -386,11 +395,11 @@ function remoteLabel(r: RemoteOption): string {
 }
 
 function subjectToProject(project: Project, engineer: Engineer): string {
-  return `【ご提案】${engineer.displayName}様のご紹介 - ${project.title}`;
+  return `【ご提案】${engineerLabel(engineer)}様のご紹介 - ${project.title}`;
 }
 
 function subjectToEngineer(project: Project, engineer: Engineer): string {
-  return `【ご紹介】${project.title} - ${engineer.displayName}様向け`;
+  return `【ご紹介】${project.title} - ${engineerLabel(engineer)}様向け`;
 }
 
 // ---------- 本番（Sonnet 5生成 → 全員に返信の下書き内容を用意） ----------
@@ -522,5 +531,7 @@ export function disclosureIssues(
   const margins = [match.grossMarginJpy / 10000, n ? n.resultingGrossMarginJpy / 10000 : 0].filter((m) => m >= 1 && m !== offered);
   if (/粗利|マージン|利益率/.test(text) || margins.some((m) => mentionsAmount(text, m))) issues.push('粗利');
   if (/https?:\/\/|www\./i.test(text)) issues.push('URL');
+  // 文面の材料にメールアドレスは無い（宛先はヘッダで指定する）ため、本文に現れたら外への誘導とみなす
+  if (/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.test(text)) issues.push('メールアドレス');
   return issues;
 }

@@ -28,6 +28,7 @@ import { recordHealEvent } from './heal/events.js';
 import { redactable, safeErr } from './redact.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
 import { jstDateOf } from './dates.js';
+import { INJECTION_REVIEW_REASON, INJECTION_CAUTION } from './injection.js';
 import {
   AGING_DAYS,
   allocateWithCaps,
@@ -93,6 +94,8 @@ export interface PrimarySelectStats {
   alreadyJudged: number; // 候補に残ったが判定済みのため判定しない組
   selected: number; // 最終判定に回す組
   reasons: Record<PrimaryReasonCode, number>;
+  projectsConsidered: number; // 突合前（または全件突合で対象）の募集中案件の数
+  projectsWithoutCandidates: number; // うちルールを通る要員が1人もいなかった案件の数（候補0件）
 }
 
 function emptyPrimaryStats(): PrimarySelectStats {
@@ -105,6 +108,8 @@ function emptyPrimaryStats(): PrimarySelectStats {
     alreadyJudged: 0,
     selected: 0,
     reasons: Object.fromEntries(PRIMARY_REASON_CODES.map((c) => [c, 0])) as Record<PrimaryReasonCode, number>,
+    projectsConsidered: 0,
+    projectsWithoutCandidates: 0,
   };
 }
 
@@ -127,6 +132,8 @@ function addToTally(s: PrimarySelectStats): void {
   primaryTally.capped += s.capped;
   primaryTally.alreadyJudged += s.alreadyJudged;
   primaryTally.selected += s.selected;
+  primaryTally.projectsConsidered += s.projectsConsidered;
+  primaryTally.projectsWithoutCandidates += s.projectsWithoutCandidates;
   for (const c of PRIMARY_REASON_CODES) primaryTally.reasons[c] += s.reasons[c];
 }
 
@@ -216,6 +223,7 @@ export function primarySelectDetailed(
   const passed: MatchPair[] = [];
   for (const project of openProjects) {
     const projectIsNew = !scope || scope.newProjectIds.has(project.id);
+    let projectPassed = 0;
     for (const engineer of availableEngineers) {
       if (!projectIsNew && !scope!.newEngineerIds.has(engineer.id)) continue; // どちらも突合済みの組
       stats.evaluated += 1;
@@ -226,6 +234,7 @@ export function primarySelectDetailed(
       }
       if (r.staleDemoted) stats.reasons.stale += 1;
       stats.passed += 1;
+      projectPassed += 1;
       // 再提案抑制は上限の割り当ての前に行う（抑制した組が枠を使い、次点の組を押し出さないように）
       const verdict = opts.suppression?.check(project, engineer) ?? { kind: 'none' };
       if (verdict.kind === 'suppress') {
@@ -238,6 +247,11 @@ export function primarySelectDetailed(
         r.pair.breakdown.notes.push('以前見送り');
       }
       passed.push(r.pair);
+    }
+    // 候補0件の案件の割合（メトリクス）は、この回に突合した案件だけで数える（再提案抑制で外れた組も候補に数える）
+    if (projectIsNew) {
+      stats.projectsConsidered += 1;
+      if (projectPassed === 0) stats.projectsWithoutCandidates += 1;
     }
   }
   const allocated = allocateWithCaps([...passed].sort(comparePairs), [
@@ -348,7 +362,13 @@ function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomain
     negotiation = proposal;
   }
 
-  // 7. 鮮度。受信から日数が経った案件・要員は募集・稼働の状況が変わっている恐れがあるため、
+  // 7. メールにAIへの指示らしき記載がある案件・要員の組は、AI判定・自動の下書きに回さず人が確かめる（要確認）
+  if (project.injectionSuspected || engineer.injectionSuspected) {
+    reviewReasons.push(INJECTION_REVIEW_REASON);
+    cautions.push(INJECTION_CAUTION);
+  }
+
+  // 8. 鮮度。受信から日数が経った案件・要員は募集・稼働の状況が変わっている恐れがあるため、
   // SES_STALE_DAYS 超は強マッチにせず要再確認を付け、14日超は並びを少し下げる
   const projectFreshness = freshnessOf(project.receivedAt, now);
   const engineerFreshness = freshnessOf(engineer.receivedAt, now);
@@ -534,10 +554,12 @@ export interface JudgeTally {
   deferredBudget: number; // 予算に達して次回に回した組
   deferredError: number; // 一時的な失敗で次回に回した組
   failed: number; // 判定に失敗し、下書きを作らず参考提案として扱った組
+  scoreSum: number; // AI判定した組のスコアの合計（平均点のため）
+  demoted: number; // 基準未満のため成立候補・交渉提案から参考提案に下げた組（ゲート降格）
 }
 
 function emptyJudgeTally(): JudgeTally {
-  return { judged: 0, low: 0, rejected: 0, deferredBudget: 0, deferredError: 0, failed: 0 };
+  return { judged: 0, low: 0, rejected: 0, deferredBudget: 0, deferredError: 0, failed: 0, scoreSum: 0, demoted: 0 };
 }
 
 let judgeTally = emptyJudgeTally();
@@ -559,6 +581,8 @@ export function reportJudgeTally(since: JudgeTally = emptyJudgeTally()): void {
     deferredBudget: judgeTally.deferredBudget - since.deferredBudget,
     deferredError: judgeTally.deferredError - since.deferredError,
     failed: judgeTally.failed - since.failed,
+    scoreSum: judgeTally.scoreSum - since.scoreSum,
+    demoted: judgeTally.demoted - since.demoted,
   };
   if (t.judged + t.deferredBudget + t.deferredError + t.failed > 0) {
     console.log(
@@ -580,9 +604,13 @@ export function reportJudgeTally(since: JudgeTally = emptyJudgeTally()): void {
   }
 }
 
-function countVerdict(result: MatchResult): void {
-  if (result.verdict === 'passed' || result.verdict === 'low' || result.verdict === 'rejected') judgeTally.judged += 1;
+function countVerdict(result: MatchResult, before: MatchCategory): void {
+  if (result.verdict === 'passed' || result.verdict === 'low' || result.verdict === 'rejected') {
+    judgeTally.judged += 1;
+    judgeTally.scoreSum += result.score;
+  }
   if (result.verdict === 'low') judgeTally.low += 1;
+  if (result.verdict === 'low' && result.category !== before) judgeTally.demoted += 1;
   if (result.verdict === 'rejected') judgeTally.rejected += 1;
 }
 
@@ -613,7 +641,7 @@ async function judgeOne(pair: MatchPair, fewShot: string, budget: JudgeBudget | 
   // demo は外部を呼ばず、決定的な代用判定で本番と同じ関門を通す
   if (isDemo()) {
     const result = finishJudgement(pair, demoJudgment(pair));
-    countVerdict(result);
+    countVerdict(result, categoryOf(pair));
     return result;
   }
   if (budgetExhausted(budget)) {
@@ -622,7 +650,7 @@ async function judgeOne(pair: MatchPair, fewShot: string, budget: JudgeBudget | 
   }
   try {
     const result = finishJudgement(pair, await judgeWithLlm(pair, fewShot));
-    countVerdict(result);
+    countVerdict(result, categoryOf(pair));
     return result;
   } catch (err) {
     console.error(

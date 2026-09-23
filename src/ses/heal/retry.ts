@@ -9,7 +9,7 @@ import { isTruncationError } from '../../llm/index.js';
 import { healRemainingJpy, inHealScope } from './budget.js';
 import { pastRunDeadline } from '../schedule.js';
 import { recordHealEvent, recordStat } from './events.js';
-import { maskPii } from './quarantine.js';
+import { maskPii } from '../pii.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

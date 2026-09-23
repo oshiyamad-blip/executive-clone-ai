@@ -71,6 +71,7 @@ import {
   invalidAddressCount,
   inspectServiceAccountJson,
 } from './settingsFormat.js';
+import { retirementNotice } from '../llm/modelLifecycle.js';
 
 let errors = 0;
 let warnings = 0;
@@ -251,6 +252,22 @@ function checkLlm(): void {
     bad('LLM_PROVIDER の値が正しくありません（anthropic または gemini）');
   }
   info(`モデル: 抽出 ${extractModel()} / 最終判定・紹介文面 ${matchModel()}`);
+  if (provider === 'anthropic') {
+    noteRetirement('抽出', 'ANTHROPIC_MODEL_EXTRACT', extractModel(), '退役後は、その実行の抽出を判定用モデルで代替して続けます（費用が増えます）。');
+    noteRetirement('最終判定・紹介文面', 'ANTHROPIC_MODEL_MATCH', matchModel(), '');
+  }
+}
+
+// 公表された退役予定（llm/modelLifecycle.ts）。近づいたら ⚠️、まだ先なら案内だけ
+function noteRetirement(label: string, envName: string, model: string, consequence: string): void {
+  const r = retirementNotice(model);
+  if (!r) return;
+  const when = r.daysLeft >= 0 ? `あと${r.daysLeft}日` : `予定日を${-r.daysLeft}日過ぎています`;
+  const message =
+    `${label}のモデル ${model} は、Anthropic の公表で ${r.notBefore} より後に退役する予定です（${when}）。${consequence}` +
+    `後継のモデルに切り替えるときは ${envName}（GitHub Actions では Variables）を変更してください`;
+  if (r.soon) warn(message);
+  else info(message);
 }
 
 function checkDatabase(): void {

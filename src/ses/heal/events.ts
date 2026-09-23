@@ -26,6 +26,16 @@ export interface BatchStats {
   budgetExhausted: number;
   skillTokens: number; // 抽出したスキル語の数（人名・社名らしい語を除く）
   unknownSkillTokens: number; // うち辞書に無い語の数（辞書拡充の指標）
+  // 抽出品質（バッチのメトリクス。件数だけ）
+  extractedProjects: number;
+  extractedEngineers: number;
+  projectRateNull: number; // 単金（下限・上限とも）が不明の案件
+  projectStartNull: number; // 開始日が不明の案件
+  requiredSkillsEmpty: number; // 必須スキルが空の案件
+  prefectureChecked: number; // 都道府県を推定すべき案件（フルリモートを除く）・要員
+  prefectureNull: number; // うち都道府県が不明
+  engineerRateNull: number; // 希望単金が不明の要員
+  draftsCreated: number; // 用意した紹介文面（下書き）の通数
 }
 
 let events: HealEvent[] = [];
@@ -42,6 +52,15 @@ function emptyStats(): BatchStats {
     budgetExhausted: 0,
     skillTokens: 0,
     unknownSkillTokens: 0,
+    extractedProjects: 0,
+    extractedEngineers: 0,
+    projectRateNull: 0,
+    projectStartNull: 0,
+    requiredSkillsEmpty: 0,
+    prefectureChecked: 0,
+    prefectureNull: 0,
+    engineerRateNull: 0,
+    draftsCreated: 0,
   };
 }
 
@@ -106,6 +125,7 @@ export interface LastBatchDiagnosis {
   events: HealEvent[];
   batchCostJpy: number;
   healSpentJpy: number;
+  metrics?: Record<string, unknown>; // バッチのメトリクス（件数・比率だけ）
 }
 
 function diagnosisPath(): string {
@@ -121,8 +141,9 @@ export function readLastBatchDiagnosis(): LastBatchDiagnosis | null {
   }
 }
 
-// 診断レポート（サマリメール末尾用の日本語ブロック）を生成し、JSONも書き残す
-export async function buildDiagnosisReport(): Promise<string> {
+// 診断レポート（サマリメール末尾用の日本語ブロック）を生成し、JSONも書き残す。
+// metrics はバッチのメトリクス（batchMetrics.ts。件数・比率だけ）の表示行と値
+export async function buildDiagnosisReport(metrics?: { lines: string[]; values: Record<string, unknown> }): Promise<string> {
   await detectAnomalies();
 
   const cost = batchCostJpy();
@@ -145,6 +166,7 @@ export async function buildDiagnosisReport(): Promise<string> {
       lines.push(`${e.severity === 'critical' ? '【重大】' : '【注意】'}${e.message}${e.detail ? `（${e.detail}）` : ''}`);
     }
   }
+  if (metrics && metrics.lines.length > 0) lines.push('', ...metrics.lines);
 
   // repair（パッチ案生成）の入力として書き残す
   try {
@@ -156,6 +178,7 @@ export async function buildDiagnosisReport(): Promise<string> {
       events,
       batchCostJpy: cost,
       healSpentJpy: heal,
+      ...(metrics ? { metrics: metrics.values } : {}),
     };
     writeFileSync(diagnosisPath(), JSON.stringify(diagnosis, null, 2), 'utf-8');
   } catch (err) {

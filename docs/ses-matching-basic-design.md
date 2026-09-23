@@ -248,7 +248,7 @@ export function skillMatchThreshold(): number;     // 既定 0.6
 export function hourlyToMonthlyHours(): number;    // 既定 160
 export function sesTargetGmail(): string;          // 既定 ''
 export function sesNotifyTo(): string;             // 既定 ''
-export function extractModel(): string;            // ANTHROPIC_MODEL_EXTRACT ?? 'claude-haiku-4-5'
+export function extractModel(): string;            // ANTHROPIC_MODEL_EXTRACT ?? 'claude-haiku-4-5'（退役等で使えないと分かった後は matchModel()）
 export function matchModel(): string;              // ANTHROPIC_MODEL_MATCH ?? 'claude-sonnet-5'
 export function notionProjectDbId(): string;
 export function notionEngineerDbId(): string;
@@ -428,7 +428,10 @@ await generateText(DRAFT_SYSTEM, messages, { model: matchModel() });
 | `ANTHROPIC_MODEL_EXTRACT` | `claude-haiku-4-5` | `extractModel()` → extract |
 | `ANTHROPIC_MODEL_MATCH` | `claude-sonnet-5` | `matchModel()` → match最終判定・draft |
 
-抽出精度が不足した場合は `ANTHROPIC_MODEL_EXTRACT` を Sonnet に差し替えるだけで検証できる（要件定義 §7.1）。Gemini プロバイダ利用時（`LLM_PROVIDER=gemini`）は `model` 引数が Gemini モデルIDとして解釈されるため、SESで段階別を使う場合は Anthropic プロバイダを推奨（設計上は両対応、実運用はAnthropic前提）。
+抽出精度が不足した場合は `ANTHROPIC_MODEL_EXTRACT` を Sonnet に差し替えるだけで検証できる（要件定義 §7.1）。
+抽出モデルをAPIが「存在しない（404 not_found_error: model）・退役した」と返した場合は、`src/ses/extractModelFallback.ts` が
+そのプロセスの残りの抽出を `matchModel()` に切り替え、診断レポートに「抽出モデルが利用できないため判定モデルで代替（費用増）」を載せる
+（Haiku 4.5 は 2026-10-15 より後に退役予定。公表された退役予定は `src/llm/modelLifecycle.ts`、事前確認・doctor が表示する）。Gemini プロバイダ利用時（`LLM_PROVIDER=gemini`）は `model` 引数が Gemini モデルIDとして解釈されるため、SESで段階別を使う場合は Anthropic プロバイダを推奨（設計上は両対応、実運用はAnthropic前提）。
 
 ---
 

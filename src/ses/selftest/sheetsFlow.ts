@@ -21,6 +21,9 @@ import {
   DRAFT_REQUEST_COLUMNS,
   MATCHED_COLUMN,
   JUDGE_COLUMN,
+  INJECTION_COLUMN,
+  METRICS_TAB,
+  METRICS_COLUMNS,
   RETIRED_PROPER_VERDICT,
   properEngineerIdOf,
   acquireBatchLeaseSheets,
@@ -61,6 +64,7 @@ import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotif
 import { buildReplyRef } from '../draft.js';
 import { matchIdOf, __setMatchJudgeForTest } from '../match.js';
 import { loadSuppressionIndex } from '../suppress.js';
+import { INJECTION_REVIEW_REASON } from '../injection.js';
 import { recordFeedback } from '../feedback.js';
 import { recordLlmUsage } from '../../llm/usage.js';
 import { SafeLogError } from '../redact.js';
@@ -353,7 +357,7 @@ const OLD_PROJECT_HEADER = [
   '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
   '元メールID', '返信メタ', '受信日', 'ステータス',
 ];
-const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN];
+const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN, INJECTION_COLUMN];
 const ENGINEER_HEADER = [
   'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
   '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス',
@@ -362,7 +366,7 @@ const OLD_MATCH_HEADER = [
   'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
   '案件側下書きURL', '要員側下書きURL', 'ステータス', '検出日時',
 ];
-const ALL_TABS = ['案件', '要員', 'マッチ', '自社社員', '評価', 'スキル同義', '処理済みメール', '_状態', PROPER_CANDIDATE_TAB];
+const ALL_TABS = ['案件', '要員', 'マッチ', '自社社員', '評価', 'スキル同義', '処理済みメール', '_状態', METRICS_TAB, PROPER_CANDIDATE_TAB];
 
 const STAMP = /^作成済 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
 
@@ -393,7 +397,7 @@ async function testTabsAndHeaders(): Promise<void> {
   check('ヘッダー移行で既存の行を変えない', legacy?.['ステータス'] === '紹介済' && legacy?.['判定根拠'] === '旧根拠');
   check(
     '人が定義の後ろに足した列はそのまま残し、増えた定義の列はその後ろに追記する',
-    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN, '年齢', '稼働率']),
+    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN, '年齢', '稼働率', INJECTION_COLUMN]),
     sheets.header(SES_BOOK, '要員').join(','),
   );
   check(
@@ -525,9 +529,11 @@ async function testJudgeGateAndSuppression(): Promise<void> {
   sheets.createBook(JUDGE_BOOK);
   process.env.SHEETS_DB_SPREADSHEET_ID = JUDGE_BOOK;
   const calls: string[] = [];
+  const judgedProjects: string[] = [];
   // 偽のAI判定: eng_gate_ng は即NG（年齢）、それ以外は通過。1回あたり約1.6円を使ったことにする
   __setMatchJudgeForTest(async (pair) => {
     calls.push(pair.engineer.id);
+    judgedProjects.push(pair.project.id);
     recordLlmUsage('claude-sonnet-5', 5000, 0);
     return pair.engineer.id === 'eng_gate_ng'
       ? { score: 30, reason: '年齢の上限を超えています', dealBreakers: ['age'], questions: [] }
@@ -662,6 +668,31 @@ async function testJudgeGateAndSuppression(): Promise<void> {
       r4.primaryStats.resuggested === 2 && changed.includes('以前「見送り」にした組の再送です（希望単金 50→45万円）') &&
         (row('proj_budget', 'eng_gate_ok3')?.['判定根拠'] ?? '').includes('以前評価で「ズレ」にした組の再送です'),
       changed,
+    );
+
+    // 5回目: AIへの指示らしき記載のあるメールの案件（印を保存して読み戻す）の組は要確認（AI判定・下書きなし）。
+    // 以前の版で保存したフルネームの表示名は、読み出しの時点でイニシャルにする
+    newRun();
+    await saveProject({ ...gateProject('proj_inject'), injectionSuspected: true });
+    await saveEngineer(gateEngineer('eng_fullname', 'Yamada Taro', { agentEmail: 'hachiro@iota-gate.example.jp' }));
+    await saveEngineer(gateEngineer('eng_kanji', '山田太郎', { agentEmail: 'hachiro@kappa-gate.example.jp' }));
+    calls.length = 0;
+    const fifth = await load();
+    const injected = fifth.projects.find((p) => p.id === 'proj_inject');
+    const names = ['eng_fullname', 'eng_kanji'].map((id) => fifth.engineers.find((e) => e.id === id)?.displayName);
+    check(
+      '指示混入疑いの印を保存して読み戻し、フルネームの表示名はイニシャル（決められなければ「（イニシャル不明）」）で読む',
+      injected?.injectionSuspected === true && sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_inject')?.[INJECTION_COLUMN] === 'あり' &&
+        names[0] === 'Y.T.' && names[1] === '（イニシャル不明）',
+      JSON.stringify([injected?.injectionSuspected, names]),
+    );
+    await matchIncrementally(fifth.projects, fifth.engineers, fifth.scope);
+    const injectedRows = sheets.records(JUDGE_BOOK, 'マッチ').filter((r) => r['案件ID'] === 'proj_inject');
+    check(
+      '指示混入疑いの案件の組は要確認（判定「ルールのみ」・下書き不要・根拠に理由）で、AI判定を呼ばない',
+      injectedRows.length > 0 && !judgedProjects.includes('proj_inject') &&
+        injectedRows.every((r) => r[JUDGE_COLUMN] === 'ルールのみ' && r['案件側下書き状態'] === '不要' && r['判定根拠'].includes(INJECTION_REVIEW_REASON)),
+      JSON.stringify(injectedRows.map((r) => [r[JUDGE_COLUMN], r['案件側下書き状態']])),
     );
   } finally {
     __setMatchJudgeForTest(null);
@@ -1227,7 +1258,7 @@ async function testHeaderByName(): Promise<void> {
     const savedRow = sheets.record(CONFLICT_BOOK, '案件', 'ID', p1.id);
     check(
       '途中にメモ列のある案件タブにも、定義の列へ正しく保存する（増えた列は右端に追記）',
-      header[header.length - 1] === MATCHED_COLUMN && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
+      header.slice(-2).join(',') === `${MATCHED_COLUMN},${INJECTION_COLUMN}` && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
       header.join(','),
     );
     const read = await fetchOpenProjects(10);
@@ -1727,6 +1758,16 @@ async function testRedaction(): Promise<void> {
   check('秘匿モードでもエラーの種別は出す', /Error/.test(out));
   const summary = mail.sent.slice(sentBefore).find((m) => m.to === `boss@${OWN_DOMAIN}`);
   check('詳細（案件名・プロパー氏名）は非公開のサマリメールに載せる', Boolean(summary) && summary!.body.includes(p1.title) && summary!.body.includes('山田太郎'));
+  const metricsRows = sheets.records(SES_BOOK, METRICS_TAB);
+  const metricsText = JSON.stringify(metricsRows);
+  check(
+    'バッチごとに「メトリクス」タブへ1行追記する（件数・比率だけ。氏名・案件名・アドレスを含まない）',
+    metricsRows.length > 0 && JSON.stringify(sheets.header(SES_BOOK, METRICS_TAB)) === JSON.stringify(METRICS_COLUMNS) &&
+      metricsRows.every((r) => r['モード'] === '通常' && /^\{"skill":\d+/.test(r['除外理由内訳(JSON)'])) &&
+      !SENSITIVE.some((w) => w && metricsText.includes(w)),
+    metricsText.slice(0, 300),
+  );
+  check('サマリメールの診断レポートに同じメトリクスを載せる', Boolean(summary) && summary!.body.includes('【バッチのメトリクス（件数・比率のみ）】'));
 
   // 比較: 秘匿を解除すると同じ処理で案件名が出る（検査がログを捕まえていることの確認）
   process.env.SES_LOG_REDACT = 'false';

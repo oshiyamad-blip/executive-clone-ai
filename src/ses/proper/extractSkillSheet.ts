@@ -4,6 +4,7 @@
 import { generateJsonWithDocuments } from '../../llm/index.js';
 import type { HealAttempt } from '../heal/retry.js';
 import { isDemo, extractModel } from '../config.js';
+import { withExtractModelFallback } from '../extractModelFallback.js';
 import { normalizeSkills } from '../skillDict.js';
 import { tallySkillTokens } from '../skillStats.js';
 import { normalizePrefecture } from '../prefecture.js';
@@ -106,29 +107,28 @@ export async function extractSkillSheet(content: SkillSheetContent, attempt?: He
   if (isDemo()) throw new SafeLogError('プロパー: demoではスキルシートの抽出を行いません');
   const maxTokens = 4000 * (attempt?.maxTokensFactor ?? 1);
   // 出力量に応じた待ち時間（SDKの既定の10分×再試行で、実行の期限・ジョブの制限時間を越えないように）
-  const opts = {
-    model: attempt?.model ?? extractModel(),
-    maxTokens,
-    ...callLimits(60_000 + maxTokens * 15, attempt ? attempt.sdkRetries : 1),
-  };
+  const limits = callLimits(60_000 + maxTokens * 15, attempt ? attempt.sdkRetries : 1);
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const system = systemPrompt(todayJst);
-  const raw =
-    content.kind === 'pdf'
-      ? await generateJsonWithDocuments<RawSkillSheet>(
+  // 抽出モデルが退役・提供終了で使えなければ、判定用モデルに切り替えて呼び直す（extractModelFallback.ts）
+  const raw = await withExtractModelFallback(attempt?.model ?? extractModel(), (model) => {
+    const opts = { model, maxTokens, ...limits };
+    return content.kind === 'pdf'
+      ? generateJsonWithDocuments<RawSkillSheet>(
           system,
           '添付のスキルシートから項目を抽出してください。',
           SKILL_SHEET_SCHEMA,
           [{ mediaType: 'application/pdf', dataBase64: content.base64 }],
           opts,
         )
-      : await generateJsonWithDocuments<RawSkillSheet>(
+      : generateJsonWithDocuments<RawSkillSheet>(
           system,
           `以下のスキルシートから項目を抽出してください。\n\n${content.text}`,
           SKILL_SHEET_SCHEMA,
           [],
           opts,
         );
+  });
 
   const exp = raw.experienceYears;
   const rate = raw.desiredRateMan;

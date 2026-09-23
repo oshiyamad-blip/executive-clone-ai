@@ -16,6 +16,7 @@ import { redactable, safeErr } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
 import { primarySelectTally, DEAL_BREAKER_CODES, DEAL_BREAKER_LABEL } from './match.js';
+import { collectBatchMetrics, recordBatchMetrics, formatMetricsLines, metricsRowValues } from './batchMetrics.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -42,15 +43,19 @@ export async function notifyResults(
 ): Promise<NotifyOutcome> {
   // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
   writeReviewMatches(saved);
+  // バッチのメトリクス（件数・比率だけ）。しきい値の警告が診断レポートに載るよう、レポートを作る前に記録する
+  const metrics = collectBatchMetrics({ requestedDrafts: requestedDrafts.created });
+  await recordBatchMetrics(metrics);
+  const metricsLines = formatMetricsLines(metrics);
   // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
   const base = buildSummary(saved, requestedDrafts, carried);
   let summary = `${base}\n${properSummaryLines(proper, true).join('\n')}`;
   const consoleSummary = `${base}\n${properSummaryLines(proper, false).join('\n')}`;
-  // 本番のみ、自動検証・修復の診断レポートをサマリ末尾に添える（コスト概算・異常検知・隔離状況）
+  // 本番のみ、自動検証・修復の診断レポート（コスト概算・異常検知・隔離状況・メトリクス）をサマリ末尾に添える
   if (!isDemo()) {
-    summary = `${summary}\n${await buildDiagnosisReport()}`;
+    summary = `${summary}\n${await buildDiagnosisReport({ lines: metricsLines, values: metricsRowValues(metrics) })}`;
   }
-  return notifySummary(summary, consoleSummary, countLine(saved, proper));
+  return notifySummary(summary, consoleSummary, countLine(saved, proper), metricsLines);
 }
 
 // ===== サマリで知らせ損ねたマッチの持ち越し（Sheets運用の本番のみ） =====
@@ -315,9 +320,11 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   return lines.join('\n');
 }
 
-async function notifySummary(summary: string, consoleSummary: string, counts: string): Promise<NotifyOutcome> {
+// metricsLines は件数・比率だけの行（秘匿モードのコンソールにも出してよい）
+async function notifySummary(summary: string, consoleSummary: string, counts: string, metricsLines: string[] = []): Promise<NotifyOutcome> {
   if (logRedact()) console.log(`SES通知: 結果 ${counts}（詳細はサマリメールを参照）`);
   else console.log(`\n${consoleSummary}\n`);
+  if (metricsLines.length > 0) console.log(`${metricsLines.join('\n')}\n`);
   if (isDemo()) return 'skipped'; // demoはコンソール出力のみ
 
   const to = sesNotifyTo();
