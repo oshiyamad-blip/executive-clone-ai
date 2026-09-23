@@ -12,6 +12,7 @@ import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
 import { redactable, safeErr } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
+import { properSummaryLines, type ProperRunResult } from './proper/index.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -19,6 +20,7 @@ export async function persistAndNotify(
   projects: Project[],
   engineers: Engineer[],
   requestedDrafts: PendingDraftResult = { created: 0, failed: 0 },
+  proper: ProperRunResult | null = null,
 ): Promise<void> {
   const projectPageIds = new Map(projects.map((p) => [p.id, p.notionPageId]));
   const engineerPageIds = new Map(engineers.map((e) => [e.id, e.notionPageId]));
@@ -26,12 +28,15 @@ export async function persistAndNotify(
   const saved = await persistMatches(matches, projectPageIds, engineerPageIds);
   // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
   writeReviewMatches(saved);
-  let summary = buildSummary(saved, requestedDrafts);
+  // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
+  const base = buildSummary(saved, requestedDrafts);
+  let summary = `${base}\n${properSummaryLines(proper, true).join('\n')}`;
+  const consoleSummary = `${base}\n${properSummaryLines(proper, false).join('\n')}`;
   // 本番のみ、自動検証・修復の診断レポートをサマリ末尾に添える（コスト概算・異常検知・隔離状況）
   if (!isDemo()) {
     summary = `${summary}\n${await buildDiagnosisReport()}`;
   }
-  await notifySummary(summary, countLine(saved));
+  await notifySummary(summary, consoleSummary, countLine(saved, proper));
 }
 
 async function persistMatches(
@@ -60,9 +65,10 @@ async function persistMatches(
 }
 
 // 区分ごとの件数（サマリ本文とログ秘匿モードのコンソール出力で共用。人名・案件名を含まない）
-function countLine(matches: MatchResult[]): string {
+function countLine(matches: MatchResult[], proper: ProperRunResult | null = null): string {
   const count = (category: MatchResult['category']) => matches.filter((m) => m.category === category).length;
-  return `成立候補: ${count('confirmed')}件 / 交渉提案: ${count('negotiable')}件 / 参考提案: ${count('tentative')}件 / 要確認: ${count('review')}件`;
+  const properCount = proper ? ` / プロパー候補: ${proper.candidates.length}件` : '';
+  return `成立候補: ${count('confirmed')}件 / 交渉提案: ${count('negotiable')}件 / 参考提案: ${count('tentative')}件 / 要確認: ${count('review')}件${properCount}`;
 }
 
 // Sheets運用では下書きは担当者メールの入力で次回バッチが作るため、URLの代わりに文面の在りかを示す
@@ -86,6 +92,7 @@ function draftRequestSection(requested: PendingDraftResult): string[] {
     '・片側だけ作る場合は、不要な側の状態を「不要」にしてください',
     '・状態が「エラー: …」の側は次回バッチで再試行します（担当者メールを直せば反映されます）',
     '・文面の修正は、作成された下書き上で行ってください（シートの文面列を書き換えても下書きには反映されません）',
+    '・「プロパー候補」タブ（自社社員のご提案）も同じ手順です（案件側の下書きのみ）',
     '',
   ];
 }
@@ -149,9 +156,9 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   return lines.join('\n');
 }
 
-async function notifySummary(summary: string, counts: string): Promise<void> {
+async function notifySummary(summary: string, consoleSummary: string, counts: string): Promise<void> {
   if (logRedact()) console.log(`SES通知: 結果 ${counts}（詳細はサマリメールを参照）`);
-  else console.log(`\n${summary}\n`);
+  else console.log(`\n${consoleSummary}\n`);
   if (isDemo()) return; // demoはコンソール出力のみ
 
   const to = sesNotifyTo();

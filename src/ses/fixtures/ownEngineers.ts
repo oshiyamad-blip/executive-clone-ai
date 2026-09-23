@@ -1,6 +1,6 @@
 // demo用の固定「自社社員」データ。fixtures/mails.ts の案件と突き合わせて
 // 「必要案件単価を満たして成立」「単価不足で除外」の両分岐を再現できるよう用意する。
-import type { OwnEngineer } from '../../types/index.js';
+import type { OwnEngineer, ProperEngineer } from '../../types/index.js';
 
 export const FIXTURE_OWN_ENGINEERS: OwnEngineer[] = [
   // A.K.: PHP/MySQL/AWS・必要案件単価65万。P1(単金60〜75万・東京)を満たし「成立」
@@ -49,4 +49,16 @@ export const FIXTURE_OWN_ENGINEERS: OwnEngineer[] = [
 
 export function loadFixtureOwnEngineers(): OwnEngineer[] {
   return FIXTURE_OWN_ENGINEERS;
+}
+
+// demo用のプロパー（スキルシート由来の自社社員）。上の自社社員を、管理表「プロパー管理」から読んだ形に写したもの
+export function loadFixtureProperEngineers(): ProperEngineer[] {
+  return FIXTURE_OWN_ENGINEERS.map((own) => ({
+    ...own,
+    id: `proper_${own.id}`,
+    fileId: `demo_file_${own.id}`,
+    fullName: '',
+    proposalLabel: own.displayName.replace(/（自社）$/, ''),
+    skillSheetUrl: '',
+  }));
 }

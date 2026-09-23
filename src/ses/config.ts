@@ -181,6 +181,55 @@ export function durableStateInSheets(): boolean {
   return dbProvider() === 'sheets' && !isDemo();
 }
 
+// ===== プロパー（自社社員）スキルシート連携 =====
+// スキルシートの置き場（Driveフォルダ）と、社員ごとの管理表「プロパー管理」のスプレッドシート。
+// 既定はメインと同じGoogle Workspace・同じサービスアカウントで読み書きする（フォルダと管理表をSAのメールに共有）。
+// 別テナントに置く場合だけ PROPER_GOOGLE_SA_* / PROPER_GOOGLE_IMPERSONATE で接続の資格情報を差し替える。
+// フォルダと管理表の両方が設定されたときだけ有効（未設定なら案内を出してスキップ）
+
+// IDの代わりにURLを貼られても動くよう、/folders/<id> や /d/<id> からIDを取り出す
+function driveIdFrom(raw: string | undefined): string {
+  const s = (raw ?? '').trim();
+  const m = s.match(/\/(?:folders|d)\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : s;
+}
+
+export function properFolderId(): string {
+  return driveIdFrom(process.env.PROPER_SKILLSHEET_FOLDER_ID);
+}
+
+export function properMasterSpreadsheetId(): string {
+  return driveIdFrom(process.env.PROPER_MASTER_SPREADSHEET_ID);
+}
+
+export function properEnabled(): boolean {
+  return Boolean(properFolderId() && properMasterSpreadsheetId());
+}
+
+// プロパー専用サービスアカウント鍵の環境変数の接頭辞（PROPER_GOOGLE_SA_KEY_JSON 等。別テナント運用時のみ）。
+// 未設定ならメインのサービスアカウント（GOOGLE_SA_*）で接続する
+export function properServiceAccountEnvPrefix(): string {
+  return 'PROPER_GOOGLE_SA_';
+}
+
+// フォルダ・管理表をサービスアカウントに共有できない（外部共有の禁止等）場合のみ設定する、
+// なりすまし対象ユーザー（要: そのテナントでのDWD。drive.readonly と spreadsheets スコープ）
+export function properImpersonate(): string {
+  return (process.env.PROPER_GOOGLE_IMPERSONATE ?? '').trim();
+}
+
+// 1回の実行でLLM抽出するスキルシートの上限（初回の大量取り込みでもコストと実行時間を抑えるため。残りは次回以降）
+export function properMaxExtractPerRun(): number {
+  const n = Number(process.env.PROPER_MAX_EXTRACT_PER_RUN ?? '20');
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 20;
+}
+
+// プロパー候補の突合対象にする案件の受信日の遡り日数
+export function properProjectLookbackDays(): number {
+  const n = Number(process.env.PROPER_PROJECT_LOOKBACK_DAYS ?? '14');
+  return Number.isFinite(n) && n > 0 ? n : 14;
+}
+
 // DWD（ドメイン全体委任）でなりすます既定ユーザー。空ならサービスアカウント単体で認証する
 export function googleTargetEmail(): string {
   return process.env.GOOGLE_TARGET_EMAIL ?? '';

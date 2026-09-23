@@ -118,6 +118,18 @@ async function main(): Promise<void> {
       `  ・データ保存先:    notion（${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '案件/要員/マッチDB 設定済み' : 'DB未設定 — 保存はスキップされます'}）`,
     );
   }
+  // プロパー（自社社員のスキルシート）連携。既定はメインのサービスアカウントで読む（同じWorkspace内で共有）
+  if (envSet('PROPER_SKILLSHEET_FOLDER_ID', 'PROPER_MASTER_SPREADSHEET_ID')) {
+    const dedicated = envSet('PROPER_GOOGLE_SA_KEY_JSON') || envSet('PROPER_GOOGLE_SA_CLIENT_EMAIL', 'PROPER_GOOGLE_SA_PRIVATE_KEY');
+    const account = dedicated ? 'プロパー用SA（PROPER_GOOGLE_SA_*）' : 'メインのSA';
+    console.log(
+      `  ・プロパー候補:    有効（${account}${envSet('PROPER_GOOGLE_IMPERSONATE') ? '・なりすましあり' : ''}。フォルダと「プロパー管理」をそのアカウントに共有してください）`,
+    );
+    if (!dedicated && !serviceAccountSet()) warn('プロパー候補: Google認証（GOOGLE_SA_KEY_JSON 等）が未設定のためスキップされます');
+    if (dbProvider !== 'sheets') warn('プロパー候補: 候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです');
+  } else {
+    console.log('  ・プロパー候補:    無効（PROPER_SKILLSHEET_FOLDER_ID / PROPER_MASTER_SPREADSHEET_ID 未設定）');
+  }
   // 公開CIのログに宛先アドレスを出さない
   const notifyTo = process.env.SES_NOTIFY_TO?.trim();
   console.log(`  ・通知先:          ${notifyTo ? (logRedact() ? '設定済み' : notifyTo) : '未設定（サマリはコンソールのみ）'}`);

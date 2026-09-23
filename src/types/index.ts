@@ -294,6 +294,21 @@ export interface OwnEngineer {
   notionPageId?: string;
 }
 
+// プロパー（自社社員）: 別管理のスキルシート（Drive）から抽出し、管理表「プロパー管理」で人が
+// 稼働状況・必要案件単価を付けた自社社員。matchOwnEngineersToProjects にそのまま渡せる
+export interface ProperEngineer extends OwnEngineer {
+  fileId: string; // スキルシートのDriveファイルID（id はこれから作る）
+  fullName: string; // 氏名（社内シート・サマリメール用。ログにも提案文面にも出さない）
+  proposalLabel: string; // 提案用表記（イニシャル）。社外向けの提案文面にはこれだけを使う
+  skillSheetUrl: string;
+}
+
+// プロパー × 案件の候補（案件スプレッドシートの「プロパー候補」タブ1行に対応）
+export interface ProperCandidate extends OwnMatch {
+  properLabel: string; // 「プロパー」列の表示（氏名（提案用表記））。ログに出さない
+  draftToProject?: DraftRef; // 案件の元メールへの全員に返信（提案文面。テンプレート生成）
+}
+
 // マッチ確認UI（web.ts）が扱う表示用のマッチ。demo/本番で同一形にするため
 // MatchResult から下書きURL/本文を平坦化して持つ（Notion内部構造から独立させる）。
 export interface ReviewMatch {

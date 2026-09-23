@@ -326,19 +326,25 @@ async function findMatchPageIdByTitle(dataSourceId: string, title: string): Prom
   }
 }
 
-// 突合対象の案件（募集中のみ）を取得する（match --match-only で使用）
-export async function fetchOpenProjects(limit = 100): Promise<Project[]> {
-  if (dbProvider() === 'sheets') return sheetsDb.fetchOpenProjectsSheets(limit);
+// 突合対象の案件（募集中のみ）を取得する（match --match-only・プロパー候補探しで使用）。
+// receivedSince 指定時はその日時以降に受信した案件に絞る（新しい順）
+export async function fetchOpenProjects(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Project[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchOpenProjectsSheets(limit, opts.receivedSince);
   if (!PROJECT_DB_ID) {
     console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件なしで継続します');
     return [];
   }
   const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
+  const open = { property: 'ステータス', select: { equals: '募集中' } };
+  const since = opts.receivedSince;
   const response = await throttle(() =>
     notion.dataSources.query({
       data_source_id: dataSourceId,
-      filter: { property: 'ステータス', select: { equals: '募集中' } },
-      page_size: limit,
+      filter: since
+        ? { and: [open, { property: '受信日', date: { on_or_after: since.toISOString() } }] }
+        : open,
+      ...(since ? { sorts: [{ property: '受信日', direction: 'descending' as const }] } : {}),
+      page_size: Math.min(limit, 100), // Notion APIの1ページ上限
     }),
   );
   return response.results.map((page) => projectFromPage(page));

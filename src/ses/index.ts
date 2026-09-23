@@ -6,17 +6,27 @@ import { matchAll } from './match.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify } from './notify.js';
 import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
+import { runProperFlow, type ProperRunResult } from './proper/index.js';
+import { resetProperMasterCache } from './proper/master.js';
 import { markMailProcessed, writeDemoArtifact, readDemoArtifact, dedupeProjects, dedupeEngineers } from './store.js';
 import { saveProject, saveEngineer, fetchOpenProjects, fetchAvailableEngineers } from '../database/index.js';
 import { resetSheetsCache } from '../database/sheets.js';
 import { isDemo, minGrossMarginJpy, maxCandidatesPerItem, repairEnabled } from './config.js';
 import { startHealBatch } from './heal/budget.js';
-import { resetHealEvents, recordStat, getStats, recordFatal, hasFatal, fatalReasons } from './heal/events.js';
+import {
+  resetHealEvents,
+  recordStat,
+  getStats,
+  recordFatal,
+  hasFatal,
+  fatalReasons,
+  recordHealEvent,
+} from './heal/events.js';
 import { runRepair } from './heal/repair.js';
 import { redactable, safeErr } from './redact.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 
-// SESマッチングバッチのオーケストレータ。collect→parse→extract→store→match→draft→notify を順に呼ぶ。
+// SESマッチングバッチのオーケストレータ。collect→parse→extract→store→(proper)→match→draft→notify を順に呼ぶ。
 // 各段は try/catch でエラーを吸収し、途中段が失敗しても後続へ渡せるデータがあれば継続する。
 // 収集失敗・重大異常・サマリ送信失敗などは recordFatal で記録し、終了コードを非0にする
 // （スケジュール実行で「失敗」として検知・通知させるため）。
@@ -35,6 +45,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   startHealBatch();
   resetHealEvents();
   resetSheetsCache();
+  resetProperMasterCache();
 
   try {
     await runStages(opts);
@@ -69,7 +80,8 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
     }
   }
 
-  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts);
+  const proper = await runProperStage(projects);
+  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts, proper);
   console.log(`=== SESバッチ完了: マッチ候補 計${matches.length}件 ===`);
 
   // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）
@@ -206,11 +218,23 @@ async function loadExisting(): Promise<{ projects: Project[]; engineers: Enginee
   }
 }
 
+// プロパー（自社社員のスキルシート）× 案件の候補探し。失敗しても本体のマッチング・通知は続ける
+async function runProperStage(projects: Project[]): Promise<ProperRunResult | null> {
+  try {
+    return await runProperFlow(projects);
+  } catch (err) {
+    console.error(`プロパー候補: 失敗: ${safeErr(err)}`);
+    recordHealEvent('warn', 'プロパー候補の処理が途中で停止しました（外部要員とのマッチング・通知は継続します）');
+    return null;
+  }
+}
+
 // ⑤〜⑦: マッチング → 下書き生成 → 通知
 async function matchDraftAndNotify(
   projects: Project[],
   engineers: Engineer[],
   requestedDrafts: PendingDraftResult,
+  proper: ProperRunResult | null,
 ): Promise<MatchResult[]> {
   let matches: MatchResult[] = [];
   try {
@@ -228,7 +252,7 @@ async function matchDraftAndNotify(
   }
 
   try {
-    await persistAndNotify(matches, projects, engineers, requestedDrafts);
+    await persistAndNotify(matches, projects, engineers, requestedDrafts, proper);
   } catch (err) {
     console.error(`SES通知: 失敗: ${safeErr(err)}`);
     recordFatal('保存・通知段が例外で停止しました');

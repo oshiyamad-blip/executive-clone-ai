@@ -51,22 +51,23 @@ export function parseServiceAccountJson(json: string): ServiceAccountCredentials
   }
 }
 
-let warnedBadKeyJson = false;
+const warnedBadKeyJson = new Set<string>();
 
-// サービスアカウントの資格情報。GOOGLE_SA_KEY_JSON（JSON鍵を丸ごと1変数に。GitHub Secrets向け）を優先し、
-// 無ければ従来の GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY を使う。どちらも無ければ null
-export function loadServiceAccountCredentials(): ServiceAccountCredentials | null {
-  const json = process.env.GOOGLE_SA_KEY_JSON?.trim();
+// サービスアカウントの資格情報。<prefix>KEY_JSON（JSON鍵を丸ごと1変数に。GitHub Secrets向け）を優先し、
+// 無ければ <prefix>CLIENT_EMAIL / <prefix>PRIVATE_KEY を使う。どちらも無ければ null。
+// prefix の既定は GOOGLE_SA_。別テナント用の鍵（例: PROPER_GOOGLE_SA_）も同じ規則で読む
+export function loadServiceAccountCredentials(prefix = 'GOOGLE_SA_'): ServiceAccountCredentials | null {
+  const json = process.env[`${prefix}KEY_JSON`]?.trim();
   if (json) {
     const parsed = parseServiceAccountJson(json);
     if (parsed) return parsed;
-    if (!warnedBadKeyJson) {
-      warnedBadKeyJson = true;
-      console.warn('Google認証: GOOGLE_SA_KEY_JSON を解釈できません（client_email / private_key を含むJSON鍵全体を設定してください）');
+    if (!warnedBadKeyJson.has(prefix)) {
+      warnedBadKeyJson.add(prefix);
+      console.warn(`Google認証: ${prefix}KEY_JSON を解釈できません（client_email / private_key を含むJSON鍵全体を設定してください）`);
     }
   }
-  const clientEmail = process.env.GOOGLE_SA_CLIENT_EMAIL;
-  const privateKey = process.env.GOOGLE_SA_PRIVATE_KEY?.replace(/\\n/g, '\n');
+  const clientEmail = process.env[`${prefix}CLIENT_EMAIL`];
+  const privateKey = process.env[`${prefix}PRIVATE_KEY`]?.replace(/\\n/g, '\n');
   if (clientEmail && privateKey) return { clientEmail, privateKey };
   return null;
 }

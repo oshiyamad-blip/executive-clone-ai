@@ -49,7 +49,12 @@ function isExcelMime(mimeType: string): boolean {
 }
 
 function xlsxToText(base64Data: string): string {
-  const workbook = readXlsx(Buffer.from(base64Data, 'base64'), { type: 'buffer' });
+  return spreadsheetBufferToText(Buffer.from(base64Data, 'base64'));
+}
+
+// Excel（.xlsx/.xls）の全シートをCSVテキストにする（プロパーのスキルシート読み取りでも使う）
+export function spreadsheetBufferToText(data: Buffer): string {
+  const workbook = readXlsx(data, { type: 'buffer' });
   return workbook.SheetNames.map((name) => {
     const sheet = workbook.Sheets[name];
     const csv = xlsxUtils.sheet_to_csv(sheet);

@@ -146,7 +146,8 @@ function isProjectItem(item: ExtractedItem): item is { kind: 'project'; project:
 }
 
 // 自社社員探しの実行本体: 社員・案件を読み込み → 突合 → コンソール出力 + レビュー成果書き出し。
-export async function runOwnMatch(): Promise<OwnMatch[]> {
+// 読み込んだ案件も返す（ses:own-match の demo でプロパー候補探しに同じ案件を使うため）
+export async function runOwnMatch(): Promise<{ matches: OwnMatch[]; projects: Project[] }> {
   console.log('=== 自社社員→案件探し 開始 ===');
   console.log(`モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'}`);
 
@@ -159,7 +160,7 @@ export async function runOwnMatch(): Promise<OwnMatch[]> {
 
   printSummary(own, matches);
   console.log(`=== 自社社員→案件探し 完了: 提示候補 計${matches.length}件 ===`);
-  return matches;
+  return { matches, projects };
 }
 
 function printSummary(own: OwnEngineer[], matches: OwnMatch[]): void {

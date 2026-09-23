@@ -1,15 +1,17 @@
 // Googleスプレッドシート版のSESデータ保存層（DB_PROVIDER=sheets）。
-// 1つのスプレッドシートにデータ6タブ（案件/要員/マッチ/自社社員/評価/スキル同義）と
-// バッチ横断の状態2タブ（処理済みメール/_状態）を持ち、タブとヘッダー行は初回アクセス時に自動生成する。
+// 1つのスプレッドシートにデータ7タブ（案件/要員/マッチ/自社社員/評価/スキル同義/プロパー候補）と
+// バッチ横断の状態2タブ（処理済みメール/_状態）を持ち、タブとヘッダー行は初回アクセス時に自動生成する
+// （タブ・行キャッシュ・クォータ制御の汎用部分は sheetBook.ts）。
 // 認証は既定でサービスアカウント自身（シートをSAのメールアドレスに編集者として共有するだけでよい）。
 // SHEETS_DB_IMPERSONATE 指定時のみDWDでそのユーザーになりすます。
 // 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
-import { google, type sheets_v4 } from 'googleapis';
+import { google } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate } from '../ses/config.js';
 import { normalizeSkills } from '../ses/skillDict.js';
 import { normalizePrefecture } from '../ses/prefecture.js';
-import { safeErr, SafeLogError } from '../ses/redact.js';
+import { SafeLogError } from '../ses/redact.js';
+import { SheetBook, sameCells, type Cell } from './sheetBook.js';
 import {
   remoteLabel,
   labelToRemote,
@@ -20,7 +22,10 @@ import {
   joinList,
   splitList,
   mergeDraftColumns,
+  MATCH_STATUS_LABEL,
+  DRAFT_STATE,
   type DraftColumns,
+  type DraftSide,
 } from './mapping.js';
 import type {
   Project,
@@ -30,78 +35,18 @@ import type {
   OwnEngineer,
   MatchFeedback,
   SkillEquivalence,
+  ProperCandidate,
 } from '../types/index.js';
-
-// 書き込みはユーザーあたり60リクエスト/分のクォータがあるため、全呼び出しを直列化して間隔を空ける
-const MIN_INTERVAL_MS = 1100;
-let lastCall = Promise.resolve();
-
-async function throttle<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = lastCall;
-  let release: () => void = () => {};
-  lastCall = new Promise<void>((res) => (release = res));
-  await prev;
-  try {
-    return await withRetry(fn);
-  } finally {
-    setTimeout(release, MIN_INTERVAL_MS);
-  }
-}
-
-// クォータ超過(429)・一時障害(5xx)のみ待って再試行する（権限不足等の恒久エラーは即失敗）
-const RETRY_DELAYS_MS = [2000, 8000, 30000];
-
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const e = err as { status?: unknown; response?: { status?: unknown } };
-      const status = Number(e.response?.status ?? e.status);
-      const retryable = status === 429 || (status >= 500 && status < 600);
-      if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw err;
-      await new Promise((res) => setTimeout(res, RETRY_DELAYS_MS[attempt]));
-    }
-  }
-}
 
 const SHEETS_RW_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
-let _api: sheets_v4.Sheets | null = null;
-function api(): sheets_v4.Sheets | null {
-  if (_api) return _api;
-  const auth = getServiceAccountAuth(SHEETS_RW_SCOPES, sheetsDbImpersonate() || undefined);
-  if (!auth) return null;
-  _api = google.sheets({ version: 'v4', auth });
-  return _api;
-}
-
-let warnedUnconfigured = false;
-
-function configured(): boolean {
-  const reason = !sheetsDbSpreadsheetId()
-    ? 'SHEETS_DB_SPREADSHEET_ID が未設定'
-    : !api()
-      ? 'Google認証（GOOGLE_SA_KEY_JSON または GOOGLE_SA_CLIENT_EMAIL/GOOGLE_SA_PRIVATE_KEY）が未設定'
-      : '';
-  if (!reason) return true;
-  if (!warnedUnconfigured) {
-    warnedUnconfigured = true;
-    console.warn(`SheetsDB: ${reason} — 保存・読出をスキップします`);
-  }
-  return false;
-}
-
-// 設定が揃っているか（処理済みID等の状態保存先の判定用。未設定時の警告は初回のみ）
-export function sheetsDbConfigured(): boolean {
-  return configured();
-}
-
-// 担当者メール列による下書き依頼の列。これを全て持つタブは materializePendingDrafts の対象になる
-// （担当者が送信元アドレスを入れると、次回バッチがそのアドレスで全員に返信の下書きを作成し状態列に結果を書く）
+// 担当者メール列による下書き依頼の列（担当者が送信元アドレスを入れると、次回バッチがそのアドレスで
+// 全員に返信の下書きを作成し状態列に結果を書く）。対象タブの判定は draftRequestTabs()
 export const DRAFT_REQUEST_COLUMNS = [
   '担当者メール', '案件側下書き状態', '要員側下書き状態', '案件側文面', '要員側文面', '下書きデータ',
 ];
+
+export const PROPER_CANDIDATE_TAB = 'プロパー候補';
 
 // タブ定義（列順は保存・読出の両方が依存する。列の追加は末尾のみ＝既存シートは ensureTabs が自動で追記する）
 const TABS: Record<string, string[]> = {
@@ -123,301 +68,52 @@ const TABS: Record<string, string[]> = {
   スキル同義: ['スキルA', 'スキルB', '追加者', '日時'],
   処理済みメール: ['メールID', '処理日時', '結果'],
   _状態: ['キー', 'JSON', '更新日時'],
+  // プロパー（自社社員のスキルシート）× 案件の候補。提案は案件側への1通だけなので要員側の下書き列は持たない
+  [PROPER_CANDIDATE_TAB]: [
+    'ID', 'プロパー', '案件名', '案件単価', '必要案件単価', '単価差', 'スキル一致率', 'バンド', '判定',
+    '適合スコア', '根拠', '案件ID', '営業元メール', '検出日時', 'ステータス',
+    '担当者メール', '案件側下書き状態', '案件側文面', '下書きデータ',
+  ],
 };
 
-type Cell = string | number | null;
+const book = new SheetBook({
+  label: 'SheetsDB',
+  tabs: TABS,
+  spreadsheetId: sheetsDbSpreadsheetId,
+  createApi: () => {
+    const auth = getServiceAccountAuth(SHEETS_RW_SCOPES, sheetsDbImpersonate() || undefined);
+    return auth ? google.sheets({ version: 'v4', auth }) : null;
+  },
+  missingIdMessage: 'SHEETS_DB_SPREADSHEET_ID が未設定',
+  missingAuthMessage: 'Google認証（GOOGLE_SA_KEY_JSON または GOOGLE_SA_CLIENT_EMAIL/GOOGLE_SA_PRIVATE_KEY）が未設定',
+  accessHint: 'IDが正しいか、サービスアカウントのメールアドレスに編集者として共有済みかを確認してください',
+  dropdowns: { [PROPER_CANDIDATE_TAB]: { ステータス: Object.values(MATCH_STATUS_LABEL) } },
+});
 
-// A1表記のタブ名。日本語・記号・先頭アンダースコアのタブ名でも誤解釈されないよう常に引用する
-export function quoteTab(tab: string): string {
-  return `'${tab.replace(/'/g, "''")}'`;
+function configured(): boolean {
+  return book.configured();
 }
 
-// 0起点の列番号 → A1列文字（0→A, 25→Z, 26→AA）
-export function columnLetter(index: number): string {
-  let n = index + 1;
-  let out = '';
-  while (n > 0) {
-    const rem = (n - 1) % 26;
-    out = String.fromCharCode(65 + rem) + out;
-    n = Math.floor((n - 1) / 26);
-  }
-  return out;
+// 設定が揃っているか（処理済みID等の状態保存先の判定用。未設定時の警告は初回のみ）
+export function sheetsDbConfigured(): boolean {
+  return configured();
 }
-
-export type HeaderPlan =
-  | { kind: 'ok' }
-  | { kind: 'append'; fromIndex: number; cells: string[] }
-  | { kind: 'conflict'; index: number };
-
-// 既存タブのヘッダー行と現行定義の突き合わせ。既存が定義の先頭部分なら不足列を末尾へ追記、
-// 定義の後ろに人が足した列があるだけなら互換、それ以外（列の並び替え・改名）は自動修正しない
-export function planHeaderMigration(existing: string[], definition: string[]): HeaderPlan {
-  const overlap = Math.min(existing.length, definition.length);
-  for (let i = 0; i < overlap; i++) {
-    if (existing[i] !== definition[i]) return { kind: 'conflict', index: i };
-  }
-  if (existing.length >= definition.length) return { kind: 'ok' };
-  return { kind: 'append', fromIndex: existing.length, cells: definition.slice(existing.length) };
-}
-
-// 並行に初回アクセスされてもタブを二重作成しないよう、実行中の Promise を共有する
-let tabsEnsured: Promise<void> | null = null;
-// ヘッダー行が定義と食い違うタブ（列の意味を取り違えるため、下書き依頼の読み取り対象から外す）
-const headerConflicts = new Set<string>();
-
-// タブとヘッダー行を必要に応じて自動生成・追記する（プロセス内で初回のみ実行）
-function ensureTabs(): Promise<void> {
-  tabsEnsured ??= ensureTabsOnce().catch((err) => {
-    tabsEnsured = null; // 失敗時は次回呼び出しで再試行
-    throw err;
-  });
-  return tabsEnsured;
-}
-
-async function ensureTabsOnce(): Promise<void> {
-  const sheetsApi = api()!;
-  const spreadsheetId = sheetsDbSpreadsheetId();
-  let meta: sheets_v4.Schema$Spreadsheet;
-  try {
-    meta = (await throttle(() => sheetsApi.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' }))).data;
-  } catch (err) {
-    throw new SafeLogError(
-      `SheetsDB: スプレッドシートにアクセスできません。IDが正しいか、サービスアカウントのメールアドレスに` +
-        `編集者として共有済みかを確認してください（${safeErr(err)}）`,
-    );
-  }
-  const existing = new Set((meta.sheets ?? []).map((sh) => sh.properties?.title ?? ''));
-  headerConflicts.clear();
-  const tabNames = Object.keys(TABS);
-  const missing = tabNames.filter((t) => !existing.has(t));
-  const present = tabNames.filter((t) => existing.has(t));
-  const headerWrites: sheets_v4.Schema$ValueRange[] = [];
-
-  if (missing.length > 0) {
-    await throttle(() =>
-      sheetsApi.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: { requests: missing.map((title) => ({ addSheet: { properties: { title } } })) },
-      }),
-    );
-    for (const title of missing) headerWrites.push({ range: `${quoteTab(title)}!A1`, values: [TABS[title]] });
-  }
-
-  if (present.length > 0) {
-    const res = await throttle(() =>
-      sheetsApi.spreadsheets.values.batchGet({ spreadsheetId, ranges: present.map((t) => `${quoteTab(t)}!1:1`) }),
-    );
-    const ranges = res.data.valueRanges ?? [];
-    present.forEach((tab, i) => {
-      const header = (ranges[i]?.values?.[0] ?? []).map((c) => String(c ?? '').trim());
-      const plan = planHeaderMigration(header, TABS[tab]);
-      if (plan.kind === 'append') {
-        headerWrites.push({ range: `${quoteTab(tab)}!${columnLetter(plan.fromIndex)}1`, values: [plan.cells] });
-        if (plan.fromIndex > 0) console.log(`SheetsDB: 「${tab}」タブに列を追加します（${plan.cells.join(', ')}）`);
-      } else if (plan.kind === 'conflict') {
-        headerConflicts.add(tab);
-        console.warn(
-          `SheetsDB: 「${tab}」タブのヘッダー行が想定と異なります（${columnLetter(plan.index)}列: 「${TABS[tab][plan.index]}」を想定）。` +
-            '列の並びに依存して読み書きするため、ヘッダー行を定義どおりに戻してください（自動修正はしません）',
-        );
-      }
-    });
-  }
-
-  if (headerWrites.length > 0) {
-    await throttle(() =>
-      sheetsApi.spreadsheets.values.batchUpdate({
-        spreadsheetId,
-        requestBody: { valueInputOption: 'RAW', data: headerWrites },
-      }),
-    );
-  }
-  if (missing.length > 0) console.log(`SheetsDB: タブを自動生成しました（${missing.join(', ')}）`);
-}
-
-// ===== タブ単位の行キャッシュ =====
-// 保存のたびにタブ全体を読み直すとAPI呼び出しが O(n^2) になるため、プロセス内で行をキャッシュし
-// 追記・更新時に同期する。人の手編集（並べ替え・行削除）とのズレは、更新直前にキー列を1セルだけ
-// 読んで検証し、ずれていれば読み直すことで防ぐ（別行の上書き事故を避ける）。
-interface CachedRow {
-  rowNumber: number; // シート上の行番号（1=ヘッダー）
-  cells: string[];
-}
-
-interface TabCache {
-  rows: CachedRow[];
-  loadedAt: number;
-  indexes: Map<number, Map<string, CachedRow>>; // 列番号 → セル値 → 最初に現れる行
-}
-
-// 長時間動くプロセス（確認UI）でも他プロセスの書き込みを取り込めるよう、一定時間で読み直す
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const tabCache = new Map<string, TabCache>();
-const tabLoading = new Map<string, Promise<TabCache>>();
 
 // バッチ開始時に呼ぶ（前回実行の状態を持ち越さない）
 export function resetSheetsCache(): void {
-  tabCache.clear();
-  tabLoading.clear();
-  tabsEnsured = null;
-  headerConflicts.clear();
-}
-
-function normalizeCells(cells: unknown[], width: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < Math.max(width, cells.length); i++) out.push(String(cells[i] ?? ''));
-  return out;
-}
-
-function loadTab(tab: string): Promise<TabCache> {
-  const hit = tabCache.get(tab);
-  if (hit && Date.now() - hit.loadedAt < CACHE_TTL_MS) return Promise.resolve(hit);
-  let pending = tabLoading.get(tab);
-  if (!pending) {
-    pending = fetchTab(tab).finally(() => tabLoading.delete(tab));
-    tabLoading.set(tab, pending);
-  }
-  return pending;
-}
-
-async function fetchTab(tab: string): Promise<TabCache> {
-  await ensureTabs();
-  const res = await throttle(() =>
-    api()!.spreadsheets.values.get({ spreadsheetId: sheetsDbSpreadsheetId(), range: quoteTab(tab) }),
-  );
-  const values = (res.data.values ?? []) as unknown[][];
-  const width = TABS[tab].length;
-  const rows = values
-    .slice(1)
-    .map((cells, i) => ({ rowNumber: i + 2, cells: normalizeCells(cells ?? [], width) }))
-    .filter((r) => r.cells.some((c) => c.trim() !== '')); // 途中の空行は読み飛ばす（行番号は保持）
-  const cache: TabCache = { rows, loadedAt: Date.now(), indexes: new Map() };
-  tabCache.set(tab, cache);
-  return cache;
-}
-
-// タブの全データ行（ヘッダー除く）。呼び出し側が並べ替え等をしてもキャッシュが壊れないようコピーを返す
-async function readRows(tab: string): Promise<CachedRow[]> {
-  return (await loadTab(tab)).rows.slice();
-}
-
-function indexFor(cache: TabCache, col: number): Map<string, CachedRow> {
-  let idx = cache.indexes.get(col);
-  if (!idx) {
-    idx = new Map();
-    for (const r of cache.rows) {
-      const key = (r.cells[col] ?? '').trim();
-      if (key && !idx.has(key)) idx.set(key, r);
-    }
-    cache.indexes.set(col, idx);
-  }
-  return idx;
-}
-
-async function findRow(tab: string, colName: string, key: string): Promise<CachedRow | null> {
-  const k = key.trim(); // 索引側もトリム済み
-  if (!k) return null;
-  const cache = await loadTab(tab);
-  return indexFor(cache, colIndex(tab, colName)).get(k) ?? null;
-}
-
-function toCells(row: Cell[]): Array<string | number> {
-  return row.map((v) => (v === null ? '' : v));
-}
-
-// 追記先の行番号を応答の updatedRange（例: 'タブ'!A12:K13）から得てキャッシュへ反映する
-function firstRowOf(updatedRange: string | null | undefined): number | null {
-  const m = (updatedRange ?? '').match(/![A-Z]+(\d+)/);
-  return m ? Number(m[1]) : null;
-}
-
-async function appendRows(tab: string, rows: Cell[][]): Promise<void> {
-  if (rows.length === 0) return;
-  await ensureTabs();
-  const res = await throttle(() =>
-    api()!.spreadsheets.values.append({
-      spreadsheetId: sheetsDbSpreadsheetId(),
-      range: `${quoteTab(tab)}!A1`,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: rows.map(toCells) },
-    }),
-  );
-  const cache = tabCache.get(tab);
-  if (!cache) return; // 未読込なら次回の読込で取り込まれる
-  const first = firstRowOf(res.data.updates?.updatedRange);
-  if (first === null) {
-    tabCache.delete(tab); // 位置が分からなければ次回読み直す
-    return;
-  }
-  const width = TABS[tab].length;
-  rows.forEach((row, i) => {
-    const cached: CachedRow = { rowNumber: first + i, cells: normalizeCells(toCells(row), width) };
-    cache.rows.push(cached);
-    for (const [col, idx] of cache.indexes) {
-      const key = (cached.cells[col] ?? '').trim();
-      if (key && !idx.has(key)) idx.set(key, cached);
-    }
-  });
-}
-
-// キャッシュ上の行が今もシート上の同じ位置にあるかを、その行を1回読んで確かめる。
-// 同じ位置なら読んだ最新値でキャッシュを更新する（バッチ実行中に人が入力した担当者メール・ステータス等を
-// 古いキャッシュで上書きしないため。呼び出し回数はキー1セルだけ読む場合と同じ）
-async function refreshRowAt(tab: string, row: CachedRow, colName: string, key: string): Promise<boolean> {
-  const width = TABS[tab].length;
-  const range = `${quoteTab(tab)}!A${row.rowNumber}:${columnLetter(width - 1)}${row.rowNumber}`;
-  const res = await throttle(() => api()!.spreadsheets.values.get({ spreadsheetId: sheetsDbSpreadsheetId(), range }));
-  const fresh = normalizeCells((res.data.values?.[0] ?? []) as unknown[], width);
-  if (fresh[colIndex(tab, colName)].trim() !== key.trim()) return false;
-  if (fresh.some((c, i) => c !== (row.cells[i] ?? ''))) {
-    row.cells = fresh;
-    tabCache.get(tab)?.indexes.clear(); // キー以外の列の値も変わり得るため索引は次回参照時に作り直す
-  }
-  return true;
-}
-
-// キー列で行を探し、位置を検証（＋最新値へ更新）してから返す。ずれていればタブを読み直して探し直す
-async function locateRow(tab: string, colName: string, key: string): Promise<CachedRow | null> {
-  const hit = await findRow(tab, colName, key);
-  if (!hit || (await refreshRowAt(tab, hit, colName, key))) return hit;
-  tabCache.delete(tab);
-  return findRow(tab, colName, key);
-}
-
-async function writeRow(tab: string, target: CachedRow, row: Cell[]): Promise<void> {
-  await throttle(() =>
-    api()!.spreadsheets.values.update({
-      spreadsheetId: sheetsDbSpreadsheetId(),
-      range: `${quoteTab(tab)}!A${target.rowNumber}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [toCells(row)] },
-    }),
-  );
-  const cache = tabCache.get(tab);
-  if (cache) {
-    target.cells = normalizeCells(toCells(row), TABS[tab].length);
-    cache.indexes.clear(); // キー値が変わり得るため索引は次回参照時に作り直す
-  }
-}
-
-// キー列で一致する行があれば更新、無ければ追記（build には既存行のセルが渡る）
-async function upsertRow(
-  tab: string,
-  keyCol: string,
-  key: string,
-  build: (existing: string[] | null) => Cell[],
-): Promise<Cell[]> {
-  const hit = await locateRow(tab, keyCol, key);
-  const row = build(hit ? hit.cells : null);
-  if (hit) await writeRow(tab, hit, row);
-  else await appendRows(tab, [row]);
-  return row;
+  book.reset();
 }
 
 function colIndex(tab: string, name: string): number {
-  return TABS[tab].indexOf(name);
+  return book.colIndex(tab, name);
 }
+
+const readRows = (tab: string) => book.readRows(tab);
+const findRow = (tab: string, colName: string, key: string) => book.findRow(tab, colName, key);
+const locateRow = (tab: string, colName: string, key: string) => book.locateRow(tab, colName, key);
+const appendRows = (tab: string, rows: Cell[][]) => book.appendRows(tab, rows);
+const upsertRow = (tab: string, keyCol: string, key: string, build: (existing: string[] | null) => Cell[]) =>
+  book.upsertRow(tab, keyCol, key, build);
 
 function cellNum(cells: string[], idx: number): number | null {
   const v = (cells[idx] ?? '').trim();
@@ -427,7 +123,12 @@ function cellNum(cells: string[], idx: number): number | null {
 }
 
 function cellStr(cells: string[], idx: number): string {
-  return (cells[idx] ?? '').trim();
+  return idx < 0 ? '' : (cells[idx] ?? '').trim();
+}
+
+// 文面など改行・前後空白も意味を持つセル（トリムしない）
+function rawCell(cells: string[], idx: number): string {
+  return idx < 0 ? '' : (cells[idx] ?? '');
 }
 
 // ===== 案件 =====
@@ -476,17 +177,21 @@ function rowToProject(cells: string[]): Project {
   };
 }
 
-export async function fetchOpenProjectsSheets(limit = 100): Promise<Project[]> {
+// receivedSince 指定時はその日時以降に受信した案件に絞り、新しい順に limit 件まで返す
+export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date): Promise<Project[]> {
   if (!configured()) {
     console.warn('SheetsDB: 案件なしで継続します');
     return [];
   }
   const rows = await readRows('案件');
   const stCol = colIndex('案件', 'ステータス');
-  return rows
-    .filter((r) => cellStr(r.cells, stCol) !== '終了')
-    .slice(0, limit)
-    .map((r) => rowToProject(r.cells));
+  const open = rows.filter((r) => cellStr(r.cells, stCol) !== '終了').map((r) => rowToProject(r.cells));
+  if (!receivedSince) return open.slice(0, limit);
+  const since = receivedSince.getTime();
+  return open
+    .filter((p) => p.receivedAt.getTime() >= since)
+    .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
+    .slice(0, limit);
 }
 
 // ===== 要員 =====
@@ -555,8 +260,8 @@ function readDraftColumns(tab: string, cells: string[]): DraftColumns {
   return {
     projectState: c('案件側下書き状態'),
     engineerState: c('要員側下書き状態'),
-    projectText: cells[colIndex(tab, '案件側文面')] ?? '',
-    engineerText: cells[colIndex(tab, '要員側文面')] ?? '',
+    projectText: rawCell(cells, colIndex(tab, '案件側文面')),
+    engineerText: rawCell(cells, colIndex(tab, '要員側文面')),
     data: c('下書きデータ'),
   };
 }
@@ -591,23 +296,22 @@ export async function updateMatchStatusSheets(id: string, status: MatchStatus): 
     console.warn(`SheetsDB: ステータス更新対象のマッチが見つかりません (${id})`);
     return;
   }
-  const stCol = colIndex('マッチ', 'ステータス');
-  const label = matchStatusLabel(status);
-  await throttle(() =>
-    api()!.spreadsheets.values.update({
-      spreadsheetId: sheetsDbSpreadsheetId(),
-      range: `${quoteTab('マッチ')}!${columnLetter(stCol)}${hit.rowNumber}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [[label]] },
-    }),
-  );
-  hit.cells[stCol] = label;
+  await book.writeCells('マッチ', hit, [['ステータス', matchStatusLabel(status)]]);
 }
 
-// ===== 担当者メール列による下書き依頼（マッチ等、DRAFT_REQUEST_COLUMNS を持つタブ共通） =====
+// ===== 担当者メール列による下書き依頼（マッチ・プロパー候補等、下書き依頼の列を持つタブ共通） =====
 
+const DRAFT_STATE_COLUMNS: Record<DraftSide, string> = { project: '案件側下書き状態', engineer: '要員側下書き状態' };
+
+// ID・担当者メール・下書きデータと、少なくとも片側の状態列を持つタブ（プロパー候補は案件側のみ）
 export function draftRequestTabs(): string[] {
-  return Object.keys(TABS).filter((tab) => ['ID', ...DRAFT_REQUEST_COLUMNS].every((c) => TABS[tab].includes(c)));
+  return book.tabNames().filter((tab) => {
+    const cols = book.columns(tab);
+    return (
+      ['ID', '担当者メール', '下書きデータ'].every((c) => cols.includes(c)) &&
+      Object.values(DRAFT_STATE_COLUMNS).some((c) => cols.includes(c))
+    );
+  });
 }
 
 export interface DraftRequestRow {
@@ -621,12 +325,15 @@ export interface DraftRequestRow {
 
 function toDraftRequestRow(tab: string, cells: string[]): DraftRequestRow {
   const c = (name: string) => cellStr(cells, colIndex(tab, name));
+  // 状態列の無い側は「不要」とみなし、作成対象にも書き込み対象にもしない
+  const state = (side: DraftSide) =>
+    colIndex(tab, DRAFT_STATE_COLUMNS[side]) >= 0 ? c(DRAFT_STATE_COLUMNS[side]) : DRAFT_STATE.notNeeded;
   return {
     tab,
     id: c('ID'),
     senderEmail: c('担当者メール'),
-    projectState: c('案件側下書き状態'),
-    engineerState: c('要員側下書き状態'),
+    projectState: state('project'),
+    engineerState: state('engineer'),
     draftData: c('下書きデータ'),
   };
 }
@@ -635,7 +342,7 @@ function toDraftRequestRow(tab: string, cells: string[]): DraftRequestRow {
 export async function listDraftRequestRowsSheets(tab: string): Promise<DraftRequestRow[]> {
   if (!configured() || !draftRequestTabs().includes(tab)) return [];
   const rows = await readRows(tab);
-  if (headerConflicts.has(tab)) {
+  if (book.hasHeaderConflict(tab)) {
     console.warn(`SheetsDB: 「${tab}」タブのヘッダー行が定義と異なるため、担当者メールによる下書き依頼を処理しません`);
     return [];
   }
@@ -653,28 +360,69 @@ export async function reloadDraftRequestRowSheets(tab: string, id: string): Prom
 export async function writeDraftStatesSheets(
   tab: string,
   id: string,
-  states: { project?: string; engineer?: string },
+  states: Partial<Record<DraftSide, string>>,
 ): Promise<boolean> {
   const hit = await locateRow(tab, 'ID', id);
   if (!hit) return false;
-  const updates: Array<[number, string]> = [];
-  if (states.project !== undefined) updates.push([colIndex(tab, '案件側下書き状態'), states.project]);
-  if (states.engineer !== undefined) updates.push([colIndex(tab, '要員側下書き状態'), states.engineer]);
-  if (updates.length === 0) return true;
-  await throttle(() =>
-    api()!.spreadsheets.values.batchUpdate({
-      spreadsheetId: sheetsDbSpreadsheetId(),
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: updates.map(([col, value]) => ({
-          range: `${quoteTab(tab)}!${columnLetter(col)}${hit.rowNumber}`,
-          values: [[value]],
-        })),
-      },
-    }),
-  );
-  for (const [col, value] of updates) hit.cells[col] = value;
+  const updates: Array<[string, Cell]> = [];
+  for (const side of Object.keys(DRAFT_STATE_COLUMNS) as DraftSide[]) {
+    const value = states[side];
+    if (value !== undefined) updates.push([DRAFT_STATE_COLUMNS[side], value]);
+  }
+  await book.writeCells(tab, hit, updates);
   return true;
+}
+
+// ===== プロパー候補（自社社員のスキルシート × 案件） =====
+
+function properVerdict(c: ProperCandidate): string {
+  return c.needsReview ? '要確認（単価・勤務地が不明）' : '単価充足';
+}
+
+// 小数は1桁に丸める（シートの表示値と比べて差分判定するため、桁数の揺れで毎回書き直さない）
+function round1(n: number | null): number | null {
+  return n === null ? null : Math.round(n * 10) / 10;
+}
+
+function properCandidateRow(c: ProperCandidate, existing: string[] | null): Cell[] {
+  const tab = PROPER_CANDIDATE_TAB;
+  const keep = (name: string) => (existing ? cellStr(existing, colIndex(tab, name)) : '');
+  const senderEmail = existing?.[colIndex(tab, '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
+  const drafts = mergeDraftColumns(existing ? readDraftColumns(tab, existing) : null, c.draftToProject, undefined);
+  return [
+    c.id, c.properLabel, c.projectTitle, round1(c.projectRate), round1(c.requiredProjectRate), round1(c.rateGapMan),
+    Math.round(c.skillMatchRate * 100), c.band === 'strong' ? '強マッチ' : '参考提案', properVerdict(c), c.score,
+    c.reason, c.projectId, c.agentEmail,
+    keep('検出日時') || c.detectedAt.toISOString(), // 初回検出日時を保つ（毎回の書き直しを避ける）
+    keep('ステータス') || matchStatusLabel('unconfirmed'),
+    senderEmail, drafts.projectState, drafts.projectText, drafts.data,
+  ];
+}
+
+// 候補を ID で upsert する。人の列（ステータス・担当者メール・案件側下書き状態）は保持し、
+// 内容が変わらない行は書き込まない（毎回の実行で候補数ぶんのAPI呼び出しをしないため）。新規行はまとめて追記。
+// 保存（追記・更新）した行数を返す
+export async function saveProperCandidatesSheets(candidates: ProperCandidate[]): Promise<number> {
+  if (!configured() || candidates.length === 0) return 0;
+  const tab = PROPER_CANDIDATE_TAB;
+  await readRows(tab); // タブの自動生成とヘッダー検証を先に済ませる
+  if (book.hasHeaderConflict(tab)) {
+    throw new SafeLogError(`SheetsDB: 「${tab}」タブのヘッダー行が定義と異なるため、プロパー候補を保存しません`);
+  }
+  const fresh: Cell[][] = [];
+  let written = 0;
+  for (const c of candidates) {
+    const cached = await findRow(tab, 'ID', c.id);
+    if (!cached) {
+      fresh.push(properCandidateRow(c, null));
+      continue;
+    }
+    if (sameCells(properCandidateRow(c, cached.cells), cached.cells)) continue;
+    await upsertRow(tab, 'ID', c.id, (existing) => properCandidateRow(c, existing));
+    written += 1;
+  }
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) await appendRows(tab, fresh.slice(i, i + APPEND_CHUNK));
+  return written + fresh.length;
 }
 
 // ===== 自社社員 =====

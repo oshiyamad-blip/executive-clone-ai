@@ -1,6 +1,7 @@
 // 自己修復レイヤーと本番実行基盤のオフライン自己検証（npm run ses:heal:check）。外部API呼び出しゼロ。
 // 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスク・異常終了判定・
-// ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定を検証する。
+// ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定・
+// プロパー（スキルシート）管理表の行の組み立てと提案文面を検証する。
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { isRetryableLlmError } from './retry.js';
 import {
@@ -14,7 +15,8 @@ import {
 } from './quarantine.js';
 import { resetHealEvents, recordStat, getStats, recordHealEvent, recordFatal, hasFatal } from './events.js';
 import { formatErr, SafeLogError } from '../redact.js';
-import { columnLetter, quoteTab, planHeaderMigration, draftRequestTabs } from '../../database/sheets.js';
+import { columnLetter, quoteTab, planHeaderMigration } from '../../database/sheetBook.js';
+import { draftRequestTabs } from '../../database/sheets.js';
 import { mergeDraftColumns, parseDraftData, isDraftStateActionable } from '../../database/mapping.js';
 import { parseServiceAccountJson } from '../../collectors/googleAuth.js';
 import {
@@ -24,7 +26,18 @@ import {
   jstStamp,
   planDraftRequest,
 } from '../pendingDrafts.js';
-import type { SesRawMail, DraftRef } from '../../types/index.js';
+import {
+  parseManYen,
+  parseAvailableFrom,
+  planMasterCells,
+  failureOutcome,
+  rowToProperEngineer,
+  PROPER_MASTER_COLUMNS,
+} from '../proper/master.js';
+import { skillSheetFormat, type SkillSheetFile } from '../proper/drive.js';
+import { buildProperProposalBody, buildProperProposalDraft, MISSING_INITIALS_PLACEHOLDER } from '../proper/proposal.js';
+import { properSummaryLines, type ProperRunResult } from '../proper/index.js';
+import type { SesRawMail, DraftRef, Project, ProperEngineer, ProperCandidate } from '../../types/index.js';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -214,7 +227,116 @@ async function main(): Promise<void> {
     ['example.co.jp'],
   );
   check('依頼判定: 文面のある側は作成、無い側はエラー', plan2.create.join(',') === 'project' && Boolean(plan2.errors.engineer?.startsWith('エラー: 下書きの文面データ')));
-  check('依頼対象タブ: マッチを含む', draftRequestTabs().includes('マッチ'));
+  check('依頼対象タブ: マッチ・プロパー候補を含む', draftRequestTabs().includes('マッチ') && draftRequestTabs().includes('プロパー候補'));
+  const properPlan = planDraftRequest(
+    { tab: 'プロパー候補', id: 'p1', senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: created.data },
+    ['example.co.jp'],
+  );
+  check('依頼判定: 案件側だけのタブは要員側に触らない', properPlan.create.join(',') === 'project' && Object.keys(properPlan.errors).length === 0);
+
+  // 13. プロパー（スキルシート）: 人が入力する列の解釈
+  check(
+    'プロパー: 必要案件単価の表記ゆれ（65/６５万円/650,000円/空欄）',
+    parseManYen('65') === 65 && parseManYen('６５万円') === 65 && parseManYen('650,000円') === 65 && parseManYen('') === null,
+  );
+  check(
+    'プロパー: 稼働可能日（ISO・スラッシュ・年月のみ→1日・即日は不明）',
+    parseAvailableFrom('2026-10-01') === '2026-10-01' && parseAvailableFrom('2026/9/5') === '2026-09-05' &&
+      parseAvailableFrom('2026年11月〜') === '2026-11-01' && parseAvailableFrom('即日') === null,
+  );
+  check(
+    'プロパー: ファイル形式（拡張子でも判定・ショートカットは未対応）',
+    skillSheetFormat({ name: 'a.xlsx', mimeType: 'application/octet-stream' }) === 'excel' &&
+      skillSheetFormat({ name: 'b', mimeType: 'application/vnd.google-apps.document' }) === 'gdoc' &&
+      skillSheetFormat({ name: 'c.pdf', mimeType: 'application/vnd.google-apps.shortcut' }) === null &&
+      skillSheetFormat({ name: 'd.doc', mimeType: 'application/msword' }) === null,
+  );
+
+  // 14. プロパー: 管理表の行（人の列は入力済みなら決して書き換えない）
+  const col = (name: string) => PROPER_MASTER_COLUMNS.indexOf(name);
+  const sheetFile: SkillSheetFile = {
+    id: 'f1', name: '山田太郎_スキルシート.xlsx', mimeType: 'application/octet-stream',
+    modifiedTime: '2026-09-20T01:00:00.000Z', webViewLink: 'https://drive.example/f1', size: 1000,
+  };
+  const profile = {
+    displayName: '山田太郎', initials: 'T.Y.', skills: ['Java', 'AWS'], experienceYears: 8, residence: '東京都港区',
+    prefecture: '東京都', remoteWish: 'partial' as const, availableDateText: '2026年10月〜', availableFromIso: '2026-10-01',
+    desiredRateMan: 60,
+  };
+  const now = new Date('2026-09-23T01:00:00Z');
+  const asMap = (u: Array<[string, unknown]>) => new Map(u);
+  const fresh = asMap(planMasterCells(null, sheetFile, { kind: 'ok', profile }, now));
+  check(
+    'プロパー管理: 新規行は氏名・提案用表記・稼働可能日を埋め、稼働状況=稼働可・必要案件単価は空欄',
+    fresh.get('氏名') === '山田太郎' && fresh.get('提案用表記') === 'T.Y.' && fresh.get('稼働状況') === '稼働可' &&
+      fresh.get('稼働可能日') === '2026-10-01' && !fresh.has('必要案件単価') && fresh.get('ファイル更新日時') === sheetFile.modifiedTime,
+  );
+  const existingRow = PROPER_MASTER_COLUMNS.map(() => '');
+  existingRow[col('氏名')] = '山田 太郎';
+  existingRow[col('稼働状況')] = 'アサイン済';
+  existingRow[col('必要案件単価')] = '70';
+  existingRow[col('抽出日時')] = '2026-09-01 10:00';
+  const updated = asMap(planMasterCells(existingRow, sheetFile, { kind: 'ok', profile }, now));
+  check(
+    'プロパー管理: 更新時は機械の列だけ（人の列は空欄でも抽出済みの行なら触らない）',
+    ['氏名', '提案用表記', '稼働状況', '必要案件単価', '稼働可能日'].every((c) => !updated.has(c)) &&
+      updated.get('スキル') === 'Java, AWS' && updated.get('経験年数') === 8,
+  );
+  const neverExtracted = [...existingRow];
+  neverExtracted[col('抽出日時')] = '';
+  const filled = asMap(planMasterCells(neverExtracted, sheetFile, { kind: 'ok', profile }, now));
+  check(
+    'プロパー管理: 未抽出の行は人の列の空欄だけ埋める（入力済みの氏名・稼働状況は保持）',
+    !filled.has('氏名') && !filled.has('稼働状況') && filled.get('提案用表記') === 'T.Y.',
+  );
+  const transient = failureOutcome('', Object.assign(new Error('x'), { status: 529 }), 'extract');
+  const retryCells = asMap(planMasterCells(existingRow, sheetFile, transient, now));
+  check(
+    'プロパー管理: 一時的な失敗は更新日時を記録せず次回再試行（回数をメモに残す）',
+    transient.kind === 'error' && transient.retry && retryCells.get('ファイル更新日時') === '' &&
+      String(retryCells.get('抽出メモ')).includes('1回目'),
+  );
+  const thirdFailure = failureOutcome('エラー: 抽出に失敗しました（2回目）— 次回の実行で再試行します', { status: 529 }, 'extract');
+  check('プロパー管理: 3回目の失敗で再試行を止める', thirdFailure.kind === 'error' && !thirdFailure.retry);
+
+  const masterRow = PROPER_MASTER_COLUMNS.map(() => '');
+  masterRow[col('氏名')] = '山田太郎';
+  masterRow[col('提案用表記')] = 'T.Y.';
+  masterRow[col('稼働状況')] = '稼働可';
+  masterRow[col('必要案件単価')] = '65万';
+  masterRow[col('スキル')] = 'Java, AWS';
+  masterRow[col('ファイルID')] = 'f1';
+  const eng = rowToProperEngineer(masterRow);
+  check(
+    'プロパー管理: 稼働可の行 → 突合用の社員（IDはファイルIDから・必要案件単価を数値化）',
+    eng?.id === 'proper_f1' && eng.requiredProjectRate === 65 && eng.skills.length === 2,
+  );
+  const assigned = [...masterRow];
+  assigned[col('稼働状況')] = 'アサイン済';
+  check('プロパー管理: 稼働可以外は突合しない', rowToProperEngineer(assigned) === null);
+
+  // 15. プロパー: 提案文面（社外向け。氏名・必要案件単価を書かない）
+  const project: Project = {
+    id: 'proj_x', title: 'Java案件', requiredSkills: ['Java'], preferredSkills: [], rateMin: 70, rateMax: 80,
+    location: '東京都', prefecture: '東京都', remote: 'partial', startPeriod: '10月', startDate: '2026-10-01', duration: '',
+    businessFlow: '', agentCompany: 'パートナー', agentContact: '佐藤', agentEmail: 'sato@partner.jp', sourceMailId: 'm1',
+    replyTarget: { from: 'sato@partner.jp', to: 'sales@example.co.jp', cc: '', subject: '案件のご紹介', messageId: '<a@b>', references: '' },
+    receivedAt: new Date(), status: 'open',
+  };
+  const body = buildProperProposalBody(eng as ProperEngineer, project);
+  check(
+    'プロパー提案文面: イニシャルのみ・氏名と必要案件単価を含まない',
+    body.includes('T.Y.') && !body.includes('山田') && !body.includes('65万') && body.startsWith('佐藤様'),
+  );
+  const noInitials = buildProperProposalBody({ ...(eng as ProperEngineer), proposalLabel: '' }, project);
+  check('プロパー提案文面: 提案用表記が空なら氏名で代用せず差し込み表記', noInitials.includes(MISSING_INITIALS_PLACEHOLDER) && !noInitials.includes('山田'));
+  const proposal = buildProperProposalDraft(eng as ProperEngineer, project);
+  check('プロパー提案文面: 元メールへの全員に返信', proposal?.to === 'sato@partner.jp' && proposal.subject === 'Re: 案件のご紹介' && proposal.inReplyTo === '<a@b>');
+
+  const candidate = { properLabel: '山田太郎（T.Y.）', projectTitle: 'Java案件' } as ProperCandidate;
+  const run: ProperRunResult = { demo: false, sync: null, engineers: 1, projects: 1, candidates: [candidate], saved: 1 };
+  const consoleLines = properSummaryLines(run, false).join('\n');
+  check('プロパー: コンソール用のサマリは件数のみ（氏名・案件名なし）', consoleLines.includes('1件') && !consoleLines.includes('山田') && !consoleLines.includes('Java案件'));
 
   console.log('');
   if (failures > 0) {

@@ -140,7 +140,7 @@ Notion を使う場合: 内部インテグレーションを作成し、対象�
 ### 4-7. 【代替】Googleスプレッドシートを保存先にする（`DB_PROVIDER=sheets`）
 
 Notionのかわりに、**1つのスプレッドシート**をデータ保存先にできます。
-データタブ（案件／要員／マッチ／自社社員／評価／スキル同義）と状態タブ（処理済みメール／_状態）、
+データタブ（案件／要員／マッチ／自社社員／評価／スキル同義／プロパー候補）と状態タブ（処理済みメール／_状態）、
 **ヘッダー行は初回実行時に自動生成**されるため、Notionのような手動DB作成は不要です。
 営業チームが普段のスプシ操作でソート・フィルタできる利点もあります（並べ替え後もバッチは行位置を検証してから更新します）。
 
@@ -190,6 +190,41 @@ Sheets運用の本番では、確認UIを常駐させなくても「担当営業
 - メールの下書き作成設定（xserverのIMAP、gmailのサービスアカウント）が未設定の間は依頼を消化せずに残します
 - 下書き作成の件数（担当者指定分）と依頼方法はサマリメールに載ります。担当者メール・文面はActionsログに出しません
 - `DB_PROVIDER=notion` に戻せばいつでもNotion運用に切替可能（データ移行は手動）
+
+#### プロパー（自社社員）のスキルシート → 案件候補（任意）
+
+自社社員のスキルシートを置いた**Driveフォルダ**と、社員ごとの**管理表「プロパー管理」**を設定すると、
+各バッチで「稼働可の社員 × 直近の募集中案件」を突き合わせ、案件スプレッドシートの**「プロパー候補」タブ**に
+候補と提案文面（案件の元メールへの全員に返信）を書き出します。
+
+**標準構成（1つのGoogle Workspace・1つのサービスアカウント）**:
+1. スキルシート用のDriveフォルダ（共有ドライブ可）を用意し、**サービスアカウントのメールに「閲覧者」**で共有
+2. 空のスプレッドシート（管理表）を作成し、**同じサービスアカウントに「編集者」**で共有
+3. `.env.local`（GitHub Actions では Secrets）に設定（IDの代わりにURLを貼っても可）:
+```
+PROPER_SKILLSHEET_FOLDER_ID=<フォルダのID>
+PROPER_MASTER_SPREADSHEET_ID=<管理表のID>
+```
+認証はメインの `GOOGLE_SA_KEY_JSON` をそのまま使います（追加の鍵・DWDは不要）。
+管理表は案件スプレッドシート（`SHEETS_DB_SPREADSHEET_ID`）と同じファイルでも構いません（「プロパー管理」タブが追加されます）。
+
+- 対応形式: PDF・Excel（.xlsx/.xls）・Word（.docx）・Googleドキュメント・Googleスプレッドシート（10MBまで。サブフォルダは2階層下まで）。
+  .doc 等の未対応形式はサマリメールにファイル名だけ載ります
+- 管理表はスキルシート1ファイル＝1行で自動作成されます。**人が入力するのは「必要案件単価」（万円/月）と「稼働状況」（稼働可/アサイン済/対象外）だけ**。
+  氏名・提案用表記（イニシャル）・稼働可能日は初回だけ抽出結果で埋まり、以後は人の入力を上書きしません
+- スキル・経験年数・居住地・リモート希望は、ファイルが更新されたときだけ抽出し直します（変更のないファイルはLLMを呼びません）。
+  1回の抽出は `PROPER_MAX_EXTRACT_PER_RUN`（既定20件）まで。初回に社員が多い場合は数回のバッチで取り込み終わります
+- 突合するのは受信から `PROPER_PROJECT_LOOKBACK_DAYS`（既定14日）以内の募集中案件です。必要案件単価が空欄の社員は「要確認」になります
+- 「プロパー候補」タブの提案は、マッチと同じく「担当者メール」を入れると次回バッチで下書きになります（案件側のみ）。
+  文面は**提案用表記（イニシャル）だけ**を使い、氏名・必要案件単価は書きません（提案用表記が空なら差し込み表記が入ります）
+- フォルダから消えたファイルの行は「抽出メモ」が `ファイルが見つかりません` になり、候補探しの対象から外れます（行は消しません）。
+  同じ社員の古いスキルシートが残っている場合は、古い行の稼働状況を `対象外` にしてください
+- ログには件数だけを出します（氏名・ファイル名・案件名はサマリメールとスプレッドシートのみ）
+
+**別のGoogle Workspaceにフォルダ・管理表がある場合（任意）**: そのテナントで作ったサービスアカウントの鍵を
+`PROPER_GOOGLE_SA_KEY_JSON`（または `PROPER_GOOGLE_SA_CLIENT_EMAIL` / `PROPER_GOOGLE_SA_PRIVATE_KEY`）に設定します。
+外部アカウント（サービスアカウント）への共有が禁止されている場合は、そのテナントでDWDを設定し
+（`drive.readonly` と `spreadsheets` スコープ）、`PROPER_GOOGLE_IMPERSONATE=<閲覧・編集できるユーザー>` を設定します。
 
 ---
 
@@ -379,6 +414,8 @@ UIでできること:
 | Notionに保存されない | DB IDと**プロパティ名の完全一致**、インテグレーションのDB共有を確認 |
 | サマリメールが届かない | `SES_NOTIFY_TO` とSMTP設定（`XSERVER_SMTP_*`）を確認 |
 | 自社社員突合が空 | `NOTION_OWN_ENGINEER_DB_ID` 設定と、ステータス`稼働可`の社員有無を確認 |
+| プロパー候補が0件 | 管理表の稼働状況が `稼働可` か、スキル列が埋まっているか（「抽出メモ」を確認）、直近の案件があるか |
+| プロパーのフォルダ・管理表を読めない | フォルダ（閲覧者）と管理表（編集者）をサービスアカウントのメールに共有したか。共有ドライブの場合はメンバー追加でも可 |
 | GWSへ移行した | `MAIL_PROVIDER=gmail` に変更し `SES_TARGET_GMAIL`＋`GOOGLE_SA_*` を設定（他は不要） |
 
 ---
@@ -392,6 +429,7 @@ UIでできること:
 - メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX` `SES_COLLECT_DAYS`
 - メール（Gmail）: `SES_TARGET_GMAIL` `GOOGLE_SA_*`
 - スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
+- プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
 - 事業ルール: `MIN_GROSS_MARGIN_JPY` `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`

@@ -75,21 +75,21 @@ function mergeCc(excludeTo: string, ...lists: string[]): string {
 
 // 元メール(replyTarget)への「全員に返信」として、宛先・件名・スレッド情報＋本文をまとめる。
 // To=元送信者、Cc=元の宛先一同（メーリス含む）、件名は Re: 付与、In-Reply-To/References でスレッド継続。
-function assembleReplyRef(
+// draftId は空（下書き作成時に決まる）。プロパーの提案文面（proper/proposal.ts）でも使う
+export function buildReplyRef(
   replyTarget: ReplyTarget | undefined,
   fallbackTo: string,
   fallbackSubject: string,
   body: string,
   fromEmail?: string,
 ): DraftRef {
-  demoDraftCounter += 1;
   const to = replyTarget?.from || fallbackTo;
   const cc = replyTarget ? mergeCc(to, replyTarget.to, replyTarget.cc) : '';
   const subject = replyTarget ? ensureRe(replyTarget.subject) : fallbackSubject;
   const inReplyTo = replyTarget?.messageId || '';
   const references = [replyTarget?.references || '', replyTarget?.messageId || ''].filter(Boolean).join(' ');
   return {
-    draftId: `demo_draft_${demoDraftCounter}`,
+    draftId: '',
     url: '',
     to,
     cc,
@@ -99,6 +99,16 @@ function assembleReplyRef(
     references,
     body,
   };
+}
+
+function assembleReplyRef(
+  replyTarget: ReplyTarget | undefined,
+  fallbackTo: string,
+  fallbackSubject: string,
+  body: string,
+): DraftRef {
+  demoDraftCounter += 1;
+  return { ...buildReplyRef(replyTarget, fallbackTo, fallbackSubject, body), draftId: `demo_draft_${demoDraftCounter}` };
 }
 
 // 下書き内容をローカルファイルに書き出す（demo/確認用）。ヘッダも人が読める形で残す。
