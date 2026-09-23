@@ -1,21 +1,22 @@
 // 再送スキップ（抽出の前に弾いてAPI費用を節約する）。
 // パートナーによっては同じ案件・要員を毎日のように送り直してくるため、本文の「指紋」を取り、
-// 同じ送信元ドメインが直近に送った内容とほぼ同じなら Haiku の抽出を呼ばずに処理済み（再送スキップ）にする。
+// 同じ送り主（認証済みのドメイン、または同じアドレス）・同じ返信先が直近に送った内容とほぼ同じなら Haiku の抽出を呼ばずに処理済み（再送スキップ）にする。
 // 抽出後の名寄せ（store.ts withoutResent*）でも二重登録は防げるが、それでは抽出の費用が毎回かかる。
 // 指紋はハッシュ値だけで本文は保存しない（元の文面に戻せない）。
 // 単価などの数字は残すので、条件を変えた再送は別の内容として抽出し直す。添付が違う（スキルシートの差し替え）、
 // 項目の見出し（【要員2】・氏名: 等）が増えた一覧も抽出し直す
 import { createHash } from 'crypto';
-import { addressOf, domainOfAddress } from './mail/ownMail.js';
+import { addressOf, domainOfAddress, isFreeMailDomain } from './mail/ownMail.js';
 import type { SesRawMail } from '../types/index.js';
 
 const SIG_SIZE = 128;
 const SHINGLE = 5;
-const VERSION = 'v1';
+// v2: 送り主の識別を「送信元ドメイン」から「認証済みのドメイン、または送信元アドレス」＋返信先に変えた（v1の記録とは比べない）
+const VERSION = 'v2';
 
 export interface MailFingerprint {
   exact: string; // 正規化した件名＋本文＋添付の SHA-256（先頭16桁）
-  domain: string; // 送信元ドメインのハッシュ（先頭8桁）
+  domain: string; // 送り主の識別（DMARC合格のドメイン、または送信元アドレス）と返信先のハッシュ（先頭8桁）
   attachments: string; // 添付の中身のハッシュ（なければ空）
   markers: number; // 項目の見出しらしき行の数（一覧に1件足した再送を見分ける）
   numbers: string; // 本文の数字（単価・年齢・年数・年のない日付）の並びのハッシュ。長いメールで単価だけ変えた再送を見分ける
@@ -115,10 +116,17 @@ export function estimatedSimilarity(a: number[], b: number[]): number {
   return same / SIG_SIZE;
 }
 
-// 送り主のドメイン。表示名の中の "@partner.jp" に惑わされないよう、アドレスヘッダとして解釈したアドレスから取る
-function senderDomain(from: string): string {
-  const domain = domainOfAddress(addressOf(from));
-  return (domain || from.toLowerCase()).replace(/\.$/, '');
+// 送り主の識別。From は誰でも書けるため、受信サーバーの認証（DMARC）に合格した From のドメインのときだけドメイン単位で
+// 同じ送り主とみなし、それ以外（認証なし・フリーメール）はアドレスそのものを使う。返信先（Reply-To、無ければ From）も含め、
+// 返信先の違うメールは元のメールの再送として扱わない（先に同じ内容を送った他人に、後から届いた本物の送り主の返信先を
+// 奪われないように）。表示名の中の "@partner.jp" に惑わされないよう、アドレスヘッダとして解釈したアドレスから取る
+export function senderIdentity(mail: Pick<SesRawMail, 'from' | 'replyTo' | 'authDomain'>): string {
+  const from = addressOf(mail.from);
+  const domain = domainOfAddress(from).replace(/\.$/, '');
+  const auth = (mail.authDomain ?? '').toLowerCase().replace(/\.$/, '');
+  const who = auth && domain && auth === domain && !isFreeMailDomain(domain) ? `dmarc:${domain}` : `addr:${from || mail.from.trim().toLowerCase()}`;
+  const replyTarget = addressOf(mail.replyTo ?? '') || from;
+  return `${who}|reply:${replyTarget}`;
 }
 
 export function fingerprintOf(mail: SesRawMail): MailFingerprint {
@@ -130,7 +138,7 @@ export function fingerprintOf(mail: SesRawMail): MailFingerprint {
   const links = [...mail.sheetLinks].sort().join(',');
   return {
     exact: sha(`${text}\n${attachments}\n${links}`).slice(0, 16),
-    domain: sha(senderDomain(mail.from)).slice(0, 8),
+    domain: sha(senderIdentity(mail)).slice(0, 8),
     attachments: links ? sha(`${attachments}|${links}`).slice(0, 16) : attachments,
     markers: countItemMarkers(mail.body),
     numbers: sha((body.match(/\d+(?:\.\d+)?/g) ?? []).join(',')).slice(0, 12),

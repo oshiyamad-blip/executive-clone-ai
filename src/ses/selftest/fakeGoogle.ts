@@ -615,6 +615,8 @@ export class FakeDrive {
 
 export class FakeMailTransport implements MailTransport {
   inbox: SesRawMail[] = [];
+  // 原文を解析できなかったメールのID（プロバイダが「解析不可」として返す分）
+  unparsable: string[] = [];
   collectCalls = 0;
   skippedAsProcessed: string[] = [];
   downloaded: string[] = []; // 本文を取得したメールID
@@ -641,7 +643,11 @@ export class FakeMailTransport implements MailTransport {
     // 実際のプロバイダと同じく、上限まで選んだメールだけ本文を取得する
     const pick = pickForRun(unprocessed, opts.limit, collectDays(), opts.now);
     this.downloaded.push(...pick.picked.map((m) => m.id));
-    return { mails: pick.picked.map((m) => ({ ...m })), deferred: pick.deferred.map((m) => m.receivedAt) };
+    return {
+      mails: pick.picked.map((m) => ({ ...m })),
+      deferred: pick.deferred.map((m) => m.receivedAt),
+      unparsable: this.unparsable.filter((id) => !isProcessed(id)),
+    };
   }
 
   draftReady(): boolean {

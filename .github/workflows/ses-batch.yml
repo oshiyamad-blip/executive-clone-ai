@@ -100,6 +100,8 @@ jobs:
           SES_ALLOWED_SENDER_DOMAINS: ${{ secrets.SES_ALLOWED_SENDER_DOMAINS }}
           SES_ALLOWED_SENDERS: ${{ secrets.SES_ALLOWED_SENDERS }}
           SES_DRAFT_SIGNING_KEY: ${{ secrets.SES_DRAFT_SIGNING_KEY }}
+          # 指示の検知に足す言い回し（正規表現・改行区切り）。公開リポジトリの一覧だけで検知の有無を確かめられないよう Secret に置く
+          SES_INJECTION_EXTRA_PATTERNS: ${{ secrets.SES_INJECTION_EXTRA_PATTERNS }}
           SHEETS_DB_IMPERSONATE: ${{ secrets.SHEETS_DB_IMPERSONATE }}
           # 価格の方針（粗利下限・交渉幅）は1つの JSON（推測できない乱数 n を含む）で渡す。「10」「5」のような短い数値を
           # 個別の Secret にすると、Actions がログ全体のその数字を伏せ字にするため、伏せ字の位置から値が分かってしまう。
@@ -141,6 +143,7 @@ jobs:
           HOURLY_TO_MONTHLY_HOURS: ${{ vars.HOURLY_TO_MONTHLY_HOURS }}
           ENABLE_NEGOTIATION: ${{ vars.ENABLE_NEGOTIATION }}
           SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
+          SES_MAX_MAIL_MB_PER_RUN: ${{ vars.SES_MAX_MAIL_MB_PER_RUN }}
           SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
           SES_RESEND_WINDOW_DAYS: ${{ vars.SES_RESEND_WINDOW_DAYS }}
           SES_RESEND_SIMILARITY: ${{ vars.SES_RESEND_SIMILARITY }}

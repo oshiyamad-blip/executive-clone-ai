@@ -330,6 +330,7 @@ export interface SesRawMail {
   receivedAt: Date;
   attachments: SesAttachment[];
   sheetLinks: string[]; // 本文中の Google スプレッドシートURL
+  authDomain?: string; // 受信サーバーの送信ドメイン認証で DMARC に合格した From のドメイン（無ければ未設定。再送スキップの送り主の識別用）
 }
 
 // 元メールへ「全員に返信」するために必要な情報（案件/要員それぞれの元メールから採取）。

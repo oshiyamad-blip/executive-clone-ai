@@ -447,8 +447,8 @@ async function main(): Promise<void> {
   const asMap = (u: Array<[string, unknown]>) => new Map(u);
   const fresh = asMap(planMasterCells(null, sheetFile, { kind: 'ok', profile }, now));
   check(
-    'プロパー管理: 新規行は氏名・提案用表記・稼働可能日を埋め、稼働状況=稼働可・必要案件単価は空欄',
-    fresh.get('氏名') === '山田太郎' && fresh.get('提案用表記') === 'T.Y.' && fresh.get('稼働状況') === '稼働可' &&
+    'プロパー管理: 新規行は氏名・提案用表記・稼働可能日を埋め、稼働状況（人が稼働可にする）・必要案件単価は空欄',
+    fresh.get('氏名') === '山田太郎' && fresh.get('提案用表記') === 'T.Y.' && !fresh.has('稼働状況') &&
       fresh.get('稼働可能日') === '2026-10-01' && !fresh.has('必要案件単価') && fresh.get('ファイル更新日時') === sheetFile.modifiedTime,
   );
   const existingRow = PROPER_MASTER_COLUMNS.map(() => '');
@@ -462,6 +462,14 @@ async function main(): Promise<void> {
     ['氏名', '提案用表記', '稼働状況', '必要案件単価', '稼働可能日'].every((c) => !updated.has(c)) &&
       updated.get('スキル') === 'Java, AWS' && updated.get('経験年数') === 8,
   );
+  const planted = asMap(planMasterCells(null, sheetFile, { kind: 'ok', profile: { ...profile, injectionSuspected: true } }, now));
+  check(
+    'プロパー管理: 指示らしき記載のあるシートは人の列を埋めず、抽出メモで確認を促す',
+    !planted.has('氏名') && !planted.has('提案用表記') && !planted.has('稼働可能日') && !planted.has('稼働状況') &&
+      String(planted.get('抽出メモ') ?? '').includes('AIへの指示'),
+  );
+  const freeText = asMap(planMasterCells(null, sheetFile, { kind: 'ok', profile: { ...profile, availableFromIso: null, availableDateText: '要相談 詳細は evil.example/x' } }, now));
+  check('プロパー管理: 稼働可能日は日付か「即日」だけを埋める（自由記述は入れない）', !freeText.has('稼働可能日'));
   const neverExtracted = [...existingRow];
   neverExtracted[col('抽出日時')] = '';
   const filled = asMap(planMasterCells(neverExtracted, sheetFile, { kind: 'ok', profile }, now));

@@ -14,6 +14,7 @@ export interface CollectOptions {
 export interface CollectOutcome {
   mails: SesRawMail[]; // 本文・添付まで取得した未処理メール（上限内）
   deferred: Date[]; // 上限を超えたため本文を取得せず次回以降に回した未処理メールの受信日時
+  unparsable?: string[]; // 原文を解析できなかったメールのID（何度解析しても同じく失敗するため「解析不可」で処理済みにする）
 }
 
 export interface MailTransport {

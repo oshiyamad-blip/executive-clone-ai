@@ -4,7 +4,7 @@
 // （プロンプトインジェクション対策）。抽出された単金は原文に現れる数値か・妥当な範囲かを検証する。
 import { createHash } from 'crypto';
 import { generateJson, generateJsonWithDocuments, type GenOptions, type PdfDocument } from '../llm/index.js';
-import { LlmOutputError } from '../llm/errors.js';
+import { LlmOutputError, isTruncationError } from '../llm/errors.js';
 import { estimateCallJpy } from '../llm/pricing.js';
 import { isDemo, extractModel, collectDays, healMaxAttempts, extractModelFallbackActive, logRedact } from './config.js';
 import { withExtractModelFallback } from './extractModelFallback.js';
@@ -221,7 +221,7 @@ export interface RawEngineer {
   agentEmail: string;
 }
 
-interface RawExtraction {
+export interface RawExtraction {
   projects: RawProject[];
   engineers: RawEngineer[];
   injectionSuspected?: boolean;
@@ -248,7 +248,8 @@ export interface ExtractOptions {
 // 基盤起因の失敗か（メール固有の問題ではなく、続けても同じく失敗する種類）。
 // 残高不足・請求の問題は 400 で返るが、どのメールでも同じく失敗するため基盤起因として扱う
 export function isInfraError(err: unknown): boolean {
-  if (err instanceof LlmOutputError || err instanceof SyntaxError) return false;
+  // 応答の形の誤り（スキーマに合わないJSONを読んだ TypeError 等）はメール側で起こせるため、基盤起因に数えない
+  if (err instanceof LlmOutputError || err instanceof SyntaxError || err instanceof TypeError || err instanceof RangeError) return false;
   const status = (err as { status?: number }).status;
   if (typeof status === 'number') {
     if (status === 400 || status === 402) {
@@ -306,13 +307,20 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
       } else {
         // 自動修復: 予算内でバックオフ再試行（打ち切りなら出力上限を拡大）→ 上位モデルへ昇格
         const budgetSkipsBefore = getStats().budgetExhausted;
+        let healTries = 0;
         extracted = await healLlmCall(
           `SES抽出(mail ${mail.id})`,
           err,
-          (a) => extractFromMail(mail, a),
-          (a) => estimateExtractionJpy(mail, a),
+          (a) => {
+            healTries += 1;
+            return extractFromMail(mail, a);
+          },
+          (a) => estimateExtractionJpy(mail, a, isTruncationError(err)),
         );
-        unfair = getStats().budgetExhausted > budgetSkipsBefore;
+        // 予算切れで1度も再試行できなかった一時的な失敗だけを「公平でない」とする。再試行した後の昇格だけを予算で省いた失敗と、
+        // メールの側で起こせる失敗（打ち切り・拒否・形の誤り）は隔離の回数に数える（毎回出力上限まで使い切るメールを大量に
+        // 送られて予算を食い続けられ、いつまでも隔離されないことを防ぐ）
+        unfair = healTries === 0 && getStats().budgetExhausted > budgetSkipsBefore && !(err instanceof LlmOutputError);
       }
     }
     if (extracted) {
@@ -350,9 +358,12 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
   // メール固有の問題ではなく基盤障害（APIキー・残高・Anthropic障害等）の可能性が高いため、隔離しない
   // （処理済みにもせず、窓の中にある限り次回以降に再処理する）。
   // 基盤障害でなければ、次回の実行時には収集の窓から外れるメールは黙って消えないよう回数に関わらず隔離して報告する
+  // 過半数の判定は基盤起因の失敗（通信・認証・残高・過負荷）だけで数える。打ち切り・拒否・JSONの誤りはメールの側で
+  // 起こせるため、同じメールを大量に送られて「基盤障害」とみなし隔離をやめる（毎回予算を使い切り異常終了する）ことにしない
+  const infraFailed = failed.filter((f) => isInfraError(f.err));
   const massFailure =
     stopReason === 'circuit' ||
-    (failed.length >= 3 && failed.length / attempted > 0.5) ||
+    (infraFailed.length >= 3 && infraFailed.length / attempted > 0.5) ||
     (failed.length > 0 && failed.every((f) => isInfraError(f.err)) && failed.length === attempted);
   let lost = notAttempted.filter((m) => isLastChance(m.receivedAt, collectDays())).length;
   if (failed.length > 0) {
@@ -360,12 +371,13 @@ export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {
     if (massFailure && stopReason !== 'circuit') {
       recordHealEvent(
         'critical',
-        `抽出失敗が${failed.length}/${attempted}件と過半数です。基盤障害の可能性が高いため隔離せず、次回の実行で再処理します`,
+        `基盤起因とみられる抽出失敗が${infraFailed.length}/${attempted}件と過半数です。基盤障害の可能性が高いため、これらは隔離せず次回の実行で再処理します`,
       );
     }
     for (const f of failed) {
       const lastChance = isLastChance(f.mail.receivedAt, collectDays());
-      if (massFailure) {
+      // 基盤障害の回でも、メール側で起こせる失敗（打ち切り・拒否・形の誤り）は通常どおり隔離の回数に数える
+      if (massFailure && isInfraError(f.err)) {
         if (lastChance) lost += 1;
         await recordFailureSafely(f.mail, f.err, { countTowardQuarantine: false });
         continue;
@@ -442,11 +454,16 @@ function mailText(mail: SesRawMail): string {
   return `${mail.subject}\n${mail.body}\n${mail.attachments.map((a) => a.text ?? '').join('\n')}`;
 }
 
+// 指示の検知の対象。抽出のAIに渡す差出人・返信先の表示名と添付のファイル名も含める（本文以外に書かれた指示も確かめる）
+function injectionScanText(mail: SesRawMail): string {
+  return `${mailText(mail)}\n${mail.from}\n${mail.replyTo ?? ''}\n${mail.attachments.map((a) => a.filename).join('\n')}`;
+}
+
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
   const items: ExtractedItem[] = [];
   for (const mail of mails) {
     const extracted = EXPECTED_EXTRACTIONS[mail.id] ?? [{ kind: 'other' as const }];
-    items.push(...withReplyTarget(withInjectionFlag(extracted, looksLikeInjection(mailText(mail))), mail));
+    items.push(...withReplyTarget(withInjectionFlag(extracted, looksLikeInjection(injectionScanText(mail))), mail));
   }
   return items;
 }
@@ -562,12 +579,12 @@ function prepareMail(mail: SesRawMail): PreparedMail {
     const capped = capText(a.text ?? '', Math.min(MAX_ATTACHMENT_CHARS, remaining));
     truncated ||= capped.truncated;
     remaining -= capped.text.length;
-    attachmentParts.push(`【添付: ${a.filename}】\n${capped.text}`);
+    attachmentParts.push(`【添付: ${a.filename.slice(0, 200)}】\n${capped.text}`);
   }
   const body = capText(mail.body, MAX_BODY_CHARS);
   truncated ||= body.truncated;
 
-  const content = `件名: ${capSubject(mail.subject)}\nFrom: ${mail.from}\n\n本文:\n${body.text}\n\n${attachmentParts.join('\n\n')}`.trim();
+  const content = `件名: ${capSubject(mail.subject)}\nFrom: ${mail.from.slice(0, 300)}\n\n本文:\n${body.text}\n\n${attachmentParts.join('\n\n')}`.trim();
   // 受信日はメールの外（サーバーの受信日時）から渡す。「即日」「10月〜」の年・日付の解釈の基準にする
   const user =
     `受信日: ${jstDateOf(mail.receivedAt)}\n` +
@@ -601,12 +618,26 @@ function genOptions(attempt: HealAttempt | undefined): GenOptions {
 }
 
 // 自動修復の1回分のコスト見積もり（円）。日本語は1文字≒1トークン、PDFは1ページ≒3,000トークン（画像分含む）で概算
-function estimateExtractionJpy(mail: SesRawMail, attempt: HealAttempt): number {
+// truncated: 出力上限での打ち切りからの修復。打ち切ったメールは再試行でも上限まで使い切ることが多いため、実際の上限
+// （EXTRACT_MAX_TOKENS×倍率）で見積もる（少なく見積もると予算の判定が甘くなり、毎回上限まで使い切るメールに予算を使われる）
+function estimateExtractionJpy(mail: SesRawMail, attempt: HealAttempt, truncated = false): number {
   const prepared = prepareMail(mail);
   const pdfTokens = prepared.documents.reduce((sum, d) => sum + Math.max(1, Math.round((d.dataBase64.length * 0.75) / 60_000)) * 3000, 0);
   const inputTokens = EXTRACT_SYSTEM.length + prepared.user.length + pdfTokens;
-  const outputTokens = 4000 * attempt.maxTokensFactor;
+  const outputTokens = (truncated ? EXTRACT_MAX_TOKENS : 4000) * attempt.maxTokensFactor;
   return estimateCallJpy(attempt.model ?? extractModel(), inputTokens, outputTokens);
+}
+
+// 抽出のLLM呼び出しの差し替え（回帰確認 ses:eval:rules 用。null で元に戻す）
+let extractLlmOverride: ((mail: SesRawMail, attempt?: HealAttempt) => Promise<RawExtraction>) | null = null;
+
+export function __setExtractLlmForTest(fn: ((mail: SesRawMail, attempt?: HealAttempt) => Promise<RawExtraction>) | null): void {
+  extractLlmOverride = fn;
+}
+
+// 自動修復の1回分のコスト見積もり（回帰確認用）
+export function __estimateExtractionJpyForTest(mail: SesRawMail, attempt: HealAttempt, truncated: boolean): number {
+  return estimateExtractionJpy(mail, attempt, truncated);
 }
 
 // attempt は自動修復（heal/retry.ts）の再試行・上位モデル昇格用。通常は extractModel() と既定の出力上限を使う
@@ -623,7 +654,7 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
 
   let usedDocuments = prepared.documents.length > 0;
   // 抽出モデルが退役・提供終了で使えなければ、判定用モデルに切り替えて呼び直す（extractModelFallback.ts）
-  const parsed = await withExtractModelFallback(genOptions(attempt).model ?? extractModel(), async (model) => {
+  const parsed = extractLlmOverride ? await extractLlmOverride(mail, attempt) : await withExtractModelFallback(genOptions(attempt).model ?? extractModel(), async (model) => {
     const opts = { ...genOptions(attempt), model };
     try {
       const documents = usedDocuments ? prepared.documents : [];
@@ -645,7 +676,7 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
     ...parsed.engineers.map((e, i) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, i, numbers) })),
   ];
   // 添付PDFの中身はコードで読めないため、抽出した値（PDF由来の文言も入る）にも指示の言い回しが無いかを確かめる
-  const injection = parsed.injectionSuspected === true || looksLikeInjection(text) || looksLikeInjection(extractedText(parsed));
+  const injection = parsed.injectionSuspected === true || looksLikeInjection(injectionScanText(mail)) || looksLikeInjection(extractedText(parsed));
   if (injection && items.length > 0) {
     recordMailEvent('warn', `mail ${mail.id}: AIへの指示らしき記載があるため、このメールの案件・要員の組は要確認にします（自動の下書きなし）`);
   }

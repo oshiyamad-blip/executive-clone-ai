@@ -429,6 +429,34 @@ export function maxMailsPerRun(): number {
   return envNum('SES_MAX_MAILS_PER_RUN', 150, { min: 1, int: true });
 }
 
+// 指示の検知に足す言い回し（正規表現。改行区切り。GitHub の Secret に置く）。公開リポジトリの一覧だけでは、
+// 送り主が自分の文面が検知されるかを手元で確かめきれないようにする。解釈できない行は無視する
+let extraPatternCache: { raw: string; patterns: RegExp[] } | null = null;
+
+export function injectionExtraPatterns(): RegExp[] {
+  const raw = env('SES_INJECTION_EXTRA_PATTERNS');
+  if (extraPatternCache && extraPatternCache.raw === raw) return extraPatternCache.patterns;
+  const patterns: RegExp[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const src = line.trim();
+    if (!src || src.length > 500) continue;
+    try {
+      patterns.push(new RegExp(src, 'i'));
+    } catch {
+      /* 解釈できない行は使わない */
+    }
+  }
+  extraPatternCache = { raw, patterns };
+  return patterns;
+}
+
+// 1回の実行で本文・添付を取得するメールの合計の大きさ（MB。RFC822の原文）。1通ごとの上限（45MB）の内でも、
+// 上限近くのメールを大量に送られると本文・添付をすべてメモリに抱えて収集中に落ちるため、合計にも上限を設ける
+// （超えた分は次回以降に回す）
+export function maxMailMbPerRun(): number {
+  return envNum('SES_MAX_MAIL_MB_PER_RUN', 400, { min: 50, max: 4000, int: true });
+}
+
 // 1回の実行で新しい処理（メールの抽出・候補の判定）を始めてよい時間（分。バッチ開始から）。
 // 過ぎたら新しい処理を始めず、済んだ分を保存してサマリを送る（残りは次回の実行で続きから処理する）。
 // GitHub Actions のジョブの制限時間（timeout-minutes）より十分短くする

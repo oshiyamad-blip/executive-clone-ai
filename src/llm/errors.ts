@@ -3,12 +3,13 @@
 // 文言は固定なので、ログ秘匿モードでもそのまま出してよい（SafeLogError）
 import { SafeLogError } from '../ses/redact.js';
 
-export type LlmOutputProblem = 'max_tokens' | 'refusal' | 'empty';
+export type LlmOutputProblem = 'max_tokens' | 'refusal' | 'empty' | 'schema';
 
 const MESSAGES: Record<LlmOutputProblem, string> = {
   max_tokens: 'LLM応答が出力上限(max_tokens)で途中打ち切りになりました',
   refusal: 'LLMが応答を拒否しました(refusal)',
   empty: 'LLM応答に本文がありませんでした',
+  schema: 'LLM応答のJSONが指定の形（スキーマ）に合いませんでした',
 };
 
 export class LlmOutputError extends SafeLogError {

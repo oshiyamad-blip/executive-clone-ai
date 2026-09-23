@@ -1113,7 +1113,7 @@ export async function appendMetricsRowSheets(values: Record<string, Cell>): Prom
 
 // 除外 = 自分たちのメール（サマリ・自社ドメイン等）として取り込まなかったもの
 // 再送スキップ = 直近に抽出した内容と同じ再送として、抽出せずに処理済みにしたもの
-export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ';
+export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ' | '解析不可';
 
 // 処理済みメールに付ける再送判定用の指紋（本文は含まない）と、元にしたメール
 export interface ProcessedFingerprint {

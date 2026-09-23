@@ -8,11 +8,12 @@ import { google } from 'googleapis';
 import { SheetBook, googleTransientKind, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from '../../database/sheetBook.js';
 import { properEngineerIdOf } from '../../database/sheets.js';
 import { joinList, splitList, remoteLabel, labelToRemote } from '../../database/mapping.js';
-import { properMasterSpreadsheetId, properMaxExtractPerRun } from '../config.js';
+import { properMasterSpreadsheetId, properMaxExtractPerRun, extractModel } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { jstStamp } from '../pendingDrafts.js';
-import { healLlmCall, isRetryableLlmError } from '../heal/retry.js';
+import { healLlmCall, isRetryableLlmError, type HealAttempt } from '../heal/retry.js';
+import { estimateCallJpy } from '../../llm/pricing.js';
 import { recordHealEvent } from '../heal/events.js';
 import { errKind, safeErr, SafeLogError } from '../redact.js';
 import { properGoogleAuth } from './auth.js';
@@ -24,7 +25,7 @@ import {
   type SkillSheetFile,
   type SkillSheetContent,
 } from './drive.js';
-import { extractSkillSheet, sanitizeInitials, type SkillSheetProfile } from './extractSkillSheet.js';
+import { extractSkillSheet, sanitizeInitials, proposalAvailableText, type SkillSheetProfile } from './extractSkillSheet.js';
 import { pastRunDeadline } from '../schedule.js';
 import type { ProperEngineer } from '../../types/index.js';
 
@@ -115,8 +116,13 @@ export type ExtractionOutcome =
   | { kind: 'ok'; profile: SkillSheetProfile }
   | { kind: 'error'; memo: string; retry: boolean };
 
-function successMemo(p: SkillSheetProfile): string {
+export const PROPER_INJECTION_MEMO =
+  'スキルシートにAIへの指示・連絡先らしき記載があるため、氏名・提案用表記・稼働可能日は自動で埋めていません。内容を確かめてから入力してください';
+
+function successMemo(p: SkillSheetProfile, statusEmpty: boolean): string {
   const notes: string[] = [];
+  if (p.injectionSuspected) notes.push(PROPER_INJECTION_MEMO);
+  if (statusEmpty) notes.push('稼働状況（稼働可など）を入力すると提案の対象になります');
   if (!p.initials) notes.push('提案用表記（イニシャル）を読み取れませんでした。入力してください');
   if (p.skills.length === 0) notes.push('スキルを読み取れませんでした');
   if (p.desiredRateMan !== null) notes.push(`シート記載の希望単価: ${p.desiredRateMan}万円（参考）`);
@@ -134,14 +140,15 @@ export function planMasterCells(
   const updates: Array<[string, Cell]> = [];
   if (outcome.kind === 'ok') {
     const p = outcome.profile;
-    if (cell(existing, '抽出日時').trim() === '') {
+    // 稼働状況は人（人事・運用担当）だけが「稼働可」にする（フォルダに置かれたファイルだけで提案の対象にしない）。
+    // AIへの指示らしき記載のあるシートは、人の列を抽出結果で埋めない
+    if (cell(existing, '抽出日時').trim() === '' && !p.injectionSuspected) {
       const fill = (name: string, value: string) => {
         if (value && cell(existing, name).trim() === '') updates.push([name, value]);
       };
       fill('氏名', p.displayName);
       fill('提案用表記', p.initials);
-      fill('稼働状況', PROPER_STATUS.available);
-      fill('稼働可能日', p.availableFromIso ?? p.availableDateText);
+      fill('稼働可能日', proposalAvailableText(p.availableFromIso, p.availableDateText));
     }
     updates.push(
       ['スキル', joinList(p.skills)],
@@ -150,7 +157,7 @@ export function planMasterCells(
       ['リモート希望', remoteLabel(p.remoteWish)],
       ['ファイル更新日時', file.modifiedTime],
       ['抽出日時', jstStamp(now)],
-      ['抽出メモ', successMemo(p)],
+      ['抽出メモ', successMemo(p, cell(existing, '稼働状況').trim() === '')],
     );
   } else {
     // 再試行する失敗は更新日時を記録しない（次回の実行で「変更あり」として抽出し直す）
@@ -190,6 +197,12 @@ export function failureOutcome(prevMemo: string, err: unknown, stage: 'load' | '
   return { kind: 'error', memo: `エラー: ${reason}（${attempts}回目）— ${next}`, retry };
 }
 
+// 自動修復の1回分のコスト見積もり（円）。出力は上限（4000×倍率）まで使う前提で見積もる（予算の見積もりを甘くしない）
+function estimateSkillSheetJpy(content: SkillSheetContent, a: HealAttempt): number {
+  const input = content.kind === 'text' ? content.text.length : Math.max(1, Math.round((content.base64.length * 0.75) / 60_000)) * 3000;
+  return estimateCallJpy(a.model ?? extractModel(), 3000 + input, 4000 * a.maxTokensFactor);
+}
+
 type SkillSheetExtractor = typeof extractSkillSheet;
 
 // オフライン自己検証（npm run ses:flow:check）用のLLM抽出の差し替え口（本番コードからは呼ばない）
@@ -218,7 +231,12 @@ async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<Extr
   try {
     return { kind: 'ok', profile: await extract(content) };
   } catch (err) {
-    const healed = await healLlmCall(`プロパー抽出(file ${fileRef(file.id)})`, err, (a) => extract(content, a));
+    const healed = await healLlmCall(
+      `プロパー抽出(file ${fileRef(file.id)})`,
+      err,
+      (a) => extract(content, a),
+      (a) => estimateSkillSheetJpy(content, a),
+    );
     if (healed) return { kind: 'ok', profile: healed };
     console.error(`プロパー: スキルシートの抽出に失敗 (file ${fileRef(file.id)}): ${safeErr(err)}`);
     return failureOutcome(prevMemo, err, 'extract');

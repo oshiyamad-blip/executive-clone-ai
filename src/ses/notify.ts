@@ -16,6 +16,7 @@ import { redactable, safeErr, logId } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
 import { primarySelectTally, DEAL_BREAKER_CODES, DEAL_BREAKER_LABEL } from './match.js';
+import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, INJECTION_CAUTION, OUTGOING_TEXT_CAUTION, linkOrContactLike } from './injection.js';
 import { collectBatchMetrics, recordBatchMetrics, formatMetricsLines, metricsRowValues } from './batchMetrics.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
@@ -131,8 +132,8 @@ function carriedSection(carried: MatchSummaryRow[], savedIds: Set<string>): stri
   const lines = [`【前回までの実行でお知らせできなかったマッチ（${rows.length + carriedOverflow}件）】`];
   for (const r of rows.slice(0, CARRIED_LIST_MAX)) {
     const margin = r.grossMarginJpy !== null ? `粗利${(r.grossMarginJpy / 10000).toFixed(1)}万円/月, ` : '';
-    lines.push(`・${r.title} — ${margin}適合スコア${r.score ?? '-'}点`);
-    lines.push(`  根拠: ${r.reason}`);
+    lines.push(`・${summaryTitle(r.title)} — ${margin}適合スコア${r.score ?? '-'}点`);
+    lines.push(`  根拠: ${summaryText(r.reason)}`);
   }
   const more = rows.length - Math.min(rows.length, CARRIED_LIST_MAX) + carriedOverflow;
   if (more > 0) lines.push(`  ほか${more}件（スプレッドシート「マッチ」タブの検出日時で確認してください）`);
@@ -279,8 +280,8 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
     if (confirmed.length > 0) {
       lines.push('【成立候補】');
       for (const m of confirmed) {
-        lines.push(`・${m.title} — 粗利${(m.grossMarginJpy / 10000).toFixed(1)}万円/月, 適合スコア${m.score}点`);
-        lines.push(`  根拠: ${m.reason}`);
+        lines.push(`・${summaryTitle(m.title)} — 粗利${(m.grossMarginJpy / 10000).toFixed(1)}万円/月, 適合スコア${m.score}点`);
+        lines.push(`  根拠: ${summaryText(m.reason)}`);
         if (m.draftToProject) lines.push(draftLine('案件側下書き', m.draftToProject));
         if (m.draftToEngineer) lines.push(draftLine('要員側下書き', m.draftToEngineer));
       }
@@ -289,8 +290,8 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
     if (tentative.length > 0) {
       lines.push('【参考提案（スキルは許容範囲内・人によるご確認を推奨）】');
       for (const m of tentative) {
-        lines.push(`・${m.title} — 適合スコア${m.score}点`);
-        lines.push(`  根拠: ${m.reason}`);
+        lines.push(`・${summaryTitle(m.title)} — 適合スコア${m.score}点`);
+        lines.push(`  根拠: ${summaryText(m.reason)}`);
       }
       lines.push('');
     }
@@ -299,9 +300,9 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
       for (const m of negotiable) {
         const n = m.negotiation!;
         lines.push(
-          `・${m.title} — 案件+${n.projectRaiseMan}万円／要員−${n.engineerCutMan}万円で粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月, 適合スコア${m.score}点`,
+          `・${summaryTitle(m.title)} — 案件+${n.projectRaiseMan}万円／要員−${n.engineerCutMan}万円で粗利${(n.resultingGrossMarginJpy / 10000).toFixed(1)}万円/月, 適合スコア${m.score}点`,
         );
-        lines.push(`  根拠: ${m.reason}`);
+        lines.push(`  根拠: ${summaryText(m.reason)}`);
         if (m.draftToProject) lines.push(draftLine('案件側下書き（交渉前提）', m.draftToProject));
         if (m.draftToEngineer) lines.push(draftLine('要員側下書き（交渉前提）', m.draftToEngineer));
       }
@@ -310,7 +311,10 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
     if (needsReview.length > 0) {
       lines.push('【要確認（単金・勤務地等が不明のため人による確認が必要）】');
       for (const m of needsReview) {
-        lines.push(`・${m.title} — ${m.reason}`);
+        // 指示混入疑い・文面に入る項目のURL等で止めた組は、社外の記載そのもの（案件名）を載せずマッチIDだけにする
+        // （バッチ自身が送る社内向けのサマリに、社外の文言・リンクを信頼できる体裁で載せないため）
+        const held = [INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, INJECTION_CAUTION, OUTGOING_TEXT_CAUTION].some((r) => m.reason.includes(r));
+        lines.push(held ? `・マッチ ${m.id} — ${heldReason(m.reason)}（内容はスプレッドシートで確認してください）` : `・${summaryTitle(m.title)} — ${summaryText(m.reason)}`);
       }
       lines.push('');
     }
@@ -318,6 +322,31 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   lines.push(...countOnlySection(matches));
 
   return lines.join('\n');
+}
+
+// サマリに載せる社外由来の文字列（案件名・判定根拠）の無害化: リンク・アドレスとして働かない表記にし（スキーム・'.'・'@'）、
+// 長さを抑える。サマリはバッチ自身が社内へ送るメールのため、社外の文言に社内の案内の体裁を与えない
+const SUMMARY_TITLE_CHARS = 80;
+const SUMMARY_TEXT_CHARS = 400;
+
+export function summaryText(s: string, max = SUMMARY_TEXT_CHARS): string {
+  const oneLine = (s ?? '').replace(/[\r\n\u2028\u2029]+/g, ' ');
+  const capped = oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+  if (!linkOrContactLike(capped) && !/[@＠]/.test(capped)) return capped;
+  return capped
+    .replace(/\b(h)(?:tt|xx)(ps?):\/\//gi, '$1xx$2[:]//')
+    .replace(/\b(ftp):\/\//gi, '$1[:]//')
+    .replace(/[@＠]/g, '[at]')
+    .replace(/([A-Za-z0-9-])[.．]([A-Za-z]{2,24})(?![A-Za-z0-9-])/g, '$1[.]$2');
+}
+
+export function summaryTitle(s: string): string {
+  return summaryText(s, SUMMARY_TITLE_CHARS);
+}
+
+function heldReason(reason: string): string {
+  if (reason.includes(INJECTION_REVIEW_REASON) || reason.includes(INJECTION_CAUTION)) return INJECTION_REVIEW_REASON;
+  return OUTGOING_TEXT_REVIEW_REASON;
 }
 
 // metricsLines は件数・比率だけの行（秘匿モードのコンソールにも出してよい）

@@ -43,6 +43,68 @@ export function addressOf(header: string): string {
   return parseAddressList(header)[0]?.address ?? '';
 }
 
+// フリーメール・携帯キャリアのドメイン（個人の営業・フリーランスが使うため、同じドメインでも同じ会社・同じ送り主とはみなさない）
+const FREE_MAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'yahoo.co.jp', 'ymail.ne.jp', 'yahoo.com', 'outlook.jp', 'outlook.com', 'hotmail.com',
+  'hotmail.co.jp', 'live.jp', 'live.com', 'msn.com', 'icloud.com', 'me.com', 'mac.com', 'aol.com', 'protonmail.com',
+  'proton.me', 'zoho.com', 'docomo.ne.jp', 'ezweb.ne.jp', 'au.com', 'softbank.ne.jp', 'i.softbank.jp', 'nifty.com',
+  'biglobe.ne.jp', 'so-net.ne.jp', 'ocn.ne.jp', 'plala.or.jp',
+]);
+
+export function isFreeMailDomain(domain: string): boolean {
+  return FREE_MAIL_DOMAINS.has(domain.toLowerCase().replace(/\.$/, ''));
+}
+
+// mailparser が解釈したアドレス（{name, address} とグループ）を、表示名を引用符でエスケープしたヘッダの表記にする。
+// mailparser の .text は表示名の '"' をエスケープせずに引用符で囲むため、encoded-word で '"' を含む表示名を送られると
+// 解釈し直したときに1つの宛先が複数に割れる（見えない宛先を足される）。解釈済みの値から組み立て直して、宛先の数を変えない
+export interface MailboxValue {
+  name?: string;
+  address?: string;
+  group?: MailboxValue[];
+}
+
+export function formatMailboxes(values: MailboxValue[]): string {
+  const out: string[] = [];
+  const walk = (list: MailboxValue[], depth: number) => {
+    for (const v of list) {
+      if (v.group && depth < 3) {
+        walk(v.group, depth + 1);
+        continue;
+      }
+      const address = (v.address ?? '').replace(/[\s<>"]/g, '');
+      if (!address) continue;
+      const name = (v.name ?? '').replace(/[\r\n]+/g, ' ').trim();
+      out.push(name ? `"${name.replace(/[\\"]/g, '\\$&')}" <${address}>` : address);
+    }
+  };
+  walk(values, 0);
+  return out.join(', ');
+}
+
+// RFC 2047 の encoded-word（=?charset?B|Q?...?=）を1回だけ戻す（Gmail API のヘッダは戻さずに返るため、
+// Xserver 経路の mailparser と同じく表示名を1回だけデコードする。2回目はしない＝二重に encode した表示名は '=?' が残り、紛らわしい表示名として扱う）
+export function decodeEncodedWordsOnce(s: string): string {
+  return (s ?? '').replace(/=\?([^?\s]{1,40})\?([bBqQ])\?([^?\s]{0,2000})\?=(?:\s+(?==\?))?/g, (m, charset: string, enc: string, text: string) => {
+    try {
+      const bytes =
+        enc.toUpperCase() === 'B'
+          ? Buffer.from(text, 'base64')
+          : Buffer.from(text.replace(/_/g, ' ').replace(/=([0-9a-fA-F]{2})/g, (_x, h: string) => String.fromCharCode(parseInt(h, 16))), 'latin1');
+      return new TextDecoder(charset.toLowerCase().replace(/\*.*$/, '')).decode(bytes);
+    } catch {
+      return m;
+    }
+  });
+}
+
+// 生のアドレスヘッダ（Gmail API）→ 表示名を1回デコードし、引用符をエスケープした表記（Xserver 経路と同じ形）
+export function normalizeAddressHeader(raw: string): string {
+  return formatMailboxes(
+    addressparser(raw ?? '', { flatten: true }).map((a) => ({ name: decodeEncodedWordsOnce(a.name ?? ''), address: a.address ?? '' })),
+  );
+}
+
 export function domainOfAddress(address: string): string {
   return address.includes('@') ? address.slice(address.lastIndexOf('@') + 1) : '';
 }

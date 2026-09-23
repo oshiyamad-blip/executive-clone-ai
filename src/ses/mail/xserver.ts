@@ -8,10 +8,13 @@ import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { extractSheetLinks, isSupportedAttachment, attachmentKind, capSubject } from '../../collectors/email.js';
 import { buildReplyMime, DRAFT_KEY_HEADER } from './mime.js';
-import { pickForRun } from '../schedule.js';
+import { pickForRun, pastRunDeadline } from '../schedule.js';
 import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
-import { attachmentsWithinLimits, MAIL_MAX_BYTES } from './attachmentLimits.js';
+import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
+import { htmlToPlainText } from './htmlText.js';
+import { formatMailboxes, type MailboxValue } from './ownMail.js';
+import { dmarcPassDomain } from './authResults.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -21,6 +24,7 @@ import {
   xserverSharedPass,
   xserverDraftsMailbox,
   collectDays,
+  maxMailMbPerRun,
 } from '../config.js';
 import type { SesRawMail, DraftRef, SesAttachment, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
 import type { CollectOptions, CollectOutcome } from './index.js';
@@ -109,7 +113,12 @@ interface Candidate {
   uid: number;
   id: string;
   receivedAt: Date;
+  size: number;
 }
+
+// mailparser の HTML→テキスト変換（html-to-text）は大きなHTMLで処理時間が線形より速く伸び、1通で収集を何分も止めるため使わない。
+// text/plain の無いメールは htmlText.ts で切り詰めてから変換する。本文中のリンク・画像の書き換えも要らない
+const SIMPLE_PARSER_OPTIONS = { skipHtmlToText: true, skipTextToHtml: true, skipImageLinks: true, skipTextLinks: true } as const;
 
 // imapflow の search は NO/BAD 応答や接続断を false で返すため、「0件」と取り違えないよう例外にする
 function searchResult(uids: number[] | false | undefined, label: string): number[] {
@@ -131,6 +140,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   const client = imapClient();
   const mails: SesRawMail[] = [];
   let deferred: Date[] = [];
+  const sources: Array<{ meta: Candidate; source: Buffer }> = [];
   // 接続・認証・検索の失敗は呼び出し側へ伝える（収集失敗としてバッチを異常終了扱いにするため）
   try {
     await client.connect();
@@ -157,7 +167,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
             oversize += 1;
             continue;
           }
-          candidates.push({ uid: msg.uid, id: ids[0], receivedAt: internalDateOf(msg) });
+          candidates.push({ uid: msg.uid, id: ids[0], receivedAt: internalDateOf(msg), size: msg.size ?? 0 });
         }
         if (skipped > 0) console.log(`Xserver収集: ${skipped}件は処理済みのため取得をスキップ`);
         if (oversize > 0) {
@@ -166,26 +176,30 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
             `Xserver収集: 大きすぎる（${Math.round(MAIL_MAX_BYTES / 1024 / 1024)}MB超の）メール${oversize}件は取り込みません（受信箱で直接確認してください）`,
           );
         }
-        // 2) 上限まで選んだメールだけ本文・添付を取得する（残りは次回以降。毎回全件をダウンロードしない）
+        // 2) 上限まで選んだメールだけ原文を取得する（残りは次回以降。毎回全件をダウンロードしない）。
+        // 1回の合計の大きさにも上限を設け、超えた分は次回に回す（上限近くのメールを大量に送られてもメモリを使い切らない）
         const pick = pickForRun(candidates, opts.limit, collectDays(), opts.now);
-        deferred = pick.deferred.map((c) => c.receivedAt);
-        const byUid = new Map(pick.picked.map((c) => [c.uid, c]));
+        const budget = { left: maxMailMbPerRun() * 1024 * 1024 };
+        const picked: Candidate[] = [];
+        const overBudget: Candidate[] = [];
+        for (const c of pick.picked) {
+          if (picked.length > 0 && c.size > budget.left) {
+            overBudget.push(c);
+            continue;
+          }
+          picked.push(c);
+          budget.left -= c.size;
+        }
+        if (overBudget.length > 0) {
+          recordHealEvent('warn', `Xserver収集: 1回の取得量の上限（SES_MAX_MAIL_MB_PER_RUN=${maxMailMbPerRun()}MB）を超えるため、${overBudget.length}件を次回以降に回します`);
+        }
+        deferred = [...pick.deferred, ...overBudget].map((c) => c.receivedAt);
+        const byUid = new Map(picked.map((c) => [c.uid, c]));
         if (byUid.size > 0) {
-          let droppedAttachments = 0;
           for await (const msg of client.fetch([...byUid.keys()], { source: true }, { uid: true })) {
             const meta = byUid.get(msg.uid);
-            if (!meta) continue;
-            try {
-              const parsed = await simpleParser(msg.source as Buffer);
-              const mail = toSesRawMail(parsed, meta.id, meta.receivedAt);
-              droppedAttachments += mail.droppedAttachments;
-              mails.push(mail.mail);
-            } catch (err) {
-              console.error(`Xserver収集: メール解析に失敗 (mail ${logId(meta.id)}): ${safeErr(err)}`);
-            }
-          }
-          if (droppedAttachments > 0) {
-            recordHealEvent('warn', `Xserver収集: 大きすぎる添付${droppedAttachments}件は読み込まずに抽出します`);
+            if (!meta || !msg.source) continue;
+            sources.push({ meta, source: msg.source });
           }
         }
       }
@@ -199,8 +213,35 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
       /* noop */
     }
   }
+  // 3) 解析は IMAP を閉じてから行う（解析に時間のかかるメールで接続が切れ、取得済みの分まで失わないように）。
+  // 実行の期限を過ぎたら残りは次回に回す。解析できないメールは同じ原文を何度解析しても失敗するため「解析不可」で処理済みにする
+  let droppedAttachments = 0;
+  const unparsable: string[] = [];
+  for (let i = 0; i < sources.length; i++) {
+    const { meta, source } = sources[i];
+    if (pastRunDeadline()) {
+      deferred.push(...sources.slice(i).map((x) => x.meta.receivedAt));
+      recordHealEvent('warn', `Xserver収集: 実行時間の上限を過ぎたため、${sources.length - i}件のメールの解析を次回に回します`);
+      break;
+    }
+    try {
+      const mail = await parseRawMail(source, meta.id, meta.receivedAt);
+      droppedAttachments += mail.droppedAttachments;
+      mails.push(mail.mail);
+    } catch (err) {
+      unparsable.push(meta.id);
+      console.error(`Xserver収集: メール解析に失敗 (mail ${logId(meta.id)}): ${safeErr(err)}`);
+    }
+    sources[i] = { meta, source: Buffer.alloc(0) }; // 解析済みの原文は手放す
+  }
+  if (droppedAttachments > 0) {
+    recordHealEvent('warn', `Xserver収集: 大きすぎる添付${droppedAttachments}件は読み込まずに抽出します`);
+  }
+  if (unparsable.length > 0) {
+    recordHealEvent('warn', `Xserver収集: 解析できないメール${unparsable.length}件は「解析不可」として処理済みにします（受信箱で直接確認してください）`);
+  }
   console.log(`Xserver収集: ${mails.length}件を収集${deferred.length > 0 ? `（上限超過で次回以降に回した未処理 ${deferred.length}件）` : ''}`);
-  return { mails, deferred };
+  return { mails, deferred, unparsable };
 }
 
 // メール量の測定（npm run ses:mail-stats）用。受信箱を EXAMINE（読み取り専用）で開き、
@@ -266,15 +307,33 @@ function mailIdsOf(uidValidity: string, uid: number, messageId: string | undefin
   return [`sesmail_m${createHash('sha256').update(mid).digest('hex').slice(0, 24)}`, legacy];
 }
 
+// 解釈済みの宛先から表記を組み立て直す（mailparser の .text は表示名の '"' をエスケープしないため使わない。ownMail.formatMailboxes）
 function addrText(a: AddressObject | AddressObject[] | undefined): string {
   if (!a) return '';
-  if (Array.isArray(a)) return a.map((x) => x.text).filter(Boolean).join(', ');
-  return a.text ?? '';
+  const list = Array.isArray(a) ? a : [a];
+  return formatMailboxes(list.flatMap((x) => (x.value ?? []) as MailboxValue[]));
+}
+
+// 受信サーバーが付けた一番上の Authentication-Results（下にあるものは送り主が書けるため読まない）
+function topAuthResults(p: ParsedMail): string {
+  const line = (p.headerLines ?? []).find((h) => h.key.toLowerCase() === 'authentication-results')?.line ?? '';
+  return line.replace(/^[^:]*:/, '').replace(/\r?\n[ \t]+/g, ' ').trim();
+}
+
+// text/plain が無ければ HTML を切り詰めてからテキストにする。保持する本文にも上限を設ける
+function bodyText(p: ParsedMail): string {
+  if (typeof p.text === 'string' && p.text.trim()) return capMailBody(p.text);
+  return typeof p.html === 'string' && p.html ? capMailBody(htmlToPlainText(p.html)) : capMailBody(p.text ?? '');
 }
 
 function refsText(r: string | string[] | undefined): string {
   if (!r) return '';
   return Array.isArray(r) ? r.join(' ') : r;
+}
+
+// 1通の原文（RFC822）→ SesRawMail。収集と回帰確認（ses:eval:rules）で同じ解析を使う
+export async function parseRawMail(source: Buffer, id: string, receivedAt: Date): Promise<{ mail: SesRawMail; droppedAttachments: number }> {
+  return toSesRawMail(await simpleParser(source, SIMPLE_PARSER_OPTIONS), id, receivedAt);
 }
 
 function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesRawMail; droppedAttachments: number } {
@@ -289,7 +348,8 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     mimeType: a.mimeType,
     data: a.content ? a.content.toString('base64') : '',
   }));
-  const body = p.text ?? '';
+  const body = bodyText(p);
+  const authDomain = dmarcPassDomain(topAuthResults(p));
   const mail: SesRawMail = {
     id,
     from: addrText(p.from),
@@ -304,6 +364,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     receivedAt,
     attachments,
     sheetLinks: extractSheetLinks(body),
+    ...(authDomain ? { authDomain } : {}),
   };
   return { mail, droppedAttachments: dropped };
 }

@@ -1,3 +1,4 @@
+import { schemaMismatch } from './schemaCheck.js';
 import { GoogleGenAI, type GenerateContentResponse } from '@google/genai';
 import type { LlmMessage, GenOptions } from './index.js';
 import type { PdfDocument } from './anthropic.js';
@@ -99,7 +100,10 @@ export async function geminiJson(
   checkFinish(response, model);
   const text = response.text ?? '';
   if (!text.trim()) throw new LlmOutputError('empty', model);
-  return parseJsonLoose(text);
+  const parsed = parseJsonLoose(text);
+  // スキーマをプロンプトで伝えるだけのため、形を確かめてから返す（メール側の記載で形を崩された応答を読まない）
+  if (schemaMismatch(parsed, schema) !== null) throw new LlmOutputError('schema', model);
+  return parsed;
 }
 
 // 無料枠モデルが ```json フェンスや前後の説明文を付けることがあるため、頑健にJSONを取り出す。

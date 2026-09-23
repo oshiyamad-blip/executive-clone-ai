@@ -473,7 +473,9 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   await touchLastSeen(lastSeen);
   // 自分たちのメールとして除外した分も記録し、次回から本文を取得し直さない
   const excludedMarked = await markMailProcessed(parsedMails.excludedMailIds, '除外');
-  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked) {
+  // 原文を解析できなかったメールも記録し、次回から取得・解析し直さない（解析に時間のかかるメールで毎回の収集を止めない）
+  const unparsableMarked = await markMailProcessed(parsedMails.unparsableMailIds, '解析不可');
+  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked) {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
   return stored;
@@ -496,12 +498,15 @@ async function withStableIds(projects: Project[], engineers: Engineer[]): Promis
   };
 }
 
-async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[]; resend: ResendSplit }> {
+async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[]; unparsableMailIds: string[]; resend: ResendSplit }> {
   let mails: SesRawMail[] = [];
   let excludedMailIds: string[] = [];
+  let unparsableMailIds: string[] = [];
   let collectFailed = false;
   try {
-    ({ mails, excludedMailIds } = await collectSesMail());
+    const collected = await collectSesMail();
+    ({ mails, excludedMailIds } = collected);
+    unparsableMailIds = collected.unparsableMailIds ?? [];
   } catch (err) {
     collectFailed = true;
     console.error(`SES収集: 失敗: ${safeErr(err)}`);
@@ -519,7 +524,7 @@ async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds
   } catch (err) {
     console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }
-  return { mails: parsedMails, excludedMailIds, resend };
+  return { mails: parsedMails, excludedMailIds, unparsableMailIds, resend };
 }
 
 // 抽出の前に、直近に抽出した内容と同じ再送を分ける（Haikuの抽出を呼ばない。件数だけログに出す）

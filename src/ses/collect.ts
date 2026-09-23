@@ -16,6 +16,7 @@ import type { SesRawMail } from '../types/index.js';
 export interface CollectResult {
   mails: SesRawMail[]; // 今回抽出する未処理メール（処理する順・上限内）
   excludedMailIds: string[]; // 自分たちのメールとして除外した分（処理済み「除外」として記録する）
+  unparsableMailIds?: string[]; // 原文を解析できなかった分（処理済み「解析不可」として記録する。毎回解析し直さない）
   deferred: number; // 上限超過で次回以降に回した件数
 }
 
@@ -59,5 +60,10 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
       );
     }
   }
-  return { mails: orderForRun(own.kept, collectDays(), now), excludedMailIds: own.excluded.map((m) => m.id), deferred };
+  return {
+    mails: orderForRun(own.kept, collectDays(), now),
+    excludedMailIds: own.excluded.map((m) => m.id),
+    unparsableMailIds: (fetched.unparsable ?? []).filter((id) => !processed.has(id)),
+    deferred,
+  };
 }

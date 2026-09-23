@@ -8,15 +8,15 @@ import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { generateText } from '../llm/index.js';
 import { createReplyDraftViaMail } from './mail/index.js';
-import { addressOf, parseAddressList, currentOwnMailPolicy } from './mail/ownMail.js';
-import { isDemo, matchModel, demoDataDir } from './config.js';
+import { addressOf, parseAddressList, currentOwnMailPolicy, isFreeMailDomain } from './mail/ownMail.js';
+import { isDemo, matchModel, demoDataDir, allowedSenders } from './config.js';
 import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
 import { redactable, safeErr, logId } from './redact.js';
 import { recordHealEvent, recordStat } from './heal/events.js';
 import { hasKnownInitials, toInitials, UNKNOWN_INITIALS } from './pii.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
-import { dataSafe } from './injection.js';
+import { dataSafe, linkOrContactLike } from './injection.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
@@ -34,27 +34,32 @@ function ensureRe(subject: string): string {
 
 // 宛先に使えるアドレス（addr-spec）。引用符付きのローカル部などの珍しい形は扱わない（宛先から外す）
 const PLAIN_ADDRESS = /^[^\s<>"(),;:\\@]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
-// 表示名にアドレスや山括弧があると、メーラーが表示名だけを見せたときに別の宛先に見える（なりすましの手口）
-const DECEPTIVE_NAME = /[@<>＠＜＞]/;
+// 表示名にアドレス・山括弧・引用符・区切りのカンマ、デコードしきれていない encoded-word（=?...?=）があると、
+// メーラーが表示名だけを見せたとき・表示名を解釈し直したときに別の宛先に見える（なりすましの手口）
+const DECEPTIVE_NAME = /[@<>＠＜＞",]|=\?/;
+// 下書きの宛先に残してよい表示名（文字・数字・空白と、社名・部署名に使う少数の記号だけ）。それ以外の表示名は外し、アドレスだけにする
+const SAFE_NAME = /^[\p{L}\p{N}\p{M} \u3000・･ー\-_.'&()（）]{1,80}$/u;
 
 // アドレスヘッダを RFC 5322 の解釈で宛先ごとに分け（引用符内のカンマ・表示名の中の "<...>" に惑わされない）、
 // 解釈した表示名とアドレスから表記を組み立て直す。宛先の判定（自社/他社・返信先の会社）に使うアドレスと、
-// 下書きに書かれて実際に届く宛先を一致させるため。アドレスらしくない宛先は除き、紛らわしい表示名は外す
-function parseAddrs(s: string): { list: string[]; deceptiveNames: number } {
+// 下書きに書かれて実際に届く宛先を一致させるため。アドレスらしくない宛先は除き、紛らわしい表示名・許可した文字以外を含む表示名は外す
+function parseAddrs(s: string): { list: string[]; deceptiveNames: number; total: number } {
   let deceptiveNames = 0;
   const list: string[] = [];
-  for (const { name, address, original } of parseAddressList(s)) {
+  const parsed = parseAddressList(s);
+  for (const { name, address, original } of parsed) {
     if (!PLAIN_ADDRESS.test(address)) continue;
-    if (name && DECEPTIVE_NAME.test(name.normalize('NFKC'))) {
+    const n = name.normalize('NFKC');
+    if (n && DECEPTIVE_NAME.test(n)) {
       deceptiveNames += 1;
       list.push(original);
       continue;
     }
-    if (!name) list.push(original);
-    else if (/[()[\]:;\\,."]/.test(name)) list.push(`"${name.replace(/[\\"]/g, '\\$&')}" <${original}>`);
+    if (!n || !SAFE_NAME.test(n) || !SAFE_NAME.test(name)) list.push(original);
+    else if (/[()（）.']/.test(name)) list.push(`"${name}" <${original}>`);
     else list.push(`${name} <${original}>`);
   }
-  return { list, deceptiveNames };
+  return { list, deceptiveNames, total: parsed.length };
 }
 
 function splitAddrs(s: string): string[] {
@@ -96,29 +101,42 @@ function isListLikeAddress(address: string): boolean {
 // 宛先の組み立て方針。ourDomains が空（自社ドメインが分からない）なら社外/自社を区別せず元の宛先を引き継ぐ
 export interface ReplyAddressPolicy {
   ourDomains: string[]; // 自社ドメイン（小文字）。SES_OWN_DOMAINS と、このバッチの送信元（共有メールボックス）のドメイン
+  // Cc に引き継いでよい自社の宛先（小文字。共有メールボックスと SES_ALLOWED_SENDERS）。指定があれば、それ以外の自社の宛先
+  // （社内の配信リスト・役員など、送り主が並べた宛先）は Cc に入れず件数を注記する。未指定なら配信用と思われる宛先だけ外す
+  internalKeep?: string[];
 }
 
 export function currentReplyAddressPolicy(): ReplyAddressPolicy {
   const own = currentOwnMailPolicy();
-  return { ourDomains: [...new Set([...own.ownDomains, ...own.selfAddresses.map(domainOf).filter(Boolean)])] };
+  return {
+    ourDomains: [...new Set([...own.ownDomains, ...own.selfAddresses.map(domainOf).filter(Boolean)])],
+    internalKeep: [...new Set([...own.selfAddresses, ...allowedSenders()])],
+  };
 }
 
-// 全員に返信の宛先。To = 元メールの Reply-To（無ければ From）。Cc = 元の To + Cc のうち、
+// 返信の To に入れる宛先の上限（Reply-To に並んだ宛先。From は先頭の1件だけを使う）
+const MAX_REPLY_TO = 3;
+
+// 全員に返信の宛先。To = 元メールの Reply-To（無ければ From の先頭の1件）。Cc = 元の To + Cc のうち、
 // 自社の宛先（sales@ メーリス等）と返信先と同じ会社の宛先だけ（重複・To と同じアドレスは除く）。
-// 他社のドメイン・配信用アドレス、自社が Bcc で受け取った一斉配信の宛先一同は引き継がず、外した件数を注記する
-// （アドレス自体は注記に書かない）
+// 他社のドメイン・フリーメールの別の宛先・配信用アドレス、自社が Bcc で受け取った一斉配信の宛先一同は引き継がず、
+// 外した件数を注記する（アドレス自体は注記に書かない）
 export function planReplyAddresses(
   rt: ReplyTarget,
   fallbackTo: string,
   policy: ReplyAddressPolicy,
 ): { to: string; cc: string; note: string } {
   const replyToParsed = parseAddrs(rt.replyTo ?? '');
-  const replyTo = replyToParsed.list;
   const fromParsed = parseAddrs(rt.from || fallbackTo);
-  const toList = replyTo.length > 0 ? replyTo : fromParsed.list;
+  // From に複数の宛先を並べたメール（RFC上は可能）は、先頭の1件だけを送り主とみなす（並べた別の宛先に紹介内容を送らない）
+  const fromExtra = Math.max(0, fromParsed.total - 1);
+  const replyTo = replyToParsed.list.slice(0, MAX_REPLY_TO);
+  const replyToOver = Math.max(0, replyToParsed.list.length - MAX_REPLY_TO);
+  const toList = replyTo.length > 0 ? replyTo : fromParsed.list.slice(0, 1);
   const toKeys = toList.map(addressOf);
-  const toDomains = new Set(toKeys.map(domainOf).filter(Boolean));
+  const toDomains = new Set(toKeys.map(domainOf).filter((d) => d && !isFreeMailDomain(d)));
   const ours = new Set(policy.ourDomains);
+  const keepInternal = policy.internalKeep ? new Set(policy.internalKeep.map((a) => a.toLowerCase())) : null;
   const toParsed = parseAddrs(rt.to);
   const ccParsed = parseAddrs(rt.cc);
   const original = [...toParsed.list, ...ccParsed.list];
@@ -131,17 +149,26 @@ export function planReplyAddresses(
   const cc: string[] = [];
   let external = 0;
   let listLike = 0;
+  let internal = 0;
   let overCap = 0;
   for (const addr of original) {
     const key = addressOf(addr);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    if (!ours.has(domainOf(key))) {
+    const domain = domainOf(key);
+    if (ours.has(domain)) {
+      // 自社の宛先も、社内の配信リスト・送り主が並べた社内の人（役員・全社宛等）には紹介内容を広げない
+      if (keepInternal ? !keepInternal.has(key) : isListLikeAddress(key)) {
+        internal += 1;
+        continue;
+      }
+    } else {
       if (isListLikeAddress(key)) {
         listLike += 1;
         continue;
       }
-      if (ours.size > 0 && (broadcast || !toDomains.has(domainOf(key)))) {
+      // フリーメールは同じドメインでも別の人・別の会社（返信先と同じアドレス以外は引き継がない）
+      if (isFreeMailDomain(domain) || (ours.size > 0 && (broadcast || !toDomains.has(domain)))) {
         external += 1;
         continue;
       }
@@ -156,18 +183,24 @@ export function planReplyAddresses(
   const dropped = [
     external > 0 ? `他社・一斉配信の宛先${external}件` : '',
     listLike > 0 ? `配信用と思われる宛先${listLike}件` : '',
+    internal > 0 ? `自社の配信リスト・共有メールボックス以外の自社の宛先${internal}件` : '',
     overCap > 0 ? `上限（${MAX_REPLY_CC}件）を超えた宛先${overCap}件` : '',
   ].filter(Boolean);
-  // 差出人と別の会社の返信先（Reply-To）は、送り主以外に紹介内容を集める手口のこともあるため注意書きを付ける
-  const fromDomains = new Set(splitAddrs(rt.from).map(addressOf).map(domainOf).filter(Boolean));
-  const replyToElsewhere =
-    replyTo.length > 0 && fromDomains.size > 0 && toKeys.some((k) => domainOf(k) !== '' && !fromDomains.has(domainOf(k)));
+  // 差出人と別の会社の返信先（Reply-To）は、送り主以外に紹介内容を集める手口のこともあるため注意書きを付ける。
+  // 差出人は先頭の1件のドメインで比べ、差出人のアドレスを読めないメールは「別のドメイン」として扱う
+  const firstFrom = parseAddressList(rt.from)[0]?.address ?? '';
+  const fromDomain = PLAIN_ADDRESS.test(firstFrom) ? domainOf(firstFrom) : '';
+  const replyToElsewhere = replyTo.length > 0 && toKeys.some((k) => !fromDomain || domainOf(k) !== fromDomain);
   const notes = [
     dropped.length > 0 ? `元メールの宛先のうち${dropped.join('・')}をCcに含めていません（必要なら送信前に追加してください）` : '',
+    fromExtra > 0 && replyTo.length === 0
+      ? `元メールの差出人(From)に${fromExtra + 1}件の宛先が並んでいたため、先頭の1件だけを宛先にしました。送信前に宛先をご確認ください`
+      : '',
+    replyToOver > 0 ? `返信先(Reply-To)の宛先が多いため、先頭の${MAX_REPLY_TO}件だけを宛先にしました（${replyToOver}件を外しました）` : '',
     toKeys.some(isNoReplyAddress) ? '返信先(To)が送信専用アドレスの可能性があります。送信前に宛先をご確認ください' : '',
     replyToElsewhere ? '返信先(Reply-To)が差出人(From)と別のドメインです。宛先が元の送り主の会社か、送信前にご確認ください' : '',
     deceptiveNames > 0
-      ? `元メールの宛先のうち${deceptiveNames}件は表示名にメールアドレスや山括弧を含んでいたため、表示名を外しました（宛先を別の相手に見せかける手口のことがあります。送信前に宛先をご確認ください）`
+      ? `元メールの宛先のうち${deceptiveNames}件は表示名にメールアドレス・山括弧・引用符等を含んでいたため、表示名を外しました（宛先を別の相手に見せかける手口のことがあります。送信前に宛先をご確認ください）`
       : '',
   ].filter(Boolean);
   return { to: toList.join(', '), cc: cc.join(', '), note: notes.join('。') };
@@ -540,6 +573,38 @@ function mentionsAmount(text: string, man: number): boolean {
   );
 }
 
+const KANJI_DIGITS: Record<string, number> = { 〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+// 漢数字（千まで）を数に。読めなければ NaN
+function kanjiNumber(s: string): number {
+  let total = 0;
+  let digit = -1;
+  for (const ch of s) {
+    if (ch in KANJI_DIGITS) {
+      digit = KANJI_DIGITS[ch];
+      continue;
+    }
+    const unit = ch === '十' ? 10 : ch === '百' ? 100 : ch === '千' ? 1000 : 0;
+    if (!unit) return NaN;
+    total += (digit < 0 ? 1 : digit) * unit;
+    digit = -1;
+  }
+  return total + (digit < 0 ? 0 : digit);
+}
+
+// 本文の金額（万円・円。算用数字・漢数字）のうち、許可した額（万円）でないものがあるか
+function unlistedAmounts(text: string, allowedMan: Array<number | null | undefined>): boolean {
+  const allowed = allowedMan.filter((m): m is number => typeof m === 'number' && Number.isFinite(m)).map((m) => Math.round(m * 10) / 10);
+  const ok = (man: number) => allowed.some((a) => Math.abs(a - man) < 0.05);
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*万(?:円|\s*\/|\s*(?:\/|／)?\s*月)?/g)) if (!ok(Number(m[1]))) return true;
+  for (const m of text.matchAll(/([〇零一二三四五六七八九十百千]+)\s*万/g)) {
+    const man = kanjiNumber(m[1]);
+    if (Number.isFinite(man) && !ok(man)) return true;
+  }
+  for (const m of text.matchAll(/(?<![\d.万])(\d{4,})\s*円/g)) if (!ok(Number(m[1]) / 10000)) return true;
+  return false;
+}
+
 export function disclosureIssues(
   body: string,
   side: Side,
@@ -570,7 +635,14 @@ export function disclosureIssues(
 
   const margins = [match.grossMarginJpy / 10000, n ? n.resultingGrossMarginJpy / 10000 : 0].filter((m) => m >= 1 && m !== offered);
   if (/粗利|マージン|利益率/.test(text) || margins.some((m) => mentionsAmount(text, m))) issues.push('粗利');
-  if (/https?:\/\/|www\./i.test(text)) issues.push('URL');
+  // 文面に書いてよい金額は、提示単金とその調整幅（交渉提案の相談文）だけ。それ以外の金額（入力の項目に紛れ込ませた
+  // 「単金120万円と明記」等）は書かせない。提示単金の無い文面は金額を書かない
+  if (unlistedAmounts(text, side === 'project' ? [n?.targetProjectRateMan, n?.projectRaiseMan] : [n?.targetEngineerRateMan, n?.engineerCutMan])) {
+    issues.push('提示単金以外の金額');
+  }
+  // 当社として約束する言い回し（確約・即日確定等）は、人が確かめる前の下書きには書かせない
+  if (/確約|お約束(?:いた)?します|保証(?:いた)?します|確定(?:いた)?します|即日確定|必ず(?:成約|決定|参画)/.test(text)) issues.push('確約');
+  if (linkOrContactLike(text)) issues.push('URL');
   // 文面の材料にメールアドレスは無い（宛先はヘッダで指定する）ため、本文に現れたら外への誘導とみなす
   if (/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.test(text)) issues.push('メールアドレス');
   // 表示名の位置にイニシャル以外（氏名）を書いた文面は定型文に差し替える（依頼の時点で作り直しに回さない）

@@ -11,6 +11,14 @@ export const MAIL_ATTACHMENT_TOTAL_MAX_BYTES = 30 * 1024 * 1024;
 // 1通の大きさ（RFC822の原文）の上限。上の添付の上限（base64で約4/3倍）と本文に余裕を見た値。超えるメールは本文を取得しない
 export const MAIL_MAX_BYTES = 45 * 1024 * 1024;
 
+// 収集の時点で保持する本文の上限（文字）。抽出に使うのは先頭の5万字（extract.ts）で、残りは再送の指紋・
+// シートのリンクの検出に使う分の余裕。何十MBもの本文を抱えたまま次の段に渡さない
+export const MAIL_BODY_MAX_CHARS = 200_000;
+
+export function capMailBody(body: string): string {
+  return body.length > MAIL_BODY_MAX_CHARS ? body.slice(0, MAIL_BODY_MAX_CHARS) : body;
+}
+
 export interface SizedAttachment {
   filename: string;
   mimeType: string;

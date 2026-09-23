@@ -47,15 +47,16 @@ function toEntry(v: unknown): QuarantineEntry | null {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
   const e = v as Record<string, unknown>;
   if (typeof e.mailId !== 'string' || !e.mailId) return null;
-  const str = (x: unknown) => (typeof x === 'string' ? x : '');
+  // 「_状態」タブのセルは人も編集できるため、どの項目も長さを抑えて読む（修復レポートの入力に長い指示を書き込ませない）
+  const str = (x: unknown, max = 200) => (typeof x === 'string' ? x.slice(0, max) : '');
   return {
-    mailId: e.mailId,
-    subject: reducedSubject(str(e.subject)), // 以前の版で伏せ字だけにして保存した件名も、読み出しの時点で縮める
+    mailId: e.mailId.slice(0, 120),
+    subject: reducedSubject(str(e.subject, 1000)), // 以前の版で伏せ字だけにして保存した件名も、読み出しの時点で縮める
     from: str(e.from),
     attempts: typeof e.attempts === 'number' && Number.isFinite(e.attempts) ? e.attempts : 0,
-    lastError: str(e.lastError),
-    firstFailedAt: str(e.firstFailedAt),
-    lastFailedAt: str(e.lastFailedAt),
+    lastError: str(e.lastError, 500),
+    firstFailedAt: str(e.firstFailedAt, 40),
+    lastFailedAt: str(e.lastFailedAt, 40),
     quarantinedAt: typeof e.quarantinedAt === 'string' && e.quarantinedAt ? e.quarantinedAt : null,
   };
 }
