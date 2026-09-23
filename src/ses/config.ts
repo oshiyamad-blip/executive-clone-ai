@@ -240,7 +240,8 @@ export function xserverDraftsMailbox(): string {
 
 // 収集の時間窓（日数。メールプロバイダ共通）。処理済みメールID（本番はスプレッドシート）で重複を除くため
 // 広めに取る: 週末をまたぐ月曜の実行や、抽出に失敗したメールの次回以降の再試行（最大 SES_HEAL_MAX_ATTEMPTS 回）が
-// 窓から外れて取りこぼされないように既定7日。旧名 XSERVER_COLLECT_DAYS も受け付ける
+// 窓から外れて取りこぼされないように既定7日（窓の中のメールは本文を取得する前に処理済みかを確かめるため、
+// 広げても取得量は増えない）。旧名 XSERVER_COLLECT_DAYS も受け付ける
 export function collectDays(): number {
   const name = env('SES_COLLECT_DAYS') ? 'SES_COLLECT_DAYS' : 'XSERVER_COLLECT_DAYS';
   return envNum(name, 7, { min: 1, max: 60 });
@@ -251,10 +252,17 @@ export function statsDays(): number {
   return envNum('SES_STATS_DAYS', 30, { min: 1, max: 365, int: true });
 }
 
-// 1回の実行で抽出する未処理メールの上限（新しい順。超過分は次回以降に回す）。
-// 初回実行やバックログ時にLLMコストと実行時間が膨らまないようにする
+// 1回の実行で抽出する未処理メールの上限（次回の実行までに収集期間を外れるものを優先し、残りは新しい順。
+// 超過分は次回以降に回す）。初回実行やバックログ時にLLMコストと実行時間が膨らまないようにする
 export function maxMailsPerRun(): number {
   return envNum('SES_MAX_MAILS_PER_RUN', 150, { min: 1, int: true });
+}
+
+// 1回の実行で新しい処理（メールの抽出・候補の判定）を始めてよい時間（分。バッチ開始から）。
+// 過ぎたら新しい処理を始めず、済んだ分を保存してサマリを送る（残りは次回の実行で続きから処理する）。
+// GitHub Actions のジョブの制限時間（timeout-minutes）より十分短くする
+export function runDeadlineMinutes(): number {
+  return envNum('SES_RUN_DEADLINE_MINUTES', 20, { min: 1, max: 600 });
 }
 
 // 自社のメールドメイン（カンマ区切り・小文字化）。ここからのメールは収集しない（営業が共有メーリスをCcに入れた
@@ -277,12 +285,27 @@ export function sesNotifyTo(): string {
 }
 
 // スプレッドシートの「担当者メール」で下書きの送信元に指定できるドメイン（カンマ区切り・小文字化）。
-// 空なら制限しない。シートの編集者なら誰でも任意の送信元で下書きを作れてしまうため、本番では設定を推奨
+// 未設定なら SES_OWN_DOMAINS と共有メールボックスのドメインだけを許可する（どれも無ければ作成しない）
 export function allowedSenderDomains(): string[] {
   return env('SES_ALLOWED_SENDER_DOMAINS')
     .split(',')
     .map((d) => d.trim().replace(/^@/, '').toLowerCase())
     .filter(Boolean);
+}
+
+// 下書きの送信元に指定できるアドレスの一覧（カンマ区切り・小文字化）。MAIL_PROVIDER=gmail では必須
+// （DWDでそのユーザーのGmailに下書きを作るため、ドメインが合うだけの社内の誰にでもなりすませてしまわないように）
+export function allowedSenders(): string[] {
+  return env('SES_ALLOWED_SENDERS')
+    .split(',')
+    .map((a) => a.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// スプレッドシートの「下書きデータ」列に付ける署名の鍵（HMAC-SHA256）。設定すると、人が書き換えた
+// 下書きデータ（宛先・本文）からは下書きを作らない。空なら署名しない
+export function draftSigningKey(): string {
+  return env('SES_DRAFT_SIGNING_KEY');
 }
 
 // ===== 自動検証・自己修復（heal）と修正パッチ案生成（repair）の設定 =====

@@ -413,6 +413,53 @@ export async function saveMatch(
   return upsertByStableId(dataSourceId, 'マッチID', match.id, properties, toParagraphBlocks(match.reason));
 }
 
+// ===== まとめ保存（Sheetsは新しい行をまとめて追記。Notionは1件ずつ） =====
+
+export interface BatchSaveResult {
+  failed: Map<string, unknown>; // 保存できなかった ID → エラー
+  pageIds: Map<string, string>; // 保存できた ID → 参照ID（NotionのページID。Sheetsは自ID）
+}
+
+async function saveEach<T extends { id: string }>(items: T[], save: (item: T) => Promise<string>): Promise<BatchSaveResult> {
+  const result: BatchSaveResult = { failed: new Map(), pageIds: new Map() };
+  for (const item of items) {
+    try {
+      result.pageIds.set(item.id, await save(item));
+    } catch (err) {
+      result.failed.set(item.id, err);
+    }
+  }
+  return result;
+}
+
+function sheetsResult<T extends { id: string }>(items: T[], failed: Map<string, unknown>): BatchSaveResult {
+  return { failed, pageIds: new Map(items.filter((i) => !failed.has(i.id)).map((i) => [i.id, i.id])) };
+}
+
+export async function saveProjects(projects: Project[]): Promise<BatchSaveResult> {
+  if (dbProvider() === 'sheets') return sheetsResult(projects, await sheetsDb.saveProjectsSheets(projects));
+  return saveEach(projects, saveProject);
+}
+
+export async function saveEngineers(engineers: Engineer[]): Promise<BatchSaveResult> {
+  if (dbProvider() === 'sheets') return sheetsResult(engineers, await sheetsDb.saveEngineersSheets(engineers));
+  return saveEach(engineers, saveEngineer);
+}
+
+export async function saveMatches(
+  matches: MatchResult[],
+  refsOf: (match: MatchResult) => { projectNotionPageId?: string; engineerNotionPageId?: string },
+): Promise<BatchSaveResult> {
+  if (dbProvider() === 'sheets') return sheetsResult(matches, await sheetsDb.saveMatchesSheets(matches));
+  return saveEach(matches, (m) => saveMatch(m, refsOf(m)));
+}
+
+// 候補ペアの判定・保存まで済んだ案件・要員に印を付ける（Sheets運用のみ。Notionは印を持たず、その回の新着だけを突合する）
+export async function markItemsMatched(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (dbProvider() === 'sheets') return sheetsDb.markItemsMatchedSheets(kind, ids);
+  return 0;
+}
+
 // 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。since 以降に検出したものに絞る
 export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
   if (dbProvider() === 'sheets') return sheetsDb.fetchJudgedMatchIdsSheets();

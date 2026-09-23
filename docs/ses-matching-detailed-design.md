@@ -149,11 +149,10 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractedItem[]
     漏れる。設計上Anthropicプロバイダを前提とする理由の一つ）。
   - 抽出結果0件（`projects`も`engineers`も空配列）の場合は `[{ kind: 'other' }]` に変換して返す
     （「案件でも要員でもないメールはother」という基本設計の意図をコード側でも保証）。
-- **決定的ID生成**: `hashId('proj'|'eng', [mail.id, title|displayName, agentEmail])` で
-  `sha1` の先頭12文字を使う。同一メールの再処理（本番でも processed-ids 漏れ等で再度流れた場合）で
-  同一IDが生成されるため、Notion側の重複登録は `saveProject`/`saveEngineer` 呼び出し回数としては
-  重複するが、決定的ID自体は再現される（ただしNotion側に一意制約は無いため、page自体は複数生成されうる —
-  §6 既知の制約を参照）。
+- **決定的ID生成**: `itemIdOf('proj'|'eng', mail.id, メール内の出現順)`（`sha1` の先頭12文字）。
+  LLMの出力（案件名・表示名・営業元メール）はIDに含めない（再抽出で言い回しが変わっても同じIDになり、同じ行を更新する）。
+  `mail.id` は Xserver では Message-ID から作る（メールボックスの再構築で UIDVALIDITY・UID が振り直されても変わらない。
+  Message-ID の無いメールと旧形式の記録は UID で判定）。Notion側に一意制約は無いため §6 既知の制約も参照。
 - **単金・都道府県正規化はこの層で完結**: `normalizeRate`（`pricing.ts`）と `normalizePrefecture`
   （`prefecture.ts`）を `buildProject`/`buildEngineer` 内で適用してから `Project`/`Engineer` を返す。
   以降の `match.ts` は正規化済みの値のみを扱う。

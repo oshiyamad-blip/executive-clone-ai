@@ -3,8 +3,9 @@
 // 機械が書く列（スキル〜抽出メモ）は、スキルシートが新規・更新されたときだけ抽出し直して更新する
 // （変更のないファイルはLLMを呼ばない。1回の実行で抽出する件数には上限があり、残りは次回以降）。
 // ログにはファイルIDと件数だけを出す（氏名・ファイル名・抽出内容は出さない）。
+import { createHash } from 'crypto';
 import { google } from 'googleapis';
-import { SheetBook, type Cell, type CachedRow } from '../../database/sheetBook.js';
+import { SheetBook, googleTransientKind, type Cell, type CachedRow } from '../../database/sheetBook.js';
 import { joinList, splitList, remoteLabel, labelToRemote } from '../../database/mapping.js';
 import { properMasterSpreadsheetId, properMaxExtractPerRun } from '../config.js';
 import { normalizeSkills } from '../skillDict.js';
@@ -22,7 +23,8 @@ import {
   type SkillSheetFile,
   type SkillSheetContent,
 } from './drive.js';
-import { extractSkillSheet, type SkillSheetProfile } from './extractSkillSheet.js';
+import { extractSkillSheet, sanitizeInitials, type SkillSheetProfile } from './extractSkillSheet.js';
+import { pastRunDeadline } from '../schedule.js';
 import type { ProperEngineer } from '../../types/index.js';
 
 export const PROPER_MASTER_TAB = 'プロパー管理';
@@ -50,7 +52,8 @@ const book = new SheetBook({
     return auth ? google.sheets({ version: 'v4', auth }) : null;
   },
   missingIdMessage: 'PROPER_MASTER_SPREADSHEET_ID が未設定',
-  missingAuthMessage: 'Google認証（GOOGLE_SA_KEY_JSON 等）が未設定',
+  missingAuthMessage:
+    'Google認証（GOOGLE_SA_KEY_JSON 等）が未設定、または PROPER_GOOGLE_IMPERSONATE に対応する PROPER_GOOGLE_SA_KEY_JSON が未設定',
   accessHint:
     'IDが正しいか、サービスアカウント（PROPER_GOOGLE_SA_* 未設定ならメインのSA）のメールアドレスに編集者として共有済みか' +
     '（PROPER_GOOGLE_IMPERSONATE 指定時はそのユーザーが編集できるか）を確認してください',
@@ -67,6 +70,12 @@ export function resetProperMasterCache(): void {
 
 function cell(cells: string[] | null, name: string): string {
   return cells?.[PROPER_MASTER_COLUMNS.indexOf(name)] ?? '';
+}
+
+// ログ用のファイルの参照（DriveのファイルIDはそのままURLになり、リンク共有のスキルシートを開けてしまうため一方向の短いハッシュにする。
+// 元のIDは管理表の「ファイルID」列にある）
+export function fileRef(fileId: string): string {
+  return createHash('sha256').update(fileId).digest('hex').slice(0, 8);
 }
 
 // ===== セル値の解釈（人が入力する列は表記ゆれを許す） =====
@@ -159,11 +168,11 @@ function toRow(updates: Array<[string, Cell]>): Cell[] {
   return row;
 }
 
+// Drive はレート制限を 403（rateLimitExceeded）でも返すため、429・5xx・通信断と同じく一時的な失敗として扱う
 function isTransientGoogleError(err: unknown): boolean {
-  const e = err as { code?: unknown; status?: unknown; response?: { status?: unknown } };
-  const status = Number(e.response?.status ?? e.status);
-  if (status === 429 || (status >= 500 && status < 600)) return true;
-  return typeof e.code === 'string' && ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(e.code);
+  if (googleTransientKind(err) !== null) return true;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && ['ENOTFOUND', 'EAI_AGAIN'].includes(code);
 }
 
 // 失敗の記録。抽出メモに「N回目」を残し、一時的な失敗は上限回数まで次回の実行で再試行する
@@ -194,7 +203,7 @@ async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<Extr
   try {
     content = await loadSkillSheetContent(file);
   } catch (err) {
-    console.error(`プロパー: スキルシートを読み込めません (file ${file.id}): ${safeErr(err)}`);
+    console.error(`プロパー: スキルシートを読み込めません (file ${fileRef(file.id)}): ${safeErr(err)}`);
     return failureOutcome(prevMemo, err, 'load');
   }
   if (content.kind === 'text' && !content.text.trim()) {
@@ -208,9 +217,9 @@ async function extractFile(file: SkillSheetFile, prevMemo: string): Promise<Extr
   try {
     return { kind: 'ok', profile: await extract(content) };
   } catch (err) {
-    const healed = await healLlmCall(`プロパー抽出(file ${file.id})`, err, (a) => extract(content, a));
+    const healed = await healLlmCall(`プロパー抽出(file ${fileRef(file.id)})`, err, (a) => extract(content, a));
     if (healed) return { kind: 'ok', profile: healed };
-    console.error(`プロパー: スキルシートの抽出に失敗 (file ${file.id}): ${safeErr(err)}`);
+    console.error(`プロパー: スキルシートの抽出に失敗 (file ${fileRef(file.id)}): ${safeErr(err)}`);
     return failureOutcome(prevMemo, err, 'extract');
   }
 }
@@ -271,7 +280,7 @@ async function reconcileMissing(rows: CachedRow[], present: Set<string>, touched
         await book.writeCells(PROPER_MASTER_TAB, fresh, [['抽出メモ', memo.slice(MISSING_FILE_MEMO.length).replace(/^ \/ /, '')]]);
       }
     } catch (err) {
-      console.error(`プロパー: 管理表の更新に失敗 (file ${id}): ${safeErr(err)}`);
+      console.error(`プロパー: 管理表の更新に失敗 (file ${fileRef(id)}): ${safeErr(err)}`);
       result.writeFailed += 1;
     }
   }
@@ -330,7 +339,7 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
     let outcome: ExtractionOutcome;
     if (precheck) {
       outcome = { kind: 'error', memo: `エラー: ${precheck}`, retry: false };
-    } else if (attempts >= cap) {
+    } else if (attempts >= cap || pastRunDeadline()) {
       result.deferred += 1;
       continue;
     } else {
@@ -343,7 +352,7 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
       result[await writeMasterRow(file, Boolean(known), outcome)] += 1;
       touched.add(file.id);
     } catch (err) {
-      console.error(`プロパー: 管理表への書き込みに失敗 (file ${file.id}): ${safeErr(err)}`);
+      console.error(`プロパー: 管理表への書き込みに失敗 (file ${fileRef(file.id)}): ${safeErr(err)}`);
       result.writeFailed += 1;
     }
   }
@@ -369,7 +378,8 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   const residence = c('居住地');
   const available = c('稼働可能日');
   const fullName = c('氏名');
-  const proposalLabel = c('提案用表記');
+  // 人が手で入れた値も含め、イニシャルの形でなければ使わない（社外に出る提案文面に氏名が載らないように）
+  const proposalLabel = sanitizeInitials(c('提案用表記'), fullName);
   return {
     id: `proper_${fileId}`,
     displayName: fullName || proposalLabel,

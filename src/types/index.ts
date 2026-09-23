@@ -143,6 +143,9 @@ export interface Project {
   receivedAt: Date;
   status: ProjectStatus;
   notionPageId?: string;
+  // 候補ペアの判定・保存まで済んだか（Sheets運用の「突合済」列）。false の間は次回以降のバッチでも突合する。
+  // 未定義（Notion等、記録しない保存先）は突合済みとして扱い、その回の新着だけを突合する
+  matched?: boolean;
 }
 
 // SES要員（エンジニア）。氏名・年齢等はPII（CLAUDE.md §非機能要件）
@@ -168,6 +171,7 @@ export interface Engineer {
   receivedAt: Date;
   status: EngineerStatus;
   notionPageId?: string;
+  matched?: boolean; // Project.matched と同じ
 }
 
 // 交渉提案。粗利が下限に届かないペアを、案件単金の値上げ交渉と要員単金の値下げ交渉で
@@ -213,6 +217,8 @@ export interface DraftRef {
   references?: string; // References ヘッダ
   body?: string; // 返信本文（UIでの送信下書き作成に使用）
   addressNote?: string; // 宛先の注意（Ccから外した社外・配信用アドレスの件数など。アドレス自体は書かない）
+  // 下書きの識別子（X-SES-Draft-Key ヘッダ）。作成の成否が分からなかったときに、下書きフォルダに既にあるかを確かめる
+  draftKey?: string;
 }
 
 // 最終判定・保存対象のマッチ結果（要件定義 §6.4 マッチ結果DBに対応）
@@ -230,6 +236,8 @@ export interface MatchResult {
   negotiation?: NegotiationProposal; // 交渉で成立見込みの提案（あれば「交渉提案」枠）
   draftToProject?: DraftRef;
   draftToEngineer?: DraftRef;
+  // 下書きを作るべき区分なのに文面を用意できなかった（下書き状態を「エラー」にし、次回のバッチで作り直す）
+  draftFailed?: boolean;
   status: MatchStatus;
   detectedAt: Date;
   notionPageId?: string;

@@ -47,7 +47,9 @@
 
 ポイント:
 
-- **サーバーは不要**です。GitHub が用意する一時的な環境で5分前後動いて終わります。
+- **サーバーは不要**です。GitHub が用意する一時的な環境で、通常は5〜15分ほど動いて終わります。
+  メールの多い回でも、開始から `SES_RUN_DEADLINE_MINUTES`（既定20分）を過ぎると新しい抽出・判定を始めずに
+  済んだ分を保存してサマリを送り、残りは次の回で続きから処理します（途中で打ち切られても取りこぼしません）。
 - 毎回まっさらな環境で動くため、**「どのメールを処理済みか」などの記録はスプレッドシートに保存**されます
   （「処理済みメール」「_状態」タブ）。パソコンや GitHub 側には何も残りません。
 - メールは**自動送信しません**。紹介文面はスプレッドシートに書き出され、営業が「担当者メール」に自分のアドレスを入れると、
@@ -148,7 +150,7 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
    （入っていなければ 6-1 の取り込みを先に行い、6-2 のとおり定時バッチは一旦「無効」にしておきます）
 2. **Settings → Secrets and variables → Actions** で、次を登録します（5章の表も参照）
    - Secrets: `XSERVER_IMAP_HOST` / `XSERVER_SHARED_USER` / `XSERVER_SHARED_PASS`
-   - Variables（推奨）: `SES_OWN_DOMAINS` = `<自社ドメイン>`（自社から届いたメールを集計から除くため）
+   - Secrets（推奨）: `SES_OWN_DOMAINS` = `<自社ドメイン>`（自社から届いたメールを集計から除くため。会社を特定できる値のため Variables には登録しません）
 3. **Actions タブ → 左の「SESメール量の測定」→ 右の「Run workflow」** → 日数（既定 30）を確認して **Run workflow**
 4. 1〜3分で終わります。実行をクリック →「メール量の測定」→「メール量を測定」を開くと結果が表示されます
 
@@ -167,7 +169,8 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
 - 「メールボックスを読めませんでした」と出たら、サーバー名・ユーザー名（メールアドレス全体）・パスワード、
   国外からの接続制限（2-3）を確認してください
 - ⚠️ で上限を超える回がある場合は、Variable `SES_MAX_MAILS_PER_RUN` を引き上げるか（費用と実行時間が増えます）、
-  そのままにして超過分を次の回に回すかを選びます
+  そのままにして超過分を次の回に回すかを選びます（次の回までに収集期間を外れるメールは優先して処理し、それでも処理できない分が
+  出たときはバッチが異常終了として知らせます）
 
 ---
 
@@ -199,9 +202,15 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
 | 処理済みメール・_状態 | バッチの記録（二重処理・無限の再試行を防ぐ） | **編集・削除しないでください**（隔離したメールを再処理する場合だけ、導入マニュアル 8-2 の手順で） |
 
 - 並べ替え・フィルタ・列幅の変更は自由です（バッチは行の位置を確かめてから更新します）
-- **1行目（見出し）・ID列・「下書きデータ」列は編集しないでください**
-- **列の挿入・移動・削除もしないでください**（バッチは列の位置で読み書きします。メモ用の列は右端の見出しの後ろに追加できます。
-  見出しの並びが変わったタブは、値を別の列に書き込まないよう、バッチがそのタブの読み書きを止めて警告します）
+- 列の移動や、途中へのメモ用の列の挿入もできます（バッチは1行目の**見出しの名前**で列を探して読み書きします）
+- **1行目の見出しの名前は変えないでください。バッチが作った列の削除・見出しの重複もしないでください**
+  （どの列に書けばよいか決められないため、バッチがそのタブの読み書きを止めて警告します。見出しを元に戻せば次の回から動きます）
+- **ID列・「下書きデータ」列・「突合済」列は編集しないでください**（「下書きデータ」を書き換えると、`SES_DRAFT_SIGNING_KEY`
+  を登録している場合はその行の下書きを作りません）
+- 「下書きデータ」列は、**データ → シートと範囲を保護** で運用担当（とサービスアカウント）だけが編集できるようにしておくと安全です
+  （サービスアカウントを編集者から外さないでください）
+- 案件・要員タブの「突合済」列は、その案件・要員の候補の判定と保存が終わった日時です（空欄の間は次の回でも突合します）
+- 「処理済みメール」タブの古い記録（収集期間＋7日より前）は、容量の上限に近づかないようバッチが自動で削除します
 - 担当者メール・状態・文面の使い方は 7章 を参照してください
 
 ### 4-3. プロパー（自社社員）のスキルシート連携（任意）
@@ -234,21 +243,26 @@ Workspace の設定で組織外への共有が禁止されていると、4-1・4
    **組織外のユーザーによる共有ドライブ内ファイルへのアクセス**を許可します
 5. 反映まで数分〜最大24時間かかることがあります。その後 4-1・4-3 の共有を行います
 
-**B. ドメイン全体の委任（DWD）で社内ユーザーとして読み書きする**
+**B. ドメイン全体の委任（DWD）で社内ユーザーとして読み書きする（同じテナントの中だけ）**
 
 1. Google Cloud のサービスアカウントの詳細画面で **「一意の ID」（数字）** を控える（JSON の `client_id` と同じ）
 2. 管理コンソール → **「セキュリティ」→「アクセスとデータ管理」→「API の制御」→「ドメイン全体の委任を管理」→「新しく追加」**
 3. クライアント ID に 1 の数字、OAuth スコープに次の2つをカンマ区切りで入力して **「承認」**
    - `https://www.googleapis.com/auth/spreadsheets`
    - `https://www.googleapis.com/auth/drive.readonly`
-4. スプレッドシート・フォルダを編集できる**社内ユーザー**（例: 運用担当 `ops@<自社ドメイン>`）のアドレスを Variables に登録
-   - メインのスプレッドシート用: `SHEETS_DB_IMPERSONATE`
-   - プロパーのフォルダ・管理表用: `PROPER_GOOGLE_IMPERSONATE`
-5. この場合、4-1・4-3 のサービスアカウントへの共有は不要です（そのユーザーが閲覧・編集できれば読み書きできます）
+4. スプレッドシートを編集できる**社内ユーザー**（例: 運用担当 `ops@<自社ドメイン>`）のアドレスを **Secret** `SHEETS_DB_IMPERSONATE` に登録
+   （社員のアドレスのため Variables には登録しないでください。Variables の値は公開ログに表示されます）
+5. この場合、4-1 のサービスアカウントへの共有は不要です（そのユーザーが閲覧・編集できれば読み書きできます）
 
-**スキルシートが別の会社（別の Google Workspace）にある場合**: そのテナント側で A（フォルダと管理表をサービスアカウントに共有）
-または B（そのテナントの管理者が DWD に `drive.readonly` と `spreadsheets` を登録し、`PROPER_GOOGLE_IMPERSONATE` を設定）を行います。
-そのテナントで別のサービスアカウントを作った場合は、その JSON 鍵を Secret `PROPER_GOOGLE_SA_KEY_JSON` に登録します。
+**スキルシートが別の会社（別の Google Workspace）にある場合**: 次のどちらかで対応します。
+メインのサービスアカウントに別テナントのドメイン全体の委任（DWD）を与える方法は**使えません**
+（その鍵を持つ人が別テナントの全ユーザーのドライブを読めてしまうため、バッチが拒否します）。
+
+- **A（推奨）**: そのテナントのフォルダ（閲覧者）と管理表（編集者）を、メインのサービスアカウントのメールに共有する
+  （そのテナントで組織外への共有が禁止されている場合は、そのテナントの管理者が上の A の許可リストを設定します）
+- **C**: そのテナントの管理者が**そのテナントの Google Cloud でサービスアカウントを作り**、JSON 鍵を Secret `PROPER_GOOGLE_SA_KEY_JSON` に登録する。
+  共有できない場合に限り、そのテナントの管理者がそのサービスアカウントに DWD（`drive.readonly` と `spreadsheets`）を与え、
+  なりすます社内ユーザーのアドレスを **Secret** `PROPER_GOOGLE_IMPERSONATE` に登録します（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます）
 
 ---
 
@@ -256,8 +270,9 @@ Workspace の設定で組織外への共有が禁止されていると、4-1・4
 
 リポジトリの **Settings → Secrets and variables → Actions** で登録します。
 
-- **Secrets** タブ →「New repository secret」: 鍵・パスワード・ID・アドレス（登録後は値を見られず、ログでも伏せ字になります）
-- **Variables** タブ →「New repository variable」: 動作の調整値（登録した人は値を見られます）
+- **Secrets** タブ →「New repository secret」: 鍵・パスワード・ID・アドレス・自社ドメイン・社外に知られたくない方針（登録後は値を見られず、ログでも伏せ字になります）
+- **Variables** タブ →「New repository variable」: 公開されても困らない動作の調整値だけ
+  （**Variables の値は、公開リポジトリの Actions ログの各ステップの env 欄にそのまま表示され、誰でも読めます**）
 - 名前は**大文字・アンダースコアまで完全一致**が必要です。値の前後に空白・改行を入れないでください
 - 表の例はすべて伏せ字です。実際の値をこの手順書やリポジトリのファイルに書かないでください
 
@@ -273,26 +288,39 @@ Workspace の設定で組織外への共有が禁止されていると、4-1・4
 | `XSERVER_SHARED_USER` | `sales@<自社ドメイン>` | **必須** | 共有メールボックスのアドレス全体 |
 | `XSERVER_SHARED_PASS` | `********` | **必須** | 共有メールボックスのパスワード |
 | `SES_NOTIFY_TO` | `担当者@<自社ドメイン>` | **強く推奨** | サマリ・診断レポートの宛先（カンマ区切りで複数可）。ログは秘匿されるため、失敗の詳細はこのメールで確認します |
+| `SES_OWN_DOMAINS` | `<自社ドメイン>` | **強く推奨** | 自社のドメイン。自社から届いたメール（紹介メールの Cc 等）を取り込まない。下書きの送信元の既定の許可にも使う |
+| `SES_ALLOWED_SENDER_DOMAINS` | `<自社ドメイン>` | 任意 | 「担当者メール」に書ける送信元のドメイン。未登録なら `SES_OWN_DOMAINS` と共有メールボックスのドメインだけ（どちらも無ければ下書きを作りません） |
+| `SES_ALLOWED_SENDERS` | `taro@<自社ドメイン>,hanako@<自社ドメイン>` | 任意（Gmail運用は**必須**） | 送信元にしてよいアドレスの一覧。登録するとこのアドレスだけを送信元にします |
+| `SES_DRAFT_SIGNING_KEY` | ランダムな32文字以上 | **推奨** | 「下書きデータ」列の署名の鍵。シート上で宛先・本文を書き換えられた行からは下書きを作りません（最初の実行の前に登録してください。後から登録すると、それまでの未作成の下書きは作り直しが必要です） |
+| `MIN_GROSS_MARGIN_JPY` / `MIN_GROSS_MARGIN_MAN` | `100000` / `10` | 任意 | 粗利の下限（円/月・万円/月。`_MAN` が優先）。社外に知られたくない方針のため Secrets に登録 |
+| `NEGOTIATION_MAX_PROJECT_RAISE_MAN` / `NEGOTIATION_MAX_ENGINEER_CUT_MAN` | `5` | 任意 | 交渉提案で案件単金を上げる・要員単金を下げる上限（万円/月）。同上 |
+| `SHEETS_DB_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ |
 | `PROPER_SKILLSHEET_FOLDER_ID` | `https://drive.google.com/drive/folders/xxxx` | 任意 | 4-3（プロパー機能） |
 | `PROPER_MASTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（プロパー機能） |
-| `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントで、別のサービスアカウントを使う場合だけ |
+| `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントにあり、そのテナントのサービスアカウントを使う場合だけ（4-4 C） |
+| `PROPER_GOOGLE_IMPERSONATE` | `ops@<別テナント>` | 任意 | 4-4 C で共有できない場合だけ（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます） |
 | `SES_TARGET_GMAIL` | — | 不要 | メールを Gmail で運用する場合だけ（`MAIL_PROVIDER=gmail`） |
+| `GEMINI_API_KEY` | — | 不要 | `LLM_PROVIDER=gemini` の場合だけ（Vertex AI はこのワークフローでは使えません） |
+
+鍵・パスワードは本番のステップにだけ渡され、依存パッケージのインストールやビルドには渡りません
+（プロパー用の鍵は `PROPER_SKILLSHEET_FOLDER_ID` と `PROPER_MASTER_SPREADSHEET_ID` の両方があるときだけ渡します）。
 
 ### Variables
 
 | 名前 | 例 | 必須 | 内容（未登録なら既定値） |
 | --- | --- | --- | --- |
-| `SES_OWN_DOMAINS` | `<自社ドメイン>` | **推奨** | 自社のドメイン。自社から共有メールボックスに届いたメール（紹介メールの Cc 等）を案件・要員として取り込まない |
-| `SES_ALLOWED_SENDER_DOMAINS` | `<自社ドメイン>` | **推奨** | 「担当者メール」に書ける送信元のドメイン。未登録だとシートの編集者が任意のアドレスで下書きを作れてしまう |
 | `XSERVER_DRAFTS_MAILBOX` | `INBOX.Drafts` | 推奨 | 下書きフォルダ名（3章の測定結果に合わせる。既定 `Drafts`） |
 | `MAIL_PROVIDER` | `xserver` | 任意 | 既定 `xserver` |
-| `SES_COLLECT_DAYS` | `4` | 任意 | 何日前までのメールを見るか（既定 4。週末をまたぐ月曜10:00の回に必要な日数） |
-| `SES_MAX_MAILS_PER_RUN` | `150` | 任意 | 1回に読み取るメールの上限（超えた分は次の回へ） |
-| `MIN_GROSS_MARGIN_JPY` | `100000` | 任意 | 粗利の下限（円/月） |
-| `SHEETS_DB_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ |
-| `PROPER_GOOGLE_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ |
+| `SES_COLLECT_DAYS` | `7` | 任意 | 何日前までのメールを見るか（既定 7。失敗したメールを次の回以降に再試行する余裕と、週末をまたぐ月曜10:00の回の分。窓の中の処理済みメールは本文を取得しないため、広げても取得量は増えません） |
+| `SES_MAX_MAILS_PER_RUN` | `150` | 任意 | 1回に読み取るメールの上限（次の回までに収集期間を外れるものを優先し、超えた分は次の回へ。本文は上限まで選んだものだけ取得します） |
+| `SES_RUN_DEADLINE_MINUTES` | `20` | 任意 | 1回の実行で新しい抽出・判定を始める期限（開始からの分）。過ぎたら済んだ分を保存してサマリを送り、残りは次の回に続きから（ワークフローの制限時間 40分より短く） |
 | `XSERVER_IMAP_PORT` / `XSERVER_SMTP_PORT` | `993` / `465` | 任意 | 通常は登録不要 |
-| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MATCH_MIN_LLM_SCORE` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `JPY_PER_USD`（意味は `.env.example`） |
+| `LLM_PROVIDER` / `GEMINI_MODEL` | `anthropic` | 任意 | 生成AIの切り替え（既定 anthropic） |
+| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MATCH_MIN_LLM_SCORE` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
+
+**Secrets に移した設定**: 以前の手順で `SES_OWN_DOMAINS` `SES_ALLOWED_SENDER_DOMAINS` `SHEETS_DB_IMPERSONATE` `PROPER_GOOGLE_IMPERSONATE`
+`MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、同じ名前で Secrets に登録し直し、Variables から削除してください
+（Variables に残っていると、事前確認が ❌ で止めて知らせます。Variables の値は使いません）。
 
 **ワークフローで固定しているもの（登録不要）**: `TZ=Asia/Tokyo`、`SES_LOG_REDACT=true`（ログ秘匿）、
 `SES_REQUIRE_LIVE=true`（キーが無いときにデモで「成功」させない）、`DB_PROVIDER=sheets`。
@@ -332,7 +360,8 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 同じく **「Run workflow」→ mode「本番」**。確認すること:
 
 1. **設定の事前確認** が ✅（❌ があれば、その行の名前の Secret / Variable を直して再実行）
-2. **本番バッチ** が ✅ で終わる（初回は直近 `SES_COLLECT_DAYS` 日分のメールを読むため、10〜20分かかることがあります）
+2. **本番バッチ** が ✅ で終わる（初回は直近 `SES_COLLECT_DAYS` 日分のメールが対象です。1回 `SES_MAX_MAILS_PER_RUN` 件まで・
+   開始から `SES_RUN_DEADLINE_MINUTES` 分までで区切り、残りは次の回で続きから処理するため、数回に分けて追いつきます）
 3. **サマリメール** が `SES_NOTIFY_TO` に届く
 4. スプレッドシートに **タブと見出しが自動で作られ**、案件・要員・マッチの行が入っている
 5. プロパー機能を使う場合は「プロパー管理」タブができ、スキルシートの行が入っている
@@ -356,6 +385,9 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
    - 下書きは**共有メールボックスの下書きフォルダ**に入ります（送信元はあなたのアドレス・元のメールへの「全員に返信」）
    - 共有メールボックスをメールソフトや Xserver の Web メールで開き、**宛先・内容を確認してから送信**してください
    - 状態が `エラー: 理由` のときは理由を直すと次の回に作り直します。止めたい場合は `不要` にします
+   - 状態が `作成中 日時` のまま残っている行は、前の回が途中で止まった可能性があります。下書きフォルダを確認し、
+     下書きがあれば `作成済`、無ければ空欄に戻してください（サマリメールにも件数が載ります）
+   - 状態が `エラー: 文面を用意できませんでした…` の行は、次の回のバッチが文面を作り直します（担当者メールを入れても作りません）
 5. 進み具合に合わせて **「ステータス」** を `紹介済` → `成約` または `見送り` に更新します
 6. 案件が終わったら「案件」タブのステータスを `終了`、要員が決まったら「要員」タブを `決定済` にします（以後の候補から外れます）
 7. プロパー機能: 「プロパー管理」タブの **必要案件単価** と **稼働状況** を最新に保ち、「プロパー候補」タブで候補と提案文面を確認します
@@ -384,10 +416,13 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 | IMAP に接続・ログインできない | サーバー名・ユーザー名（アドレス全体）・パスワード、国外からの接続制限（2-3） |
 | スプレッドシートを開けない | 共有先がサービスアカウントのメールで「編集者」か、URL が正しいか（4-1・4-4） |
 | AI の呼び出しが失敗（status=401/400 等） | API キーの貼り付け、Anthropic のクレジット残高・利用上限（2-1） |
-| 下書き状態が `エラー` | 担当者メールの形式、`SES_ALLOWED_SENDER_DOMAINS`、下書きフォルダ名（3章） |
-| 30分で打ち切られた | 初回・大量受信時。`SES_MAX_MAILS_PER_RUN` を下げる |
+| 下書き状態が `エラー` | 担当者メールの形式、`SES_ALLOWED_SENDER_DOMAINS`（未登録なら `SES_OWN_DOMAINS`）・`SES_ALLOWED_SENDERS`、下書きフォルダ名（3章） |
+| 「収集期間を外れて処理されません」で異常終了 | 1回の上限を超える未処理メールが続いています。`SES_MAX_MAILS_PER_RUN` を上げるか、`SES_COLLECT_DAYS` を広げて手動で再実行 |
+| 「保存先を読み込めない」「ヘッダー行から列を特定できない」 | スプレッドシートの共有、または見出しの名前が変えられていないか（4-2） |
+| 40分で打ち切られた | 通常は20分で区切って終わります。長引く場合は AI の応答の遅延です。`SES_RUN_DEADLINE_MINUTES` を下げる |
 
-- 失敗した回を **再実行しても二重には処理されません**（処理済みの記録がスプレッドシートにあるため）
+- 失敗した回を **再実行しても二重には処理されません**（処理済みの記録がスプレッドシートにあるため）。途中で止まった回の
+  判定し残し（「突合済」が空欄の案件・要員）は、次の回が続きから判定します
 - **ログに個人情報は出ません**（氏名・アドレス・件名・本文・APIのエラー本文は伏せ字または件数のみ）。
   原因の詳細はサマリメール（非公開）とスプレッドシートで確認します
 - 一時的に止めたいときは 6-2 の「Disable workflow」、再開は「Enable workflow」
@@ -398,18 +433,25 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 
 - **リポジトリは非公開（Private）にすることを強く推奨します**（2-4 の手順）。
   - 公開のままだと、実行ログ・実行時刻・失敗の有無を誰でも見られます（個人情報は出しませんが、運用状況が外から分かります）
-  - 非公開でも GitHub Free の **Actions 無料枠（月2,000分）で足ります**（平日約22日 × 1日2回 × 約5分 ≒ 月220分）
+  - 非公開でも GitHub Free の **Actions 無料枠（月2,000分）で足ります**（平日約22日 × 1日2回 × 約5〜20分 ≒ 月220〜880分）
   - 公開リポジトリでは、**60日間リポジトリに更新が無いと定時実行が自動で止まります**（GitHub の仕様。Actions タブで再度有効化が必要）。非公開では止まりません
 - **鍵・パスワードは Secrets にだけ登録**し、ファイル（`.env.local` など）をコミットしないでください（`.env.local` はコミット対象外に設定済み）。
   JSON 鍵ファイルをリポジトリのフォルダに置かないでください
 - **書き込み権限のある人は Secrets を取り出せます**（ワークフローを書き換えられるため）。共同作業者は最小限にしてください
+- **Variables の値は公開ログに表示されます**。社員のアドレス・自社ドメイン・粗利や交渉の方針は Secrets に登録してください（5章）
+- 鍵・パスワードは本番のステップにだけ渡し、依存パッケージのインストールスクリプトは実行しません（`npm ci --ignore-scripts`）。
+  使っている GitHub Actions はコミットのハッシュで固定しています（更新するときはハッシュごと書き換えます）
+- スプレッドシートの編集者は誰でも「担当者メール」を書けます。下書きの送信元は許可したドメイン・アドレスに限られます（未登録なら作りません）。
+  `SES_DRAFT_SIGNING_KEY` を登録すると、「下書きデータ」列を書き換えた行からは下書きを作りません
+- 社外から届いたメールに貼られたスプレッドシートのリンクは、社内（自社ドメインの人が所有・プロパーのスキルシートのフォルダ配下）の
+  ファイルなら読みません（確かめるためにメインのサービスアカウントの Google Cloud プロジェクトで Drive API を有効にしてください）
 - 実行データ（`data/` フォルダ）を Actions のキャッシュや成果物（artifact）として保存しないでください（ダウンロードできる人に個人情報が渡ります）。
   現在のワークフローは保存していません
 - メール本文・添付は処理のために Anthropic の API に送られます。**ZDR（ゼロデータリテンション）** の利用を推奨します
 - 鍵が漏れた可能性があるときは、すぐに作り直して Secrets を更新します
   （Anthropic: API Keys で旧キーを削除／Google Cloud: サービスアカウントの「鍵」で旧鍵を削除／Xserver: パスワード変更）
 - 4-4 B（DWD）を使うと、サービスアカウントの鍵で社内ユーザーとしてスプレッドシート・ドライブを操作できるようになります。
-  可能な限り A（共有）を使ってください
+  可能な限り A（共有）を使ってください。別テナントへのDWDはメインの鍵では行いません（4-4 C）
 
 ---
 
@@ -417,7 +459,7 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 
 | 項目 | 費用の目安 |
 | --- | --- |
-| GitHub Actions | 非公開: 無料枠（月2,000分）内。1回約5分 × 月約44回 ≒ 220分。公開: 無料 |
+| GitHub Actions | 非公開: 無料枠（月2,000分）内。1回約5〜20分 × 月約44回 ≒ 220〜880分。公開: 無料 |
 | Google Cloud（サービスアカウント・Sheets API・Drive API） | 無料 |
 | Google Workspace・Xserver | 既存の契約のまま（追加費用なし） |
 | **Anthropic（AI）** | 下表。**3章の測定結果に実際の見込み額が出ます** |
@@ -468,24 +510,26 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | ☐ | `XSERVER_SHARED_USER` | 必須 |
 | ☐ | `XSERVER_SHARED_PASS` | 必須 |
 | ☐ | `SES_NOTIFY_TO` | 強く推奨 |
+| ☐ | `SES_OWN_DOMAINS` | 強く推奨 |
+| ☐ | `SES_DRAFT_SIGNING_KEY` | 推奨（最初の実行の前に） |
+| ☐ | `SES_ALLOWED_SENDER_DOMAINS` / `SES_ALLOWED_SENDERS` | 任意（Gmail 運用は `SES_ALLOWED_SENDERS` 必須） |
+| ☐ | `MIN_GROSS_MARGIN_JPY` / `MIN_GROSS_MARGIN_MAN` / `NEGOTIATION_MAX_*` | 任意（既定 100000円・5万円） |
+| ☐ | `SHEETS_DB_IMPERSONATE` | 任意（DWD の場合のみ） |
 | ☐ | `PROPER_SKILLSHEET_FOLDER_ID` | 任意（プロパー） |
 | ☐ | `PROPER_MASTER_SPREADSHEET_ID` | 任意（プロパー） |
 | ☐ | `PROPER_GOOGLE_SA_KEY_JSON` | 任意（別テナント・別サービスアカウントの場合のみ） |
+| ☐ | `PROPER_GOOGLE_IMPERSONATE` | 任意（4-4 C で共有できない場合のみ） |
 | ☐ | `SES_TARGET_GMAIL` | 不要（Gmail 運用の場合のみ） |
 
 ### GitHub Variables
 
 | ✔ | 名前 | 必須／任意 |
 | --- | --- | --- |
-| ☐ | `SES_OWN_DOMAINS` | 推奨 |
-| ☐ | `SES_ALLOWED_SENDER_DOMAINS` | 推奨 |
 | ☐ | `XSERVER_DRAFTS_MAILBOX` | 推奨（測定結果に合わせる） |
 | ☐ | `MAIL_PROVIDER` | 任意（既定 xserver） |
-| ☐ | `SES_COLLECT_DAYS` | 任意（既定 4） |
+| ☐ | `SES_COLLECT_DAYS` | 任意（既定 7） |
 | ☐ | `SES_MAX_MAILS_PER_RUN` | 任意（既定 150） |
-| ☐ | `MIN_GROSS_MARGIN_JPY` | 任意（既定 100000） |
-| ☐ | `SHEETS_DB_IMPERSONATE` | 任意（DWD の場合のみ） |
-| ☐ | `PROPER_GOOGLE_IMPERSONATE` | 任意（DWD の場合のみ） |
+| ☐ | `SES_RUN_DEADLINE_MINUTES` | 任意（既定 20） |
 | ☐ | `XSERVER_IMAP_PORT` / `XSERVER_SMTP_PORT` | 任意（通常不要） |
 | ☐ | その他の調整値（5章の表） | 任意 |
 

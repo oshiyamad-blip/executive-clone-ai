@@ -4,9 +4,9 @@
 // 添付は社外の誰からでも届くため、表計算の解析前に形式（先頭バイト）とサイズを確かめ、
 // 解析は数式・スタイル・マクロ等を読まない設定で行い、行数と文字数に上限を設ける。
 import { read as readXlsx, utils as xlsxUtils } from 'xlsx';
-import { google, sheets_v4 } from 'googleapis';
+import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
-import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId } from './config.js';
+import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains } from './config.js';
 import { redactable, safeErr, SafeLogError } from './redact.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
 
@@ -14,7 +14,7 @@ export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[
   if (isDemo()) return mails; // fixtureは attachments[].text 済み。展開処理をスキップ
 
   const parsed: SesRawMail[] = [];
-  const linkStats: SheetLinkStats = { read: 0, skipped: 0 };
+  const linkStats: SheetLinkStats = { read: 0, skipped: 0, internal: 0 };
   for (const mail of mails) {
     try {
       const fileAttachments = await Promise.all(mail.attachments.map(parseAttachment));
@@ -26,7 +26,10 @@ export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[
     }
   }
   if (linkStats.read + linkStats.skipped > 0) {
-    console.log(`SES展開: スプレッドシートのリンク 読取${linkStats.read}件・読めず${linkStats.skipped}件（サービスアカウントに共有されたものだけ読みます）`);
+    console.log(
+      `SES展開: スプレッドシートのリンク 読取${linkStats.read}件・読めず${linkStats.skipped}件` +
+        `${linkStats.internal > 0 ? `（うち社内のファイルのため読まなかった${linkStats.internal}件）` : ''}（サービスアカウントに共有された社外のものだけ読みます）`,
+    );
   }
   return parsed;
 }
@@ -112,6 +115,51 @@ const LINK_MAX_CHARS = 30_000;
 interface SheetLinkStats {
   read: number;
   skipped: number;
+  internal: number;
+}
+
+const DRIVE_METADATA_SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly'];
+// 親フォルダをたどる深さ（プロパーのスキルシートのフォルダは2階層下まで使う）
+const PARENT_DEPTH = 3;
+
+function domainOf(address: string | null | undefined): string {
+  const a = (address ?? '').toLowerCase();
+  return a.includes('@') ? a.slice(a.lastIndexOf('@') + 1) : '';
+}
+
+let warnedDriveCheck = false;
+
+// 社内のファイル（自社ドメインの人が所有する・プロパーのスキルシートのフォルダ配下にある）か。
+// サービスアカウントは社内の共有物（スキルシート等）も読めるため、社外から届いたメールにリンクを貼られただけで
+// 社内の個人情報を抽出・保存しないよう、確かめられない場合も社内とみなして読まない
+async function isInternalFile(drive: drive_v3.Drive, fileId: string): Promise<boolean> {
+  const own = ownDomains();
+  const folder = properFolderId();
+  try {
+    const f = (await drive.files.get({ fileId, fields: 'owners(emailAddress), parents', supportsAllDrives: true })).data;
+    if ((f.owners ?? []).some((o) => own.includes(domainOf(o.emailAddress)))) return true;
+    let parents = f.parents ?? [];
+    for (let depth = 0; depth < PARENT_DEPTH && parents.length > 0 && folder; depth++) {
+      if (parents.includes(folder)) return true;
+      const next: string[] = [];
+      for (const parent of parents) {
+        try {
+          const r = await drive.files.get({ fileId: parent, fields: 'parents', supportsAllDrives: true });
+          next.push(...(r.data.parents ?? []));
+        } catch {
+          // 親フォルダを見られない（社外の共有ファイルでは普通）
+        }
+      }
+      parents = next;
+    }
+    return Boolean(folder) && parents.includes(folder);
+  } catch (err) {
+    if (!warnedDriveCheck) {
+      warnedDriveCheck = true;
+      console.warn(`SES展開: リンク先のファイルの所有者を確かめられないため読みません（Drive APIの有効化を確認）: ${safeErr(err)}`);
+    }
+    return true;
+  }
 }
 
 // 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す。
@@ -129,11 +177,20 @@ async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise
 
   const ownSheets = new Set([sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean));
   const sheetsApi = google.sheets({ version: 'v4', auth });
+  // 自社ドメイン・プロパーのフォルダが分からなければ社内かどうかを判定できないため、確かめない
+  const checkInternal = ownDomains().length > 0 || Boolean(properFolderId());
+  const driveAuth = checkInternal ? getServiceAccountAuth(DRIVE_METADATA_SCOPES) : null;
+  const driveApi = driveAuth ? google.drive({ version: 'v3', auth: driveAuth }) : null;
   const results: SesAttachment[] = [];
   for (const link of mail.sheetLinks) {
     const spreadsheetId = extractSpreadsheetId(link);
     if (!spreadsheetId || ownSheets.has(spreadsheetId)) {
       stats.skipped += 1;
+      continue;
+    }
+    if (driveApi && (await isInternalFile(driveApi, spreadsheetId))) {
+      stats.skipped += 1;
+      stats.internal += 1;
       continue;
     }
     try {

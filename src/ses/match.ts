@@ -19,6 +19,7 @@ import {
   matchMinLlmScore,
 } from './config.js';
 import { redactable, safeErr } from './redact.js';
+import { callTimeoutMs } from './schedule.js';
 import type {
   Project,
   Engineer,
@@ -29,7 +30,8 @@ import type {
   MatchCategory,
 } from '../types/index.js';
 
-// 通常バッチの突合範囲。今回の新着（newProjectIds/newEngineerIds）を含むペアだけを評価し、
+// 通常バッチの突合範囲。まだ突合を終えていない案件・要員（newProjectIds/newEngineerIds。今回の新着に加え、
+// 前回以前の実行が時間切れ・失敗で突合し終えなかったもの）を含むペアだけを評価し、
 // 判定済みのペア（judgedMatchIds。マッチタブ/マッチDBに既にあるID）は判定し直さない。
 // 未指定なら渡された案件×要員の全ペアが対象（demo・--match-only）
 export interface PairScope {
@@ -57,7 +59,9 @@ function rankCandidates(candidates: MatchPair[]): MatchPair[] {
 
 // 一次選抜のみ（LLM不使用・純関数。demo/本番共通で使う）。
 // scope 指定時: 新着案件は全要員から上位N件、既存案件×新着要員は新着要員ごとに上位N件（LLM判定の件数を
-// 新着の件数に比例させ、既存の案件が多くても判定コストが膨らまないようにする）
+// 新着の件数に比例させ、既存の案件が多くても判定コストが膨らまないようにする）。
+// 上位N件は判定済みのペアも含めて決めてから判定済みを除く（途中で終わった回の続きを判定するときに、
+// 判定済みの分だけ順位の低いペアへ繰り下がって判定件数が増えないように）
 export function primarySelect(projects: Project[], engineers: Engineer[], scope?: PairScope): MatchPair[] {
   const openProjects = projects.filter((p) => p.status === 'open');
   const availableEngineers = engineers.filter((e) => e.status === 'available');
@@ -71,16 +75,17 @@ export function primarySelect(projects: Project[], engineers: Engineer[], scope?
     const projectIsNew = !scope || scope.newProjectIds.has(project.id);
     const candidates: MatchPair[] = [];
     for (const engineer of availableEngineers) {
-      if (!projectIsNew && !scope!.newEngineerIds.has(engineer.id)) continue; // どちらも前回以前＝判定済みの組
-      if (!fresh(project, engineer)) continue;
+      if (!projectIsNew && !scope!.newEngineerIds.has(engineer.id)) continue; // どちらも突合済みの組
       const pair = evaluatePair(project, engineer);
       if (!pair) continue;
       if (projectIsNew) candidates.push(pair);
       else byNewEngineer.set(engineer.id, [...(byNewEngineer.get(engineer.id) ?? []), pair]);
     }
-    results.push(...rankCandidates(candidates).slice(0, limit));
+    results.push(...rankCandidates(candidates).slice(0, limit).filter((p) => fresh(p.project, p.engineer)));
   }
-  for (const pairs of byNewEngineer.values()) results.push(...rankCandidates(pairs).slice(0, limit));
+  for (const pairs of byNewEngineer.values()) {
+    results.push(...rankCandidates(pairs).slice(0, limit).filter((p) => fresh(p.project, p.engineer)));
+  }
   return results;
 }
 
@@ -234,32 +239,47 @@ export function isTimingWithinGrace(startDateIso: string, availableFromIso: stri
   return available <= start + graceMs;
 }
 
+// 最終判定を同時に走らせる数（1件ずつだと候補の多い回で実行時間の上限に届くため。APIのレート制限の内に収める）
+const JUDGE_CONCURRENCY = 3;
+
+// 最終判定の前準備（同義辞書・人間フィードバックのfew-shot）。本番の最終判定に過去の評価を渡す（御社の許容感覚を学習）
+export async function prepareJudging(): Promise<string> {
+  await loadSkillEquivalences(); // 育てた同義辞書を読み込んでからスキル判定に入る
+  return isDemo() ? '' : buildFeedbackFewShot();
+}
+
+// 一次選抜を通ったペアの最終判定（本番=Sonnet / demo・要確認枠・交渉提案枠=ヒューリスティック）。入力の順に返す
+export async function judgePairs(pairs: MatchPair[], fewShot: string): Promise<MatchResult[]> {
+  const results: MatchResult[] = new Array(pairs.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < pairs.length) {
+      const i = next++;
+      results[i] = await judgeOne(pairs[i], fewShot);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(JUDGE_CONCURRENCY, pairs.length) }, worker));
+  return results;
+}
+
+async function judgeOne(pair: MatchPair, fewShot: string): Promise<MatchResult> {
+  // 要確認枠（単金/勤務地不明）と交渉提案枠はLLM節約のため最終判定に回さない。demoも同様にLLM不使用。
+  // 交渉提案は提案内容（値上げ/値下げ額）が主眼なので、根拠は決定的に生成する。
+  if (pair.needsReview || pair.negotiation || isDemo()) return buildHeuristicResult(pair);
+  try {
+    return await judgeWithLlm(pair, fewShot);
+  } catch (err) {
+    console.error(
+      `SESマッチ: 最終判定に失敗 (${pair.project.id} × ${pair.engineer.id} ${redactable(`${pair.project.title} × ${pair.engineer.displayName}`)}): ${safeErr(err)}`,
+    );
+    return buildHeuristicResult(pair); // 判定失敗時はヒューリスティックにフォールバック
+  }
+}
+
 // 一次選抜 → 通過ペアのみ最終判定（本番=Sonnet / demo・要確認枠=ヒューリスティック）
 export async function matchAll(projects: Project[], engineers: Engineer[], scope?: PairScope): Promise<MatchResult[]> {
-  await loadSkillEquivalences(); // 育てた同義辞書を読み込んでからスキル判定に入る
-  const pairs = primarySelect(projects, engineers, scope);
-
-  // 本番の最終判定に、過去の人間フィードバックをfew-shotとして渡す（御社の許容感覚を学習）
-  const fewShot = isDemo() ? '' : await buildFeedbackFewShot();
-
-  const results: MatchResult[] = [];
-  for (const pair of pairs) {
-    // 要確認枠（単金/勤務地不明）と交渉提案枠はLLM節約のため最終判定に回さない。demoも同様にLLM不使用。
-    // 交渉提案は提案内容（値上げ/値下げ額）が主眼なので、根拠は決定的に生成する。
-    if (pair.needsReview || pair.negotiation || isDemo()) {
-      results.push(buildHeuristicResult(pair));
-      continue;
-    }
-    try {
-      results.push(await judgeWithLlm(pair, fewShot));
-    } catch (err) {
-      console.error(
-        `SESマッチ: 最終判定に失敗 (${pair.project.id} × ${pair.engineer.id} ${redactable(`${pair.project.title} × ${pair.engineer.displayName}`)}): ${safeErr(err)}`,
-      );
-      results.push(buildHeuristicResult(pair)); // 判定失敗時はヒューリスティックにフォールバック
-    }
-  }
-  return results;
+  const fewShot = await prepareJudging();
+  return judgePairs(primarySelect(projects, engineers, scope), fewShot);
 }
 
 function buildHeuristicResult(pair: MatchPair): MatchResult {
@@ -325,8 +345,9 @@ async function judgeWithLlm(pair: MatchPair, fewShot: string): Promise<MatchResu
     MATCH_SYSTEM,
     user,
     MATCH_SCHEMA,
-    // adaptive thinking の思考トークンも出力上限に数えるため余裕を持たせる（出力が短ければ課金も短い分だけ）
-    { model: matchModel(), maxTokens: 4000 },
+    // adaptive thinking の思考トークンも出力上限に数えるため余裕を持たせる（出力が短ければ課金も短い分だけ）。
+    // 1件の詰まりで実行時間の上限を使い切らないよう、待ち時間を明示する
+    { model: matchModel(), maxTokens: 4000, timeoutMs: callTimeoutMs(120_000), maxRetries: 1 },
   );
   const score = Math.max(0, Math.min(100, Math.round(parsed.score)));
   const result = buildMatchResult(pair, score, parsed.reason);

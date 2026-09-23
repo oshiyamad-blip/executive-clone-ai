@@ -20,6 +20,7 @@ const MAX_TEXT_CHARS = 60_000;
 
 const MIME = {
   folder: 'application/vnd.google-apps.folder',
+  shortcut: 'application/vnd.google-apps.shortcut',
   gdoc: 'application/vnd.google-apps.document',
   gsheet: 'application/vnd.google-apps.spreadsheet',
   pdf: 'application/pdf',
@@ -71,7 +72,20 @@ function driveApi(): drive_v3.Drive {
   return client;
 }
 
-// フォルダ配下のファイル（フォルダ以外。ゴミ箱は除く）を列挙する。共有ドライブ上のフォルダにも対応
+// ショートカットの参照先のファイル情報（更新日時・リンクは参照先のものを使う。読めなければ null）
+async function shortcutTarget(drive: drive_v3.Drive, targetId: string): Promise<drive_v3.Schema$File | null> {
+  try {
+    const res = await withGoogleRetry(() =>
+      drive.files.get({ fileId: targetId, fields: 'id, name, mimeType, modifiedTime, webViewLink, size, trashed', supportsAllDrives: true }),
+    );
+    return res.data.trashed ? null : res.data;
+  } catch {
+    return null;
+  }
+}
+
+// フォルダ配下のファイル（フォルダ以外。ゴミ箱は除く）を列挙する。共有ドライブ上のフォルダにも対応。
+// ショートカットは参照先をたどる（社員ごとのフォルダの原本をショートカットで集める運用があるため）
 export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
   const root = properFolderId();
   if (!/^[A-Za-z0-9_-]+$/.test(root)) {
@@ -80,6 +94,7 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
   const drive = driveApi();
   const files: SkillSheetFile[] = [];
   const seenFolders = new Set<string>([root]);
+  const seenFiles = new Set<string>();
   let level = [root];
   for (let depth = 0; depth <= MAX_FOLDER_DEPTH && level.length > 0; depth++) {
     const next: string[] = [];
@@ -91,7 +106,7 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
           res = await withGoogleRetry(() =>
             drive.files.list({
               q: `'${folderId}' in parents and trashed = false`,
-              fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size)',
+              fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size, shortcutDetails(targetId, targetMimeType))',
               pageSize: 1000,
               pageToken,
               supportsAllDrives: true,
@@ -105,13 +120,28 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
             `プロパー: スキルシートのフォルダを読めません（status=${status ?? '不明'}）。フォルダIDが正しいか、${properAccessHint()}`,
           );
         }
-        for (const f of res.data.files ?? []) {
+        for (const listed of res.data.files ?? []) {
+          let f: drive_v3.Schema$File = listed;
+          if (listed.mimeType === MIME.shortcut) {
+            const targetId = listed.shortcutDetails?.targetId;
+            if (!targetId) continue;
+            if (listed.shortcutDetails?.targetMimeType === MIME.folder) {
+              if (!seenFolders.has(targetId)) next.push(targetId);
+              seenFolders.add(targetId);
+              continue;
+            }
+            const target = await shortcutTarget(drive, targetId);
+            if (!target?.id) continue;
+            f = target;
+          }
           if (!f.id) continue;
           if (f.mimeType === MIME.folder) {
             if (!seenFolders.has(f.id)) next.push(f.id);
             seenFolders.add(f.id);
             continue;
           }
+          if (seenFiles.has(f.id)) continue; // 原本とショートカットの両方がある等
+          seenFiles.add(f.id);
           files.push({
             id: f.id,
             name: f.name ?? '',

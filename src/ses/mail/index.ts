@@ -6,16 +6,29 @@ import * as gmail from './gmail.js';
 import * as xserver from './xserver.js';
 import type { SesRawMail, DraftRef, SesMailMeta } from '../../types/index.js';
 
+export interface CollectOptions {
+  limit: number; // 本文を取得するメールの上限（1回の実行で抽出する件数）
+  now?: Date;
+}
+
+export interface CollectOutcome {
+  mails: SesRawMail[]; // 本文・添付まで取得した未処理メール（上限内）
+  deferred: Date[]; // 上限を超えたため本文を取得せず次回以降に回した未処理メールの受信日時
+}
+
 export interface MailTransport {
   // 収集に必要な設定が揃っているか
   collectReady(): boolean;
-  // 共有メールボックス（メーリス）から収集期間内のメールを取得する。isProcessed が真のメールは本文を取得しない。
-  // 接続・認証・検索の失敗は例外（「0件」と区別するため）
-  collect(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]>;
+  // 共有メールボックス（メーリス）から収集期間内の未処理メールを取得する。先に受信日時などの軽い情報だけを読み、
+  // 処理済み（isProcessed が真）を除いて、次回の実行で窓を外れるものを優先し新しい順に上限まで選んだメールだけ
+  // 本文・添付を取得する（schedule.pickForRun）。接続・認証・検索の失敗は例外（「0件」と区別するため）
+  collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome>;
   // 下書き作成に必要な設定が揃っているか（揃っていなければ依頼を消化せず次回に回す）
   draftReady(): boolean;
   // 全員に返信の下書きを、担当営業本人の会社アドレス(fromEmail)で作成する。作成できなければ例外
   createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef>;
+  // 下書きの識別子（X-SES-Draft-Key）が同じ下書きが既にあるか。確かめられないプロバイダは null
+  draftExists(draftKey: string): Promise<boolean | null>;
   // サマリ送信に必要な設定が揃っているか
   sendReady(): boolean;
   // サマリ等のプレーンメールを送信する。送れなければ例外
@@ -40,8 +53,8 @@ export function collectMailReady(): boolean {
   return transport().collectReady();
 }
 
-export function collectMail(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]> {
-  return transport().collect(isProcessed);
+export function collectMail(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
+  return transport().collect(isProcessed, opts);
 }
 
 export function replyDraftReady(): boolean {
@@ -50,6 +63,10 @@ export function replyDraftReady(): boolean {
 
 export function createReplyDraftViaMail(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   return transport().createReplyDraft(ref, fromEmail);
+}
+
+export function replyDraftExistsViaMail(draftKey: string): Promise<boolean | null> {
+  return transport().draftExists(draftKey);
 }
 
 export function sendMailReady(): boolean {

@@ -13,9 +13,11 @@ import {
 import { google } from 'googleapis';
 import { SafeLogError } from '../redact.js';
 import { sesTargetGmail, collectDays } from '../config.js';
+import { pickForRun } from '../schedule.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
 import { addressOf } from './ownMail.js';
-import type { SesRawMail, DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
+import type { DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
+import type { CollectOptions, CollectOutcome } from './index.js';
 
 function mailboxReady(): boolean {
   return Boolean(sesTargetGmail()) && loadServiceAccountCredentials() !== null;
@@ -27,12 +29,15 @@ export function collectReady(): boolean {
 
 // SES専用メールボックスの受信メール（送信済み・下書き・迷惑メール・ゴミ箱を除く）を収集期間ぶん取得する。
 // 宛先(to:)で絞らない（BCC・転送で届いたメールも拾うため。メールボックス自体がSES専用である前提）
-export async function collect(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]> {
+export async function collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
   const auth = getGoogleAuthAs(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
   if (!auth) throw new SafeLogError('Gmail収集: SES_TARGET_GMAIL または Google認証（サービスアカウント）が未設定です');
   const afterEpoch = Math.floor((Date.now() - collectDays() * 24 * 60 * 60 * 1000) / 1000);
   const query = `after:${afterEpoch} -in:sent -in:drafts -in:spam -in:trash`;
-  return collectSesRawMail(auth, query, isProcessed);
+  return collectSesRawMail(auth, query, isProcessed, {
+    limit: opts.limit,
+    pick: (items, limit) => pickForRun(items, limit, collectDays(), opts.now),
+  });
 }
 
 export function draftReady(): boolean {
@@ -59,6 +64,11 @@ export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promis
   const messageId = res.data.message?.id ?? '';
   const url = messageId ? `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}` : '';
   return { ...finalized, draftId, url };
+}
+
+// Gmail API では任意のヘッダで下書きを検索できないため確かめない（drafts.create は作成結果を同期的に返す）
+export async function draftExists(_draftKey: string): Promise<boolean | null> {
+  return null;
 }
 
 export function sendReady(): boolean {

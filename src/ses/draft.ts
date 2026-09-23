@@ -13,6 +13,8 @@ import { isDemo, matchModel, demoDataDir } from './config.js';
 import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
 import { redactable, safeErr } from './redact.js';
+import { recordHealEvent } from './heal/events.js';
+import { callTimeoutMs } from './schedule.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
@@ -140,9 +142,14 @@ export function planReplyAddresses(
     listLike > 0 ? `配信用と思われる宛先${listLike}件` : '',
     overCap > 0 ? `上限（${MAX_REPLY_CC}件）を超えた宛先${overCap}件` : '',
   ].filter(Boolean);
+  // 差出人と別の会社の返信先（Reply-To）は、送り主以外に紹介内容を集める手口のこともあるため注意書きを付ける
+  const fromDomains = new Set(splitAddrs(rt.from).map(addressOf).map(domainOf).filter(Boolean));
+  const replyToElsewhere =
+    replyTo.length > 0 && fromDomains.size > 0 && toKeys.some((k) => domainOf(k) !== '' && !fromDomains.has(domainOf(k)));
   const notes = [
     dropped.length > 0 ? `元メールの宛先のうち${dropped.join('・')}をCcに含めていません（必要なら送信前に追加してください）` : '',
     toKeys.some(isNoReplyAddress) ? '返信先(To)が送信専用アドレスの可能性があります。送信前に宛先をご確認ください' : '',
+    replyToElsewhere ? '返信先(Reply-To)が差出人(From)と別のドメインです。宛先が元の送り主の会社か、送信前にご確認ください' : '',
   ].filter(Boolean);
   return { to: toList.join(', '), cc: cc.join(', '), note: notes.join('。') };
 }
@@ -225,6 +232,8 @@ export async function createDrafts(
   const results: MatchResult[] = [];
   const demoRecords: Array<{ matchId: string; title: string; draftToProject: DraftRef; draftToEngineer: DraftRef }> =
     [];
+  let templated = 0;
+  let failed = 0;
 
   for (const match of matches) {
     // 要確認枠(情報不足)・参考提案枠(スキルが許容範囲)は自動下書き対象外。
@@ -235,23 +244,33 @@ export async function createDrafts(
     }
     const project = projectMap.get(match.projectId);
     const engineer = engineerMap.get(match.engineerId);
+    // 文面を用意できなかった成立候補・交渉提案は、下書き状態を「文面を用意できませんでした」にして次回作り直す
+    // （「不要」にすると判定済みのまま二度と文面が作られない）
     if (!project || !engineer) {
       console.warn(`SES下書き: 案件/要員情報が見つからずスキップ (${match.id} ${redactable(match.title)})`);
-      results.push(match);
+      results.push({ ...match, draftFailed: true });
+      failed += 1;
       continue;
     }
     try {
       const [draftToProject, draftToEngineer] = isDemo()
         ? createDemoDraftPair(project, engineer, match)
-        : await createProdDraftPair(project, engineer, match);
+        : await createProdDraftPair(project, engineer, match, () => (templated += 1));
       results.push({ ...match, draftToProject, draftToEngineer });
       if (isDemo()) demoRecords.push({ matchId: match.id, title: match.title, draftToProject, draftToEngineer });
     } catch (err) {
       console.error(`SES下書き: 生成に失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
-      results.push(match);
+      results.push({ ...match, draftFailed: true });
+      failed += 1;
     }
   }
 
+  if (templated > 0) {
+    recordHealEvent('warn', `紹介文面${templated}通は生成AIで作れなかったため定型文で用意しました（送信前に内容をご確認ください）`);
+  }
+  if (failed > 0) {
+    recordHealEvent('warn', `成立候補・交渉提案${failed}件の紹介文面を用意できませんでした（次回のバッチで作り直します）`);
+  }
   if (isDemo()) writeDemoArtifact('drafts', demoRecords);
   return results;
 }
@@ -381,13 +400,22 @@ async function createProdDraftPair(
   project: Project,
   engineer: Engineer,
   match: MatchResult,
+  onTemplate: () => void,
 ): Promise<[DraftRef, DraftRef]> {
   // strict: 出力上限での打ち切り・拒否・空応答を例外にする（途中で切れた文面や案内文を紹介メールの本文にしない）。
   // 上位モデルは adaptive thinking の思考も出力上限に数えるため、本文の長さより大きめに取る
-  const opts = { model: matchModel(), maxTokens: 8000, strict: true };
+  const opts = { model: matchModel(), maxTokens: 8000, strict: true, timeoutMs: callTimeoutMs(180_000), maxRetries: 1 };
   const generate = async (side: Side): Promise<string> => {
     const view = recipientView(side, project, engineer, match);
-    const body = await generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt(side, view) }], opts);
+    let body: string;
+    try {
+      body = await generateText(DRAFT_SYSTEM, [{ role: 'user', content: buildDraftPrompt(side, view) }], opts);
+    } catch (err) {
+      // 生成できなくても、相手に出してよい事実だけで組んだ定型文で下書きを用意する（成立候補を文面なしにしない）
+      console.warn(`SES下書き: ${side === 'project' ? '案件側' : '要員側'}宛の文面を生成できないため定型文にしました (${match.id}): ${safeErr(err)}`);
+      onTemplate();
+      return buildTemplate(view);
+    }
     const issues = disclosureIssues(body, side, project, engineer, match);
     if (issues.length === 0) return body;
     // 生成文面に相手へ出さない情報が混ざった場合は、材料を絞った定型文に差し替える（IDと種別だけをログに出す）

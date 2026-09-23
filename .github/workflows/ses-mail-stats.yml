@@ -2,6 +2,7 @@
 # Actions タブ →「SESメール量の測定」→ Run workflow で手動実行します（定時実行はしません）。
 # 受信箱を読み取り専用で開き、本文・添付は取得しません。ログに出すのは件数などの集計値だけです
 # （件名・アドレス・氏名・送信元のドメイン名は出しません）。手順書: docs/ses-deploy-github-actions.md
+# 鍵・パスワードは測定のステップにだけ渡します（依存パッケージのインストールには渡さず、インストールスクリプトも実行しない）。
 
 name: SESメール量の測定
 
@@ -24,39 +25,40 @@ jobs:
     env:
       TZ: Asia/Tokyo
       SES_LOG_REDACT: 'true'
-      SES_STATS_DAYS: ${{ inputs.days }}
-      MAIL_PROVIDER: ${{ vars.MAIL_PROVIDER || 'xserver' }}
-      # xserver
-      XSERVER_IMAP_HOST: ${{ secrets.XSERVER_IMAP_HOST }}
-      XSERVER_SHARED_USER: ${{ secrets.XSERVER_SHARED_USER }}
-      XSERVER_SHARED_PASS: ${{ secrets.XSERVER_SHARED_PASS }}
-      XSERVER_IMAP_PORT: ${{ vars.XSERVER_IMAP_PORT }}
-      XSERVER_DRAFTS_MAILBOX: ${{ vars.XSERVER_DRAFTS_MAILBOX }}
-      # gmail（MAIL_PROVIDER=gmail のときだけ使う）
-      SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
-      GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY_JSON }}
-      # 集計・費用の概算に使う設定（未設定なら既定値）
-      SES_OWN_DOMAINS: ${{ vars.SES_OWN_DOMAINS }}
-      SES_COLLECT_OWN_DOMAIN: ${{ vars.SES_COLLECT_OWN_DOMAIN }}
-      SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
-      SES_HEAL_BUDGET_JPY: ${{ vars.SES_HEAL_BUDGET_JPY }}
-      ANTHROPIC_MODEL_EXTRACT: ${{ vars.ANTHROPIC_MODEL_EXTRACT }}
-      ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
-      JPY_PER_USD: ${{ vars.JPY_PER_USD }}
     steps:
       - name: リポジトリを取得
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
       - name: Node.js を用意
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
-      - name: 依存パッケージをインストール
-        run: npm ci
+      - name: 依存パッケージをインストール（インストールスクリプトは実行しない）
+        run: npm ci --ignore-scripts
 
       - name: メール量を測定（読み取り専用・集計値のみ表示）
+        env:
+          SES_STATS_DAYS: ${{ inputs.days }}
+          MAIL_PROVIDER: ${{ vars.MAIL_PROVIDER || 'xserver' }}
+          # xserver
+          XSERVER_IMAP_HOST: ${{ secrets.XSERVER_IMAP_HOST }}
+          XSERVER_SHARED_USER: ${{ secrets.XSERVER_SHARED_USER }}
+          XSERVER_SHARED_PASS: ${{ secrets.XSERVER_SHARED_PASS }}
+          XSERVER_IMAP_PORT: ${{ vars.XSERVER_IMAP_PORT }}
+          XSERVER_DRAFTS_MAILBOX: ${{ vars.XSERVER_DRAFTS_MAILBOX }}
+          # gmail（MAIL_PROVIDER=gmail のときだけ使う）
+          SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
+          GOOGLE_SA_KEY_JSON: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.GOOGLE_SA_KEY_JSON || '' }}
+          # 集計・費用の概算に使う設定（未設定なら既定値）
+          SES_OWN_DOMAINS: ${{ secrets.SES_OWN_DOMAINS }}
+          SES_COLLECT_OWN_DOMAIN: ${{ vars.SES_COLLECT_OWN_DOMAIN }}
+          SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
+          SES_HEAL_BUDGET_JPY: ${{ vars.SES_HEAL_BUDGET_JPY }}
+          ANTHROPIC_MODEL_EXTRACT: ${{ vars.ANTHROPIC_MODEL_EXTRACT }}
+          ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
+          JPY_PER_USD: ${{ vars.JPY_PER_USD }}
         run: npm run ses:mail-stats

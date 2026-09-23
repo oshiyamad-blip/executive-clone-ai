@@ -76,6 +76,23 @@ export interface SkillSheetProfile extends RawSkillSheet {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+// 提案用表記（社外に出る提案文面に載る）として使えるイニシャルか。「T.Y.」「TY」「T・Y」「K.S.T」のような
+// ローマ字2〜3文字だけを通し、氏名の一部（ローマ字・漢字）を含むものは捨てる（''＝未入力扱いで記入を促す）
+export function sanitizeInitials(raw: string, displayName: string): string {
+  const value = raw.normalize('NFKC').trim();
+  const upper = value.toUpperCase();
+  if (!/^[A-Z](?:[.・･]?\s?[A-Z]){1,2}[.・･]?$/.test(upper)) return '';
+  const letters = upper.replace(/[^A-Z]/g, '');
+  const nameParts = displayName
+    .normalize('NFKC')
+    .toUpperCase()
+    .split(/[\s・,，()（）]+/)
+    .map((t) => t.replace(/[^A-Z]/g, ''))
+    .filter((t) => t.length >= 2);
+  if (nameParts.some((part) => letters.includes(part) || part === letters)) return '';
+  return value;
+}
+
 // 指示に反して番地まで返された場合に備え、最初の数字以降（丁目・番地・建物）を落とす
 function coarseResidence(raw: string): string {
   return raw.normalize('NFKC').replace(/\d.*$/, '').trim();
@@ -110,9 +127,10 @@ export async function extractSkillSheet(content: SkillSheetContent, attempt?: He
 
   const exp = raw.experienceYears;
   const rate = raw.desiredRateMan;
+  const displayName = raw.displayName.trim();
   return {
-    displayName: raw.displayName.trim(),
-    initials: raw.initials.trim(),
+    displayName,
+    initials: sanitizeInitials(raw.initials, displayName),
     skills: [...new Set(normalizeSkills(raw.skills))],
     experienceYears: exp !== null && Number.isFinite(exp) && exp >= 0 && exp < 60 ? exp : null,
     residence: coarseResidence(raw.residence),

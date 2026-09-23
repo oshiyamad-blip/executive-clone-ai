@@ -3,15 +3,14 @@
 import { ownMailReason, type OwnMailPolicy } from './mail/ownMail.js';
 import { estimateCallJpy, jpyPerUsd } from '../llm/pricing.js';
 import { extractModel, matchModel, healBudgetJpy } from './config.js';
+import { nextRunAt, RUN_HOURS_JST, DAY_MS } from './schedule.js';
 import type { SesMailMeta, SesAttachmentKind } from '../types/index.js';
 
 const HOUR_MS = 60 * 60 * 1000;
-export const DAY_MS = 24 * HOUR_MS;
 const JST_OFFSET_MS = 9 * HOUR_MS; // 日本時間は夏時間がないため固定オフセットで足りる
 const WEEKDAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
 
-// 定時バッチ（.github/workflows/ses-batch.yml）の平日の実行時刻（日本時間）
-export const RUN_HOURS_JST = [10, 14];
+export { nextRunAt, RUN_HOURS_JST, DAY_MS };
 
 const KIND_LABELS: Record<SesAttachmentKind, string> = {
   pdf: 'PDF',
@@ -75,25 +74,6 @@ export interface MailStats {
 
 function jstDayIndex(ms: number): number {
   return Math.floor((ms + JST_OFFSET_MS) / DAY_MS);
-}
-
-function weekdayOfDayIndex(day: number): number {
-  return new Date(day * DAY_MS).getUTCDay();
-}
-
-// その時刻以降で最初の定時バッチの実行時刻（UTCのミリ秒）
-export function nextRunAt(ms: number): number {
-  const shifted = ms + JST_OFFSET_MS;
-  let day = Math.floor(shifted / DAY_MS);
-  for (let i = 0; i < 8; i += 1, day += 1) {
-    const wd = weekdayOfDayIndex(day);
-    if (wd === 0 || wd === 6) continue;
-    for (const h of RUN_HOURS_JST) {
-      const slot = day * DAY_MS + h * HOUR_MS;
-      if (slot >= shifted) return slot - JST_OFFSET_MS;
-    }
-  }
-  return Number.POSITIVE_INFINITY;
 }
 
 function emptyKinds(): Record<SesAttachmentKind, number> {

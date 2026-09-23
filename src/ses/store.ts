@@ -181,22 +181,46 @@ function engineersCompatible(a: Engineer, b: Engineer): boolean {
   );
 }
 
+const projectKey = (p: Project) => `${p.title}${p.requiredSkills.join('')}${p.agentCompany}`;
+const engineerKey = (e: Engineer) => `${e.displayName}${e.skills.join('')}${e.agentCompany}`;
+
 // 同一案件が同じ営業元から再送された場合などの重複統合（単金・勤務地・営業元が食い違うものは別案件として残す）
 export function dedupeProjects(projects: Project[]): Project[] {
-  return dedupeBySimilarity(
-    projects,
-    (p) => `${p.title}${p.requiredSkills.join('')}${p.agentCompany}`,
-    projectsCompatible,
-    '案件',
-  );
+  return dedupeBySimilarity(projects, projectKey, projectsCompatible, '案件');
 }
 
 // 同一要員が再送・複数経路で届いた場合の重複統合（イニシャル・年齢・最寄駅・希望単金・居住県が食い違うものは別人として残す）
 export function dedupeEngineers(engineers: Engineer[]): Engineer[] {
-  return dedupeBySimilarity(
-    engineers,
-    (e) => `${e.displayName}${e.skills.join('')}${e.agentCompany}`,
-    engineersCompatible,
-    '要員',
-  );
+  return dedupeBySimilarity(engineers, engineerKey, engineersCompatible, '要員');
+}
+
+// 前回以前の実行で保存済みのもの（existing）と同じ案件・要員の再送を除く（同じルールで判定）。
+// 再送を新しい行として保存すると、同じ相手との組を別のマッチIDで判定し直し、同じ紹介を二重に提案してしまうため。
+// 既存の行は残るので、再送された案件・要員とこれから届く相手との組は既存の行で突合される
+function withoutResends<T extends { id: string }>(
+  existing: T[],
+  fresh: T[],
+  keyFn: (item: T) => string,
+  compatible: (a: T, b: T) => boolean,
+  label: string,
+): T[] {
+  if (existing.length === 0 || fresh.length === 0) return fresh;
+  const known = existing.map((e) => ({ item: e, key: keyFn(e) }));
+  const knownIds = new Set(existing.map((e) => e.id));
+  const kept = fresh.filter((item) => {
+    if (knownIds.has(item.id)) return true; // 同じメールの抽出し直し（同じ行を更新する）
+    const key = keyFn(item);
+    return !known.some((k) => compatible(k.item, item) && bigramSimilarity(k.key, key) >= DEDUP_THRESHOLD);
+  });
+  const removed = fresh.length - kept.length;
+  if (removed > 0) console.log(`SES名寄せ: 保存済みの${label}と同じ再送${removed}件を除外（既存の行で突合します）`);
+  return kept;
+}
+
+export function withoutResentProjects(existing: Project[], fresh: Project[]): Project[] {
+  return withoutResends(existing, fresh, projectKey, projectsCompatible, '案件');
+}
+
+export function withoutResentEngineers(existing: Engineer[], fresh: Engineer[]): Engineer[] {
+  return withoutResends(existing, fresh, engineerKey, engineersCompatible, '要員');
 }

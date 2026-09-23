@@ -96,43 +96,64 @@ export async function collectSesRawMail(
   auth: GoogleJwt,
   query: string,
   isProcessed: (mailId: string) => boolean = () => false,
-): Promise<SesRawMail[]> {
+  opts: { limit?: number; pick?: <T extends { receivedAt: Date }>(items: T[], limit: number) => { picked: T[]; deferred: T[] } } = {},
+): Promise<{ mails: SesRawMail[]; deferred: Date[] }> {
   const gmail = google.gmail({ version: 'v1', auth });
   const mails: SesRawMail[] = [];
   let skipped = 0;
   let failed = 0;
 
+  // 一覧（IDだけ・新しい順）を先に全部読み、処理済みを除く（本文は上限まで選んだものだけ取得する）
+  const unprocessed: string[] = [];
   let pageToken: string | undefined;
   do {
-    const list = await gmail.users.messages.list({
-      userId: 'me',
-      q: query,
-      maxResults: 100,
-      pageToken,
-    });
-
+    const list = await gmail.users.messages.list({ userId: 'me', q: query, maxResults: 500, pageToken });
     for (const ref of list.data.messages ?? []) {
       if (!ref.id) continue;
-      if (isProcessed(sesMailId(ref.id))) {
-        skipped += 1;
-        continue;
-      }
-      try {
-        const msg = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
-        mails.push(await buildSesRawMail(gmail, msg.data));
-      } catch (err) {
-        failed += 1;
-        console.error(`SESメール収集: メッセージ取得に失敗 (${ref.id}): ${safeErr(err)}`);
-      }
+      if (isProcessed(sesMailId(ref.id))) skipped += 1;
+      else unprocessed.push(ref.id);
     }
-
     pageToken = list.data.nextPageToken ?? undefined;
   } while (pageToken);
 
+  const limit = opts.limit ?? Number.POSITIVE_INFINITY;
+  let targets = unprocessed;
+  let deferred: Date[] = [];
+  if (unprocessed.length > limit && opts.pick) {
+    // 上限を超える分は受信日時だけを読んで、次回の実行で窓を外れるものを優先して選ぶ
+    const dated: Array<{ id: string; receivedAt: Date }> = [];
+    for (let i = 0; i < unprocessed.length; i += 10) {
+      const chunk = unprocessed.slice(i, i + 10);
+      const settled = await Promise.allSettled(
+        chunk.map((id) => gmail.users.messages.get({ userId: 'me', id, format: 'minimal', fields: 'id,internalDate' })),
+      );
+      settled.forEach((r, j) => {
+        const ms = r.status === 'fulfilled' ? Number(r.value.data.internalDate ?? NaN) : NaN;
+        dated.push({ id: chunk[j], receivedAt: new Date(Number.isFinite(ms) ? ms : Date.now()) });
+      });
+    }
+    const pick = opts.pick(dated, limit);
+    targets = pick.picked.map((d) => d.id);
+    deferred = pick.deferred.map((d) => d.receivedAt);
+  } else if (unprocessed.length > limit) {
+    deferred = unprocessed.slice(limit).map(() => new Date());
+    targets = unprocessed.slice(0, limit);
+  }
+
+  for (const id of targets) {
+    try {
+      const msg = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+      mails.push(await buildSesRawMail(gmail, msg.data));
+    } catch (err) {
+      failed += 1;
+      console.error(`SESメール収集: メッセージ取得に失敗 (${id}): ${safeErr(err)}`);
+    }
+  }
+
   if (skipped > 0) console.log(`SESメール収集: ${skipped}件は処理済みのため取得をスキップ`);
   if (failed > 0) console.warn(`SESメール収集: ${failed}件は取得に失敗しました（次回の実行で再取得します）`);
-  console.log(`SESメール収集: ${mails.length}件を収集`);
-  return mails;
+  console.log(`SESメール収集: ${mails.length}件を収集${deferred.length > 0 ? `（上限超過で次回以降に回した未処理 ${deferred.length}件）` : ''}`);
+  return { mails, deferred };
 }
 
 function sesMailId(gmailMessageId: string): string {

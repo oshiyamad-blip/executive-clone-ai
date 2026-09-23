@@ -5,6 +5,9 @@
 // 設定値の解釈・実行モード判定・自己メール除外・抽出値の検証・添付の形式判定・突合範囲・Web UIの要求拒否、
 // 勤務地の正規化・突合ルール（勤務地不明・単金下限・候補上限・交渉額の丸め・必須スキル空）・名寄せ・返信宛先・紹介文面の開示検査、
 // 事前確認（preflight）の書式検査・メール量の測定の集計（集計値だけを表示すること）を検証する。
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { LlmOutputError, isTruncationError } from '../../llm/errors.js';
@@ -35,16 +38,24 @@ import {
 } from './quarantine.js';
 import { resetHealEvents, recordStat, getStats, recordHealEvent, recordFatal, hasFatal } from './events.js';
 import { formatErr, SafeLogError } from '../redact.js';
-import { columnLetter, quoteTab, planHeaderMigration } from '../../database/sheetBook.js';
-import { draftRequestTabs } from '../../database/sheets.js';
-import { mergeDraftColumns, parseDraftData, isDraftStateActionable } from '../../database/mapping.js';
+import { columnLetter, quoteTab, planHeaderMigration, googleTransientKind } from '../../database/sheetBook.js';
+import { draftRequestTabs, parseReceivedAt } from '../../database/sheets.js';
+import { mergeDraftColumns, parseDraftData, isDraftStateActionable, verifyDraftData, DRAFT_STATE } from '../../database/mapping.js';
+import { buildReplyMime } from '../mail/mime.js';
+import { isInfraError, itemIdOf } from '../extract.js';
+import { withoutResentProjects } from '../store.js';
+import { orderForRun, pickForRun, followingRunAt } from '../schedule.js';
+import { sanitizeInitials } from '../proper/extractSkillSheet.js';
+import { fileRef } from '../proper/master.js';
 import { parseServiceAccountJson } from '../../collectors/googleAuth.js';
 import {
   normalizeSenderEmail,
   isValidSenderEmail,
   senderDomainAllowed,
+  senderRejection,
   jstStamp,
   planDraftRequest,
+  type SenderPolicy,
 } from '../pendingDrafts.js';
 import {
   parseManYen,
@@ -189,7 +200,27 @@ async function main(): Promise<void> {
   );
   check('ヘッダー: 空タブは全列を追記', planHeaderMigration([], def).kind === 'append');
   const conflict = planHeaderMigration(['ID', '日時'], def);
-  check('ヘッダー: 並びが違えば上書きしない', conflict.kind === 'conflict' && conflict.index === 1);
+  check('ヘッダー: 途中の列の見出しが無ければ上書きしない', conflict.kind === 'conflict' && conflict.index === 1);
+  const moved = planHeaderMigration(['名前', 'メモ', 'ID', '日時'], def);
+  check(
+    'ヘッダー: 並べ替え・途中のメモ列は見出しの名前で対応付ける',
+    moved.kind === 'ok' && moved.defToLive.join(',') === '2,0,3',
+  );
+  const grown = planHeaderMigration(['ID', '名前', 'メモ'], def);
+  check(
+    'ヘッダー: 人の列が右端にあっても、増えた定義の列はその後ろに追記する',
+    grown.kind === 'append' && grown.fromIndex === 3 && grown.cells.join(',') === '日時' && grown.defToLive.join(',') === '0,1,3',
+  );
+  const dup = planHeaderMigration(['ID', '名前', '名前', '日時'], def);
+  check('ヘッダー: 同じ見出しが2つあれば上書きしない', dup.kind === 'conflict' && dup.reason === 'duplicate');
+  check(
+    'Google API: 429・Driveの403レート制限は再送可、5xx・通信断は要確認、権限不足は再試行しない',
+    googleTransientKind({ response: { status: 429 } }) === 'rate' &&
+      googleTransientKind({ response: { status: 403, data: { error: { errors: [{ reason: 'userRateLimitExceeded' }] } } } }) === 'rate' &&
+      googleTransientKind({ response: { status: 503 } }) === 'ambiguous' &&
+      googleTransientKind({ code: 'ETIMEDOUT' }) === 'ambiguous' &&
+      googleTransientKind({ response: { status: 403, data: { error: { errors: [{ reason: 'forbidden' }] } } } }) === null,
+  );
 
   // 10. 隔離リストの切り詰め（件数上限・1セル文字数上限）
   const many: QuarantineEntry[] = Array.from({ length: QUARANTINE_MAX_ENTRIES + 50 }, (_, i) => ({
@@ -238,10 +269,50 @@ async function main(): Promise<void> {
     refreshed.projectState === 'エラー: x' && refreshed.engineerState === '不要' && parseDraftData(refreshed.data).project?.body === 'v2',
   );
   check('下書き列: 壊れたJSONは空扱い', Object.keys(parseDraftData('{broken')).length === 0);
+  const injected = parseDraftData(
+    JSON.stringify({ project: { to: 'x@own.jp', subject: 's', body: { path: '/proc/self/environ' } }, engineer: { to: 'y@own.jp', subject: 's', body: 'ok', extra: { href: 'http://x' } } }),
+  );
+  check(
+    '下書き列: 文字列以外の項目（{path}/{href}）を含む側は捨て、決まった項目だけを取り出す',
+    !injected.project && injected.engineer?.body === 'ok' && !('extra' in (injected.engineer ?? {})),
+  );
+  const secretDir = mkdtempSync(join(tmpdir(), 'ses-mime-'));
+  const secretFile = join(secretDir, 'secret.txt');
+  writeFileSync(secretFile, 'SES_SELFTEST_SECRET_MARKER');
+  try {
+    const mime = (
+      await buildReplyMime({ draftId: '', url: '', to: 'a@b.jp', subject: 's', body: { path: secretFile } as unknown as string })
+    ).toString('utf-8');
+    check('MIME: 本文がファイル指定（{path}）でもファイルを読み込まない', !mime.includes('SES_SELFTEST_SECRET_MARKER'));
+  } finally {
+    rmSync(secretDir, { recursive: true, force: true });
+  }
+  const signed = mergeDraftColumns(null, draft('v1'), undefined, { signingKey: 'k'.repeat(32) });
+  const tamperedJson = signed.data.replace('a@partner.jp', 'evil@attacker.example');
+  check(
+    '下書き列: 署名鍵があれば署名し、書き換え・署名なしを検知する',
+    verifyDraftData(signed.data, 'k'.repeat(32)) &&
+      !verifyDraftData(tamperedJson, 'k'.repeat(32)) &&
+      !verifyDraftData(created.data, 'k'.repeat(32)) &&
+      verifyDraftData(tamperedJson, ''),
+  );
+  const relaundered = mergeDraftColumns(
+    { ...signed, data: tamperedJson, projectState: '作成済 2026-09-01 10:00' },
+    undefined,
+    undefined,
+    { signingKey: 'k'.repeat(32) },
+  );
+  check('下書き列: 署名の合わない既存データは再保存で引き継がない（署名し直して正規化しない）', !relaundered.data.includes('attacker'));
+  const genFailed = mergeDraftColumns(null, undefined, undefined, { failed: true });
+  check(
+    '下書き列: 成立候補の文面を用意できなかった側は「不要」でなく作り直し待ち（依頼は受けない）',
+    genFailed.projectState === DRAFT_STATE.genFailed && !isDraftStateActionable(genFailed.projectState) &&
+      mergeDraftColumns(genFailed, draft('v2'), draft('e2')).projectState === '未作成',
+  );
   check(
     '下書き状態: 空欄・未作成・エラーのみ作成対象',
     ['', '未作成', 'エラー: x'].every(isDraftStateActionable) &&
-      !['作成済 2026-09-01 10:00', '送信済', '不要', '作成中'].some(isDraftStateActionable),
+      !['作成済 2026-09-01 10:00', '送信済', '不要', '作成中', '作成中 2026-09-01 10:00'].some(isDraftStateActionable),
   );
   check('送信元: 全角・前後空白・ドメイン大文字を正規化', normalizeSenderEmail(' ｔａｒｏ＠Example.CO.jp ') === 'taro@example.co.jp');
   check(
@@ -250,26 +321,48 @@ async function main(): Promise<void> {
       !['山田 <y@example.co.jp>', 'a@example.co.jp, b@example.co.jp', 'a@example.co.jp\nBcc: x@evil.jp', 'taro', 'a@b'].some(isValidSenderEmail),
   );
   check(
-    '送信元: 許可ドメインは完全一致（未設定なら全許可）',
+    '送信元: 許可ドメインは完全一致（一覧が空なら許可しない）',
     senderDomainAllowed('a@example.co.jp', ['example.co.jp']) && !senderDomainAllowed('a@sub.example.co.jp', ['example.co.jp']) &&
-      !senderDomainAllowed('a@evil.jp', ['example.co.jp']) && senderDomainAllowed('a@evil.jp', []),
+      !senderDomainAllowed('a@evil.jp', ['example.co.jp']) && !senderDomainAllowed('a@evil.jp', []),
   );
+  const domainPolicy: SenderPolicy = { domains: ['example.co.jp'], addresses: [], requireAddress: false };
+  setDemoOverride(false);
+  try {
+    check(
+      '送信元: 設定が無ければ作らない・Gmailはアドレスの一覧が必須・一覧があればそのアドレスだけ',
+      senderRejection('a@example.co.jp', { domains: [], addresses: [], requireAddress: false }) !== '' &&
+        senderRejection('boss@example.co.jp', { domains: ['example.co.jp'], addresses: [], requireAddress: true }) !== '' &&
+        senderRejection('taro@example.co.jp', { domains: [], addresses: ['taro@example.co.jp'], requireAddress: true }) === '' &&
+        senderRejection('boss@example.co.jp', { domains: ['example.co.jp'], addresses: ['taro@example.co.jp'], requireAddress: false }) !== '' &&
+        senderRejection('taro@example.co.jp', domainPolicy) === '',
+    );
+  } finally {
+    setDemoOverride(null);
+  }
   check('状態の日時はJST表記', jstStamp(new Date('2026-09-23T01:05:00Z')) === '2026-09-23 10:05');
+  setDemoOverride(false);
   const plan = planDraftRequest(
-    { tab: 'マッチ', id: 'm1', senderEmail: 'y@evil.jp', projectState: '', engineerState: '不要', draftData: created.data },
-    ['example.co.jp'],
+    { tab: 'マッチ', id: 'm1', rowNumber: 2, senderEmail: 'y@evil.jp', projectState: '', engineerState: '不要', draftData: created.data },
+    domainPolicy,
   );
   check('依頼判定: 許可外ドメインは作成せずエラー（不要の側は触らない）', plan.create.length === 0 && plan.errors.project === 'エラー: 送信元ドメインが許可されていません' && plan.errors.engineer === undefined);
   const plan2 = planDraftRequest(
-    { tab: 'マッチ', id: 'm1', senderEmail: 'taro@example.co.jp', projectState: '未作成', engineerState: '', draftData: created.data },
-    ['example.co.jp'],
+    { tab: 'マッチ', id: 'm1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '未作成', engineerState: '', draftData: created.data },
+    domainPolicy,
   );
   check('依頼判定: 文面のある側は作成、無い側はエラー', plan2.create.join(',') === 'project' && Boolean(plan2.errors.engineer?.startsWith('エラー: 下書きの文面データ')));
+  const plan3 = planDraftRequest(
+    { tab: 'マッチ', id: 'm1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: tamperedJson },
+    domainPolicy,
+    'k'.repeat(32),
+  );
+  check('依頼判定: 署名の合わない下書きデータからは作らない', plan3.create.length === 0 && Boolean(plan3.errors.project?.includes('書き換え')));
   check('依頼対象タブ: マッチ・プロパー候補を含む', draftRequestTabs().includes('マッチ') && draftRequestTabs().includes('プロパー候補'));
   const properPlan = planDraftRequest(
-    { tab: 'プロパー候補', id: 'p1', senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: created.data },
-    ['example.co.jp'],
+    { tab: 'プロパー候補', id: 'p1', rowNumber: 2, senderEmail: 'taro@example.co.jp', projectState: '', engineerState: '不要', draftData: created.data },
+    domainPolicy,
   );
+  setDemoOverride(null);
   check('依頼判定: 案件側だけのタブは要員側に触らない', properPlan.create.join(',') === 'project' && Object.keys(properPlan.errors).length === 0);
 
   // 13. プロパー（スキルシート）: 人が入力する列の解釈
@@ -428,11 +521,57 @@ async function reviewFindingChecks(project: Project): Promise<void> {
     pii,
   );
   check('隔離リスト: 送信者はドメインのみ', senderDomainOnly('山田 太郎 <taro@Partner.co.jp>') === '@partner.co.jp');
+  // 水曜10:00 JST（次回は同日14:00）と金曜14:00 JST（次回は月曜10:00）
   const now = new Date('2026-09-23T01:00:00Z');
+  const friday = new Date('2026-09-25T05:00:00Z');
+  check('次回の実行: 水曜10時の次は同日14時・金曜14時の次は月曜10時', followingRunAt(now) === Date.parse('2026-09-23T05:00:00Z') && followingRunAt(friday) === Date.parse('2026-09-28T01:00:00Z'));
   check(
-    '隔離: 次回の実行時に収集期間を外れるメールは最後の機会と判定',
-    isLastChance(new Date('2026-09-19T01:00:00Z'), 7, now) && !isLastChance(new Date('2026-09-22T01:00:00Z'), 7, now),
+    '隔離: 次回の実行時に収集期間を外れるメールだけを最後の機会と判定（半日前のメールは平日なら最後の機会ではない）',
+    isLastChance(new Date('2026-09-19T01:00:00Z'), 4, now) &&
+      !isLastChance(new Date('2026-09-22T12:00:00Z'), 4, now) &&
+      !isLastChance(new Date('2026-09-20T12:00:00Z'), 4, now) &&
+      isLastChance(new Date('2026-09-22T03:00:00Z'), 4, friday) &&
+      !isLastChance(new Date('2026-09-24T12:00:00Z'), 4, friday) &&
+      !isLastChance(new Date('2026-09-19T01:00:00Z'), 7, now),
   );
+  const lastFirst = orderForRun(
+    [
+      { id: 'new', receivedAt: new Date('2026-09-23T00:00:00Z') },
+      { id: 'old', receivedAt: new Date('2026-09-19T02:00:00Z') },
+      { id: 'mid', receivedAt: new Date('2026-09-22T00:00:00Z') },
+    ],
+    4,
+    now,
+  ).map((x) => x.id);
+  const picked = pickForRun([{ receivedAt: new Date('2026-09-23T00:00:00Z') }, { receivedAt: new Date('2026-09-22T00:00:00Z') }], 1, 4, now);
+  check(
+    '収集: 次回に窓を外れるメールを先に、残りは新しい順に処理し、上限を超えた分は次回へ',
+    lastFirst.join(',') === 'old,new,mid' && picked.picked.length === 1 && picked.deferred.length === 1,
+    lastFirst.join(','),
+  );
+  check(
+    '抽出: 残高不足・請求の400は基盤起因（メールの問題として隔離しない）',
+    isInfraError({ status: 400, message: 'Your credit balance is too low to access the Anthropic API' }) &&
+      !isInfraError({ status: 400, message: 'invalid pdf document' }) &&
+      isInfraError({ status: 529 }),
+  );
+  check('抽出: 案件・要員のIDはメールIDと出現順で決まる（言い回しが変わっても同じ）', itemIdOf('proj', 'sesmail_a', 0) === itemIdOf('proj', 'sesmail_a', 0) && itemIdOf('proj', 'sesmail_a', 0) !== itemIdOf('proj', 'sesmail_a', 1));
+  check(
+    '受信日: ISO・スラッシュ・年月日・年なしを読み、空欄と読めない値は不明',
+    parseReceivedAt('2026-09-01T00:00:00.000Z')?.toISOString() === '2026-09-01T00:00:00.000Z' &&
+      parseReceivedAt('2026/9/1')?.toISOString() === '2026-08-31T15:00:00.000Z' &&
+      parseReceivedAt('2026年9月1日')?.toISOString() === '2026-08-31T15:00:00.000Z' &&
+      parseReceivedAt('9/1', now)?.toISOString() === '2026-08-31T15:00:00.000Z' &&
+      parseReceivedAt('12/30', now)?.toISOString() === '2025-12-29T15:00:00.000Z' &&
+      parseReceivedAt('') === null && parseReceivedAt('来週') === null && parseReceivedAt('2026/2/30') === null,
+  );
+  check(
+    'プロパー: 提案用表記はイニシャルの形だけ（氏名・ローマ字の氏名は捨てる）',
+    sanitizeInitials('T.Y.', '山田太郎') === 'T.Y.' && sanitizeInitials('ＴＹ', '山田太郎') === 'TY' &&
+      sanitizeInitials('Taro Yamada', 'Taro Yamada') === '' && sanitizeInitials('山田太郎', '山田太郎') === '' &&
+      sanitizeInitials('LI', 'Li Wei') === '' && sanitizeInitials('', 'x') === '',
+  );
+  check('プロパー: ログのファイル参照はIDを含まない短いハッシュ', fileRef('1AbCdEfGhIjKlMn') .length === 8 && !fileRef('1AbCdEfGhIjKlMn').includes('AbC'));
 
   // 19. 抽出値の検証（単金は原文にある数値・妥当な範囲のみ、日付は実在する YYYY-MM-DD のみ）
   const nums = sourceNumbers('単価：７０～８０万円（税別）/ 時給4,500円 / 月額800,000円');
@@ -613,6 +752,11 @@ function matchingAndDraftChecks(base: Project): void {
   const pg = proj('pg', { title: '【Java】金融系開発（PG）', rateMax: 60 });
   const pl = proj('pl', { title: '【Java】金融系開発（PL）', rateMax: 75 });
   check('名寄せ: 単金の違う案件は統合しない', dedupeProjects([pg, pl]).length === 2);
+  const stored = proj('stored', { title: '【Java】金融系開発（PG）', rateMax: 60, sourceMailId: 'm_monday' });
+  const resentProject = proj('resent', { title: '【Java】金融系開発（PG）', rateMax: 60, sourceMailId: 'm_wednesday' });
+  const reExtracted = proj('stored', { title: '金融系Java開発（PG）', rateMax: 60, sourceMailId: 'm_monday' });
+  const kept = withoutResentProjects([stored], [resentProject, reExtracted, pl]).map((p) => p.id).join(',');
+  check('名寄せ: 保存済みと同じ案件の再送は除き、同じメールの抽出し直し・別案件は残す', kept === 'stored,pl', kept);
 
   // 31. 全員に返信: Reply-To を宛先に、他社・配信用アドレスは Cc に引き継がない、自社は重複なく1回
   const policy = { ourDomains: ['ours.example'] };
@@ -635,6 +779,16 @@ function matchingAndDraftChecks(base: Project): void {
   const bcc = planReplyAddresses({ from: 'tanaka@partner.example', to: 'tanaka-team@partner.example', cc: '', subject: 's', messageId: '', references: '' }, '', policy);
   check('返信宛先: Bccで受け取った一斉配信は宛先一同を Cc にしない', bcc.cc === '' && bcc.note !== '');
   check('返信宛先: 下書き作成時は送信者本人を Cc から外す', removeAddress(normal.cc, 'Taro <TARO@ours.example>') === 'sales@ours.example, boss@partner.example');
+  const harvester = planReplyAddresses(
+    { from: 'eigyo@real-partner.example', replyTo: 'collect@evil.example', to: 'sales@ours.example', cc: '', subject: 's', messageId: '', references: '' },
+    '',
+    policy,
+  );
+  check(
+    '返信宛先: Reply-To が差出人と別のドメインなら注意書きを付ける（アドレスは書かない）',
+    harvester.note.includes('Reply-To') && !harvester.note.includes('@') && normal.note === '',
+    harvester.note,
+  );
 
   // 32. 紹介文面: 相手方の社名・担当者名・単金・粗利・URL が混ざったら検出する
   const dp = proj('dp', { rateMin: 70, rateMax: 78, agentCompany: '株式会社アルファ', agentContact: '田中' });

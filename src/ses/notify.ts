@@ -4,7 +4,7 @@
 //
 // 基本設計I/F（persistAndNotify(matches): Promise<void>）に対し、実装ではマッチ結果DBのrelation
 // （案件・要員）を張るため projects/engineers を追加引数にしている（draft.tsと同様の変更点）。
-import { saveMatch } from '../database/index.js';
+import { saveMatches } from '../database/index.js';
 import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
 import { SUMMARY_SUBJECT } from './mail/ownMail.js';
 import { isDemo, sesNotifyTo, logRedact, mailProvider, requireLive } from './config.js';
@@ -23,10 +23,16 @@ export async function persistAndNotify(
   requestedDrafts: PendingDraftResult = { created: 0, failed: 0 },
   proper: ProperRunResult | null = null,
 ): Promise<void> {
-  const projectPageIds = new Map(projects.map((p) => [p.id, p.notionPageId]));
-  const engineerPageIds = new Map(engineers.map((e) => [e.id, e.notionPageId]));
+  const { saved } = await persistMatches(matches, projects, engineers);
+  await notifyResults(saved, requestedDrafts, proper);
+}
 
-  const saved = await persistMatches(matches, projectPageIds, engineerPageIds);
+// 保存済みのマッチ（保存できなかったものは含めない）のサマリを作って通知する
+export async function notifyResults(
+  saved: MatchResult[],
+  requestedDrafts: PendingDraftResult = { created: 0, failed: 0 },
+  proper: ProperRunResult | null = null,
+): Promise<void> {
   // 確認UI(web.ts)用のレビュー成果を書き出す（demo/本番共通。UIはこれを読む）
   writeReviewMatches(saved);
   // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
@@ -40,29 +46,37 @@ export async function persistAndNotify(
   await notifySummary(summary, consoleSummary, countLine(saved, proper));
 }
 
-async function persistMatches(
+// マッチを保存する。保存できなかったものはサマリに載せず（マッチタブに無い行を案内しない）、異常終了として知らせる。
+// 通常バッチでは保存できなかったペアの案件・要員に「突合済」を付けないため、次回の実行で判定し直される
+export async function persistMatches(
   matches: MatchResult[],
-  projectPageIds: Map<string, string | undefined>,
-  engineerPageIds: Map<string, string | undefined>,
-): Promise<MatchResult[]> {
+  projects: Project[],
+  engineers: Engineer[],
+): Promise<{ saved: MatchResult[]; failed: number }> {
   if (isDemo()) {
     writeDemoArtifact('matches', matches);
-    return matches;
+    return { saved: matches, failed: 0 };
   }
-  const results: MatchResult[] = [];
+  const projectPageIds = new Map(projects.map((p) => [p.id, p.notionPageId]));
+  const engineerPageIds = new Map(engineers.map((e) => [e.id, e.notionPageId]));
+  const result = await saveMatches(matches, (m) => ({
+    projectNotionPageId: projectPageIds.get(m.projectId),
+    engineerNotionPageId: engineerPageIds.get(m.engineerId),
+  }));
+  const saved: MatchResult[] = [];
   for (const match of matches) {
-    try {
-      const notionPageId = await saveMatch(match, {
-        projectNotionPageId: projectPageIds.get(match.projectId),
-        engineerNotionPageId: engineerPageIds.get(match.engineerId),
-      });
-      results.push({ ...match, notionPageId });
-    } catch (err) {
-      console.error(`SES通知: マッチ保存失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
-      results.push(match);
+    const err = result.failed.get(match.id);
+    if (err === undefined) {
+      saved.push({ ...match, notionPageId: result.pageIds.get(match.id) });
+      continue;
     }
+    console.error(`SES通知: マッチ保存失敗 (${match.id} ${redactable(match.title)}): ${safeErr(err)}`);
   }
-  return results;
+  const failed = matches.length - saved.length;
+  if (failed > 0) {
+    recordFatal(`マッチ${failed}件を保存できませんでした（次回の実行で判定し直します。スプレッドシートの共有・見出し・容量を確認してください）`);
+  }
+  return { saved, failed };
 }
 
 // 区分ごとの件数（サマリ本文とログ秘匿モードのコンソール出力で共用。人名・案件名を含まない）
@@ -104,6 +118,9 @@ function draftRequestSection(requested: PendingDraftResult): string[] {
     `   作成先: ${mailProvider() === 'gmail' ? 'ご自身のGmailの下書き' : '共有メールボックスの下書きフォルダ'}`,
     '・片側だけ作る場合は、不要な側の状態を「不要」にしてください',
     '・状態が「エラー: …」の側は次回バッチで再試行します（担当者メールを直せば反映されます）',
+    ...(requested.stale
+      ? [`・状態が「作成中」のまま残っている依頼が${requested.stale}件あります。下書きフォルダを確認し、あれば「作成済」、無ければ空欄に戻してください`]
+      : []),
     '・文面の修正は、作成された下書き上で行ってください（シートの文面列を書き換えても下書きには反映されません）',
     '・「プロパー候補」タブ（自社社員のご提案）も同じ手順です（案件側の下書きのみ）',
     '',

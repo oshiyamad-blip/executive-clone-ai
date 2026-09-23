@@ -11,6 +11,9 @@ import { safeErr } from '../redact.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, STATE_JSON_MAX_CHARS } from '../../database/sheets.js';
 import type { SesRawMail } from '../../types/index.js';
 
+// 「次回の実行時には収集の窓を外れるか」は定時実行の時刻から決める（schedule.ts）
+export { isLastChance } from '../schedule.js';
+
 export interface QuarantineEntry {
   mailId: string;
   subject: string;
@@ -108,9 +111,10 @@ export function senderDomainOnly(from: string): string {
 }
 
 // 失敗を記録する。countTowardQuarantine=false のときはカウンタを増やさない
-// （バッチ内の過半数が失敗＝基盤障害の可能性が高い場合の誤隔離防止）。
+// （バッチ内の過半数が失敗＝基盤障害の可能性が高い場合・修復予算切れの誤隔離防止）。
 // lastChance=true は「次回の実行ではもう収集の窓から外れる」メール。回数に達していなくても隔離して
-// サマリに載せる（黙って窓から落ちて消えるのを防ぐ。基盤障害中でも同様）。
+// サマリに載せる（黙って窓から落ちて消えるのを防ぐ）。基盤障害中は呼び出し側が lastChance を渡さない
+// （メールの問題ではないため隔離せず、処理済みにもしないで異常終了として知らせる）。
 // 履歴を読めなかった場合は記録も隔離もしない（次回バッチで再試行される）。
 export async function recordFailure(
   mail: SesRawMail,
@@ -141,13 +145,6 @@ export async function recordFailure(
   if (quarantined && !entry.quarantinedAt) entry.quarantinedAt = now;
   await save(list);
   return { attempts: entry.attempts, quarantined };
-}
-
-// 次回の実行時にはメールが収集の窓（collectDays）から外れているか。週末・祝日で実行が空く分として
-// runGapDays（既定3.5日）を見込む。窓の方が短い設定では常に最後の機会とみなす
-export function isLastChance(receivedAt: Date, collectDays: number, now = new Date(), runGapDays = 3.5): boolean {
-  const ageDays = (now.getTime() - receivedAt.getTime()) / (24 * 60 * 60 * 1000);
-  return ageDays + runGapDays >= collectDays;
 }
 
 // 成功したら失敗履歴を消す（一時障害からの回復）

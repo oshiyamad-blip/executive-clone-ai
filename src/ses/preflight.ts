@@ -28,6 +28,9 @@ import {
   sesNotifyTo,
   ownDomains,
   allowedSenderDomains,
+  allowedSenders,
+  draftSigningKey,
+  runDeadlineMinutes,
   properFolderId,
   properMasterSpreadsheetId,
   properImpersonate,
@@ -115,6 +118,7 @@ function collectNumberWarnings(): string[] {
       properMaxExtractPerRun,
       properProjectLookbackDays,
       statsDays,
+      runDeadlineMinutes,
       xserverImapPort,
       xserverSmtpPort,
     ]) {
@@ -210,6 +214,12 @@ function checkRuntime(): void {
     if (!logRedact()) bad('SES_LOG_REDACT=false です — 公開リポジトリのActionsログに氏名・アドレスが出るため true にしてください');
     else ok('ログ秘匿: 有効（氏名・メールアドレス・件名・本文はログに出ません）');
     if (!requireLive()) warn('SES_REQUIRE_LIVE=false です — LLMの鍵の渡し忘れがあると fixture のデモ結果で「成功」してしまいます');
+    if (settingValue('SES_SENSITIVE_VARS_PRESENT') === 'true') {
+      bad(
+        '公開ログに表示される Variables に、Secrets へ移した設定（SES_OWN_DOMAINS・SES_ALLOWED_SENDER_DOMAINS・SHEETS_DB_IMPERSONATE・' +
+          'PROPER_GOOGLE_IMPERSONATE・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*）が残っています。同じ名前で Secrets に登録し、Variables からは削除してください（Variables の値は使いません）',
+      );
+    }
   } else if (logRedact()) {
     ok('ログ秘匿: 有効');
   } else {
@@ -321,11 +331,46 @@ function checkNotifyAndDomains(): void {
   }
   checkDomainList('SES_OWN_DOMAINS', ownDomains(), '自社から共有メールボックスに届いたメール（紹介メールのCc等）も案件・要員として取り込みます');
   if (dbProvider() === 'sheets') {
-    checkDomainList(
-      'SES_ALLOWED_SENDER_DOMAINS',
-      allowedSenderDomains(),
-      '「担当者メール」列に任意のアドレスを書くと、その送信元で下書きを作れます（自社ドメインの設定を推奨）',
-    );
+    checkSenders();
+    checkDraftSigning();
+  }
+}
+
+// 「担当者メール」で下書きの送信元にできるアドレス。未設定なら作らない（シートの編集者が任意の送信元で下書きを作れないように）
+function checkSenders(): void {
+  const addresses = allowedSenders();
+  const invalid = addresses.filter((a) => !isPlainEmailAddress(a)).length;
+  if (invalid > 0) bad(`SES_ALLOWED_SENDERS にメールアドレスとして解釈できない値が${invalid}件あります（カンマ区切り）`);
+  else if (addresses.length > 0) ok(`SES_ALLOWED_SENDERS: ${addresses.length}件（このアドレスだけを下書きの送信元にします）`);
+  if (mailProvider() === 'gmail') {
+    if (addresses.length === 0) {
+      bad('MAIL_PROVIDER=gmail では SES_ALLOWED_SENDERS（下書きの送信元にしてよい社員のアドレス）が必須です（DWDでその人のGmailに下書きを作るため）');
+    }
+    return;
+  }
+  if (addresses.length > 0) return;
+  const explicit = allowedSenderDomains();
+  if (explicit.length > 0) {
+    checkDomainList('SES_ALLOWED_SENDER_DOMAINS', explicit, '');
+    return;
+  }
+  const shared = xserverSharedUser();
+  const fallback = [...ownDomains(), shared.includes('@') ? shared.slice(shared.lastIndexOf('@') + 1) : ''].filter(Boolean);
+  if (fallback.length === 0) {
+    bad('下書きの送信元にできるドメインがありません（SES_ALLOWED_SENDER_DOMAINS か SES_OWN_DOMAINS を登録してください。未設定のままでは担当者メールの依頼はすべてエラーになります）');
+  } else {
+    info('SES_ALLOWED_SENDER_DOMAINS が未設定のため、SES_OWN_DOMAINS と共有メールボックスのドメインだけを下書きの送信元として許可します');
+  }
+}
+
+function checkDraftSigning(): void {
+  const key = draftSigningKey();
+  if (!key) {
+    warn('SES_DRAFT_SIGNING_KEY が未設定です — スプレッドシートの「下書きデータ」列を書き換えられても、その内容で下書きを作ります（ランダムな32文字以上を Secrets に登録すると、書き換えを検知して作成しません）');
+  } else if (key.length < 32) {
+    warn('SES_DRAFT_SIGNING_KEY が短すぎます（ランダムな32文字以上を推奨）');
+  } else {
+    ok('SES_DRAFT_SIGNING_KEY: 設定済み（下書きデータの書き換えを検知します）');
   }
 }
 
@@ -354,7 +399,14 @@ function checkProper(): void {
   const impersonate = properImpersonate();
   if (impersonate) {
     checkEmailSetting('PROPER_GOOGLE_IMPERSONATE', impersonate, false, '');
-    info('フォルダ・管理表はDWDでこのユーザーとして読みます（そのテナントで drive.readonly と spreadsheets の委任が必要）');
+    if (!dedicated) {
+      bad(
+        'PROPER_GOOGLE_IMPERSONATE はプロパー専用のサービスアカウント（PROPER_GOOGLE_SA_KEY_JSON。そのテナントが発行したもの）と組み合わせてください' +
+          '（メインの鍵で別テナントをなりすますと、その鍵で別テナントの全ユーザーのDriveを読めてしまうため使いません）',
+      );
+    } else {
+      info('フォルダ・管理表はDWDでこのユーザーとして読みます（そのテナントで drive.readonly と spreadsheets の委任が必要）');
+    }
   }
   if (dbProvider() !== 'sheets') warn('候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです（notion では保存されません）');
 }
@@ -370,9 +422,10 @@ function checkNumbers(numberWarnings: string[]): void {
   if (skillMatchThreshold() > skillMatchStrongThreshold()) {
     warn('SKILL_MATCH_THRESHOLD が SKILL_MATCH_STRONG_THRESHOLD より大きいため「参考提案」の帯がなくなります');
   }
-  if (collectDays() < 3) {
-    warn('SES_COLLECT_DAYS が3日未満です — 金曜14:00〜月曜10:00（約3日）をまたぐ月曜の回で取りこぼす恐れがあります');
+  if (collectDays() < 4) {
+    warn('SES_COLLECT_DAYS が4日未満です — 金曜14:00〜月曜10:00（約3日）をまたぐ月曜の回で取りこぼしたり、失敗したメールを再試行できずに隔離したりする恐れがあります（既定 7）');
   }
+  info(`1回の実行で新しい抽出・判定を始める期限: 開始から${runDeadlineMinutes()}分（残りは次回の実行で続きから処理します。ワークフローの制限時間より短くしてください）`);
   if (repairEnabled()) info('修正パッチ案の自動生成: 有効（隔離が増えた回にソースコードの一部をAPIへ送ります）');
 }
 

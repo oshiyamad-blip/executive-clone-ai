@@ -1,6 +1,7 @@
 // SESデータのラベル・シリアライズ変換（DBプロバイダ共通）。
 // Notion（index.ts）と Google Sheets（sheets.ts）の両バックエンドが同じ表記で保存・復元するための
 // 単一の変換層。ここを変えると既存データの読み戻しに影響するため、値の変更は慎重に。
+import { createHmac, timingSafeEqual } from 'crypto';
 import type { RemoteOption, MatchStatus, ReplyTarget, FeedbackVerdict, DraftRef } from '../types/index.js';
 
 export const REMOTE_LABEL: Record<RemoteOption, string> = {
@@ -88,6 +89,7 @@ export function splitList(cell: string | undefined): string[] {
 // ===== 担当者メール列による下書き依頼（Sheets版のマッチ等のタブ） =====
 // 状態列の値。空欄と「未作成」は依頼待ち、「エラー: …」は次回バッチで再試行する。
 // 「作成中」は下書き作成の直前に書く目印（作成後の状態書き戻しに失敗しても二重作成しないため）。
+// genFailed は成立候補・交渉提案なのに文面を用意できなかった行（依頼を受けず、バッチが判定からやり直して文面を作り直す）
 export const DRAFT_STATE = {
   pending: '未作成',
   notNeeded: '不要',
@@ -95,6 +97,7 @@ export const DRAFT_STATE = {
   created: '作成済',
   sent: '送信済',
   error: 'エラー',
+  genFailed: 'エラー: 文面を用意できませんでした（次回のバッチで作り直します）',
 } as const;
 
 // 作成済・送信済・作成中は機械が上書きしない（文面・下書きデータも固定する）
@@ -103,14 +106,20 @@ export function isDraftStateLocked(state: string): boolean {
   return s.startsWith(DRAFT_STATE.created) || s.startsWith(DRAFT_STATE.sent) || s.startsWith(DRAFT_STATE.inProgress);
 }
 
+// 文面の作り直し待ち（バッチが判定し直す）の状態か
+export function isDraftRegenerationPending(state: string): boolean {
+  return state.trim().startsWith(DRAFT_STATE.genFailed);
+}
+
 // 担当者メールが入っていれば下書きを作成しに行く状態か
 export function isDraftStateActionable(state: string): boolean {
   const s = state.trim();
+  if (isDraftRegenerationPending(s)) return false;
   return s === '' || s === DRAFT_STATE.pending || s.startsWith(DRAFT_STATE.error);
 }
 
-// 下書きデータ列に保存する片側分。draftId/url は下書き作成時に決まり、from は担当者メールで確定するため持たない
-export type StoredDraft = Omit<DraftRef, 'draftId' | 'url' | 'from'>;
+// 下書きデータ列に保存する片側分。draftId/url は下書き作成時に、from は担当者メールで、draftKey は行の位置から決まるため持たない
+export type StoredDraft = Omit<DraftRef, 'draftId' | 'url' | 'from' | 'draftKey'>;
 
 export interface StoredDraftData {
   project?: StoredDraft;
@@ -120,7 +129,7 @@ export interface StoredDraftData {
 export type DraftSide = keyof StoredDraftData;
 
 export function toStoredDraft(ref: DraftRef): StoredDraft {
-  const { draftId: _id, url: _url, from: _from, ...rest } = ref;
+  const { draftId: _id, url: _url, from: _from, draftKey: _key, ...rest } = ref;
   return rest;
 }
 
@@ -128,23 +137,72 @@ export function storedToDraftRef(stored: StoredDraft): DraftRef {
   return { ...stored, draftId: '', url: '' };
 }
 
-function isStoredDraft(v: unknown): v is StoredDraft {
-  const o = v as Partial<StoredDraft> | null;
-  return Boolean(o) && typeof o!.to === 'string' && o!.to !== '' && typeof o!.subject === 'string';
+const OPTIONAL_TEXT_FIELDS = ['cc', 'body', 'inReplyTo', 'references', 'addressNote'] as const;
+
+// 下書きデータ列は人も編集できるセルのため、決まった項目の文字列だけを取り出して新しいオブジェクトを作る。
+// 文字列以外（{path:…} {href:…} 等。MIMEの組み立てでファイル・URLの読み込みに化ける）が入っていれば、その側ごと捨てる
+function cleanStoredDraft(v: unknown): StoredDraft | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.to !== 'string' || o.to === '' || typeof o.subject !== 'string') return undefined;
+  const out: StoredDraft = { to: o.to, subject: o.subject };
+  for (const f of OPTIONAL_TEXT_FIELDS) {
+    const value = o[f];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string') return undefined;
+    out[f] = value;
+  }
+  return out;
+}
+
+function parseDraftJson(json: string): Record<string, unknown> | null {
+  if (!json.trim()) return null;
+  try {
+    const o = JSON.parse(json) as unknown;
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 // 人が壊した・空のセルでも例外にせず、読めた側だけ返す
 export function parseDraftData(json: string): StoredDraftData {
-  if (!json.trim()) return {};
-  try {
-    const o = JSON.parse(json) as Record<string, unknown>;
-    const out: StoredDraftData = {};
-    if (isStoredDraft(o?.project)) out.project = o.project;
-    if (isStoredDraft(o?.engineer)) out.engineer = o.engineer;
-    return out;
-  } catch {
-    return {};
-  }
+  const o = parseDraftJson(json);
+  if (!o) return {};
+  const out: StoredDraftData = {};
+  const project = cleanStoredDraft(o.project);
+  const engineer = cleanStoredDraft(o.engineer);
+  if (project) out.project = project;
+  if (engineer) out.engineer = engineer;
+  return out;
+}
+
+// 署名の対象（項目の順序を固定した正規形）
+function canonicalDraftData(data: StoredDraftData): string {
+  const side = (d: StoredDraft | undefined) =>
+    d ? [d.to, d.subject, ...OPTIONAL_TEXT_FIELDS.map((f) => d[f] ?? null)] : null;
+  return JSON.stringify([side(data.project), side(data.engineer)]);
+}
+
+function draftSignature(data: StoredDraftData, key: string): string {
+  return createHmac('sha256', key).update(canonicalDraftData(data)).digest('base64url');
+}
+
+// 下書きデータ列の署名を確かめる。鍵が無ければ検証しない（true）。鍵があるのに署名が無い・合わない（人が書き換えた）なら false
+export function verifyDraftData(json: string, key: string): boolean {
+  if (!key) return true;
+  const o = parseDraftJson(json);
+  if (!o) return !json.trim();
+  const sig = typeof o.sig === 'string' ? o.sig : '';
+  const expected = draftSignature(parseDraftData(json), key);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function serializeDraftData(data: StoredDraftData, key: string): string {
+  if (!data.project && !data.engineer) return '';
+  return JSON.stringify(key ? { ...data, sig: draftSignature(data, key) } : data);
 }
 
 // 文面列（人が読む用）。宛先・件名を本文の前に付ける
@@ -163,17 +221,28 @@ export interface DraftColumns {
   data: string; // StoredDraftData のJSON（空なら ''）
 }
 
+export interface DraftMergeOptions {
+  // 下書きを作るべき区分なのに文面を用意できなかった（空欄の状態を「文面を用意できませんでした」にする）
+  failed?: boolean;
+  // 下書きデータ列の署名鍵（SES_DRAFT_SIGNING_KEY）。空なら署名しない
+  signingKey?: string;
+}
+
 // 再実行で同じマッチを保存し直すときの下書き列の決め方。状態列は人も編集するため空欄を埋める以外は
 // 変えない（人が付けた「不要」を戻さない）。作成済等になった側は文面・下書きデータも固定し、
-// 依頼前の側だけ最新の生成物に差し替える
+// 依頼前の側だけ最新の生成物に差し替える。署名の合わない既存の下書きデータ（人が書き換えたもの）は引き継がない
 export function mergeDraftColumns(
   existing: DraftColumns | null,
   project: DraftRef | undefined,
   engineer: DraftRef | undefined,
+  opts: DraftMergeOptions = {},
 ): DraftColumns {
-  const prev = parseDraftData(existing?.data ?? '');
-  const p = mergeDraftSide(existing?.projectState ?? '', existing?.projectText ?? '', prev.project, project);
-  const e = mergeDraftSide(existing?.engineerState ?? '', existing?.engineerText ?? '', prev.engineer, engineer);
+  const key = opts.signingKey ?? '';
+  const prevJson = existing?.data ?? '';
+  const prev = verifyDraftData(prevJson, key) ? parseDraftData(prevJson) : {};
+  const failed = Boolean(opts.failed);
+  const p = mergeDraftSide(existing?.projectState ?? '', existing?.projectText ?? '', prev.project, project, failed);
+  const e = mergeDraftSide(existing?.engineerState ?? '', existing?.engineerText ?? '', prev.engineer, engineer, failed);
   const data: StoredDraftData = {};
   if (p.stored) data.project = p.stored;
   if (e.stored) data.engineer = e.stored;
@@ -182,7 +251,7 @@ export function mergeDraftColumns(
     engineerState: e.state,
     projectText: p.text,
     engineerText: e.text,
-    data: data.project || data.engineer ? JSON.stringify(data) : '',
+    data: serializeDraftData(data, key),
   };
 }
 
@@ -191,12 +260,17 @@ function mergeDraftSide(
   text: string,
   prevStored: StoredDraft | undefined,
   fresh: DraftRef | undefined,
+  failed: boolean,
 ): { state: string; text: string; stored: StoredDraft | undefined } {
   const s = state.trim();
   if (isDraftStateLocked(s)) return { state, text, stored: prevStored };
   if (fresh) {
     const stored = toStoredDraft(fresh);
-    return { state: s === '' ? DRAFT_STATE.pending : state, text: draftDisplayText(stored), stored };
+    const nextState = s === '' || isDraftRegenerationPending(s) ? DRAFT_STATE.pending : state;
+    return { state: nextState, text: draftDisplayText(stored), stored };
+  }
+  if (failed && (s === '' || isDraftRegenerationPending(s)) && !prevStored) {
+    return { state: DRAFT_STATE.genFailed, text, stored: undefined };
   }
   if (s) return { state, text, stored: prevStored };
   return { state: prevStored ? DRAFT_STATE.pending : DRAFT_STATE.notNeeded, text, stored: prevStored };

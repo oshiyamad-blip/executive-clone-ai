@@ -10,11 +10,10 @@ import {
   sesWebHost,
   webAccessToken,
   isDemo,
-  allowedSenderDomains,
   setDemoOverride,
   demoModeExplicit,
 } from './config.js';
-import { senderDomainAllowed } from './pendingDrafts.js';
+import { senderRejection, currentSenderPolicy, normalizeSenderEmail } from './pendingDrafts.js';
 import { safeErr } from './redact.js';
 import {
   HttpError,
@@ -130,9 +129,8 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) {
     return json(res, 400, { error: '送信元となるあなたの会社メールアドレスを入力してください' });
   }
-  if (!senderDomainAllowed(fromEmail.toLowerCase(), allowedSenderDomains())) {
-    return json(res, 400, { error: '送信元ドメインが許可されていません' });
-  }
+  const rejected = senderRejection(normalizeSenderEmail(fromEmail), currentSenderPolicy());
+  if (rejected) return json(res, 400, { error: rejected });
   try {
     const result = await createReplyDraftForSender(matchId, side, fromEmail);
     if (!result.ok) {

@@ -5,9 +5,12 @@
 // - append は範囲の先頭行から続く表（空行で途切れる）の直後に行を挿入し（INSERT_ROWS。下の行はずれる）、
 //   updates.updatedRange（'タブ'!A12:K13 の形）を返す
 // - A1表記は引用符付きタブ名（'' のエスケープ込み）・A5:K5・1:1・タブ名だけに対応。存在しないタブは 400
-// - 1セル50,000文字を超える書き込みは 400
+// - 1セル50,000文字を超える書き込み・シートの列数（グリッド）を超える書き込みは 400
+// - タブの作成時の行数・列数（gridProperties）を持ち、列の追加（appendDimension）・行の削除（deleteDimension）に対応
 import type { sheets_v4, drive_v3 } from 'googleapis';
-import type { MailTransport } from '../mail/index.js';
+import type { MailTransport, CollectOptions, CollectOutcome } from '../mail/index.js';
+import { pickForRun } from '../schedule.js';
+import { collectDays } from '../config.js';
 import type { DraftRef, SesMailMeta, SesRawMail } from '../../types/index.js';
 
 type Stored = string | number | boolean;
@@ -108,7 +111,13 @@ interface FakeTab {
   sheetId: number;
   title: string;
   rows: Row[];
+  columnCount: number;
+  rowCount: number;
 }
+
+// 既定のグリッド（Googleスプレッドシートでタブを作ったときと同じ 1000行×26列）
+const DEFAULT_ROWS = 1000;
+const DEFAULT_COLUMNS = 26;
 
 export interface FakeCall {
   method: string;
@@ -121,6 +130,7 @@ interface FailRule {
   tab?: string;
   status: number;
   times: number;
+  afterCommit?: boolean; // 実行してから失敗を返す（書き込みは済んだのに応答が 5xx になった状況の再現）
 }
 
 interface ValueRangeInput {
@@ -134,6 +144,7 @@ export class FakeSheets {
   readonly calls: FakeCall[] = [];
   readonly validations: Array<{ spreadsheetId: string; sheetId: number; column: number; options: string[] }> = [];
   readonly violations: string[] = []; // 実APIなら拒否される・本番で起きてはならない呼び方
+  deletedRows = 0;
   private readonly failRules: FailRule[] = [];
   // 次のAPI呼び出しの直前に1回だけ実行する処理（実行中に人がシートを編集した状況の再現用）
   private readonly beforeHooks: Array<{ method: string; fn: () => void }> = [];
@@ -143,13 +154,44 @@ export class FakeSheets {
   }
 
   // 既存のタブ（人が作った・旧バージョンのヘッダー等）を用意する
-  seedTab(spreadsheetId: string, title: string, values: Stored[][]): void {
+  seedTab(spreadsheetId: string, title: string, values: Stored[][], columnCount = DEFAULT_COLUMNS): void {
     this.createBook(spreadsheetId);
-    this.book(spreadsheetId).set(title, { sheetId: this.nextSheetId++, title, rows: values.map((r) => [...r]) });
+    this.book(spreadsheetId).set(title, {
+      sheetId: this.nextSheetId++,
+      title,
+      rows: values.map((r) => [...r]),
+      columnCount,
+      rowCount: DEFAULT_ROWS,
+    });
   }
 
-  failNext(method: string, status: number, tab?: string, times = 1): void {
-    this.failRules.push({ method, tab, status, times });
+  // タブのグリッドの大きさ（セル数の上限の検証用）
+  grid(spreadsheetId: string, title: string): { rows: number; columns: number } {
+    const t = this.tab(spreadsheetId, title);
+    return { rows: t.rowCount, columns: t.columnCount };
+  }
+
+  // 人の列の挿入（index の位置に列を差し込み、以降の列を右へずらす。見出しは header）
+  insertColumnAt(spreadsheetId: string, title: string, index: number, header: string): void {
+    const t = this.tab(spreadsheetId, title);
+    t.rows.forEach((r, i) => {
+      if (!r) return;
+      while (r.length < index) r.push(undefined);
+      r.splice(index, 0, i === 0 ? header : undefined);
+    });
+    t.columnCount += 1;
+  }
+
+  // 人の見出しの変更
+  renameHeader(spreadsheetId: string, title: string, from: string, to: string): void {
+    const t = this.tab(spreadsheetId, title);
+    const i = (t.rows[0] ?? []).findIndex((c) => formatted(c) === from);
+    if (i < 0) throw new Error(`fake: 見出しがありません (${from})`);
+    t.rows[0][i] = to;
+  }
+
+  failNext(method: string, status: number, tab?: string, times = 1, afterCommit = false): void {
+    this.failRules.push({ method, tab, status, times, afterCommit });
   }
 
   beforeNext(method: string, fn: () => void): void {
@@ -291,6 +333,7 @@ export class FakeSheets {
     );
     if (rule) {
       rule.times -= 1;
+      if (rule.afterCommit && spreadsheetId) fn();
       throw new FakeApiError(rule.status, `fake failure (${method})`);
     }
     if (!spreadsheetId) throw new FakeApiError(400, 'spreadsheetId is required');
@@ -307,7 +350,14 @@ export class FakeSheets {
     return {
       data: {
         spreadsheetId: p.spreadsheetId,
-        sheets: tabs.map((t, index) => ({ properties: { sheetId: t.sheetId, title: t.title, index } })),
+        sheets: tabs.map((t, index) => ({
+          properties: {
+            sheetId: t.sheetId,
+            title: t.title,
+            index,
+            gridProperties: { rowCount: Math.max(t.rowCount, t.rows.length), columnCount: t.columnCount },
+          },
+        })),
       },
     };
   }
@@ -325,6 +375,13 @@ export class FakeSheets {
           throw new FakeApiError(400, `Invalid requests[0].addSheet: A sheet with the name "${title}" already exists.`);
         }
         adding.add(title);
+      } else if (r.appendDimension) {
+        if (r.appendDimension.dimension !== 'COLUMNS') throw new FakeApiError(400, 'fake: unsupported appendDimension');
+        if (![...book.values()].some((t) => t.sheetId === r.appendDimension!.sheetId)) throw new FakeApiError(400, 'fake: no such sheetId');
+      } else if (r.deleteDimension) {
+        const range = r.deleteDimension.range;
+        if (range?.dimension !== 'ROWS') throw new FakeApiError(400, 'fake: unsupported deleteDimension');
+        if (![...book.values()].some((t) => t.sheetId === range.sheetId)) throw new FakeApiError(400, 'fake: no such sheetId');
       } else if (!r.setDataValidation) {
         throw new FakeApiError(400, 'fake: unsupported request');
       }
@@ -334,8 +391,27 @@ export class FakeSheets {
       if (r.addSheet) {
         const title = r.addSheet.properties!.title!;
         const sheetId = this.nextSheetId++;
-        book.set(title, { sheetId, title, rows: [] });
+        const grid = r.addSheet.properties?.gridProperties;
+        book.set(title, {
+          sheetId,
+          title,
+          rows: [],
+          columnCount: grid?.columnCount ?? DEFAULT_COLUMNS,
+          rowCount: grid?.rowCount ?? DEFAULT_ROWS,
+        });
         replies.push({ addSheet: { properties: { sheetId, title } } });
+      } else if (r.appendDimension) {
+        const t = [...book.values()].find((x) => x.sheetId === r.appendDimension!.sheetId)!;
+        t.columnCount += r.appendDimension.length ?? 0;
+        replies.push({});
+      } else if (r.deleteDimension) {
+        const range = r.deleteDimension.range!;
+        const t = [...book.values()].find((x) => x.sheetId === range.sheetId)!;
+        const start = range.startIndex ?? 0;
+        const end = range.endIndex ?? t.rows.length;
+        t.rows.splice(start, end - start);
+        this.deletedRows += end - start;
+        replies.push({});
       } else if (r.setDataValidation) {
         const v = r.setDataValidation;
         const sheetId = v.range?.sheetId ?? -1;
@@ -368,6 +444,9 @@ export class FakeSheets {
   }
 
   private writeCell(t: FakeTab, row: number, col: number, v: unknown): void {
+    if (col >= t.columnCount) {
+      throw new FakeApiError(400, `Range (${quote(t.title)}!${indexToLetter(col)}${row}) exceeds grid limits. Max columns: ${t.columnCount}`);
+    }
     if (v === null || v === undefined) return; // 実APIと同じく null は「変更しない」
     if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
       throw new FakeApiError(400, 'Invalid value');
@@ -423,6 +502,7 @@ export interface FakeDriveFile {
   parents: string[];
   content?: string; // 本文（PDF・Word等は「ダウンロードした中身」、Googleドキュメントは書き出したテキスト）
   trashed?: boolean;
+  shortcutTarget?: string; // ショートカット（application/vnd.google-apps.shortcut）の参照先ID
 }
 
 const GOOGLE_TYPES = 'application/vnd.google-apps.';
@@ -463,6 +543,9 @@ export class FakeDrive {
                 modifiedTime: f.modifiedTime,
                 webViewLink: `https://drive.example.invalid/file/${f.id}`,
                 ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(Buffer.byteLength(f.content ?? '')) }),
+                ...(f.shortcutTarget
+                  ? { shortcutDetails: { targetId: f.shortcutTarget, targetMimeType: this.files.get(f.shortcutTarget)?.mimeType ?? '' } }
+                  : {}),
               })),
               ...(next ? { nextPageToken: next } : {}),
             },
@@ -470,6 +553,22 @@ export class FakeDrive {
         },
         get: async (p: drive_v3.Params$Resource$Files$Get, opts?: { responseType?: string }) => {
           const f = this.files.get(p.fileId ?? '');
+          if (!p.alt && p.fields) {
+            // メタデータの取得（ショートカットの参照先の確認等）
+            if (!f) throw new FakeApiError(404, 'File not found');
+            return {
+              data: {
+                id: f.id,
+                name: f.name,
+                mimeType: f.mimeType,
+                modifiedTime: f.modifiedTime,
+                webViewLink: `https://drive.example.invalid/file/${f.id}`,
+                trashed: Boolean(f.trashed),
+                parents: f.parents,
+                ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(Buffer.byteLength(f.content ?? '')) }),
+              },
+            };
+          }
           if (!f || f.trashed) throw new FakeApiError(404, 'File not found');
           if (p.alt !== 'media' || opts?.responseType !== 'arraybuffer') throw new FakeApiError(400, 'fake: unsupported get');
           if (f.mimeType.startsWith(GOOGLE_TYPES)) throw new FakeApiError(403, 'fileNotDownloadable');
@@ -496,7 +595,10 @@ export class FakeMailTransport implements MailTransport {
   inbox: SesRawMail[] = [];
   collectCalls = 0;
   skippedAsProcessed: string[] = [];
+  downloaded: string[] = []; // 本文を取得したメールID
   drafts: Array<{ ref: DraftRef; from: string }> = [];
+  // 作成は済んだのに応答だけ失敗する（APPENDの応答待ちで接続が切れた状況の再現）送信元
+  ambiguousDraftFrom = new Set<string>();
   sent: Array<{ to: string; subject: string; body: string }> = [];
   // この送信元での下書き作成を失敗させる（エラー文に宛先を含め、秘匿されるかを確かめる）
   failDraftFrom = new Set<string>();
@@ -505,14 +607,17 @@ export class FakeMailTransport implements MailTransport {
     return true;
   }
 
-  async collect(isProcessed: (mailId: string) => boolean): Promise<SesRawMail[]> {
+  async collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
     this.collectCalls += 1;
-    const out: SesRawMail[] = [];
+    const unprocessed: SesRawMail[] = [];
     for (const m of this.inbox) {
       if (isProcessed(m.id)) this.skippedAsProcessed.push(m.id);
-      else out.push({ ...m });
+      else unprocessed.push(m);
     }
-    return out;
+    // 実際のプロバイダと同じく、上限まで選んだメールだけ本文を取得する
+    const pick = pickForRun(unprocessed, opts.limit, collectDays(), opts.now);
+    this.downloaded.push(...pick.picked.map((m) => m.id));
+    return { mails: pick.picked.map((m) => ({ ...m })), deferred: pick.deferred.map((m) => m.receivedAt) };
   }
 
   draftReady(): boolean {
@@ -525,7 +630,12 @@ export class FakeMailTransport implements MailTransport {
     }
     const created = { ...ref, from: fromEmail, draftId: `fake_draft_${this.drafts.length + 1}`, url: 'imap://fake/Drafts' };
     this.drafts.push({ ref: created, from: fromEmail });
+    if (this.ambiguousDraftFrom.has(fromEmail)) throw Object.assign(new Error('socket timeout'), { code: 'ETIMEDOUT' });
     return created;
+  }
+
+  async draftExists(draftKey: string): Promise<boolean | null> {
+    return this.drafts.some((d) => d.ref.draftKey === draftKey);
   }
 
   sendReady(): boolean {

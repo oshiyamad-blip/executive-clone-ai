@@ -8,8 +8,9 @@ import { LlmOutputError } from '../llm/errors.js';
 import { estimateCallJpy } from '../llm/pricing.js';
 import { isDemo, extractModel, collectDays, healMaxAttempts } from './config.js';
 import { healLlmCall, type HealAttempt } from './heal/retry.js';
-import { recordFailure, recordSuccess, isLastChance } from './heal/quarantine.js';
-import { recordHealEvent, recordStat } from './heal/events.js';
+import { recordFailure, recordSuccess } from './heal/quarantine.js';
+import { recordHealEvent, recordStat, recordFatal, getStats } from './heal/events.js';
+import { isLastChance, pastRunDeadline, callTimeoutMs } from './schedule.js';
 import { normalizeSkills } from './skillDict.js';
 import { normalizePrefecture } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
@@ -201,79 +202,142 @@ export interface ExtractOutcome {
   processedMailIds: string[];
   // 累計失敗で隔離した（=再試行を打ち切る）メールのID。処理済みとして「隔離」の結果で記録する
   quarantinedMailIds: string[];
+  // 時間切れ・連続失敗・保存先の不調で抽出を始めなかったメールの数（処理済みにせず次回へ）
+  notAttempted: number;
 }
 
-// 基盤起因の失敗か（メール固有の問題ではなく、続けても同じく失敗する種類）
-function isInfraError(err: unknown): boolean {
+// 抽出の途中で、済んだ分を保存・処理済みにするための受け渡し（false を返すと以降の抽出をやめる）
+export type ExtractFlush = (batch: { items: ExtractedItem[]; processedMailIds: string[] }) => Promise<boolean>;
+
+export interface ExtractOptions {
+  onBatch?: ExtractFlush;
+  batchSize?: number; // 何通ごとに onBatch を呼ぶか
+}
+
+// 基盤起因の失敗か（メール固有の問題ではなく、続けても同じく失敗する種類）。
+// 残高不足・請求の問題は 400 で返るが、どのメールでも同じく失敗するため基盤起因として扱う
+export function isInfraError(err: unknown): boolean {
   if (err instanceof LlmOutputError || err instanceof SyntaxError) return false;
   const status = (err as { status?: number }).status;
-  if (typeof status === 'number') return status === 401 || status === 403 || status === 429 || status >= 500;
+  if (typeof status === 'number') {
+    if (status === 400 || status === 402) {
+      return /credit balance|billing|quota|insufficient|purchase credits/i.test(String((err as { message?: unknown }).message ?? ''));
+    }
+    return status === 401 || status === 403 || status === 429 || status >= 500;
+  }
   return true; // ステータスの無い例外は通信障害・タイムアウト
 }
 
-export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome> {
+export async function extractItems(mails: SesRawMail[], opts: ExtractOptions = {}): Promise<ExtractOutcome> {
   if (isDemo()) {
-    return { items: extractItemsDemo(mails), processedMailIds: mails.map((m) => m.id), quarantinedMailIds: [] };
+    return { items: extractItemsDemo(mails), processedMailIds: mails.map((m) => m.id), quarantinedMailIds: [], notAttempted: 0 };
   }
 
   const items: ExtractedItem[] = [];
   const processedMailIds: string[] = [];
   const quarantinedMailIds: string[] = [];
-  const failed: Array<{ mail: SesRawMail; err: unknown }> = [];
+  // 公平に再試行できなかった失敗（修復予算切れ・時間切れで自動修復を省いた）は隔離の回数に数えない
+  const failed: Array<{ mail: SesRawMail; err: unknown; unfair: boolean }> = [];
+  const batchSize = opts.batchSize ?? 10;
+  let pending: { items: ExtractedItem[]; processedMailIds: string[] } = { items: [], processedMailIds: [] };
   let consecutiveInfraFailures = 0;
   let attempted = 0;
+  let stopReason: 'circuit' | 'deadline' | 'flush' | null = null;
+
+  const flush = async (): Promise<boolean> => {
+    if (!opts.onBatch || pending.processedMailIds.length === 0) return true;
+    const batch = pending;
+    pending = { items: [], processedMailIds: [] };
+    return opts.onBatch(batch);
+  };
+
   for (const mail of mails) {
-    if (consecutiveInfraFailures >= CIRCUIT_BREAK_CONSECUTIVE) break;
+    if (consecutiveInfraFailures >= CIRCUIT_BREAK_CONSECUTIVE) {
+      stopReason = 'circuit';
+      break;
+    }
+    if (pastRunDeadline()) {
+      stopReason = 'deadline';
+      break;
+    }
     attempted += 1;
     let extracted: ExtractedItem[] | null = null;
     let firstErr: unknown;
+    let unfair = false;
     try {
       extracted = await extractFromMail(mail);
     } catch (err) {
       firstErr = err;
-      // 自動修復: 予算内でバックオフ再試行（打ち切りなら出力上限を拡大）→ 上位モデルへ昇格
-      extracted = await healLlmCall(
-        `SES抽出(mail ${mail.id})`,
-        err,
-        (a) => extractFromMail(mail, a),
-        (a) => estimateExtractionJpy(mail, a),
-      );
+      if (pastRunDeadline()) {
+        unfair = true; // 自動修復の再試行は時間がかかるため、期限後は次回の実行に回す
+      } else {
+        // 自動修復: 予算内でバックオフ再試行（打ち切りなら出力上限を拡大）→ 上位モデルへ昇格
+        const budgetSkipsBefore = getStats().budgetExhausted;
+        extracted = await healLlmCall(
+          `SES抽出(mail ${mail.id})`,
+          err,
+          (a) => extractFromMail(mail, a),
+          (a) => estimateExtractionJpy(mail, a),
+        );
+        unfair = getStats().budgetExhausted > budgetSkipsBefore;
+      }
     }
     if (extracted) {
       consecutiveInfraFailures = 0;
       items.push(...extracted);
       processedMailIds.push(mail.id);
+      pending.items.push(...extracted);
+      pending.processedMailIds.push(mail.id);
       await recordSuccess(mail.id); // 過去に失敗歴があれば消す（一時障害からの回復）
+      if (pending.processedMailIds.length >= batchSize && !(await flush())) {
+        stopReason = 'flush';
+        break;
+      }
       continue;
     }
     consecutiveInfraFailures = isInfraError(firstErr) ? consecutiveInfraFailures + 1 : 0;
     console.error(`SES抽出: 抽出に失敗 (mail ${mail.id}): ${safeErr(firstErr)} — 処理済みにせず次回再処理します`);
-    failed.push({ mail, err: firstErr });
+    failed.push({ mail, err: firstErr, unfair });
   }
-  const skipped = mails.length - attempted;
-  if (skipped > 0) {
-    recordHealEvent(
-      'critical',
-      `抽出が基盤起因で${CIRCUIT_BREAK_CONSECUTIVE}件連続して失敗したため、残り${skipped}件の抽出を中止しました（次回実行で再処理します。APIキー・残高・Anthropic側の障害情報を確認してください）`,
-    );
+  if (stopReason !== 'flush' && !(await flush())) stopReason ??= 'flush';
+
+  const notAttempted = mails.slice(attempted);
+  if (notAttempted.length > 0) {
+    const message =
+      stopReason === 'circuit'
+        ? `抽出が基盤起因で${CIRCUIT_BREAK_CONSECUTIVE}件連続して失敗したため、残り${notAttempted.length}件の抽出を中止しました（次回実行で再処理します。APIキー・残高・Anthropic側の障害情報を確認してください）`
+        : stopReason === 'deadline'
+          ? `1回の実行時間の上限（SES_RUN_DEADLINE_MINUTES）に達したため、残り${notAttempted.length}件の抽出は次回の実行に回しました`
+          : `抽出結果を保存できないため、残り${notAttempted.length}件の抽出を中止しました（次回実行で再処理します）`;
+    recordHealEvent(stopReason === 'deadline' ? 'warn' : 'critical', message);
   }
 
   // 失敗の累積カウントと隔離。バッチ内の過半数が失敗した場合（または連続失敗で打ち切った場合）は
-  // メール固有の問題ではなく基盤障害（APIキー・Anthropic障害等）の可能性が高いため、誤隔離を防ぐべくカウントを保留する。
-  // ただし次回の実行時には収集の窓から外れるメールは、黙って消えないよう回数に関わらず隔離して報告する
+  // メール固有の問題ではなく基盤障害（APIキー・残高・Anthropic障害等）の可能性が高いため、隔離しない
+  // （処理済みにもせず、窓の中にある限り次回以降に再処理する）。
+  // 基盤障害でなければ、次回の実行時には収集の窓から外れるメールは黙って消えないよう回数に関わらず隔離して報告する
+  const massFailure =
+    stopReason === 'circuit' ||
+    (failed.length >= 3 && failed.length / attempted > 0.5) ||
+    (failed.length > 0 && failed.every((f) => isInfraError(f.err)) && failed.length === attempted);
+  let lost = notAttempted.filter((m) => isLastChance(m.receivedAt, collectDays())).length;
   if (failed.length > 0) {
     recordStat('extractFailures', failed.length);
-    const massFailure = skipped > 0 || (failed.length >= 3 && failed.length / attempted > 0.5);
-    if (massFailure && skipped === 0) {
+    if (massFailure && stopReason !== 'circuit') {
       recordHealEvent(
         'critical',
-        `抽出失敗が${failed.length}/${attempted}件と過半数です。基盤障害の可能性が高いため隔離カウントを保留しました`,
+        `抽出失敗が${failed.length}/${attempted}件と過半数です。基盤障害の可能性が高いため隔離せず、次回の実行で再処理します`,
       );
     }
     for (const f of failed) {
       const lastChance = isLastChance(f.mail.receivedAt, collectDays());
+      if (massFailure) {
+        if (lastChance) lost += 1;
+        await recordFailure(f.mail, f.err, { countTowardQuarantine: false });
+        continue;
+      }
       const { attempts, quarantined } = await recordFailure(f.mail, f.err, {
-        countTowardQuarantine: !massFailure,
+        countTowardQuarantine: !f.unfair,
         lastChance,
       });
       if (quarantined) {
@@ -289,11 +353,17 @@ export async function extractItems(mails: SesRawMail[]): Promise<ExtractOutcome>
       }
     }
   }
+  if (lost > 0) {
+    recordFatal(
+      `抽出できなかったメールのうち${lost}件は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れます` +
+        '（原因を解消したうえで SES_COLLECT_DAYS を広げて手動で再実行すると処理できます）',
+    );
+  }
 
   const extractedCount = items.filter((i) => i.kind !== 'other').length;
   console.log(`SES抽出: ${attempted}件のメールから案件・要員 計${extractedCount}件を抽出`);
   recordStat('extractedItems', extractedCount);
-  return { items, processedMailIds, quarantinedMailIds };
+  return { items, processedMailIds, quarantinedMailIds, notAttempted: notAttempted.length };
 }
 
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
@@ -420,8 +490,8 @@ function genOptions(attempt: HealAttempt | undefined): GenOptions {
   return {
     model: attempt?.model ?? extractModel(),
     maxTokens,
-    // 出力量に応じたタイムアウト（通信の詰まりで1通に10分以上かけない）
-    timeoutMs: Math.min(600_000, 60_000 + maxTokens * 15),
+    // 出力量に応じたタイムアウト（通信の詰まりで1通に10分以上かけない。実行の期限が近ければさらに短く）
+    timeoutMs: callTimeoutMs(Math.min(600_000, 60_000 + maxTokens * 15)),
     ...(attempt ? { maxRetries: attempt.sdkRetries } : {}),
   };
 }
@@ -463,27 +533,10 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
   // PDFの中身はここでは読めないため、PDFを渡したときは単金の原文照合を省く（範囲の検証は常に行う）
   const numbers = usedDocuments ? null : sourceNumbers(`${mail.subject}\n${mail.body}\n${mail.attachments.map((a) => a.text ?? '').join('\n')}`);
   const items: ExtractedItem[] = [
-    ...parsed.projects.map((p) => ({ kind: 'project' as const, project: buildProject(p, mail, numbers) })),
-    ...parsed.engineers.map((e) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, numbers) })),
+    ...parsed.projects.map((p, i) => ({ kind: 'project' as const, project: buildProject(p, mail, i, numbers) })),
+    ...parsed.engineers.map((e, i) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, i, numbers) })),
   ];
-  return withReplyTarget(items.length > 0 ? disambiguateIds(items) : [{ kind: 'other' }], mail);
-}
-
-// 同じメール内に案件名（要員の表示名）と営業元メールが同じ別項目があると決定的IDが衝突し、保存・下書き・マッチIDで
-// 取り違えるため、2件目以降だけ出現順を加えたIDにする（1件目のIDは従来どおり＝再抽出しても変わらない）
-function disambiguateIds(items: ExtractedItem[]): ExtractedItem[] {
-  const seen = new Map<string, number>();
-  return items.map((item) => {
-    if (item.kind === 'other') return item;
-    const id = item.kind === 'project' ? item.project.id : item.engineer.id;
-    const n = (seen.get(id) ?? 0) + 1;
-    seen.set(id, n);
-    if (n === 1) return item;
-    const newId = hashId(id.slice(0, id.indexOf('_')), [id, String(n)]);
-    return item.kind === 'project'
-      ? { kind: 'project', project: { ...item.project, id: newId } }
-      : { kind: 'engineer', engineer: { ...item.engineer, id: newId } };
-  });
+  return withReplyTarget(items.length > 0 ? items : [{ kind: 'other' }], mail);
 }
 
 // 原文に現れる数値の集合（全角・桁区切りを正規化）。抽出された単金が原文にあるかの照合に使う
@@ -519,9 +572,15 @@ function hashId(prefix: string, parts: string[]): string {
   return `${prefix}_${digest}`;
 }
 
-function buildProject(raw: RawProject, mail: SesRawMail, numbers: Set<string> | null): Project {
+// IDはメールIDとメール内の出現順から作る（LLMが案件名・表示名の言い回しを変えても、同じメールを抽出し直せば同じIDになる。
+// メールIDは Message-ID 由来で、メールボックスの再構築でも変わらない）
+export function itemIdOf(kind: 'proj' | 'eng', mailId: string, index: number): string {
+  return hashId(kind, [mailId, kind, String(index)]);
+}
+
+function buildProject(raw: RawProject, mail: SesRawMail, index: number, numbers: Set<string> | null): Project {
   return {
-    id: hashId('proj', [mail.id, raw.title, raw.agentEmail]),
+    id: itemIdOf('proj', mail.id, index),
     title: raw.title,
     requiredSkills: skillsOf(raw.requiredSkills),
     preferredSkills: skillsOf(raw.preferredSkills),
@@ -551,10 +610,10 @@ function residenceWithStation(residence: string, station: string): string {
   return r ? `${r}（最寄駅: ${station.trim()}）` : `最寄駅: ${station.trim()}`;
 }
 
-function buildEngineer(raw: RawEngineer, mail: SesRawMail, numbers: Set<string> | null): Engineer {
+function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number, numbers: Set<string> | null): Engineer {
   const residence = residenceWithStation(raw.residence, raw.nearestStation);
   return {
-    id: hashId('eng', [mail.id, raw.displayName, raw.agentEmail]),
+    id: itemIdOf('eng', mail.id, index),
     displayName: raw.displayName,
     age: raw.age,
     skills: skillsOf(raw.skills),
