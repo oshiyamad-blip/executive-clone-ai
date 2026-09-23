@@ -20,6 +20,7 @@ import {
   PROPER_CANDIDATE_TAB,
   DRAFT_REQUEST_COLUMNS,
   MATCHED_COLUMN,
+  JUDGE_COLUMN,
   RETIRED_PROPER_VERDICT,
   properEngineerIdOf,
   acquireBatchLeaseSheets,
@@ -58,7 +59,10 @@ import { resetHealEvents, hasFatal } from '../heal/events.js';
 import { materializePendingDrafts } from '../pendingDrafts.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from '../notify.js';
 import { buildReplyRef } from '../draft.js';
-import { matchIdOf } from '../match.js';
+import { matchIdOf, __setMatchJudgeForTest } from '../match.js';
+import { loadSuppressionIndex } from '../suppress.js';
+import { recordFeedback } from '../feedback.js';
+import { recordLlmUsage } from '../../llm/usage.js';
 import { SafeLogError } from '../redact.js';
 import { FakeSheets, FakeDrive, FakeMailTransport, type FakeDriveFile } from './fakeGoogle.js';
 import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail } from '../../types/index.js';
@@ -382,14 +386,14 @@ async function testTabsAndHeaders(): Promise<void> {
   check('案件タブのヘッダー行が定義どおり', JSON.stringify(sheets.header(SES_BOOK, '案件')) === JSON.stringify(PROJECT_HEADER));
   check(
     '旧マッチタブの末尾に担当者メール等の列を追記する',
-    JSON.stringify(sheets.header(SES_BOOK, 'マッチ')) === JSON.stringify([...OLD_MATCH_HEADER, ...DRAFT_REQUEST_COLUMNS]),
+    JSON.stringify(sheets.header(SES_BOOK, 'マッチ')) === JSON.stringify([...OLD_MATCH_HEADER, ...DRAFT_REQUEST_COLUMNS, JUDGE_COLUMN]),
     sheets.header(SES_BOOK, 'マッチ').join(','),
   );
   const legacy = sheets.record(SES_BOOK, 'マッチ', 'ID', 'match_legacy_1');
   check('ヘッダー移行で既存の行を変えない', legacy?.['ステータス'] === '紹介済' && legacy?.['判定根拠'] === '旧根拠');
   check(
     '人が定義の後ろに足した列はそのまま残し、増えた定義の列はその後ろに追記する',
-    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN]),
+    JSON.stringify(sheets.header(SES_BOOK, '要員')) === JSON.stringify([...ENGINEER_HEADER, '社内メモ', MATCHED_COLUMN, '年齢', '稼働率']),
     sheets.header(SES_BOOK, '要員').join(','),
   );
   check(
@@ -510,6 +514,160 @@ async function testShiftedRows(): Promise<void> {
   newRun();
   const judged = await fetchJudgedMatchIds();
   check('次の実行で空行の前後の行をすべて読む', judged.has(mNew.id) && judged.has(mR().id) && judged.has('match_legacy_1'));
+}
+
+// ===== 3b. AI最終判定の関門・判定予算・再提案抑制 =====
+
+const JUDGE_BOOK = 'fakeJudgeBook';
+
+async function testJudgeGateAndSuppression(): Promise<void> {
+  section('AI最終判定の関門・判定予算・再提案抑制（不適合は判定列に残す・未判定は次回判定・見送りの再送は載せない）');
+  sheets.createBook(JUDGE_BOOK);
+  process.env.SHEETS_DB_SPREADSHEET_ID = JUDGE_BOOK;
+  const calls: string[] = [];
+  // 偽のAI判定: eng_gate_ng は即NG（年齢）、それ以外は通過。1回あたり約1.6円を使ったことにする
+  __setMatchJudgeForTest(async (pair) => {
+    calls.push(pair.engineer.id);
+    recordLlmUsage('claude-sonnet-5', 5000, 0);
+    return pair.engineer.id === 'eng_gate_ng'
+      ? { score: 30, reason: '年齢の上限を超えています', dealBreakers: ['age'], questions: [] }
+      : { score: 82, reason: '条件に合っています', dealBreakers: [], questions: ['面談の日程は調整できますか？'] };
+  });
+  const gateProject = (id: string) =>
+    project(id, {
+      title: `【検証】Java保守案件 ${id}`,
+      requiredSkills: ['Java', 'Spring Boot', 'Oracle'],
+      rateMin: 60,
+      rateMax: 70,
+      location: '東京都港区',
+      prefecture: '東京都',
+      remote: 'partial',
+      businessFlow: '45歳まで',
+      agentCompany: 'ゼータ検証',
+      agentContact: '検証七子',
+      agentEmail: 'nanako@zeta-gate.example.jp',
+      replyTarget: rt('検証七子', 'nanako@zeta-gate.example.jp', `【案件】Java保守（検証 ${id}）`, id),
+    });
+  // 必須3件のうち2件（参考提案）なので、判定を通っても下書きは作らない（生成AIを呼ばない）
+  const gateEngineer = (id: string, name: string, over: Partial<Engineer> = {}) =>
+    engineer(id, {
+      displayName: name,
+      skills: ['Java', 'Spring Boot'],
+      desiredRate: 50,
+      residence: '東京都',
+      prefecture: '東京都',
+      agentCompany: `エータ検証${name}`,
+      agentContact: '検証八郎',
+      agentEmail: `hachiro@eta-gate.example.jp`,
+      replyTarget: rt('検証八郎', 'hachiro@eta-gate.example.jp', `【要員】${name}（検証）`, id),
+      ...over,
+    });
+  const load = async () => {
+    const projects = await fetchOpenProjects(100);
+    const engineers = await fetchAvailableEngineers(100);
+    return {
+      projects,
+      engineers,
+      scope: {
+        newProjectIds: new Set(projects.filter((p) => p.matched === false).map((p) => p.id)),
+        newEngineerIds: new Set(engineers.filter((e) => e.matched === false).map((e) => e.id)),
+        judgedMatchIds: await fetchJudgedMatchIds(),
+      },
+    };
+  };
+  const row = (projectId: string, engineerId: string) => sheets.record(JUDGE_BOOK, 'マッチ', 'ID', matchIdOf(projectId, engineerId));
+  try {
+    // 1回目: 予算の上限なし。通過は「通過」、即NGは「不適合」（下書きなし）で保存し、案件を突合済にする
+    process.env.SES_JUDGE_BUDGET_JPY = '0';
+    newRun();
+    await saveProject(gateProject('proj_gate'));
+    await saveEngineer(gateEngineer('eng_gate_ok', 'T.A.', { age: 41, utilization: '週4' }));
+    await saveEngineer(gateEngineer('eng_gate_ng', 'T.B.'));
+    const first = await load();
+    const back = first.engineers.find((e) => e.id === 'eng_gate_ok');
+    check('要員の年齢・稼働率を保存して読み戻す（最終判定の入力に使う）', back?.age === 41 && back.utilization === '週4', JSON.stringify([back?.age, back?.utilization]));
+    const r1 = await matchIncrementally(first.projects, first.engineers, first.scope);
+    const ok1 = row('proj_gate', 'eng_gate_ok');
+    const ng1 = row('proj_gate', 'eng_gate_ng');
+    check('AI判定を通った組は判定「通過」・確認事項を根拠に載せる', ok1?.[JUDGE_COLUMN] === '通過' && (ok1?.['判定根拠'] ?? '').includes('確認事項: 面談の日程'), ok1?.[JUDGE_COLUMN]);
+    check(
+      '即NGの組は判定「不適合」でマッチタブに残し、下書きは作らない',
+      ng1?.[JUDGE_COLUMN] === '不適合' && ng1?.['案件側下書き状態'] === '不要' && (ng1?.['判定根拠'] ?? '').includes('即NG: 年齢') &&
+        r1.saved.some((m) => m.category === 'rejected'),
+      JSON.stringify([ng1?.[JUDGE_COLUMN], ng1?.['案件側下書き状態']]),
+    );
+    const judged1 = await fetchJudgedMatchIds();
+    check('通過・不適合の組は判定済み（再判定しない）、案件は突合済', judged1.has(matchIdOf('proj_gate', 'eng_gate_ng')) && judged1.has(matchIdOf('proj_gate', 'eng_gate_ok')) &&
+      Boolean(sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_gate')?.[MATCHED_COLUMN]));
+
+    // 2回目: 予算1円。1件目の判定で使い切り、2件目は「未判定」で保存して案件を突合済にしない
+    process.env.SES_JUDGE_BUDGET_JPY = '1';
+    newRun();
+    await saveProject(gateProject('proj_budget'));
+    calls.length = 0;
+    const second = await load();
+    const r2 = await matchIncrementally(second.projects, second.engineers, second.scope);
+    const deferred = r2.saved.filter((m) => m.category === 'deferred');
+    const dRow = deferred[0] ? sheets.record(JUDGE_BOOK, 'マッチ', 'ID', deferred[0].id) : undefined;
+    check('予算に達した後の組はAIを呼ばず「未判定」で保存する', calls.length === 1 && deferred.length === 1 && dRow?.[JUDGE_COLUMN] === '未判定', JSON.stringify(calls));
+    check('未判定の組の下書き状態は「判定待ち」（依頼を受けない）', dRow?.['案件側下書き状態'] === DRAFT_STATE.awaitingJudge, dRow?.['案件側下書き状態']);
+    check(
+      '未判定の組は判定済みに含めず、その案件は突合済にしない（次回の実行で判定する）',
+      !(await fetchJudgedMatchIds()).has(deferred[0]?.id ?? '') && !sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_budget')?.[MATCHED_COLUMN] && r2.deferredItems === 1,
+    );
+
+    // 3回目: 予算の上限なし。未判定の組を判定し、案件を突合済にする
+    process.env.SES_JUDGE_BUDGET_JPY = '0';
+    newRun();
+    calls.length = 0;
+    const third = await load();
+    await matchIncrementally(third.projects, third.engineers, third.scope);
+    const again = deferred[0] ? sheets.record(JUDGE_BOOK, 'マッチ', 'ID', deferred[0].id) : undefined;
+    check(
+      '次の回で未判定の組だけを判定し、判定列と下書き状態を更新する（参考提案なので「不要」）',
+      calls.length === 1 && again?.[JUDGE_COLUMN] === '通過' && again?.['案件側下書き状態'] === '不要' &&
+        Boolean(sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_budget')?.[MATCHED_COLUMN]),
+      JSON.stringify([calls, again?.[JUDGE_COLUMN], again?.['案件側下書き状態']]),
+    );
+    newRun();
+    await saveMatch({ ...makeMatch(p1, e1, 'deferred'), verdict: 'deferred' });
+    await saveMatch({ ...makeMatch(p1, e1, 'confirmed'), verdict: 'passed' });
+    check('「判定待ち」の側は判定後に文面が入ると「未作成」になる', row(p1.id, e1.id)?.['案件側下書き状態'] === '未作成');
+
+    // 4回目: 見送り（マッチタブのステータス）とズレ（評価）の組の再送。単金がほぼ同じ再送は載せず、大きく変わった再送は注意つきで通す
+    sheets.setByKey(JUDGE_BOOK, 'マッチ', 'ID', matchIdOf('proj_gate', 'eng_gate_ok'), 'ステータス', '見送り');
+    await recordFeedback({
+      matchId: matchIdOf('proj_budget', 'eng_gate_ok'),
+      matchTitle: '検証',
+      verdict: 'bad',
+      note: '',
+      reviewer: '検証',
+      at: new Date().toISOString(),
+    });
+    newRun();
+    await saveEngineer(gateEngineer('eng_gate_ok2', 'T.A.', { desiredRate: 51 }));
+    await saveEngineer(gateEngineer('eng_gate_ok3', 'T.A.', { desiredRate: 45 }));
+    calls.length = 0;
+    const fourth = await load();
+    const suppression = await loadSuppressionIndex({ projects: fourth.projects, engineers: fourth.engineers });
+    const r4 = await matchIncrementally(fourth.projects, fourth.engineers, fourth.scope, { suppression });
+    check(
+      '見送り・ズレの組の再送（単金の差が小さい）は判定も保存もしない（再提案抑制）',
+      r4.primaryStats.suppressed === 2 && !row('proj_gate', 'eng_gate_ok2') && !row('proj_budget', 'eng_gate_ok2') && !calls.includes('eng_gate_ok2'),
+      JSON.stringify(r4.primaryStats),
+    );
+    const changed = row('proj_gate', 'eng_gate_ok3')?.['判定根拠'] ?? '';
+    check(
+      '単金が大きく変わった再送は「以前見送り」の注意つきで判定する',
+      r4.primaryStats.resuggested === 2 && changed.includes('以前「見送り」にした組の再送です（希望単金 50→45万円）') &&
+        (row('proj_budget', 'eng_gate_ok3')?.['判定根拠'] ?? '').includes('以前評価で「ズレ」にした組の再送です'),
+      changed,
+    );
+  } finally {
+    __setMatchJudgeForTest(null);
+    delete process.env.SES_JUDGE_BUDGET_JPY;
+    process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;
+  }
 }
 
 // ===== 4. 処理済みメールIDの持ち越し =====
@@ -1597,6 +1755,7 @@ async function main(): Promise<void> {
     await testTabsAndHeaders();
     await testUpsertIdempotency();
     await testShiftedRows();
+    await testJudgeGateAndSuppression();
     await testProcessedIds();
     await testQuarantine();
     await testPendingDrafts();

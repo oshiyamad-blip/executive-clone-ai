@@ -187,8 +187,28 @@ export interface NegotiationProposal {
 // スキル確度バンド。strong=強マッチ、tentative=許容範囲（参考提案）
 export type MatchBand = 'strong' | 'tentative';
 
-// マッチの表示区分。優先度: review > tentative > negotiable > confirmed
-export type MatchCategory = 'confirmed' | 'negotiable' | 'tentative' | 'review';
+// マッチの表示区分。優先度: review > tentative > negotiable > confirmed。
+// rejected = AI最終判定で不適合（下書きなし・サマリは件数だけ）、deferred = AI判定の予算超過・一時的な失敗で
+// 判定を次回に回した組（ルールの結果のまま保存し、下書きは作らない）
+export type MatchCategory = 'confirmed' | 'negotiable' | 'tentative' | 'review' | 'rejected' | 'deferred';
+
+// AI最終判定の結果（スプレッドシート「マッチ」タブの「判定」列）。
+// passed=基準以上 / low=基準（MATCH_MIN_LLM_SCORE）未満で参考提案に下げた / rejected=不適合 /
+// deferred=未判定（次回判定） / failed=判定に失敗し参考提案として扱った / rule=AI判定を使わないルールのみの判定（要確認枠等）
+export type JudgeVerdict = 'passed' | 'low' | 'rejected' | 'deferred' | 'failed' | 'rule';
+
+// AI最終判定が挙げる即NG条件の種類（入力から違反が読み取れるものだけ）
+export type DealBreakerCode =
+  | 'flow'
+  | 'affiliation'
+  | 'nationality'
+  | 'age'
+  | 'onsite'
+  | 'utilization'
+  | 'skill_years'
+  | 'timing'
+  | 'rate'
+  | 'other';
 
 // 必須スキルの満たし方の内訳（正規化後のスキル名）。implied=要員の下位の技術（Spring Boot 等）の経験から含意して
 // 満たしたもの（直接の記載なし）。via は implied/equiv の根拠となった要員側のスキル（必須スキル名 → 要員のスキル名）
@@ -284,6 +304,9 @@ export interface MatchResult {
   draftToEngineer?: DraftRef;
   // 下書きを作るべき区分なのに文面を用意できなかった（下書き状態を「エラー」にし、次回のバッチで作り直す）
   draftFailed?: boolean;
+  verdict?: JudgeVerdict; // AI最終判定の結果（未設定は従来の保存分）
+  dealBreakers?: DealBreakerCode[]; // AI最終判定が挙げた即NG条件
+  questions?: string[]; // AI最終判定が挙げた先方への確認事項（最大3件）
   status: MatchStatus;
   detectedAt: Date;
   notionPageId?: string;

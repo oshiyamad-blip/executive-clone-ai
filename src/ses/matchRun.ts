@@ -5,15 +5,21 @@
 //   次回の実行でも突合の対象に残るため、時間切れ・途中の失敗で判定し損ねたペアを取りこぼさない
 // - 保存できなかったマッチ・文面を用意できなかったマッチのある案件・要員は突合済にしない（次回判定し直す）
 // - 次回の実行では突合の対象期間（SES_MATCH_LOOKBACK_DAYS）を外れる案件・要員を先に突合し、それでも残れば異常終了で知らせる
+// - 判定の予算（SES_JUDGE_BUDGET_JPY）に達した後の組・AI判定が一時的に失敗した組は「未判定」で保存し、その組の案件・要員は
+//   突合済にしない（次回の実行で判定し、下書きは判定を通った組にだけ作る）
 import {
   primarySelectDetailed,
   prepareJudging,
   judgePairs,
   matchIdOf,
   formatPrimaryStats,
+  startJudgeBudget,
+  reportJudgeTally,
+  judgeTallySnapshot,
   type PairScope,
   type PrimarySelectStats,
 } from './match.js';
+import type { SuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
 import { markItemsMatched } from '../database/index.js';
@@ -47,6 +53,8 @@ export interface IncrementalMatchOptions {
   saved?: MatchResult[];
   // 途中経過の記録（数分ごとと最後に、それまでに保存できたマッチを渡す）
   checkpoint?: (saved: MatchResult[]) => Promise<void>;
+  // 以前「見送り」「ズレ」にした組（再提案抑制）
+  suppression?: SuppressionIndex;
 }
 
 // 候補ペアを「その組を受け持つ突合前の案件・要員」ごとにまとめる（案件が突合前ならその案件、そうでなければ要員）
@@ -99,7 +107,10 @@ export async function matchIncrementally(
   opts: IncrementalMatchOptions = {},
 ): Promise<IncrementalMatchResult> {
   const fewShot = await prepareJudging();
-  const primary = primarySelectDetailed(projects, engineers, scope);
+  const primary = primarySelectDetailed(projects, engineers, scope, { suppression: opts.suppression });
+  // 最終判定と紹介文面の生成のコストを、この突合の開始から数える
+  const budget = startJudgeBudget();
+  const tallyBefore = judgeTallySnapshot();
   const groups = groupPairs(projects, engineers, scope, primary.pairs);
   const pairCount = groups.reduce((n, g) => n + g.pairs.length, 0);
   console.log(`SESマッチング: ${formatPrimaryStats(primary.stats)}`);
@@ -136,11 +147,12 @@ export async function matchIncrementally(
         index += 1;
       }
       // 期限を過ぎたら判定し残したペアは次回へ（そのペアを持つ案件・要員は突合済にしない）
-      const judged = await judgePairs(step.flatMap((g) => g.pairs), fewShot, { stopAtDeadline: true });
+      const judged = await judgePairs(step.flatMap((g) => g.pairs), fewShot, { stopAtDeadline: true, budget });
       const drafted = await createDrafts(judged, projects, engineers);
       const { saved: stepSaved } = await persistMatches(drafted, projects, engineers);
       saved.push(...stepSaved);
-      const ok = new Set(stepSaved.filter((m) => !m.draftFailed).map((m) => m.id));
+      // 文面を用意できなかった組・AI判定を次回に回した組のある案件・要員は突合済にしない（次回判定し直す）
+      const ok = new Set(stepSaved.filter((m) => !m.draftFailed && m.category !== 'deferred').map((m) => m.id));
       for (const g of step) {
         if (!g.pairs.every((p) => ok.has(matchIdOf(p.project.id, p.engineer.id)))) continue;
         completed.add(g);
@@ -150,6 +162,7 @@ export async function matchIncrementally(
     }
   } finally {
     await checkpoint();
+    reportJudgeTally(tallyBefore);
   }
 
   const unfinished = groups.filter((g) => !completed.has(g));

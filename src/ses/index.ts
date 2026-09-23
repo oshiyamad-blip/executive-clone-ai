@@ -2,8 +2,9 @@ import '../env.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
-import { matchAll, resetPrimarySelectTally, type PairScope } from './match.js';
+import { matchAll, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
 import { matchIncrementally } from './matchRun.js';
+import { loadSuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
 import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
@@ -98,6 +99,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   resetHealEvents();
   resetSkillTokenTally();
   resetPrimarySelectTally();
+  resetJudgeTally();
   resetSheetsCache();
   resetProperMasterCache();
   if (!isDemo()) startRunClock();
@@ -185,7 +187,8 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
         `SESマッチング: 新着 案件${stored.projects.length}件・要員${stored.engineers.length}件を、直近${matchLookbackDays()}日の` +
           `案件${projects.length - stored.projects.length}件・要員${engineers.length - stored.engineers.length}件とも突合します（判定済み${pool.judged.size}組は除外）`,
       );
-      await matchIncrementally(projects, engineers, scope, { saved, checkpoint: remember });
+      const suppression = await loadSuppressionIndex({ projects, engineers });
+      await matchIncrementally(projects, engineers, scope, { saved, checkpoint: remember, suppression });
     } catch (err) {
       console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
       recordFatal('マッチング段が例外で停止しました（突合済でない案件・要員は次回の実行で突合します）');
@@ -528,7 +531,7 @@ async function matchDraftAndNotify(
 ): Promise<MatchResult[]> {
   let matches: MatchResult[] = [];
   try {
-    matches = await matchAll(projects, engineers);
+    matches = await matchAll(projects, engineers, undefined, { suppression: await loadSuppressionIndex({ projects, engineers }) });
   } catch (err) {
     console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
     recordFatal('マッチング段が例外で停止しました');

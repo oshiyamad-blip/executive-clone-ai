@@ -238,9 +238,9 @@ export async function createDrafts(
   const counts = { templated: 0, deadline: 0, failed: 0 };
 
   const draftOne = async (match: MatchResult): Promise<MatchResult> => {
-    // 要確認枠(情報不足)・参考提案枠(スキルが許容範囲)は自動下書き対象外。
-    // 人が内容を確認・確定してから紹介する（誤提案を防ぐ）。
-    if (match.needsReview || match.category === 'tentative') return match;
+    // 下書きはAI最終判定を通った成立候補・交渉提案だけに作る。要確認枠(情報不足)・参考提案枠(スキルが許容範囲・AI低評価)・
+    // 不適合・未判定（次回判定）は自動下書き対象外。人が内容を確認・確定してから紹介する（誤提案を防ぐ）。
+    if (match.needsReview || (match.category !== 'confirmed' && match.category !== 'negotiable')) return match;
     const project = projectMap.get(match.projectId);
     const engineer = engineerMap.get(match.engineerId);
     // 文面を用意できなかった成立候補・交渉提案は、下書き状態を「文面を用意できませんでした」にして次回作り直す

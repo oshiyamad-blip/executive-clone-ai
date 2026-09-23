@@ -240,6 +240,8 @@ function renderPage(): string {
   .card.tentative { border-left: 3px solid #58a6ff; }
   .card.negotiable { border-left: 3px solid #a371f7; }
   .card.review { border-left: 3px solid #d9a441; }
+  .card.rejected { border-left: 3px solid #6e7681; opacity: 0.8; }
+  .card.deferred { border-left: 3px solid #6e7681; }
   .title { font-weight: 600; margin-bottom: 4px; }
   .meta { font-size: 13px; color: #9aa4b2; margin-bottom: 6px; }
   .reason { font-size: 13px; line-height: 1.5; margin-bottom: 8px; }
@@ -248,6 +250,8 @@ function renderPage(): string {
   .b-tentative { background: #1f6feb; color: #fff; }
   .b-negotiable { background: #8957e5; color: #fff; }
   .b-review { background: #9e6a00; color: #fff; }
+  .b-rejected { background: #484f58; color: #fff; }
+  .b-deferred { background: #30363d; color: #c9d1d9; }
   .b-unconfirmed { background: #30363d; color: #c9d1d9; }
   .b-introduced { background: #1f6feb; color: #fff; }
   .b-closed_won { background: #238636; color: #fff; }
@@ -312,7 +316,9 @@ function renderPage(): string {
     confirmed: { cls: 'confirmed', label: '成立候補' },
     tentative: { cls: 'tentative', label: '参考提案' },
     negotiable: { cls: 'negotiable', label: '交渉提案' },
-    review: { cls: 'review', label: '要確認' }
+    review: { cls: 'review', label: '要確認' },
+    rejected: { cls: 'rejected', label: '不適合（AI判定）' },
+    deferred: { cls: 'deferred', label: 'AI判定待ち' }
   };
   var BAND_LABEL = { strong: '強マッチ', tentative: '参考(許容範囲)', negotiable: '交渉提案' };
 

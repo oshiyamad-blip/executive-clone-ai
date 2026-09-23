@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     `got ${haikuCost}`,
   );
   const sonnetCost = usageCostJpy({ model: 'claude-sonnet-5', inputTokens: 1_000_000, outputTokens: 0 });
-  check('円換算: Sonnet 1MTok入力 = 3USD相当', near(sonnetCost, 3 * rate), `got ${sonnetCost}`);
+  check('円換算: Sonnet 5 1MTok入力 = 2USD相当', near(sonnetCost, 2 * rate), `got ${sonnetCost}`);
 
   // 2. エラー分類（400/401/403/404は再試行しない、429/529/その他は再試行）
   check('分類: 400は再試行しない', !isRetryableLlmError({ status: 400 }));

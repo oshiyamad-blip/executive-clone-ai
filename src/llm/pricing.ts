@@ -10,7 +10,7 @@ interface UsdPerMTok {
 
 const PRICING_USD_PER_MTOK: Array<{ match: string; price: UsdPerMTok }> = [
   { match: 'haiku-4-5', price: { input: 1, output: 5 } },
-  { match: 'sonnet-5', price: { input: 3, output: 15 } },
+  { match: 'sonnet-5', price: { input: 2, output: 10 } },
   { match: 'sonnet-4-6', price: { input: 3, output: 15 } },
   { match: 'opus-4-8', price: { input: 5, output: 25 } },
   { match: 'opus-4-7', price: { input: 5, output: 25 } },

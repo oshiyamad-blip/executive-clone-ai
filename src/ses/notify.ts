@@ -15,6 +15,7 @@ import { buildDiagnosisReport, recordFatal } from './heal/events.js';
 import { redactable, safeErr } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
+import { primarySelectTally, DEAL_BREAKER_CODES, DEAL_BREAKER_LABEL } from './match.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
 export async function persistAndNotify(
@@ -96,10 +97,12 @@ export async function loadUnnotifiedMatches(): Promise<{ ids: string[]; rows: Ma
   }
 }
 
-// 保存したがまだ知らせていないマッチのIDを控える（前回までの控え carriedIds を含めて書く。変わらなければ書かない）
+// 保存したがまだ知らせていないマッチのIDを控える（前回までの控え carriedIds を含めて書く。変わらなければ書かない）。
+// 不適合（件数だけ知らせる）・未判定（次回判定してから知らせる）の組は控えない
 export async function rememberUnnotified(carriedIds: string[], saved: MatchResult[]): Promise<void> {
   if (!carryEnabled()) return;
-  const all = [...new Set([...carriedIds, ...saved.map((m) => m.id)])];
+  const listed = saved.filter((m) => isListed(m)).map((m) => m.id);
+  const all = [...new Set([...carriedIds, ...listed])];
   const state: UnnotifiedState = {
     ids: all.slice(0, UNNOTIFIED_MAX_IDS),
     overflow: carriedOverflow + Math.max(0, all.length - UNNOTIFIED_MAX_IDS),
@@ -165,11 +168,49 @@ export async function persistMatches(
   return { saved, failed };
 }
 
+// サマリに1件ずつ載せる区分か（不適合・未判定は件数だけ）
+function isListed(m: MatchResult): boolean {
+  return m.category !== 'rejected' && m.category !== 'deferred';
+}
+
 // 区分ごとの件数（サマリ本文とログ秘匿モードのコンソール出力で共用。人名・案件名を含まない）
 function countLine(matches: MatchResult[], proper: ProperRunResult | null = null): string {
   const count = (category: MatchResult['category']) => matches.filter((m) => m.category === category).length;
+  const suppressed = primarySelectTally().suppressed;
+  const extra = [
+    count('rejected') > 0 ? ` / 不適合（AI判定）: ${count('rejected')}件` : '',
+    count('deferred') > 0 ? ` / AI判定待ち: ${count('deferred')}件` : '',
+    suppressed > 0 ? ` / 再提案抑制: ${suppressed}件` : '',
+  ].join('');
   const properCount = proper ? ` / プロパー候補: ${proper.candidates.length}件` : '';
-  return `成立候補: ${count('confirmed')}件 / 交渉提案: ${count('negotiable')}件 / 参考提案: ${count('tentative')}件 / 要確認: ${count('review')}件${properCount}`;
+  return `成立候補: ${count('confirmed')}件 / 交渉提案: ${count('negotiable')}件 / 参考提案: ${count('tentative')}件 / 要確認: ${count('review')}件${extra}${properCount}`;
+}
+
+// 1件ずつは載せない組の件数（AI判定で不適合・判定待ち・再提案抑制・低評価）。人名・案件名を含まない
+function countOnlySection(matches: MatchResult[]): string[] {
+  const rejected = matches.filter((m) => m.category === 'rejected');
+  const deferred = matches.filter((m) => m.category === 'deferred').length;
+  const low = matches.filter((m) => m.verdict === 'low').length;
+  const suppressed = primarySelectTally().suppressed;
+  const lines: string[] = [];
+  if (low > 0) lines.push(`・AI判定のスコアが基準（MATCH_MIN_LLM_SCORE）未満のため参考提案にした組: ${low}件（上の参考提案に含みます）`);
+  if (rejected.length > 0) {
+    const byCode = DEAL_BREAKER_CODES.map((c) => [c, rejected.filter((m) => m.dealBreakers?.includes(c)).length] as const)
+      .filter(([, n]) => n > 0)
+      .map(([c, n]) => `${DEAL_BREAKER_LABEL[c]}${n}`);
+    const lowScore = rejected.filter((m) => !m.dealBreakers?.length).length;
+    const detail = [...byCode, ...(lowScore > 0 ? [`スコア不足${lowScore}`] : [])].join('・');
+    const where =
+      dbProvider() === 'sheets'
+        ? 'スプレッドシート「マッチ」タブの「判定」列が「不適合」の行'
+        : '確認UI（「不適合（AI判定）」の印）またはマッチDBの「判定」列';
+    lines.push(`・AI判定で不適合: ${rejected.length}件（${detail}）— 下書きは作っていません。${where}で内容を確認できます`);
+  }
+  if (deferred > 0) {
+    lines.push(`・AI判定待ち: ${deferred}件 — 1回の実行の判定予算・一時的な失敗のため、次回の実行で判定します（下書きは判定の後）`);
+  }
+  if (suppressed > 0) lines.push(`・再提案抑制 ${suppressed}件 — 以前「見送り」「ズレ」にした組の再送のため載せていません`);
+  return lines.length > 0 ? ['【件数のみのお知らせ】', ...lines, ''] : [];
 }
 
 // Sheets運用では下書きは担当者メールの入力で次回バッチが作るため、URLの代わりに文面の在りかを示す
@@ -227,7 +268,7 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
   lines.push(...draftRequestSection(requestedDrafts));
   lines.push(...carriedSection(carried, new Set(matches.map((m) => m.id))));
 
-  if (matches.length === 0) {
+  if (!matches.some(isListed)) {
     lines.push('今回のバッチで成立・交渉・参考のいずれの候補も検出されませんでした。');
   } else {
     if (confirmed.length > 0) {
@@ -269,6 +310,7 @@ function buildSummary(matches: MatchResult[], requestedDrafts: PendingDraftResul
       lines.push('');
     }
   }
+  lines.push(...countOnlySection(matches));
 
   return lines.join('\n');
 }

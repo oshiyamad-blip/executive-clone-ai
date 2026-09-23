@@ -31,6 +31,14 @@ function thinkingParam(model: string): { type: 'adaptive' } | undefined {
   return supportsAdaptiveThinking(model) ? { type: 'adaptive' } : undefined;
 }
 
+// effort を受け付けるモデルだけに付ける（Haiku 4.5・Sonnet 4.5 以前は 400 になるため、既知の対応モデルに限る）
+const EFFORT_MODELS = /opus-4-[5-9]|opus-5|sonnet-4-6|sonnet-5|fable|mythos/;
+
+function outputConfig(model: string, schema: object, opts: GenOptions): Anthropic.Messages.OutputConfig {
+  const format = { type: 'json_schema' as const, schema: schema as Record<string, unknown> };
+  return opts.effort && EFFORT_MODELS.test(model) ? { format, effort: opts.effort } : { format };
+}
+
 // 呼び出し単位のSDKオプション（再試行回数・タイムアウト）
 function requestOptions(opts: GenOptions): { maxRetries?: number; timeout?: number } {
   const o: { maxRetries?: number; timeout?: number } = {};
@@ -97,7 +105,7 @@ export async function anthropicJson(
       max_tokens: maxTokens,
       ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
       system,
-      output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+      output_config: outputConfig(resolvedModel, schema, opts),
       messages: [{ role: 'user', content: user }],
     },
     requestOptions(opts),
@@ -135,7 +143,7 @@ export async function anthropicJsonWithDocuments(
       max_tokens: maxTokens,
       ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
       system,
-      output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+      output_config: outputConfig(resolvedModel, schema, opts),
       messages: [{ role: 'user', content }],
     },
     requestOptions(opts),

@@ -28,6 +28,8 @@ import {
   isDraftStateLocked,
   MATCH_STATUS_LABEL,
   DRAFT_STATE,
+  JUDGE_VERDICT_LABEL,
+  judgeVerdictLabel,
   type DraftColumns,
   type DraftSide,
 } from './mapping.js';
@@ -56,6 +58,9 @@ export const PROPER_CANDIDATE_TAB = 'プロパー候補';
 // （実行が時間切れ・失敗で途中終了しても、判定し損ねたペアを取りこぼさないため）
 export const MATCHED_COLUMN = '突合済';
 
+// AI最終判定の結果（通過・低評価・不適合・未判定 等。JUDGE_VERDICT_LABEL）。「未判定」の行は次回の実行で判定し直す
+export const JUDGE_COLUMN = '判定';
+
 // タブ定義（列は見出しの名前で読み書きする。列の追加は末尾のみ＝既存シートは ensureTabs が見出しの右端へ自動で追記する）
 const TABS: Record<string, string[]> = {
   案件: [
@@ -66,10 +71,11 @@ const TABS: Record<string, string[]> = {
   要員: [
     'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
     '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN,
+    '年齢', '稼働率',
   ],
   マッチ: [
     'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
-    '案件側下書きURL', '要員側下書きURL', 'ステータス', '検出日時', ...DRAFT_REQUEST_COLUMNS,
+    '案件側下書きURL', '要員側下書きURL', 'ステータス', '検出日時', ...DRAFT_REQUEST_COLUMNS, JUDGE_COLUMN,
   ],
   自社社員: ['ID', '表示名', 'スキル', '経験年数', '必要案件単価', '居住地', 'リモート希望', '稼働可能日', 'ステータス'],
   評価: ['日時', '元マッチID', 'マッチ名', '評価', 'メモ', '評価者', 'バンド'],
@@ -319,7 +325,7 @@ function engineerToRow(e: Engineer): Cell[] {
     e.id, e.displayName, joinList(e.skills), e.experienceYears, e.desiredRate, e.residence,
     remoteLabel(e.remoteWish), e.availableFrom ?? '', e.agentCompany, e.agentContact, e.agentEmail,
     e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail)), e.receivedAt.toISOString(),
-    e.status === 'assigned' ? '決定済' : '提案可', '',
+    e.status === 'assigned' ? '決定済' : '提案可', '', e.age, e.utilization,
   ];
 }
 
@@ -337,7 +343,7 @@ function rowToEngineer(cells: string[]): Engineer {
   return {
     id: c('ID'),
     displayName: c('表示名'),
-    age: null,
+    age: n('年齢'),
     skills: normalizeSkills(splitList(c('スキル'))),
     experienceYears: n('経験年数'),
     desiredRate: n('希望単金'),
@@ -346,7 +352,7 @@ function rowToEngineer(cells: string[]): Engineer {
     nearestStation: '',
     availableDate: '',
     availableFrom: c('稼働開始可能日') || null,
-    utilization: '',
+    utilization: c('稼働率'),
     remoteWish: labelToRemote(c('リモート希望')),
     agentCompany: c('営業元会社'),
     agentContact: c('営業元担当'),
@@ -530,13 +536,19 @@ function matchRow(match: MatchResult, existing: string[] | null): Cell[] {
     existing ? readDraftColumns('マッチ', existing) : null,
     match.draftToProject,
     match.draftToEngineer,
-    { failed: match.draftFailed, signingKey: draftSigningKey(), bind: draftBinding('マッチ', id) },
+    {
+      failed: match.draftFailed,
+      deferred: match.category === 'deferred',
+      signingKey: draftSigningKey(),
+      bind: draftBinding('マッチ', id),
+    },
   );
   return [
     id, match.title, match.grossMarginJpy, match.score, match.reason, match.projectId,
     match.engineerId, match.draftToProject?.url ?? '', match.draftToEngineer?.url ?? '',
     keep('ステータス') || matchStatusLabel(match.status), match.detectedAt.toISOString(),
     senderEmail, drafts.projectState, drafts.engineerState, drafts.projectText, drafts.engineerText, drafts.data,
+    judgeVerdictLabel(match.verdict),
   ];
 }
 
@@ -548,14 +560,57 @@ export async function saveMatchSheets(match: MatchResult): Promise<string> {
 }
 
 // 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。文面を用意できなかった行
-// （下書き状態が「文面を用意できませんでした」）は判定済みに含めず、次回のバッチで判定と文面の作成をやり直す
+// （下書き状態が「文面を用意できませんでした」）と、AI判定を次回に回した行（判定「未判定」）は判定済みに含めず、
+// 次回のバッチで判定と文面の作成をやり直す
 export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
   if (!configured()) return new Set();
   const rows = await readRows('マッチ');
   const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
   const regenerate = (cells: string[]) =>
-    isDraftRegenerationPending(c(cells, '案件側下書き状態')) || isDraftRegenerationPending(c(cells, '要員側下書き状態'));
+    isDraftRegenerationPending(c(cells, '案件側下書き状態')) ||
+    isDraftRegenerationPending(c(cells, '要員側下書き状態')) ||
+    c(cells, JUDGE_COLUMN) === JUDGE_VERDICT_LABEL.deferred;
   return new Set(rows.filter((r) => !regenerate(r.cells)).map((r) => c(r.cells, 'ID')).filter(Boolean));
+}
+
+// 再提案抑制の元になる組: ステータスを「見送り」にしたマッチと、評価で「ズレ」にしたマッチ（badIds）の案件ID・要員ID
+export interface RejectedMatchRow {
+  matchId: string;
+  projectId: string;
+  engineerId: string;
+  source: 'dropped' | 'bad';
+}
+
+export async function fetchRejectedMatchRowsSheets(badIds: Set<string>): Promise<RejectedMatchRow[]> {
+  if (!configured()) return [];
+  const dropped = matchStatusLabel('dropped');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const out: RejectedMatchRow[] = [];
+  for (const r of await readRows('マッチ')) {
+    const matchId = c(r.cells, 'ID');
+    const projectId = c(r.cells, '案件ID');
+    const engineerId = c(r.cells, '要員ID');
+    if (!matchId || !projectId || !engineerId) continue;
+    if (c(r.cells, 'ステータス') === dropped) out.push({ matchId, projectId, engineerId, source: 'dropped' });
+    else if (badIds.has(matchId)) out.push({ matchId, projectId, engineerId, source: 'bad' });
+  }
+  return out;
+}
+
+// IDを指定して案件・要員を読む（ステータスによらず）。再提案抑制で、見送りにした組の案件・要員の内容と再送を比べるために使う
+export async function fetchItemsByIdsSheets(
+  projectIds: Set<string>,
+  engineerIds: Set<string>,
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (!configured() || (projectIds.size === 0 && engineerIds.size === 0)) return { projects: [], engineers: [] };
+  const pick = async <T>(tab: string, ids: Set<string>, toItem: (cells: string[]) => T): Promise<T[]> => {
+    if (ids.size === 0) return [];
+    const col = colIndex(tab, 'ID');
+    const items = (await readRows(tab)).filter((r) => ids.has(cellStr(r.cells, col))).map((r) => toItem(r.cells));
+    untrustedReplyRows.delete(tab);
+    return items;
+  };
+  return { projects: await pick('案件', projectIds, rowToProject), engineers: await pick('要員', engineerIds, rowToEngineer) };
 }
 
 // サマリで知らせ損ねたマッチを次の回のサマリに載せるための要約（保存済みの行から）

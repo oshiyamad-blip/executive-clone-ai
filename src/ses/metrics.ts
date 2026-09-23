@@ -22,8 +22,10 @@ export function computeBandMetrics(matches: ReviewMatch[], feedback: MatchFeedba
   }
 
   const keys: BandKey[] = ['strong', 'tentative', 'negotiable'];
+  // 提示しなかった組（AI判定で不適合・判定待ち）は成約率・妥当率の母数に入れない
+  const presented = matches.filter((m) => m.category !== 'rejected' && m.category !== 'deferred');
   return keys.map((band) => {
-    const inBand = matches.filter((m) => bandKeyOf(m) === band);
+    const inBand = presented.filter((m) => bandKeyOf(m) === band);
     let introduced = 0;
     let closedWon = 0;
     let dropped = 0;

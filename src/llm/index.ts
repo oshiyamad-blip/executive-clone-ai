@@ -22,7 +22,11 @@ export interface GenOptions {
   // SDKの自動再試行回数（呼び出し側が自前で再試行する場合は0にして多重再試行を避ける）
   maxRetries?: number;
   timeoutMs?: number;
+  // 推論の深さ（Anthropic の output_config.effort）。対応していないモデル（Haiku 等）と Gemini では無視する
+  effort?: LlmEffort;
 }
+
+export type LlmEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 function provider(): string {
   return (process.env.LLM_PROVIDER?.trim() || 'anthropic').toLowerCase();

@@ -157,16 +157,21 @@ function nonEmpty(s: string): string | null {
   return t ? t : null;
 }
 
-function projectsCompatible(a: Project, b: Project): boolean {
+// 単金以外の属性（別のメール・勤務地・営業元）が同じ案件でありえるか
+function projectsCompatibleIgnoringRate(a: Project, b: Project): boolean {
   return (
     a.sourceMailId !== b.sourceMailId &&
-    sameIfKnown(a.rateMax ?? a.rateMin, b.rateMax ?? b.rateMin, sameRate) &&
     sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y) &&
     sameIfKnown(nonEmpty(a.agentCompany), nonEmpty(b.agentCompany), (x, y) => x === y)
   );
 }
 
-function engineersCompatible(a: Engineer, b: Engineer): boolean {
+function projectsCompatible(a: Project, b: Project): boolean {
+  return projectsCompatibleIgnoringRate(a, b) && sameIfKnown(a.rateMax ?? a.rateMin, b.rateMax ?? b.rateMin, sameRate);
+}
+
+// 希望単金以外の属性（別のメール・イニシャル・年齢・最寄駅・居住県）が同じ人物でありえるか
+function engineersCompatibleIgnoringRate(a: Engineer, b: Engineer): boolean {
   const nameA = nonEmpty(a.displayName);
   const nameB = nonEmpty(b.displayName);
   return (
@@ -176,13 +181,28 @@ function engineersCompatible(a: Engineer, b: Engineer): boolean {
     nameA === nameB &&
     sameIfKnown(a.age, b.age, (x, y) => Math.abs(x - y) <= 1) &&
     sameIfKnown(nonEmpty(a.nearestStation), nonEmpty(b.nearestStation), (x, y) => x === y) &&
-    sameIfKnown(a.desiredRate, b.desiredRate, sameRate) &&
     sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y)
   );
 }
 
+function engineersCompatible(a: Engineer, b: Engineer): boolean {
+  return engineersCompatibleIgnoringRate(a, b) && sameIfKnown(a.desiredRate, b.desiredRate, sameRate);
+}
+
 const projectKey = (p: Project) => `${p.title}${p.requiredSkills.join('')}${p.agentCompany}`;
 const engineerKey = (e: Engineer) => `${e.displayName}${e.skills.join('')}${e.agentCompany}`;
+
+// 同じ案件（同じ行、または名寄せで同じとみなせる再送）か。単金・日付の違いは問わない（再提案抑制で使う）
+export function sameProjectIgnoringRate(a: Project, b: Project): boolean {
+  if (a.id === b.id) return true;
+  return projectsCompatibleIgnoringRate(a, b) && bigramSimilarity(projectKey(a), projectKey(b)) >= DEDUP_THRESHOLD;
+}
+
+// 同じ要員（同じ行、または名寄せで同じとみなせる再送）か。希望単金・日付の違いは問わない（再提案抑制で使う）
+export function sameEngineerIgnoringRate(a: Engineer, b: Engineer): boolean {
+  if (a.id === b.id) return true;
+  return engineersCompatibleIgnoringRate(a, b) && bigramSimilarity(engineerKey(a), engineerKey(b)) >= DEDUP_THRESHOLD;
+}
 
 // 同一案件が同じ営業元から再送された場合などの重複統合（単金・勤務地・営業元が食い違うものは別案件として残す）
 export function dedupeProjects(projects: Project[]): Project[] {

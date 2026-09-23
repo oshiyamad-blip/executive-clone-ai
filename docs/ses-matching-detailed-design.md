@@ -187,10 +187,15 @@ export async function matchAll(projects: Project[], engineers: Engineer[]): Prom
 運用上の影響は小さい（居住地・勤務地はメール本文に明記されるケースが大半でnull化しにくい項目のため）
 が、抽出精度チューニング時に想定外の除外が増えた場合はここを疑うこと。
 
-**最終判定**: `pair.needsReview || isDemo()` の場合は必ず `buildHeuristicResult`（LLM不使用）。
-それ以外は `judgeWithLlm`（Sonnet 5、`matchModel()`）を試み、例外時は `buildHeuristicResult` に
-フォールバックする（1ペアの判定失敗がバッチ全体を止めない）。ヒューリスティックのスコア式:
-`round(skillMatchRate×70 + (locationOk?20:0) + (timingOk?10:0))`（0〜100の範囲は数式上自明に収まる）。
+**最終判定**: `pair.needsReview` の場合は `buildHeuristicResult`（LLM不使用・判定「ルールのみ」）。demo は
+`demoJudgment`（商流メモの年齢上限・常駐必須等と要員の突き合わせだけを真似る決定的な代用判定）、本番は `judgeWithLlm`
+（Sonnet 5、`matchModel()`、`effort: low`、構造化出力 {score, reason, dealBreakers, questions}）の結果を
+`finishJudgement` → `gateJudgement` で区分にする: 即NG（dealBreakers）またはスコアが `MATCH_REJECT_LLM_SCORE`（既定40）未満 → `rejected`
+（下書きなし・サマリは件数だけ）、`MATCH_MIN_LLM_SCORE`（既定60）未満 → 成立候補・交渉提案を `tentative` に、それ以外はルールの区分のまま。
+交渉提案もこの関門を通る。1回の実行の予算 `SES_JUDGE_BUDGET_JPY` に達した後の組と、一時的な失敗（429/5xx/通信）の組は
+`deferred`（判定「未判定」。判定済みに数えず、案件・要員を突合済にしないため次回判定）、やり直しても通らない失敗の組は
+下書きを作らない `tentative`（判定「判定失敗」）にする（1ペアの判定失敗がバッチ全体を止めない）。ヒューリスティックのスコア式:
+`round(skillMatchRate×70 + (locationOk?20:0) + (timingOk?10:0))` から鮮度の減点を引く（0〜100に収める）。
 
 ### 2.7 `src/ses/draft.ts` — 紹介メール下書き生成
 
@@ -282,7 +287,7 @@ demo=直前の `data/ses-demo/{projects,engineers}.json`）で案件・要員を
 | 外部API呼び出し（Gmail/Sheets/Anthropic/Notion） | try/catch で吸収し `console.error`/`console.warn` + 空配列やフォールバック値を返す | 各モジュールの本番分岐 |
 | バッチのステップ間 | 各ステップを `index.ts` 側でも try/catch し、前段が全滅しても後段を実行（可能な範囲で） | `collectAndStore`/`matchDraftAndNotify` |
 | 1件の失敗 vs 全体停止 | メール単位・ペア単位・マッチ単位でループ内 try/catch し、1件の失敗が全体を止めない | `extractItems`/`matchAll`/`createDrafts`/`persistMatches` |
-| LLM判定の失敗 | ヒューリスティック（決定的スコア式）にフォールバックし、マッチ自体は落とさない | `matchAll` の `judgeWithLlm` catch節 |
+| LLM判定の失敗 | 一時的な失敗は「未判定」で保存して次回判定、それ以外は下書きを作らない参考提案として保存（マッチ自体は落とさない） | `judgeOne` の catch節 |
 | 環境変数未設定 | 例外を投げず空文字列・既定値・`console.warn` で縮退動作 | `config.ts` 全関数、`saveProject`/`saveEngineer`/`saveMatch` の DB ID 未設定チェック |
 | トップレベル | `runSesBatch(...).catch(console.error)` で最終防波堤 | `index.ts` 末尾 |
 
@@ -300,7 +305,7 @@ demo=直前の `data/ses-demo/{projects,engineers}.json`）で案件・要員を
 | extract | `extract.ts` 冒頭 `if (isDemo())` | `EXPECTED_EXTRACTIONS` 固定マッピング | なし |
 | store | `index.ts` の `storeProjects`/`storeEngineers` 内 `if (isDemo())` | `writeDemoArtifact` | なし |
 | match一次選抜 | 分岐なし（純関数） | `primarySelect` をdemo/本番共通実行 | なし |
-| match最終判定 | `matchAll` 内 `pair.needsReview \|\| isDemo()` | ヒューリスティックスコア | なし |
+| match最終判定 | `judgeOne` 内 `isDemo()` | `demoJudgment`（決定的な代用判定）→ 本番と同じ関門 | なし |
 | draft | `draft.ts` 内 `isDemo() ? ... : ...` | テンプレート文 + ローカルファイル | なし |
 | notify（保存） | `persistMatches` 内 `if (isDemo())` | `writeDemoArtifact('matches', ...)` | なし |
 | notify（通知） | `notifySummary` 内 `if (isDemo()) return` | `console.log` のみ | なし |
@@ -338,6 +343,7 @@ demo=直前の `data/ses-demo/{projects,engineers}.json`）で案件・要員を
 | xlsx添付 | `sesmail_demo_p1` の `attachments[0].text` | parseの添付テキスト同梱 |
 | スプレッドシートリンク | `sesmail_demo_multi` の `sheetLinks` | 本文中リンクの型(demoは展開スキップ) |
 | その他メール（破棄） | `sesmail_demo_other` | `EXPECTED_EXTRACTIONS` 未定義→`other`扱い |
+| 最終判定で不適合（ルールでは成立候補） | `sesmail_demo_p2` × `sesmail_demo_e5` | P2 の商流メモ「50歳まで」× 55歳 → `demoJudgment` が即NG（年齢）→ `rejected`（サマリは件数だけ） |
 
 上記表の「除外」ケース（P2×E2）は `MIN_GROSS_MARGIN_JPY` を50000/200000のいずれに変更しても
 常に除外され続ける（差額2万円は両閾値を下回る）。**マッチ件数が変化する境界を作っているのは

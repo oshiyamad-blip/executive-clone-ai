@@ -22,6 +22,8 @@ import {
   replyMetaJson,
   parseReplyMeta,
   sanitizeListItem,
+  JUDGE_VERDICT_LABEL,
+  judgeVerdictLabel,
 } from './mapping.js';
 import type {
   Signal,
@@ -232,9 +234,10 @@ async function queryAll(dataSourceId: string, args: QueryArgs, limit: number): P
 
 // SESで後から追加したテキスト列（安定ID）を、既存のDBにも自動で追加する（プロセス内で1回。
 // 既存の列は型を変えない。権限不足等で追加できなければ警告のみ — 保存時に失敗し、元メールは次回再処理される）
-const ensuredProps = new Map<string, Promise<void>>();
+const ensuredProps = new Map<string, Promise<boolean>>();
 
-function ensureTextProperties(dataSourceId: string, names: string[]): Promise<void> {
+// 列がある（または追加できた）なら true
+function ensureTextProperties(dataSourceId: string, names: string[]): Promise<boolean> {
   const key = `${dataSourceId}:${names.join(',')}`;
   let pending = ensuredProps.get(key);
   if (!pending) {
@@ -244,7 +247,7 @@ function ensureTextProperties(dataSourceId: string, names: string[]): Promise<vo
           properties?: Record<string, unknown>;
         };
         const missing = names.filter((n) => !(n in (ds.properties ?? {})));
-        if (missing.length === 0) return;
+        if (missing.length === 0) return true;
         await throttle(() =>
           notion.dataSources.update({
             data_source_id: dataSourceId,
@@ -252,9 +255,11 @@ function ensureTextProperties(dataSourceId: string, names: string[]): Promise<vo
           } as never),
         );
         console.log(`Notion: SES用のテキスト列を追加しました（${missing.join(', ')}）`);
+        return true;
       } catch (err) {
         ensuredProps.delete(key); // 次回呼び出しで再試行
         console.warn(`Notion: SES用の列（${names.join(', ')}）の確認・追加に失敗: ${safeErr(err)}`);
+        return false;
       }
     })();
     ensuredProps.set(key, pending);
@@ -397,6 +402,8 @@ export async function saveMatch(
     return '';
   }
   const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  // 判定列を追加できない（権限不足等）ときは判定を書かずに保存する（保存そのものを失敗させない）
+  const hasJudgeColumn = await ensureTextProperties(dataSourceId, ['判定']);
   const properties: Record<string, unknown> = {
     マッチ名: { title: toRichText(match.title) },
     マッチID: { rich_text: toRichText(match.id) },
@@ -408,6 +415,7 @@ export async function saveMatch(
     ステータス: { select: { name: matchStatusLabel(match.status) } },
     検出日時: { date: { start: match.detectedAt.toISOString() } },
   };
+  if (hasJudgeColumn) properties['判定'] = { rich_text: toRichText(judgeVerdictLabel(match.verdict)) };
   if (refs?.projectNotionPageId) properties['案件'] = { relation: [{ id: refs.projectNotionPageId }] };
   if (refs?.engineerNotionPageId) properties['要員'] = { relation: [{ id: refs.engineerNotionPageId }] };
   return upsertByStableId(dataSourceId, 'マッチID', match.id, properties, toParagraphBlocks(match.reason));
@@ -474,21 +482,56 @@ export async function markItemsMatched(kind: 'project' | 'engineer', ids: string
   return 0;
 }
 
-// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。since 以降に検出したものに絞る
+// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）。since 以降に検出したものに絞る。
+// AI判定を次回に回した組（判定「未判定」）は含めない
 export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
   if (dbProvider() === 'sheets') return sheetsDb.fetchJudgedMatchIdsSheets();
   if (!MATCH_DB_ID) return new Set();
   const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
-  await ensureTextProperties(dataSourceId, ['マッチID']);
+  await ensureTextProperties(dataSourceId, ['マッチID', '判定']);
   const pages = await queryAll(
     dataSourceId,
     since ? { filter: { property: '検出日時', date: { on_or_after: since.toISOString() } } } : {},
     10_000,
   );
   const ids = pages
-    .map((page) => readRichText(((page as { properties?: Record<string, unknown> }).properties ?? {})['マッチID']))
+    .map((page) => (page as { properties?: Record<string, unknown> }).properties ?? {})
+    .filter((props) => readRichText(props['判定']) !== JUDGE_VERDICT_LABEL.deferred)
+    .map((props) => readRichText(props['マッチID']))
     .filter(Boolean);
   return new Set(ids);
+}
+
+export type { RejectedMatchRow } from './sheets.js';
+
+// 再提案抑制の元になる組（ステータス「見送り」のマッチと、評価で「ズレ」にしたマッチ badIds）。
+// Notion は「見送り」のマッチだけを読み、案件ID・要員IDはマッチIDから取り出す（取り出せないものは呼び出し側で除く）
+export async function fetchRejectedMatchRows(
+  badIds: Set<string>,
+  parseId: (matchId: string) => { projectId: string; engineerId: string } | null,
+): Promise<sheetsDb.RejectedMatchRow[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchRejectedMatchRowsSheets(badIds);
+  if (!MATCH_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  const pages = await queryAll(
+    dataSourceId,
+    { filter: { property: 'ステータス', select: { equals: matchStatusLabel('dropped') } } } as QueryArgs,
+    10_000,
+  );
+  return pages.flatMap((page) => {
+    const matchId = readRichText(((page as { properties?: Record<string, unknown> }).properties ?? {})['マッチID']);
+    const ids = matchId ? parseId(matchId) : null;
+    return ids ? [{ matchId, ...ids, source: 'dropped' as const }] : [];
+  });
+}
+
+// IDを指定して案件・要員を読む（ステータスによらず。再提案抑制用）。Notion は読まない（直近の突合の対象だけで照合する）
+export async function fetchItemsByIds(
+  projectIds: Set<string>,
+  engineerIds: Set<string>,
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchItemsByIdsSheets(projectIds, engineerIds);
+  return { projects: [], engineers: [] };
 }
 
 // 突合対象の案件（募集中のみ）を新しい順に取得する（通常バッチの突合プール・--match-only・プロパー候補探しで使用）。

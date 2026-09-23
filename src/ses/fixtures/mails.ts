@@ -1,5 +1,5 @@
 // demo用の固定メールデータ。
-// 「成立」「粗利不足で除外」「単金不明で要確認」「その他（破棄）」の全分岐と、
+// 「成立」「粗利不足で除外」「単金不明で要確認」「最終判定で不適合」「その他（破棄）」の全分岐と、
 // 1通複数件抽出・添付(xlsx)・スプレッドシートリンクのケースを網羅する。
 import type { SesRawMail } from '../../types/index.js';
 import { demoReceivedAt } from './demoClock.js';
@@ -89,7 +89,7 @@ export const FIXTURE_MAILS: FixtureMail[] = [
 リモート: 不可（常駐必須）
 開始時期: 2026年8月1日
 期間: 12ヶ月
-商流: 二次請け。面談2回
+商流: 二次請け。50歳まで。面談2回
 ご担当: 佐藤次郎（sato@gammasys.example.jp）`,
     receivedAt: d('2026-07-16T10:00:00+09:00'),
     attachments: [],
@@ -227,6 +227,31 @@ https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit`,
 リモート希望: 一部リモート可
 ご担当: 渡辺七海（watanabe@iotasoft.example.jp）`,
     receivedAt: d('2026-07-16T15:30:00+09:00'),
+    attachments: [],
+    sheetLinks: [],
+  },
+
+  // --- E5: 要員（兵庫・Java/Spring Boot、55歳）。ルールではP2の成立候補になるが、P2の商流メモ「50歳まで」に反するため
+  //     最終判定で「不適合」になる（サマリには件数だけ載る） ---
+  {
+    id: 'sesmail_demo_e5',
+    from: '小林九郎 <kobayashi@kappasys.example.jp>',
+    to: '営業部 <sales@ourcompany.example.jp>',
+    subject: '【要員情報】Javaエンジニア H.K. 8月稼働可',
+    body: `お世話になっております。株式会社カッパシステムの小林です。
+
+氏名: H.K.
+年齢: 55歳
+スキル: Java, Spring Boot
+経験年数: 25年
+希望単金: 45万円/月
+居住地: 兵庫県神戸市
+最寄駅: 三宮駅
+稼働開始可能日: 2026年8月1日
+稼働率: 週5
+リモート希望: 不可
+ご担当: 小林九郎（kobayashi@kappasys.example.jp）`,
+    receivedAt: d('2026-07-16T16:00:00+09:00'),
     attachments: [],
     sheetLinks: [],
   },

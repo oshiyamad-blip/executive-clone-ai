@@ -2,7 +2,7 @@
 // Notion（index.ts）と Google Sheets（sheets.ts）の両バックエンドが同じ表記で保存・復元するための
 // 単一の変換層。ここを変えると既存データの読み戻しに影響するため、値の変更は慎重に。
 import { createHmac, timingSafeEqual } from 'crypto';
-import type { RemoteOption, MatchStatus, ReplyTarget, FeedbackVerdict, DraftRef } from '../types/index.js';
+import type { RemoteOption, MatchStatus, ReplyTarget, FeedbackVerdict, DraftRef, JudgeVerdict } from '../types/index.js';
 
 export const REMOTE_LABEL: Record<RemoteOption, string> = {
   full: 'フル',
@@ -32,6 +32,20 @@ export function matchStatusLabel(status: MatchStatus): string {
 }
 
 export const FB_VERDICT_LABEL: Record<FeedbackVerdict, string> = { good: '妥当', bad: 'ズレ' };
+
+// AI最終判定の結果（マッチタブの「判定」列）。「未判定」の行は判定済みに数えず、次回の実行で判定し直す
+export const JUDGE_VERDICT_LABEL: Record<JudgeVerdict, string> = {
+  passed: '通過',
+  low: '低評価',
+  rejected: '不適合',
+  deferred: '未判定',
+  failed: '判定失敗',
+  rule: 'ルールのみ',
+};
+
+export function judgeVerdictLabel(verdict: JudgeVerdict | undefined): string {
+  return verdict ? JUDGE_VERDICT_LABEL[verdict] : '';
+}
 
 // 要員の「営業元」は 会社/担当/メール を1テキストに結合して保存する。
 // 読み戻し時は " / " 区切りで分解する（値自体に " / " を含む場合もメールは '@' で確実に拾う）。
@@ -138,6 +152,8 @@ export const DRAFT_STATE = {
   noRecipient: '不要（宛先が不明なため作成できません）',
   // 稼働可でなくなった社員のプロパー候補（再び稼働可になって候補に戻れば「未作成」に戻す）
   retired: '不要（稼働可の社員ではなくなりました）',
+  // AI判定を次回に回した組（判定の結果、下書きを作る区分になれば「未作成」、ならなければ「不要」に変わる）
+  awaitingJudge: '判定待ち（次回のバッチでAI判定します）',
 } as const;
 
 // 作成済・送信済・作成中は機械が上書きしない（文面・下書きデータも固定する）
@@ -269,6 +285,8 @@ export interface DraftColumns {
 export interface DraftMergeOptions {
   // 下書きを作るべき区分なのに文面を用意できなかった（空欄の状態を「文面を用意できませんでした」にする）
   failed?: boolean;
+  // AI判定を次回に回した組（空欄の状態を「判定待ち」にする。人が付けたものと区別できない「不要」にしない）
+  deferred?: boolean;
   // 下書きデータ列の署名鍵（SES_DRAFT_SIGNING_KEY）。空なら署名しない
   signingKey?: string;
   // 署名に含める行の識別（タブ・ID）
@@ -288,9 +306,9 @@ export function mergeDraftColumns(
   const bind = opts.bind ?? [];
   const prevJson = existing?.data ?? '';
   const prev = verifyDraftData(prevJson, key, bind) ? parseDraftData(prevJson) : {};
-  const failed = Boolean(opts.failed);
-  const p = mergeDraftSide(existing?.projectState ?? '', existing?.projectText ?? '', prev.project, project, failed);
-  const e = mergeDraftSide(existing?.engineerState ?? '', existing?.engineerText ?? '', prev.engineer, engineer, failed);
+  const flags = { failed: Boolean(opts.failed), deferred: Boolean(opts.deferred) };
+  const p = mergeDraftSide(existing?.projectState ?? '', existing?.projectText ?? '', prev.project, project, flags);
+  const e = mergeDraftSide(existing?.engineerState ?? '', existing?.engineerText ?? '', prev.engineer, engineer, flags);
   const data: StoredDraftData = {};
   if (p.stored) data.project = p.stored;
   if (e.stored) data.engineer = e.stored;
@@ -308,11 +326,13 @@ function mergeDraftSide(
   text: string,
   prevStored: StoredDraft | undefined,
   fresh: DraftRef | undefined,
-  failed: boolean,
+  flags: { failed: boolean; deferred: boolean },
 ): { state: string; text: string; stored: StoredDraft | undefined } {
   const s = state.trim();
   if (isDraftStateLocked(s)) return { state, text, stored: prevStored };
-  const machineState = s === '' || isDraftRegenerationPending(s) || s === DRAFT_STATE.noRecipient || s === DRAFT_STATE.retired;
+  const awaiting = s === DRAFT_STATE.awaitingJudge;
+  const machineState =
+    s === '' || isDraftRegenerationPending(s) || s === DRAFT_STATE.noRecipient || s === DRAFT_STATE.retired || awaiting;
   if (fresh) {
     // 読み戻せない側（宛先が空等）は下書きデータに入れず、依頼を受けない状態にする（文面は人が読めるよう残す）
     const stored = cleanStoredDraft(toStoredDraft(fresh));
@@ -320,11 +340,14 @@ function mergeDraftSide(
     if (!stored) return { state: machineState ? DRAFT_STATE.noRecipient : state, text: display, stored: undefined };
     return { state: machineState ? DRAFT_STATE.pending : state, text: draftDisplayText(stored), stored };
   }
-  if (failed && (s === '' || isDraftRegenerationPending(s)) && !prevStored) {
+  if (flags.deferred && (s === '' || awaiting) && !prevStored) {
+    return { state: DRAFT_STATE.awaitingJudge, text, stored: undefined };
+  }
+  if (flags.failed && (s === '' || awaiting || isDraftRegenerationPending(s)) && !prevStored) {
     return { state: DRAFT_STATE.genFailed, text, stored: undefined };
   }
-  // 作り直し待ちだった側が、判定し直しで下書きを作らない区分（参考提案・要確認）になった
-  if (isDraftRegenerationPending(s)) {
+  // 作り直し待ち・判定待ちだった側が、判定し直しで下書きを作らない区分（参考提案・要確認・不適合）になった
+  if (isDraftRegenerationPending(s) || awaiting) {
     return { state: prevStored ? DRAFT_STATE.pending : DRAFT_STATE.notNeeded, text, stored: prevStored };
   }
   if (s) return { state, text, stored: prevStored };

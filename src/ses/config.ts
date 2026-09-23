@@ -175,9 +175,21 @@ export function hourlyToMonthlyHours(): number {
   return envNum('HOURLY_TO_MONTHLY_HOURS', 160, { min: 1 });
 }
 
-// 最終判定（LLM）のスコアがこれ未満の「成立候補」は「参考提案」に下げる（自動の紹介下書きを作らない）。0で無効
+// AI最終判定のスコアがこれ未満の成立候補・交渉提案は「参考提案」に下げる（自動の紹介下書きを作らない）。0で無効
 export function matchMinLlmScore(): number {
-  return envNum('MATCH_MIN_LLM_SCORE', 50, { min: 0, max: 100 });
+  return envNum('MATCH_MIN_LLM_SCORE', 60, { min: 0, max: 100 });
+}
+
+// AI最終判定のスコアがこれ未満の組は「不適合」とし、サマリには件数だけを載せる（マッチタブには判定「不適合」で残す）。
+// 即NG条件（商流・年齢等）に反すると判定された組は、スコアに関わらず不適合。0でスコアによる不適合を無効
+export function matchRejectLlmScore(): number {
+  return envNum('MATCH_REJECT_LLM_SCORE', 40, { min: 0, max: 100 });
+}
+
+// 1回の実行でAI最終判定と紹介文面の生成に使ってよいLLMコストの目安（円）。超えたら残りの組はAI判定をせず
+// ルールの結果のまま「未判定」で保存し、次回の実行で判定する（その組の案件・要員は突合済にしない）。0で上限なし
+export function judgeBudgetJpy(): number {
+  return envNum('SES_JUDGE_BUDGET_JPY', 300, { min: 0 });
 }
 
 // 時期整合判定の猶予日数
