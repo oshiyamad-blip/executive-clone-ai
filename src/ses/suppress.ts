@@ -60,7 +60,9 @@ function memberSet(labels: string[]): Set<string> {
 
 // 判定に使うスキルの要件（必須、無ければ尚可）で満たせなかった要件
 function missingRequirements(project: Project, skills: string[]): Set<string> {
-  const m = skillMatch(project.requiredSkills, skills) ?? skillMatch(project.preferredSkills, skills);
+  // 記載の無い工程・役割・業種も不足に数える（後から記載された要件を「不足していたスキルの追加」として拾う）
+  const opts = { softUnstated: false };
+  const m = skillMatch(project.requiredSkills, skills, opts) ?? skillMatch(project.preferredSkills, skills, opts);
   return new Set((m?.breakdown.missing ?? []).map((r) => r.toLowerCase()));
 }
 

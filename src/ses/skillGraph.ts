@@ -45,6 +45,7 @@ const IMPLIES: Record<string, string[]> = {
   AKS: ['Kubernetes', 'Azure'],
   OpenShift: ['Kubernetes'],
   Apex: ['Salesforce'],
+  'Oracle APEX': ['Oracle'],
   LWC: ['Salesforce'],
   Visualforce: ['Salesforce'],
   ABAP: ['SAP'],
@@ -66,7 +67,7 @@ const IMPLIES: Record<string, string[]> = {
   RHEL: ['Linux'],
   CentOS: ['Linux'],
   Ubuntu: ['Linux'],
-  'Windows Server': ['Windows'],
+  'Windows Server': ['Windows', 'インフラ'],
   'PL/SQL': ['Oracle', 'SQL'],
   'T-SQL': ['SQL Server', 'SQL'],
   MySQL: ['SQL'],
@@ -80,6 +81,19 @@ const IMPLIES: Record<string, string[]> = {
   'GitHub Actions': ['CI/CD'],
   要件定義: ['上流工程'],
   基本設計: ['上流工程'],
+  // 業種: 証券・保険は金融の一部（「金融系の業務経験」を証券・保険の経験で満たす）
+  証券: ['金融'],
+  保険: ['金融'],
+  // 役割: 上位の役割の経験は下位の役割の必須を満たす（PM ⇒ PL は確実、PL ⇒ SE は推定）
+  PM: ['PL'],
+  PL: ['SE'],
+  // 基盤の技術からの推定（ネットワーク機器・クラウド・OS の経験 ⇒ NW・インフラの役割）
+  Cisco: ['NW'],
+  'TCP/IP': ['NW'],
+  AWS: ['インフラ'],
+  Azure: ['インフラ'],
+  GCP: ['インフラ'],
+  Linux: ['インフラ'],
 };
 
 // 推定にとどまる含意（子→親）。これ以外の辺は確実な含意
@@ -91,6 +105,16 @@ const WEAK_EDGES: Array<[string, string]> = [
   ['React Native', 'React'],
   ['Unity', 'C#'],
   ['OpenShift', 'Kubernetes'],
+  // Power BI（BIのレポート作成）は Power Apps / Power Automate のアプリ開発を意味する Power Platform の必須を確実には満たさない
+  ['Power BI', 'Power Platform'],
+  ['PL', 'SE'],
+  ['Cisco', 'NW'],
+  ['TCP/IP', 'NW'],
+  ['AWS', 'インフラ'],
+  ['Azure', 'インフラ'],
+  ['GCP', 'インフラ'],
+  ['Linux', 'インフラ'],
+  ['Windows Server', 'インフラ'],
 ];
 
 // 条件つきの含意（推定）。ASP.NET は日本の既存システムでは VB.NET で書かれることも多いため、VB の記載が無いときだけ C# を推定する
@@ -109,6 +133,7 @@ const NOT_EQUIVALENT: Array<[string, string]> = [
   ['C#', 'C++'],
   ['Go', 'GCP'],
   ['SQL Server', 'MySQL'],
+  ['Apex', 'Oracle APEX'],
 ];
 
 const key = (s: string) => s.toLowerCase();
@@ -187,6 +212,11 @@ export function descendantKeysOf(skill: string): ReadonlySet<string> {
 // skill から含意される親スキル（小文字の正規形）
 export function ancestorKeysOf(skill: string): ReadonlySet<string> {
   return ANCESTORS.get(key(skill)) ?? new Set();
+}
+
+// skill から確実な含意だけでたどれる親スキル（小文字の正規形）
+export function strongAncestorKeysOf(skill: string): ReadonlySet<string> {
+  return STRONG_ANCESTORS.get(key(skill)) ?? new Set();
 }
 
 // 否定リストの組か（同義として扱ってはいけない）

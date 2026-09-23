@@ -28,7 +28,7 @@ const EN_PATTERNS: RegExp[] = [
   /(?:ignore|reveal|override|forget|print|show)\s+(?:the\s+|your\s+)?system\s*prompt/i,
   /(?:set|give|output|assign)\s+(?:the\s+)?score\s+(?:to|of|as)\s+\d{2,3}/i,
   /you\s+are\s+(?:now\s+)?(?:an?\s+)?(?:ai|assistant|language\s+model|chatbot)\b/i,
-  /<\/?\s*(?:untrusted_mail|case_data|reference_feedback)\s*>/i,
+  /<\s*\/?\s*(?:untrusted_mail|case_data|reference_feedback)\b/i,
 ];
 
 const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
@@ -39,7 +39,10 @@ export function looksLikeInjection(text: string): boolean {
   return JA_PATTERNS.some((p) => p.test(compact)) || EN_PATTERNS.some((p) => p.test(spaced));
 }
 
-// データ区切りのタグを値の側から閉じられないようにする（最終判定の入力・参考の評価に入れる社外・人の自由記述の値）
+// データ区切りのタグを値の側から閉じられないようにする（抽出・最終判定・文面の生成の入力に入れる社外・人の自由記述の値）。
+// '< /untrusted_mail>' のように '<' と '/' の間に空白を挟んだ閉じタグも無害にする
+const DATA_TAG = /<(\s*\/?\s*(?:untrusted_mail|case_data|reference_feedback))/gi;
+
 export function dataSafe(s: string): string {
-  return s.replace(/<(\/?\s*(?:untrusted_mail|reference_feedback))/gi, '＜$1');
+  return s.replace(DATA_TAG, '＜$1');
 }

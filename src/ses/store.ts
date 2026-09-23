@@ -217,9 +217,21 @@ export function sameProjectIgnoringRate(a: Project, b: Project): boolean {
 }
 
 // 同じ要員（同じ行、または名寄せで同じとみなせる再送）か。希望単金・日付の違いは問わない（再提案抑制で使う）
+// 表示名はイニシャルだけのため、同じ営業元の同じイニシャル・似たスキルの別人を取り違えないよう、再提案抑制では
+// 同じ営業元のアドレスに加えて年齢か最寄駅の一致（どちらも記載があるもの）を求める（別人の組を黙って抑制しない）
 export function sameEngineerIgnoringRate(a: Engineer, b: Engineer): boolean {
   if (a.id === b.id) return true;
-  return engineersCompatibleIgnoringRate(a, b) && bigramSimilarity(engineerKey(a), engineerKey(b)) >= DEDUP_THRESHOLD;
+  return (
+    engineersCompatibleIgnoringRate(a, b) &&
+    bigramSimilarity(engineerKey(a), engineerKey(b)) >= DEDUP_THRESHOLD &&
+    sameAgentMail(a, b) &&
+    ((a.age !== null && a.age === b.age) || (nonEmpty(a.nearestStation) !== null && nonEmpty(a.nearestStation) === nonEmpty(b.nearestStation)))
+  );
+}
+
+function sameAgentMail(a: Engineer, b: Engineer): boolean {
+  const mail = a.agentEmail.trim().toLowerCase();
+  return mail !== '' && mail === b.agentEmail.trim().toLowerCase();
 }
 
 // 同一案件が同じ営業元から再送された場合などの重複統合（単金・勤務地・営業元が食い違うものは別案件として残す）
@@ -314,6 +326,8 @@ export function reconcileReextractedIds<T extends Project | Engineer>(
     }
     let changed = 0;
     for (const [i, id] of assigned) {
+      // 保存済みの行に付いた指示混入疑い（AI判定・人の印）は、抽出し直しで印が立たなくても引き継ぐ
+      if (existing.find((x) => x.id === id)?.injectionSuspected && !out[i].injectionSuspected) out[i] = { ...out[i], injectionSuspected: true };
       if (out[i].id === id) continue;
       out[i] = { ...out[i], id };
       changed += 1;

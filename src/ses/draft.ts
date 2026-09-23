@@ -16,6 +16,7 @@ import { redactable, safeErr } from './redact.js';
 import { recordHealEvent, recordStat } from './heal/events.js';
 import { hasKnownInitials, toInitials, UNKNOWN_INITIALS } from './pii.js';
 import { callLimits, pastRunDeadline } from './schedule.js';
+import { dataSafe } from './injection.js';
 import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarget } from '../types/index.js';
 
 let demoDraftCounter = 0;
@@ -303,8 +304,15 @@ function engineerLabel(engineer: Engineer): string {
   return hasKnownInitials(engineer.displayName) ? engineer.displayName : MISSING_ENGINEER_INITIALS;
 }
 
-// 文面の中で要員の表示名を差し込む位置（件名・導入文・表の「表示名」）
-const ENGINEER_LABEL_SPOTS = [/【ご提案】(.+?)様のご紹介/g, / - (.+?)様向け/g, /要員「(.+?)」様/g, /表示名\s*[:：]\s*([^\n\r]+)/g];
+// 文面の中で要員の表示名を差し込む位置（件名・導入文・表の「表示名」）。コードが決まった形で差し込む位置だけを見る:
+// 要員側宛の件名は「… - <表示名>様向け」で終わる（案件名に ' - ' を含んでも最後の区切りの後だけを表示名とみなす）。
+// 「表示名:」の行は生成AIが「K.S.様」「K.S.（イニシャル）」「K.S.　経験年数：5年」のように続けて書くため、最初の語だけを見る
+const ENGINEER_LABEL_SPOTS = [
+  /【ご提案】(.+?)様のご紹介/g,
+  /^[^\n\r]* - ([^\n\r]*?)様向け[ \t]*$/gm,
+  /要員「(.+?)」様/g,
+  /表示名[ \t]*[:：][ \t]*([^\s(（、,，]+)/g,
+];
 
 // 表示名の位置にイニシャル（または差し込みの表記）以外が入った文面か。表示名にイニシャルを徹底する前の版で保存した
 // 下書きデータに氏名が残っていれば、そのまま社外へ出さない（pendingDrafts が作り直しに回す）
@@ -312,7 +320,7 @@ export function hasNonInitialsEngineerLabel(d: { subject: string; body?: string 
   const text = `${d.subject}\n${d.body ?? ''}`.normalize('NFKC');
   for (const re of ENGINEER_LABEL_SPOTS) {
     for (const m of text.matchAll(re)) {
-      const label = m[1].trim();
+      const label = m[1].trim().replace(/(?:様|さん|氏)$/, '');
       if (label === MISSING_ENGINEER_INITIALS.normalize('NFKC')) continue;
       if (/[\u3040-\u30FF\u4E00-\u9FFF]/.test(label) || toInitials(label) === UNKNOWN_INITIALS || label.replace(/[^A-Za-z]/g, '').length > 3) {
         return true;
@@ -476,10 +484,6 @@ async function createProdDraftPair(
   ];
 }
 
-// データ区切りタグを値の側から閉じられないようにする
-function dataSafe(s: string): string {
-  return s.replace(/<(\/?\s*case_data)/gi, '＜$1');
-}
 
 function buildDraftPrompt(side: Side, view: RecipientView): string {
   const facts = [
@@ -552,5 +556,7 @@ export function disclosureIssues(
   if (/https?:\/\/|www\./i.test(text)) issues.push('URL');
   // 文面の材料にメールアドレスは無い（宛先はヘッダで指定する）ため、本文に現れたら外への誘導とみなす
   if (/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.test(text)) issues.push('メールアドレス');
+  // 表示名の位置にイニシャル以外（氏名）を書いた文面は定型文に差し替える（依頼の時点で作り直しに回さない）
+  if (hasNonInitialsEngineerLabel({ subject: '', body })) issues.push('要員の氏名');
   return issues;
 }

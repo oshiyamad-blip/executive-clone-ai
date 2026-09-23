@@ -653,8 +653,8 @@ async function testJudgeGateAndSuppression(): Promise<void> {
       at: new Date().toISOString(),
     });
     newRun();
-    await saveEngineer(gateEngineer('eng_gate_ok2', 'T.A.', { desiredRate: 51 }));
-    await saveEngineer(gateEngineer('eng_gate_ok3', 'T.A.', { desiredRate: 45 }));
+    await saveEngineer(gateEngineer('eng_gate_ok2', 'T.A.', { desiredRate: 51, age: 41 }));
+    await saveEngineer(gateEngineer('eng_gate_ok3', 'T.A.', { desiredRate: 45, age: 41 }));
     calls.length = 0;
     const fourth = await load();
     const suppression = await loadSuppressionIndex({ projects: fourth.projects, engineers: fourth.engineers });
@@ -812,6 +812,49 @@ async function testJudgeGateAndSuppression(): Promise<void> {
         sheets.record(JUDGE_BOOK, '要員', 'ID', 'eng_taint1')?.[INJECTION_COLUMN] === '' && !taintCalls.includes('eng_taint2') &&
         (taint2?.['判定根拠'] ?? '').includes(INJECTION_REVIEW_REASON) && taint2?.['案件側下書き状態'] === '不要',
       JSON.stringify([taint1?.['案件側下書き状態'], taintCalls, taint2?.[JUDGE_COLUMN], taint2?.['案件側下書き状態']]),
+    );
+    // 同じメールを抽出し直して印の無い案件として保存し直しても、AI判定が付けた印は消さない（外すのは人だけ）
+    newRun();
+    const tainted = twelfth.projects.find((p) => p.id === 'proj_taint')!;
+    await saveProjectsSheets([{ ...tainted, injectionSuspected: false }]);
+    check(
+      '指示混入疑いの印は、同じ案件を印なしで保存し直しても残る',
+      sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_taint')?.[INJECTION_COLUMN] === 'あり',
+      sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_taint')?.[INJECTION_COLUMN],
+    );
+
+    // 13回目: 認証・残高・モデル名の誤り（組によらない失敗）は「判定失敗」で埋もれさせず、未判定で次回に回す（突合済にしない）。
+    // 最初の1件の後はAIを呼ばない。直った次の実行で判定する
+    newRun();
+    const acctCalls: string[] = [];
+    __setMatchJudgeForTest(async (pair) => {
+      acctCalls.push(pair.engineer.id);
+      throw Object.assign(new Error('Your credit balance is too low'), { status: 400 });
+    });
+    await saveProject(project('proj_acct', { ...gateProject('proj_acct'), requiredSkills: ['Haskell'], businessFlow: '' }));
+    await saveEngineer(gateEngineer('eng_acct1', 'A.A.', { skills: ['Haskell'], agentEmail: 'a@acct1-gate.example.jp' }));
+    for (const n of [2, 3, 4, 5, 6]) {
+      await saveEngineer(gateEngineer(`eng_acct${n}`, `A.${'BCDEF'[n - 2]}.`, { skills: ['Haskell'], agentEmail: `x@acct${n}-gate.example.jp` }));
+    }
+    const acctLoad = await load();
+    await matchIncrementally(acctLoad.projects, acctLoad.engineers, acctLoad.scope);
+    const acct1 = row('proj_acct', 'eng_acct1');
+    const acct2 = row('proj_acct', 'eng_acct2');
+    check(
+      'アカウント・設定のエラーの組は未判定で保存し（判定済みにしない）、案件を突合済にせず、同時に始めた分の後はAIを呼ばない',
+      acct1?.[JUDGE_COLUMN] === '未判定' && acct2?.[JUDGE_COLUMN] === '未判定' && acctCalls.length <= 3 &&
+        !(await fetchJudgedMatchIds()).has(matchIdOf('proj_acct', 'eng_acct1')) &&
+        !sheets.record(JUDGE_BOOK, '案件', 'ID', 'proj_acct')?.[MATCHED_COLUMN] && hasFatal(),
+      JSON.stringify([acct1?.[JUDGE_COLUMN], acct2?.[JUDGE_COLUMN], acctCalls]),
+    );
+    newRun();
+    __setMatchJudgeForTest(async () => ({ score: 90, reason: '条件に合っています', dealBreakers: [], questions: [], injectionSuspected: false, injectionSource: 'unknown' }));
+    const acctRetry = await load();
+    await matchIncrementally(acctRetry.projects, acctRetry.engineers, acctRetry.scope);
+    check(
+      '直った次の実行で未判定の組を判定する',
+      row('proj_acct', 'eng_acct1')?.[JUDGE_COLUMN] === '通過' && row('proj_acct', 'eng_acct2')?.[JUDGE_COLUMN] === '通過',
+      JSON.stringify([row('proj_acct', 'eng_acct1')?.[JUDGE_COLUMN], row('proj_acct', 'eng_acct2')?.[JUDGE_COLUMN]]),
     );
   } finally {
     __setMatchJudgeForTest(null);

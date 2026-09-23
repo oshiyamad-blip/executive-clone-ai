@@ -2,7 +2,7 @@
 // 1つの記載を複数の技術に分ける（1→N）: 'Java(Spring Boot)' → Java, Spring Boot / 'AWS(EC2/RDS)' → AWS, EC2, RDS。
 // 辞書に無い語は正規化した表記のまま残す（未知語は skillStats.ts が件数を数え、辞書を育てる材料にする）。
 // 含意（Spring Boot ⇒ Java 等）と否定（Java ≠ JavaScript 等）は skillGraph.ts。
-import { impliesSkill } from './skillGraph.js';
+import { impliesSkill, ancestorKeysOf, strongAncestorKeysOf, descendantKeysOf } from './skillGraph.js';
 
 export type SkillCategory = 'skill' | 'role' | 'phase' | 'domain';
 
@@ -29,6 +29,7 @@ const SKILLS: string[][] = [
   ['COBOL', 'コボル'],
   ['VB.NET', 'visual basic .net'],
   ['VB', 'visual basic'],
+  ['PL/I', 'pl1', 'pl/1'],
   ['VBA', 'excel vba', 'access vba', 'エクセルvba', 'excelマクロ'],
   ['Shell', 'shellscript', 'shell script', 'シェル', 'シェルスクリプト', 'bash'],
   ['PowerShell'],
@@ -40,6 +41,7 @@ const SKILLS: string[][] = [
   ['Dart'],
   ['ABAP'],
   ['Apex'],
+  ['Oracle APEX', 'apex(oracle)', 'oracle application express'],
   ['JCL'],
   ['RPG'],
   ['AS/400', 'ibm i', 'iseries'],
@@ -164,6 +166,8 @@ const SKILLS: string[][] = [
   ['SharePoint'],
   ['Microsoft 365', 'm365', 'office365', 'office 365'],
   ['Tableau'],
+  // 構成の略語（'C/S開発' を C 言語と読まない）
+  ['C/S', 'クライアントサーバー', 'クライアントサーバ', 'クラサバ', 'client/server'],
 ];
 
 const ROLES: string[][] = [
@@ -175,7 +179,7 @@ const ROLES: string[][] = [
   ['テスター', 'tester', 'テストエンジニア'],
   ['QA', '品質保証', 'qaエンジニア'],
   ['インフラ', 'インフラエンジニア', 'infra', 'infrastructure'],
-  ['NW', 'ネットワーク', 'ネットワークエンジニア', 'nwエンジニア', 'network'],
+  ['NW', 'n/w', 'ネットワーク', 'ネットワークエンジニア', 'nwエンジニア', 'network'],
   ['DBA', 'dbエンジニア', 'データベースエンジニア'],
   ['SRE'],
   ['ヘルプデスク', 'help desk', 'helpdesk'],
@@ -238,10 +242,17 @@ for (const [category, entries] of GROUPS) {
 }
 
 // 区切り文字を含む正規形・別名（分割の前に保護する）。'C/C++' は保護せず C と C++ に分ける
-const PROTECTED = [...new Set([...ALIAS.keys()].filter((k) => /[\/+&・,;]/.test(k)).concat(['c++', 'notepad++', 'r&d']))].sort(
+// 'i/f'（インターフェース）は技術名ではないが、I と F に分けて F を語に残さないよう保護する
+const PROTECTED = [...new Set([...ALIAS.keys()].filter((k) => /[\/+&・,;]/.test(k)).concat(['c++', 'notepad++', 'r&d', 'i/f']))].sort(
   (a, b) => b.length - a.length,
 );
-const PROTECTED_RES = PROTECTED.map((term) => new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'));
+// 英数字で始まる・終わる保護語は英数字の境界で照合する（'Objective-C/Swift' の 'c/s' を C/S と読まない）
+const PROTECTED_RES = PROTECTED.map((term) => {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const head = /^[a-z0-9]/i.test(term) ? '(?<![a-z0-9])' : '';
+  const tail = /[a-z0-9]$/i.test(term) ? '(?![a-z0-9])' : '';
+  return new RegExp(`${head}${escaped}${tail}`, 'gi');
+});
 
 // 2つの技術をつなげて書く慣用表記（分割の前に区切りを入れる）
 const REWRITES: Array<[RegExp, string]> = [[/c#\s*\.net(?![a-z])/gi, 'C#/.NET']];
@@ -288,7 +299,7 @@ const LEVEL_PATTERNS: RegExp[] = [
 // それだけでは技術名にならない語（括弧内の補足等。分割後の要素がこれなら捨てる）
 const NOISE = new Set([
   'あり', '有', 'なし', '無', '可', '他', 'その他', '業務', '使用', '利用', '独学', '学習中',
-  '読み書き', '少々', '趣味', '個人開発', '年',
+  '読み書き', '少々', '趣味', '個人開発', '年', 'i/f',
 ]);
 
 // 末尾のバージョン。語幹が辞書にあるときだけ外す（'S3' 'EC2' 'Route53' のように数字まで含めて1つの名前のものを壊さない）
@@ -299,17 +310,54 @@ const ATTACHED_VERSIONS = [
 ];
 const VERSION_WORD = /^(?:(?:v|ver\.?|version)?\d+(?:\.\d+)*(?:\.x)?[a-z]{0,2}\+?|r\d+|sp\d+|update\d+)$/i; // Windows Server 2019 R2
 // 語幹が辞書にあるときだけ外す接尾辞（'Java系' 'C++言語' 'テスト工程' 'インフラ構築'）
-const DROPPABLE_SUFFIX = /(?:系|言語|工程|業務|構築|開発)$/;
+const DROPPABLE_SUFFIX = /(?:系|言語|工程|業務|構築|開発|から|より|以降)$/;
 // 技術名に続く作業の名詞（'AWS環境構築' 'Linuxサーバ構築' 'AWSでのインフラ構築'）。語幹が辞書にあるときだけ外す
 const WORK_NOUN = /(?:での|の|で)?(?:環境|基盤|インフラ|サーバー?)$/;
 const TRAILING_PARTICLE = /(?:での|の|で)$/;
 // 'SE8' 'SE 11' は Java SE（役割の SE と読まない）
 const JAVA_SE_VERSION = /^se\s?\d+(?:\.\d+)*$/i;
+const VB_VERSION = /^(?:vb|visual\s*basic)\s*[\-_]?\s*(?:v|ver\.?)?\s*(\d+)(?:\.\d+)*$/i;
 
 function lookup(token: string): string | null {
   const key = token.toLowerCase();
   return ALIAS.get(key) ?? ALIAS_COMPACT.get(compactKey(key)) ?? null;
 }
+
+// 工程の並び（上流から）。「基本設計〜テスト」のような範囲の記載を、端の2工程ではなく範囲として読む
+const PHASE_ORDER = ['要件定義', '基本設計', '詳細設計', '製造', 'テスト', '運用保守'];
+const PHASE_ORDER_KEYS = PHASE_ORDER.map((p) => p.toLowerCase());
+const RANGE_SEP = /\s*[〜~]\s*/;
+
+function phaseIndex(token: string): number {
+  const hit = lookup(token.replace(/工程$/, '').trim());
+  return hit ? PHASE_ORDER_KEYS.indexOf(hit.toLowerCase()) : -1;
+}
+
+// 「A〜B」の両端が工程なら正規の範囲の表記（上流の工程を先に）。そうでなければ null
+function phaseRangeLabel(token: string): string | null {
+  const parts = token.split(RANGE_SEP);
+  if (parts.length !== 2) return null;
+  const a = phaseIndex(parts[0]);
+  const b = phaseIndex(parts[1]);
+  if (a < 0 || b < 0 || a === b) return null;
+  return `${PHASE_ORDER[Math.min(a, b)]}〜${PHASE_ORDER[Math.max(a, b)]}`;
+}
+
+function phaseRangeOf(label: string): { start: number; end: number } | null {
+  const parts = label.split('〜');
+  if (parts.length !== 2) return null;
+  const start = PHASE_ORDER.indexOf(parts[0]);
+  const end = PHASE_ORDER.indexOf(parts[1]);
+  return start >= 0 && end > start ? { start, end } : null;
+}
+
+// 本文の中の工程の範囲（分割の前に1語として保護する）。両端は辞書の工程の表記（「工程」の接尾辞も可）
+const PHASE_FORMS = [...ALIAS.entries()]
+  .filter(([, name]) => PHASE_ORDER.includes(name))
+  .map(([form]) => form)
+  .sort((a, b) => b.length - a.length)
+  .map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+const PHASE_RANGE_RE = new RegExp(`(?:${PHASE_FORMS.join('|')})(?:工程)?\\s*[〜~]\\s*(?:${PHASE_FORMS.join('|')})(?:工程)?`, 'gi');
 
 // バージョンを外した語幹は技術のときだけ採る（'SE8' を役割の SE にしない）
 function versionStem(stem: string): string | null {
@@ -321,6 +369,9 @@ function lookupWithoutVersion(token: string): string | null {
   const direct = lookup(token);
   if (direct) return direct;
   if (JAVA_SE_VERSION.test(token)) return 'Java';
+  // 'VB2010' 'Visual Basic 2019' 'VB7' は VB.NET（VB 7.0 = .NET 2002 以降）、'VB6' 'VB5' は従来の VB
+  const vb = token.match(VB_VERSION);
+  if (vb) return Number(vb[1]) >= 7 ? 'VB.NET' : 'VB';
   for (const re of ATTACHED_VERSIONS) {
     const attached = token.match(re);
     const hit = attached ? versionStem(attached[1].trim()) : null;
@@ -337,6 +388,8 @@ function lookupWithoutVersion(token: string): string | null {
 
 // 接尾辞・作業の名詞・助詞を1つずつ外し、語幹が辞書にあればその語（'Linuxサーバ構築' → Linux）
 function resolve(token: string): string | null {
+  const range = phaseRangeLabel(token);
+  if (range) return range;
   const hit = lookupWithoutVersion(token);
   if (hit) return hit;
   let stem = token;
@@ -386,6 +439,9 @@ export interface SkillRequirement {
   members: string[];
   qualifiers: string[]; // 表記に残す補足（辞書に無い語。満たす手段には数えない）
   preferred: boolean; // 尚可・歓迎の印があった（必須スキルの欄に紛れた尚可を尚可スキルへ移す）
+  // 工程の範囲（'基本設計〜テスト'）の記載が含む工程。要員側ではこの工程をすべて経験したとみなす（案件側の members は
+  // 範囲の始まりの工程かそれより上流の工程のどれか。上流から担当した人は下流も担える）
+  span?: string[];
 }
 
 // ラムダ式（Java・C# 等の言語機能）を AWS Lambda と読まない言語
@@ -423,12 +479,29 @@ function resolveNames(segment: string, ctx: ParseContext): string[] {
   if (!piece) return [];
   if (resolve(piece) === null && piece.includes(' ')) {
     const words = piece.split(' ').map((w) => resolve(w));
-    if (words.length > 1 && words.every((w): w is string => w !== null)) {
+    if (words.length > 1 && words.every((w): w is string => w !== null) && !foreignProduct(words)) {
       return words.map((w) => (w === 'Lambda' && ctx.lambdaExpression ? LAMBDA_EXPRESSION : w));
     }
   }
   const one = resolveOne(piece, ctx);
   return one ? [one] : [];
+}
+
+// 空白で並んだ語に、ほかの語の技術と縁の無い製品（別の製品群を確実に含意する語）が混ざるか。
+// 'Oracle APEX' を Oracle と Salesforce の Apex に分けない（'Java SpringBoot' 'Oracle PL/SQL' 'AWS Lambda' は分ける）
+function foreignProduct(words: string[]): boolean {
+  const keys = words.map((w) => w.toLowerCase());
+  const related = (a: string, b: string): boolean => {
+    const ancA = ancestorKeysOf(a);
+    const ancB = ancestorKeysOf(b);
+    return ancA.has(b) || ancB.has(a) || [...ancA].some((x) => ancB.has(x));
+  };
+  return keys.some(
+    (w, i) =>
+      w !== 'lambda' &&
+      strongAncestorKeysOf(w).size > 0 &&
+      keys.some((o, j) => j !== i && descendantKeysOf(o).size > 0 && !related(w, o)),
+  );
 }
 
 // 括弧・区切りを含む文字列の技術名をすべて取り出す（括弧の中も。順序を保ち重複を除く）
@@ -515,10 +588,21 @@ function uniqueCi(names: string[]): string[] {
 }
 
 function singleReq(name: string, preferred: boolean): SkillRequirement {
+  const range = phaseRangeOf(name);
+  if (range) {
+    return {
+      label: name,
+      members: [...PHASE_ORDER.slice(0, range.start + 1).reverse(), '上流工程'],
+      qualifiers: [],
+      preferred,
+      span: PHASE_ORDER.slice(range.start, range.end + 1),
+    };
+  }
   return { label: name, members: [name], qualifiers: [], preferred };
 }
 
 function parentReq(parent: string, parts: PieceParts, preferred: boolean): SkillRequirement {
+  if (phaseRangeOf(parent)) return singleReq(parent, preferred);
   if (parts.orWithParent) return anyOfReq([parent, ...parts.alts].map((n) => singleReq(n, preferred)), preferred);
   const kids = uniqueCi([...parts.alts, ...parts.qualifiers]).filter((c) => c.toLowerCase() !== parent.toLowerCase());
   if (kids.length === 0) return singleReq(parent, preferred);
@@ -534,6 +618,7 @@ function anyOfReq(reqs: SkillRequirement[], preferred: boolean): SkillRequiremen
     members,
     qualifiers: uniqueCi(reqs.flatMap((r) => r.qualifiers)),
     preferred,
+    ...(reqs.some((r) => r.span) ? { span: uniqueCi(reqs.flatMap((r) => r.span ?? r.members)) } : {}),
   };
 }
 
@@ -555,9 +640,25 @@ function interchangeable(reqs: SkillRequirement[]): boolean {
   );
 }
 
+// 要件がすべて同じ「互いに代わりになる」群の技術そのものか（具体例・括弧の補足を含まない。'AWS/Azure' 'Oracle/PostgreSQL'）。
+// 印の無い「/」の並びでも、競合するクラウド・RDB・フロントのFWはどれか1つの環境を指すため選択肢とみなす
+// （'Oracle/PL/SQL' 'Java/Spring' は両方の経験を求める並びのまま）
+function interchangeableDirect(reqs: SkillRequirement[]): boolean {
+  if (reqs.some((r) => r.members.length !== 1 || r.qualifiers.length > 0)) return false;
+  const members = reqs.map((r) => r.members[0].toLowerCase());
+  return INTERCHANGEABLE_GROUPS.some((group) => members.every((m) => group.some((g) => g.toLowerCase() === m)));
+}
+
 function parseWith(text: string, lambdaExpression: boolean): SkillRequirement[] {
   const ctx: ParseContext = { restore: [], brackets: [], lambdaExpression };
   let s = REWRITES.reduce((acc, [re, to]) => acc.replace(re, to), text);
+  // 工程の範囲は区切りの「〜」で分けず1語にする（範囲の途中の工程を落とさない）
+  s = s.replace(PHASE_RANGE_RE, (hit) => {
+    const label = phaseRangeLabel(hit);
+    if (!label || ctx.restore.length >= BRACKET_BASE - PLACEHOLDER_BASE) return hit;
+    ctx.restore.push(label);
+    return String.fromCharCode(PLACEHOLDER_BASE + ctx.restore.length - 1);
+  });
   for (const re of PROTECTED_RES) {
     s = s.replace(re, (hit) => {
       if (ctx.restore.length >= BRACKET_BASE - PLACEHOLDER_BASE) return hit;
@@ -600,7 +701,7 @@ function parseWith(text: string, lambdaExpression: boolean): SkillRequirement[] 
     const unique = uniqueReqs(reqs);
     if (unique.length === 0) continue;
     const weakOr = !strongOr && WEAK_OR_MARK.test(clauseMarks);
-    if (strongOr || (weakOr && unique.length >= 2 && interchangeable(unique))) {
+    if (strongOr || (unique.length >= 2 && ((weakOr && interchangeable(unique)) || interchangeableDirect(unique)))) {
       // 並びの中に選択肢があればその並びを1要件に。1語だけの並び（'AWS、GCP、Azureのいずれか' の最後）なら項目全体を1要件にする
       if (unique.length >= 2) out.push(anyOfReq(unique, clausePreferred && !explicitRequired));
       else {
@@ -654,13 +755,13 @@ export function parseRequirements(raw: string): SkillRequirement[] {
     if (reqCache.size >= TOKEN_CACHE_MAX) reqCache.clear();
     reqCache.set(raw, cached);
   }
-  return cached.map((r) => ({ ...r, members: [...r.members], qualifiers: [...r.qualifiers] }));
+  return cached.map((r) => ({ ...r, members: [...r.members], qualifiers: [...r.qualifiers], ...(r.span ? { span: [...r.span] } : {}) }));
 }
 
 // 1つの記載 → 正規化したスキル名の配列（辞書にあれば正規形、無ければ正規化した表記）。
 // 要員のスキル・同義辞書・集計用で、選択肢や括弧の補足も1語ずつに分ける
 export function tokenizeSkill(raw: string): string[] {
-  return uniqueCi(parseRequirements(raw).flatMap((r) => [...r.members, ...r.qualifiers]));
+  return uniqueCi(parseRequirements(raw).flatMap((r) => r.span ?? [...r.members, ...r.qualifiers]));
 }
 
 // 1つのスキル名として正規化する（同義辞書の照合キー用）。複数の技術に分かれる記載は分けずに
@@ -707,7 +808,7 @@ export function normalizeRequirementLists(requiredRaw: string[], preferredRaw: s
 
 // 要件の表記の配列 → 含まれる技術名（集計・表示用に1語ずつ）
 export function requirementMembers(labels: string[]): string[] {
-  return uniqueCi(labels.flatMap((l) => parseRequirements(l).flatMap((r) => [...r.members, ...r.qualifiers])));
+  return uniqueCi(labels.flatMap((l) => parseRequirements(l).flatMap((r) => r.span ?? [...r.members, ...r.qualifiers])));
 }
 
 // 辞書にある正規形か（tokenizeSkill の出力に対して使う）
@@ -716,7 +817,7 @@ export function isKnownSkill(token: string): boolean {
 }
 
 export function skillCategory(token: string): SkillCategory | null {
-  return CANONICAL.get(token.toLowerCase())?.category ?? null;
+  return CANONICAL.get(token.toLowerCase())?.category ?? (phaseRangeOf(token) ? 'phase' : null);
 }
 
 export function canonicalSkillNames(): string[] {

@@ -358,7 +358,8 @@ export async function saveProject(project: Project): Promise<string> {
   // 指示混入疑いの列を追加できない（権限不足等）ときは書かずに保存する（保存そのものを失敗させない）。
   // ただし印の付いた案件は、読み戻したときに印が消えてAI判定・自動の下書きに進まないよう「終了」で保存する
   if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
-    properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(project.injectionSuspected ? 'あり' : '') };
+    // 印は付けるだけにし、空欄では上書きしない（AI判定・人が付けた印を再抽出で消さない。外すのは人だけ）
+    if (project.injectionSuspected) properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText('あり') };
   } else if (project.injectionSuspected) {
     properties['ステータス'] = { select: { name: '終了' } };
     injectionColumnMissing('案件');
@@ -398,7 +399,8 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
   const availableFrom = dateOnly(engineer.availableFrom);
   if (availableFrom) properties['稼働開始可能日'] = { date: { start: availableFrom } };
   if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
-    properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText(engineer.injectionSuspected ? 'あり' : '') };
+    // 印は付けるだけにし、空欄では上書きしない（AI判定・人が付けた印を再抽出で消さない。外すのは人だけ）
+    if (engineer.injectionSuspected) properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText('あり') };
   } else if (engineer.injectionSuspected) {
     properties['ステータス'] = { select: { name: '決定済' } };
     injectionColumnMissing('要員');

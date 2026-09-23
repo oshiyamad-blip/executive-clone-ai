@@ -168,10 +168,11 @@ function rawCell(cells: string[], idx: number): string {
   return idx < 0 ? '' : (cells[idx] ?? '');
 }
 
-// 人が進めたステータス（案件の終了・要員の決定済など）と突合済の印は再保存で巻き戻さない。同じメールを再抽出して
-// 同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。既存が空欄なら機械の値を入れる
+// 人が進めたステータス（案件の終了・要員の決定済など）・突合済の印・指示混入疑いの印（AI判定・人が付けたもの）は
+// 再保存で巻き戻さない。同じメールを再抽出して同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。
+// 既存が空欄なら機械の値を入れる（指示混入疑いを外すのは人だけ）
 function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[] {
-  for (const name of ['ステータス', MATCHED_COLUMN]) {
+  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN]) {
     const col = colIndex(tab, name);
     if (col < 0) continue;
     const prev = existing ? cellStr(existing, col) : '';

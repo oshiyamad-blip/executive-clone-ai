@@ -7,6 +7,7 @@ import { saveMatchFeedback, fetchRecentFeedback } from '../database/index.js';
 import { safeErr } from './redact.js';
 import { maskPii, toInitials, UNKNOWN_INITIALS } from './pii.js';
 import { looksLikeInjection, dataSafe } from './injection.js';
+import { isNameLikeToken } from './skillDict.js';
 import type { MatchFeedback } from '../types/index.js';
 
 function localPath(): string {
@@ -92,15 +93,21 @@ function oneLine(s: string, max: number): string {
 
 // 評価のタイトル（「案件名 × 要員の表示名」）の要員の表示名は、イニシャル（toInitials と同じ決め方。3文字まで）のときだけ
 // 整えたイニシャルで残す（'KEN' 'Lee' のような短い名前や、表示名に入った氏名を最終判定の入力へ渡さないため）
+// 評価タブに人が手で足した行は「案件名 × 表示名」の形とは限らないため、区切りの無いタイトルは使わず、
+// 区切りの前（案件名）も氏名らしければ伏せ、連絡先は maskPii で伏せる
 export function fewShotTitle(title: string): string {
   const i = title.lastIndexOf(' × ');
-  if (i < 0) return title;
+  if (i < 0) return FEWSHOT_UNKNOWN_TITLE;
   const name = title.slice(i + 3).normalize('NFKC').trim();
   const letters = name.replace(/[\s.・･]/g, '');
   const initials = toInitials(name);
   const keep = /^[A-Za-z]{1,3}$/.test(letters) && initials !== UNKNOWN_INITIALS;
-  return `${title.slice(0, i)} × ${keep ? initials : '要員'}`;
+  const head = title.slice(0, i).normalize('NFKC').trim();
+  const project = !head || isNameLikeToken(head, []) ? '案件' : maskPii(head);
+  return `${project} × ${keep ? initials : '要員'}`;
 }
+
+export const FEWSHOT_UNKNOWN_TITLE = '案件 × 要員';
 
 // 評価のメモ（人の自由記述）は氏名・連絡先を伏せてから渡す（最終判定には判定に要る情報だけを渡す）
 export function fewShotNote(note: string): string {
