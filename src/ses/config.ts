@@ -101,6 +101,15 @@ export function sesNotifyTo(): string {
   return process.env.SES_NOTIFY_TO ?? '';
 }
 
+// スプレッドシートの「担当者メール」で下書きの送信元に指定できるドメイン（カンマ区切り・小文字化）。
+// 空なら制限しない。シートの編集者なら誰でも任意の送信元で下書きを作れてしまうため、本番では設定を推奨
+export function allowedSenderDomains(): string[] {
+  return (process.env.SES_ALLOWED_SENDER_DOMAINS ?? '')
+    .split(',')
+    .map((d) => d.trim().replace(/^@/, '').toLowerCase())
+    .filter(Boolean);
+}
+
 // ===== 自動検証・自己修復（heal）と修正パッチ案生成（repair）の設定 =====
 
 // 自己修復（失敗時の再試行・モデル昇格・隔離）を有効にするか。既定ON（予算で拘束される）

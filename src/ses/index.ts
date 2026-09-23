@@ -5,6 +5,7 @@ import { extractItems } from './extract.js';
 import { matchAll } from './match.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify } from './notify.js';
+import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
 import { markMailProcessed, writeDemoArtifact, readDemoArtifact, dedupeProjects, dedupeEngineers } from './store.js';
 import { saveProject, saveEngineer, fetchOpenProjects, fetchAvailableEngineers } from '../database/index.js';
 import { resetSheetsCache } from '../database/sheets.js';
@@ -49,6 +50,15 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   let projects: Project[];
   let engineers: Engineer[];
 
+  // 前回バッチ以降にスプレッドシートの「担当者メール」で依頼された下書きを、収集より先に作成する
+  let requestedDrafts: PendingDraftResult = { created: 0, failed: 0 };
+  try {
+    requestedDrafts = await materializePendingDrafts();
+  } catch (err) {
+    console.error(`SES下書き依頼: 失敗: ${safeErr(err)}`);
+    recordFatal('担当者指定の下書き作成段が例外で停止しました');
+  }
+
   if (opts.matchOnly) {
     ({ projects, engineers } = await loadExisting());
   } else {
@@ -59,7 +69,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
     }
   }
 
-  const matches = await matchDraftAndNotify(projects, engineers);
+  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts);
   console.log(`=== SESバッチ完了: マッチ候補 計${matches.length}件 ===`);
 
   // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）
@@ -197,7 +207,11 @@ async function loadExisting(): Promise<{ projects: Project[]; engineers: Enginee
 }
 
 // ⑤〜⑦: マッチング → 下書き生成 → 通知
-async function matchDraftAndNotify(projects: Project[], engineers: Engineer[]): Promise<MatchResult[]> {
+async function matchDraftAndNotify(
+  projects: Project[],
+  engineers: Engineer[],
+  requestedDrafts: PendingDraftResult,
+): Promise<MatchResult[]> {
   let matches: MatchResult[] = [];
   try {
     matches = await matchAll(projects, engineers);
@@ -214,7 +228,7 @@ async function matchDraftAndNotify(projects: Project[], engineers: Engineer[]): 
   }
 
   try {
-    await persistAndNotify(matches, projects, engineers);
+    await persistAndNotify(matches, projects, engineers, requestedDrafts);
   } catch (err) {
     console.error(`SES通知: 失敗: ${safeErr(err)}`);
     recordFatal('保存・通知段が例外で停止しました');

@@ -15,8 +15,9 @@ import type { MatchResult, Project, Engineer, DraftRef, RemoteOption, ReplyTarge
 
 let demoDraftCounter = 0;
 
-// 送信元(From)が未確定のうちは placeholder を入れておく。確認UIで担当営業が自分の会社アドレスを
-// 入れて下書きを作成するまでこの文言が残る（＝未確定のまま送らないためのガードも兼ねる）。
+// 送信元(From)が未確定のうちは placeholder を入れておく。担当営業が自分の会社アドレスを入れて
+// 下書きを作成するまでこの文言が残る（＝未確定のまま送らないためのガードも兼ねる）。
+// アドレスの入れ先は、確認UI（web.ts）またはSheets運用ではスプレッドシートの「担当者メール」列（pendingDrafts.ts）。
 export const FROM_PLACEHOLDER = '《送信元：あなたの会社ドメインのアドレスを確認して入力してください》';
 
 function ensureRe(subject: string): string {
@@ -117,7 +118,7 @@ function writeDraftFile(ref: DraftRef): DraftRef {
   }
 }
 
-// 確認UIから、担当営業本人の会社アドレスで下書きを確定する。
+// 確認UI／スプレッドシートの担当者メールから、担当営業本人の会社アドレスで下書きを確定する。
 // demo=Fromを入れてローカル保存、prod=メールプロバイダで下書き作成
 // （xserver=共有下書きフォルダにAPPEND / gmail=本人のGmailにスレッド下書き）。
 export async function materializeReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
@@ -268,8 +269,9 @@ function subjectToEngineer(project: Project, engineer: Engineer): string {
 }
 
 // ---------- 本番（Sonnet 5生成 → 全員に返信の下書き内容を用意） ----------
-// 送信元は担当営業個人の会社アドレスのため、実際のGmail下書き作成は確認UIで本人が行う
-// （materializeReplyDraft）。ここでは全員に返信の文面・宛先・スレッド情報を用意する。
+// 送信元は担当営業個人の会社アドレスのため、実際の下書き作成は本人のアドレス確定後に行う
+// （確認UI、またはSheets運用では次回バッチが担当者メール列を見て materializeReplyDraft を呼ぶ）。
+// ここでは全員に返信の文面・宛先・スレッド情報を用意する（Sheets運用ではマッチタブの下書きデータ列に保存される）。
 
 const DRAFT_SYSTEM = `あなたはSES事業者の営業担当として、案件と要員をつなぐ紹介メールを作成するアシスタントです。
 丁寧なビジネス日本語で、簡潔かつ具体的な文面を作成してください。件名は含めず、本文のみを返してください。

@@ -8,7 +8,7 @@ import nodemailer from 'nodemailer';
 import { extractSheetLinks, isSupportedAttachment } from '../../collectors/email.js';
 import { loadProcessedMailIds } from '../store.js';
 import { buildReplyMime } from './mime.js';
-import { safeErr } from '../redact.js';
+import { safeErr, SafeLogError } from '../redact.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -131,21 +131,24 @@ function toSesRawMail(p: ParsedMail, uidValidity: string, uid: number): SesRawMa
   };
 }
 
+export function draftReady(): boolean {
+  return imapConfigured();
+}
+
 // 全員に返信の下書きを、共有メールボックスの下書きフォルダに APPEND する（From=担当営業本人）。
 // 担当営業は共有の下書きを開いて内容を確認のうえ送信する（送信は手動＝下書き止まりを維持）。
+// 失敗は例外で返す（呼び出し側が「作成済」と誤記録しないため）
 export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   const finalized: DraftRef = { ...ref, from: fromEmail };
   if (!imapConfigured()) {
-    console.warn('Xserver下書き: IMAP設定が未完了のため下書き作成をスキップ');
-    return finalized;
+    throw new SafeLogError('Xserver下書き: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了のため下書きを作成できません');
   }
   const raw = await buildReplyMime(finalized);
   const client = imapClient();
   try {
     await client.connect();
-    await client.append(xserverDraftsMailbox(), raw, ['\\Draft']);
-  } catch (err) {
-    console.error(`Xserver下書き: 下書きフォルダへのAPPENDに失敗: ${safeErr(err)}`);
+    const res = await client.append(xserverDraftsMailbox(), raw, ['\\Draft']);
+    if (!res) throw new SafeLogError(`Xserver下書き: 下書きフォルダ「${xserverDraftsMailbox()}」へ保存できませんでした`);
   } finally {
     try {
       await client.logout();

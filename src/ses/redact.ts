@@ -13,16 +13,21 @@ export function redactable(label: string): string {
 // 文言が固定・内容を含まないと分かっているエラー。秘匿モードでもメッセージを出してよい
 export class SafeLogError extends Error {}
 
-// エラーのログ表記。秘匿モードでは種別・HTTPステータス・コードのみ（API応答が本文等を反響し得るため）
-export function formatErr(err: unknown, redact: boolean): string {
-  if (err instanceof SafeLogError) return err.message;
-  if (!redact) return String(err);
+// エラーの種別・HTTPステータス・コードだけの表記（メッセージ本文を含まない）
+export function errKind(err: unknown): string {
   const e = (err ?? {}) as { status?: unknown; code?: unknown; response?: { status?: unknown } };
   const parts = [err instanceof Error ? err.name : typeof err];
   const status = e.status ?? e.response?.status;
   if (typeof status === 'number' || typeof status === 'string') parts.push(`status=${String(status).slice(0, 10)}`);
   if (typeof e.code === 'number' || typeof e.code === 'string') parts.push(`code=${String(e.code).slice(0, 40)}`);
-  return `${parts.join(' ')}（詳細は秘匿）`;
+  return parts.join(' ');
+}
+
+// エラーのログ表記。秘匿モードでは種別・HTTPステータス・コードのみ（API応答が本文等を反響し得るため）
+export function formatErr(err: unknown, redact: boolean): string {
+  if (err instanceof SafeLogError) return err.message;
+  if (!redact) return String(err);
+  return `${errKind(err)}（詳細は秘匿）`;
 }
 
 export function safeErr(err: unknown): string {

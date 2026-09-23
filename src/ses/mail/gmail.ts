@@ -3,7 +3,8 @@
 // SES用スコープ（gmail.compose / gmail.send / spreadsheets.readonly）のDWD登録が必要。
 import { google } from 'googleapis';
 import { collectSesRawMail } from '../../collectors/email.js';
-import { getGoogleAuth, getGoogleAuthAs, SES_SCOPES } from '../../collectors/googleAuth.js';
+import { getGoogleAuth, getGoogleAuthAs, loadServiceAccountCredentials, SES_SCOPES } from '../../collectors/googleAuth.js';
+import { SafeLogError } from '../redact.js';
 import { sesTargetGmail, collectDays } from '../config.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
 import type { SesRawMail, DraftRef } from '../../types/index.js';
@@ -15,13 +16,17 @@ export async function collect(): Promise<SesRawMail[]> {
   return collectSesRawMail(query);
 }
 
+export function draftReady(): boolean {
+  return loadServiceAccountCredentials() !== null;
+}
+
 // 担当営業本人(fromEmail)を impersonate して、全員に返信のスレッド下書きを本人のGmailに作成する。
+// 失敗は例外で返す（呼び出し側が「作成済」と誤記録しないため）
 export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   const finalized: DraftRef = { ...ref, from: fromEmail };
   const auth = getGoogleAuthAs(fromEmail, SES_SCOPES);
   if (!auth) {
-    console.warn('Gmail下書き: Google認証未設定のため下書き作成をスキップ');
-    return finalized;
+    throw new SafeLogError('Gmail下書き: Google認証（サービスアカウント）が未設定のため下書きを作成できません');
   }
   const gmail = google.gmail({ version: 'v1', auth });
   // 手組みヘッダではなく共通MIMEビルダーを使う（日本語表示名のRFC2047エンコード等をXserver側と統一）

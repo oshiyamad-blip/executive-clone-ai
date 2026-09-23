@@ -9,7 +9,9 @@ import type { SesRawMail, DraftRef } from '../../types/index.js';
 export interface MailTransport {
   // 共有メールボックス（メーリス）から未整理のメールを収集する
   collect(): Promise<SesRawMail[]>;
-  // 全員に返信の下書きを、担当営業本人の会社アドレス(fromEmail)で作成する
+  // 下書き作成に必要な設定が揃っているか（揃っていなければ依頼を消化せず次回に回す）
+  draftReady(): boolean;
+  // 全員に返信の下書きを、担当営業本人の会社アドレス(fromEmail)で作成する。作成できなければ例外
   createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef>;
   // サマリ等のプレーンメールを送信する
   sendPlainMail(to: string, subject: string, body: string): Promise<void>;
@@ -21,6 +23,10 @@ function transport(): MailTransport {
 
 export function collectMail(): Promise<SesRawMail[]> {
   return transport().collect();
+}
+
+export function replyDraftReady(): boolean {
+  return transport().draftReady();
 }
 
 export function createReplyDraftViaMail(ref: DraftRef, fromEmail: string): Promise<DraftRef> {

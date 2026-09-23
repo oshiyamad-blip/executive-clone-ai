@@ -5,7 +5,8 @@ import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData,
 import { recordFeedback, loadFeedback } from './feedback.js';
 import { addSkillEquivalence } from './skillEquiv.js';
 import { computeBandMetrics } from './metrics.js';
-import { sesWebPort, sesWebHost, webAccessToken, isDemo } from './config.js';
+import { sesWebPort, sesWebHost, webAccessToken, isDemo, allowedSenderDomains } from './config.js';
+import { senderDomainAllowed } from './pendingDrafts.js';
 import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 
 // SESマッチ確認UI（複数人運用）。バッチ/自社社員探しが書き出したレビュー成果を一覧表示し、
@@ -115,6 +116,9 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
   if (!matchId || !side) return json(res, 400, { error: 'matchId と side が必要です' });
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) {
     return json(res, 400, { error: '送信元となるあなたの会社メールアドレスを入力してください' });
+  }
+  if (!senderDomainAllowed(fromEmail.toLowerCase(), allowedSenderDomains())) {
+    return json(res, 400, { error: '送信元ドメインが許可されていません' });
   }
   try {
     const ref = await createReplyDraftForSender(matchId, side, fromEmail);

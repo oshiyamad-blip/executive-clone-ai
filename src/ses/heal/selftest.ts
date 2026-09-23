@@ -1,6 +1,6 @@
 // 自己修復レイヤーと本番実行基盤のオフライン自己検証（npm run ses:heal:check）。外部API呼び出しゼロ。
 // 円換算・予算メーター・隔離ラウンドトリップ・エラー分類・PIIマスク・異常終了判定・
-// ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈を検証する。
+// ログ秘匿・SheetsDBのA1表記/ヘッダー移行判定・SA鍵JSONの解釈・担当者メールによる下書き依頼の判定を検証する。
 import { usageCostJpy, jpyPerUsd } from '../../llm/pricing.js';
 import { isRetryableLlmError } from './retry.js';
 import {
@@ -14,9 +14,17 @@ import {
 } from './quarantine.js';
 import { resetHealEvents, recordStat, getStats, recordHealEvent, recordFatal, hasFatal } from './events.js';
 import { formatErr, SafeLogError } from '../redact.js';
-import { columnLetter, quoteTab, planHeaderMigration } from '../../database/sheets.js';
+import { columnLetter, quoteTab, planHeaderMigration, draftRequestTabs } from '../../database/sheets.js';
+import { mergeDraftColumns, parseDraftData, isDraftStateActionable } from '../../database/mapping.js';
 import { parseServiceAccountJson } from '../../collectors/googleAuth.js';
-import type { SesRawMail } from '../../types/index.js';
+import {
+  normalizeSenderEmail,
+  isValidSenderEmail,
+  senderDomainAllowed,
+  jstStamp,
+  planDraftRequest,
+} from '../pendingDrafts.js';
+import type { SesRawMail, DraftRef } from '../../types/index.js';
 
 let failures = 0;
 function check(name: string, cond: boolean, detail = ''): void {
@@ -154,6 +162,59 @@ async function main(): Promise<void> {
   const sa = parseServiceAccountJson(JSON.stringify({ client_email: 'sa@p.iam.gserviceaccount.com', private_key: 'A\\nB' }));
   check('SA鍵JSON: client_email/private_keyを取り出し、\\n を改行に戻す', sa?.clientEmail === 'sa@p.iam.gserviceaccount.com' && sa.privateKey === 'A\nB');
   check('SA鍵JSON: 不正なJSONは null', parseServiceAccountJson('{not json') === null && parseServiceAccountJson('{}') === null);
+
+  // 12. 担当者メールによる下書き依頼（列の保存方針・状態判定・送信元アドレス検証）
+  const draft = (body: string): DraftRef => ({
+    draftId: 'd1', url: '/tmp/x', to: 'a@partner.jp', cc: 'sales@example.jp', from: 'placeholder',
+    subject: 'Re: 件名', inReplyTo: '<m@p>', references: '<m@p>', body,
+  });
+  const created = mergeDraftColumns(null, draft('v1'), undefined);
+  const stored = parseDraftData(created.data);
+  check(
+    '下書き列: 新規は文面ありの側=未作成・無い側=不要、保存データに draftId/url/from を持たない',
+    created.projectState === '未作成' && created.engineerState === '不要' && Boolean(stored.project) &&
+      !stored.engineer && !('draftId' in stored.project!) && !('url' in stored.project!) && !('from' in stored.project!),
+  );
+  check('下書き列: 文面は宛先・件名つき', created.projectText.startsWith('To: a@partner.jp\nCc: sales@example.jp\nSubject: Re: 件名\n\nv1'));
+  const locked = mergeDraftColumns({ ...created, projectState: '作成済 2026-09-01 10:00' }, draft('v2'), undefined);
+  check(
+    '下書き列: 作成済の側は状態・文面・データを固定',
+    locked.projectState === '作成済 2026-09-01 10:00' && locked.projectText === created.projectText && parseDraftData(locked.data).project?.body === 'v1',
+  );
+  const refreshed = mergeDraftColumns({ ...created, engineerState: '不要', projectState: 'エラー: x' }, draft('v2'), draft('e2'));
+  check(
+    '下書き列: 依頼前の側は最新文面に差し替え、人が書いた状態（不要・エラー）は保持',
+    refreshed.projectState === 'エラー: x' && refreshed.engineerState === '不要' && parseDraftData(refreshed.data).project?.body === 'v2',
+  );
+  check('下書き列: 壊れたJSONは空扱い', Object.keys(parseDraftData('{broken')).length === 0);
+  check(
+    '下書き状態: 空欄・未作成・エラーのみ作成対象',
+    ['', '未作成', 'エラー: x'].every(isDraftStateActionable) &&
+      !['作成済 2026-09-01 10:00', '送信済', '不要', '作成中'].some(isDraftStateActionable),
+  );
+  check('送信元: 全角・前後空白・ドメイン大文字を正規化', normalizeSenderEmail(' ｔａｒｏ＠Example.CO.jp ') === 'taro@example.co.jp');
+  check(
+    '送信元: 表示名付き・複数・改行入りは不正',
+    isValidSenderEmail('taro@example.co.jp') &&
+      !['山田 <y@example.co.jp>', 'a@example.co.jp, b@example.co.jp', 'a@example.co.jp\nBcc: x@evil.jp', 'taro', 'a@b'].some(isValidSenderEmail),
+  );
+  check(
+    '送信元: 許可ドメインは完全一致（未設定なら全許可）',
+    senderDomainAllowed('a@example.co.jp', ['example.co.jp']) && !senderDomainAllowed('a@sub.example.co.jp', ['example.co.jp']) &&
+      !senderDomainAllowed('a@evil.jp', ['example.co.jp']) && senderDomainAllowed('a@evil.jp', []),
+  );
+  check('状態の日時はJST表記', jstStamp(new Date('2026-09-23T01:05:00Z')) === '2026-09-23 10:05');
+  const plan = planDraftRequest(
+    { tab: 'マッチ', id: 'm1', senderEmail: 'y@evil.jp', projectState: '', engineerState: '不要', draftData: created.data },
+    ['example.co.jp'],
+  );
+  check('依頼判定: 許可外ドメインは作成せずエラー（不要の側は触らない）', plan.create.length === 0 && plan.errors.project === 'エラー: 送信元ドメインが許可されていません' && plan.errors.engineer === undefined);
+  const plan2 = planDraftRequest(
+    { tab: 'マッチ', id: 'm1', senderEmail: 'taro@example.co.jp', projectState: '未作成', engineerState: '', draftData: created.data },
+    ['example.co.jp'],
+  );
+  check('依頼判定: 文面のある側は作成、無い側はエラー', plan2.create.join(',') === 'project' && Boolean(plan2.errors.engineer?.startsWith('エラー: 下書きの文面データ')));
+  check('依頼対象タブ: マッチを含む', draftRequestTabs().includes('マッチ'));
 
   console.log('');
   if (failures > 0) {

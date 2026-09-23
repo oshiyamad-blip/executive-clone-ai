@@ -110,6 +110,9 @@ async function main(): Promise<void> {
     console.log(
       `  ・データ保存先:    sheets（スプレッドシート ${envSet('SHEETS_DB_SPREADSHEET_ID') ? '設定済み' : '未設定 — SHEETS_DB_SPREADSHEET_ID が必要'}／Google認証 ${serviceAccountSet() ? '設定済み（シートをサービスアカウントのメールに共有してください）' : '未設定'}）`,
     );
+    if (!envSet('SES_ALLOWED_SENDER_DOMAINS')) {
+      warn('SES_ALLOWED_SENDER_DOMAINS 未設定 — 「担当者メール」列で任意の送信元の下書きを作れます（自社ドメインの設定を推奨）');
+    }
   } else {
     console.log(
       `  ・データ保存先:    notion（${envSet('NOTION_PROJECT_DB_ID', 'NOTION_ENGINEER_DB_ID', 'NOTION_MATCH_DB_ID') ? '案件/要員/マッチDB 設定済み' : 'DB未設定 — 保存はスキップされます'}）`,
