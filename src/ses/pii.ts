@@ -85,12 +85,17 @@ function maskHonorificName(match: string): string {
 // メールアドレス・電話番号・氏名らしき並びをマスクする（診断ログ・repairプロンプトに載せる前に必ず通す）。
 // 全角（０９０−…）・括弧（03(1234)5678）・区切りなし（09012345678）・+81 表記も拾えるよう先に NFKC で正規化する。
 // 氏名は「氏名: 」等の欄の値と、敬称（様・さん・氏・殿）の直前の漢字2〜4文字だけを伏せる（スキル名・業務の語を伏せすぎない）
-export function maskPii(s: string): string {
+// 伏せ字にかける文字数の上限（共通の関数としての歯止め。呼び出し側は表示・入力に使う長さで切ってから渡す）
+export const MASK_PII_MAX_CHARS = 20_000;
+
+export function maskPii(raw: string): string {
+  const s = raw.length > MASK_PII_MAX_CHARS ? `${raw.slice(0, MASK_PII_MAX_CHARS)}…` : raw;
   return s
     .normalize('NFKC')
     // 連続した英数字の途中からは始めない（結果は同じで、長い英数字の列で2乗の時間がかからない）
     .replace(/(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '<メールアドレス>')
-    .replace(/(?<![\d])(?:\+81[\s-]?\(?0?\)?|0)\d{1,4}[\s-]*\(?[\s-]*\d{1,4}[\s-]*\)?[\s-]*\d{3,4}(?![\d])/g, '<電話番号>')
+    // 区切り（空白・ハイフン）は各所3文字まで（'[\s-]*' が並ぶ形は長い空白の並びで2乗の時間がかかる）
+    .replace(/(?<![\d])(?:\+81[\s-]?\(?0?\)?|0)\d{1,4}[\s-]{0,3}\(?[\s-]{0,3}\d{1,4}[\s-]{0,3}\)?[\s-]{0,3}\d{3,4}(?![\d])/g, '<電話番号>')
     .replace(/(?<![\d])0\d{9,10}(?![\d])/g, '<電話番号>')
     .replace(NAME_LABEL, (_m, label: string, sep: string, value: string) => `${label}${sep}${maskNameValue(value)}`)
     .replace(NAME_LABEL_SPACED, (_m, label: string, sep: string, value: string) => `${label}${sep}${maskNameValue(value)}`)
@@ -183,11 +188,15 @@ function initialsFrom(part: string): string | null {
 // 表示名をイニシャル（「K.S.」の形。2〜3文字）にする。イニシャル・ローマ字の氏名・区切りのある読み仮名から作れるときだけ作り、
 // 読みの分からない漢字の氏名などから決められなければ UNKNOWN_INITIALS（フルネームは返さない）。
 // 括弧の中（「山田太郎（T.Y.）」「K.S.（イニシャル）」）も手がかりにする
+// 表示名として読む文字数の上限（イニシャル・氏名の手がかりはこれより長くならない）
+const DISPLAY_NAME_MAX_CHARS = 100;
+
 export function toInitials(raw: string): string {
-  const s = raw.normalize('NFKC').trim();
+  const s = raw.slice(0, DISPLAY_NAME_MAX_CHARS).normalize('NFKC').trim();
   if (!s) return UNKNOWN_INITIALS;
-  const inner = [...s.matchAll(/[(（\[【]([^)）\]】]*)[)）\]】]/g)].map((m) => m[1]);
-  const outer = s.replace(/[(（\[【][^)）\]】]*[)）\]】]/g, ' ').replace(/\s+/g, ' ').trim();
+  // 括弧の中には開き括弧も含めない（開き括弧だけが続く並びで、始点ごとに末尾まで読み直さない）
+  const inner = [...s.matchAll(/[(（\[【]([^()（）\[\]【】]*)[)）\]】]/g)].map((m) => m[1]);
+  const outer = s.replace(/[(（\[【][^()（）\[\]【】]*[)）\]】]/g, ' ').replace(/\s+/g, ' ').trim();
   for (const part of [outer, ...inner]) {
     const initials = initialsFrom(part);
     if (initials) return initials;

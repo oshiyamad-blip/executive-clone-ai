@@ -1257,9 +1257,17 @@ function ageLines(businessFlow: string, age: number | null): string[] {
 }
 
 // カードに入れる社外の値: 改行・段落区切りを空白にし、カードの見出し（【案件】【要員】）に見える文字列とデータ区切りのタグを無害にする
+// カードの1項目の長さの上限（判定に要る長さ。シートのセルは5万字まで入るため、伏せ字・無害化の前に切る）
+const CARD_FIELD_MAX_CHARS = 2000;
+
+function clipField(s: string | null | undefined): string {
+  const v = s ?? '';
+  return v.length > CARD_FIELD_MAX_CHARS ? `${v.slice(0, CARD_FIELD_MAX_CHARS)}…` : v;
+}
+
 function cardValue(s: string): string {
   return dataSafe(
-    (s ?? '')
+    clipField(s)
       .replace(/[\r\n\u2028\u2029\u0085\v\f]+/g, ' ')
       .replace(/【(\s*(?:案件|要員)\s*)】/g, '〔$1〕'),
   );
@@ -1276,7 +1284,7 @@ export function buildMatchPrompt(pair: MatchPair, now = new Date()): string {
   // 案件側・要員側をそれぞれのタグで囲む（どちらの送り主の記載かを入力の構造で分ける）
   const v = cardValue;
   const projectCard = [
-    `案件名: ${v(maskPii(p.title))}`,
+    `案件名: ${v(maskPii(clipField(p.title)))}`,
     `必須スキル: ${v(p.requiredSkills.join(', ')) || '記載なし'}`,
     `尚可スキル: ${v(p.preferredSkills.join(', ')) || 'なし'}`,
     `単金: ${p.rateMin ?? '不明'}〜${p.rateMax ?? '不明'}万円/月`,
@@ -1284,7 +1292,7 @@ export function buildMatchPrompt(pair: MatchPair, now = new Date()): string {
     `開始時期: ${v(p.startPeriod) || '記載なし'}${p.startDate ? `（${p.startDate}）` : ''}`,
     `期間: ${v(p.duration) || '記載なし'}`,
     // 商流メモ・稼働率・稼働開始可能日の自由記述には担当者名・電話番号が紛れるため伏せる（年齢上限の照合はコードが原文で行う）
-    `商流メモ: ${v(maskPii(p.businessFlow)) || '記載なし'}`,
+    `商流メモ: ${v(maskPii(clipField(p.businessFlow))) || '記載なし'}`,
     `受信日: ${received(p.receivedAt)}`,
   ].join('\n');
   const engineerCard = [
@@ -1294,8 +1302,8 @@ export function buildMatchPrompt(pair: MatchPair, now = new Date()): string {
     `希望単金: ${e.desiredRate ?? '不明'}万円/月`,
     `居住地（都道府県）: ${e.prefecture ?? '不明'}`,
     `リモート希望: ${REMOTE_TEXT[e.remoteWish]}`,
-    `稼働開始可能日: ${v(maskPii(e.availableDate)) || '記載なし'}${e.availableFrom ? `（${e.availableFrom}）` : ''}`,
-    `稼働率: ${v(maskPii(e.utilization)) || '記載なし'}`,
+    `稼働開始可能日: ${v(maskPii(clipField(e.availableDate))) || '記載なし'}${e.availableFrom ? `（${e.availableFrom}）` : ''}`,
+    `稼働率: ${v(maskPii(clipField(e.utilization))) || '記載なし'}`,
     `受信日: ${received(e.receivedAt)}`,
   ].join('\n');
   const card = [

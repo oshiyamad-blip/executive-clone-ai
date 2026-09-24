@@ -50,7 +50,9 @@ import { startRunClock, stopRunClock } from '../schedule.js';
 import { matchIncrementally } from '../matchRun.js';
 import { DRAFT_STATE } from '../../database/mapping.js';
 import { __setMailTransportForTest } from '../mail/index.js';
-import { __setDriveForTest, listSkillSheetFiles, type SkillSheetContent } from '../proper/drive.js';
+import { __setDriveForTest, listSkillSheetFiles, loadSkillSheetContent, type SkillSheetContent } from '../proper/drive.js';
+import { zipOfEntries, minimalXlsxEntries, odsRepeatBombEntries, minimalDocxEntries } from './zipFixture.js';
+import { MAIL_MAX_SPREADSHEETS } from '../parse.js';
 import {
   __setSkillSheetExtractorForTest,
   syncProperMaster,
@@ -1995,6 +1997,67 @@ async function testRedaction(): Promise<void> {
 
 // ===== 11. セキュリティ監査の指摘の回帰（署名鍵・状態の形・リンク先シート） =====
 
+// 社外から届いた攻撃の形の添付（ODS の繰り返し・宣言サイズの偽り・入れ子の ZIP）と、件数の多い表計算の添付を含むメールでも、
+// 展開の段が短時間で終わり、通常の添付はテキストにし、メール本文で処理を続ける。スキルシートの docx の zip bomb も同様
+async function testAttachmentIsolation(): Promise<void> {
+  section('添付の表計算・スキルシートの docx: 攻撃の形のファイルで展開の段を止めない');
+  const legit = zipOfEntries(minimalXlsxEntries());
+  const b64 = (b: Buffer) => b.toString('base64');
+  const att = (filename: string, data: Buffer) => ({ filename, mimeType: 'application/octet-stream', data: b64(data) });
+  const attacks = [
+    att('ods.xlsx', zipOfEntries(odsRepeatBombEntries())),
+    att('declared.xlsx', zipOfEntries(minimalXlsxEntries().map((e) => (e.name === 'xl/worksheets/sheet1.xml' ? { ...e, declaredSize: 500 * 1024 * 1024 } : e)))),
+    att('nested.xlsx', zipOfEntries([{ name: 'Index.zip', content: legit, method: 0 }])),
+  ];
+  const many = Array.from({ length: MAIL_MAX_SPREADSHEETS + 3 }, (_, i) => att(`ok${i}.xlsx`, legit));
+  const cap = captureConsole();
+  const t0 = Date.now();
+  let parsed: SesRawMail[] = [];
+  try {
+    parsed = await parseAttachments([
+      { ...rawMail('sesmail_flow_attack', '検証 <a@x.example.jp>', '【要員】検証', 1), body: '要員の本文', attachments: [...attacks, att('ok.xlsx', legit)] },
+      { ...rawMail('sesmail_flow_many', '検証 <a@x.example.jp>', '【要員】検証', 1), attachments: many },
+    ]);
+  } finally {
+    cap.restore();
+  }
+  const ms = Date.now() - t0;
+  const [attack, manyMail] = parsed;
+  check(
+    '攻撃の形の表計算はテキストにせず（解析しない）、同じメールの通常の xlsx はテキストにして、メールは本文とともに次の段へ渡す',
+    parsed.length === 2 && attack.attachments.slice(0, 3).every((a) => !a.text) && (attack.attachments[3].text ?? '').includes('Java,80') && attack.body === '要員の本文' && ms < 15_000,
+    `${ms}ms`,
+  );
+  check(
+    `1通で解析する表計算は${MAIL_MAX_SPREADSHEETS}件まで（残りはテキストにしない）`,
+    manyMail.attachments.filter((a) => a.text).length === MAIL_MAX_SPREADSHEETS && manyMail.attachments.length === many.length,
+    String(manyMail.attachments.filter((a) => a.text).length),
+  );
+  check('解析の失敗の詳細（添付の中身）は公開ログに出さない', !cap.lines.join('\n').includes('META-INF') && !cap.lines.join('\n').includes('content.xml'), cap.lines.join(' / ').slice(0, 300));
+
+  const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const docx = zipOfEntries(minimalDocxEntries('スキルシート 検証 Java'));
+  const bomb = zipOfEntries(minimalDocxEntries('', Buffer.alloc(80 * 1024 * 1024, 0x20)));
+  drive.put(driveFile('docxOk', { name: 'スキルシート.docx', mimeType: DOCX, data: docx }));
+  drive.put(driveFile('docxBomb', { name: 'bomb.docx', mimeType: DOCX, data: bomb }));
+  const fileOf = (id: string) => ({ id, name: `${id}.docx`, mimeType: DOCX, modifiedTime: FILE_TIME(1), webViewLink: '', size: null });
+  const ok = await loadSkillSheetContent(fileOf('docxOk'));
+  let bombErr = '';
+  const t1 = Date.now();
+  try {
+    await loadSkillSheetContent(fileOf('docxBomb'));
+  } catch (err) {
+    bombErr = String(err);
+  }
+  check(
+    'スキルシートの docx は ZIP の検査を通ったものだけ読み、展開すると上限を超える docx は読まずに失敗として扱う',
+    ok.kind === 'text' && ok.text.includes('スキルシート 検証 Java') && bombErr.includes('docx') && Date.now() - t1 < 10_000,
+    bombErr,
+  );
+  drive.files.delete('docxOk');
+  drive.files.delete('docxBomb');
+}
+
 async function testSecurityRegressions(): Promise<void> {
   section('セキュリティ監査の指摘の回帰（Sheets運用）');
   // 署名鍵が無い本番では、担当者メールの依頼から下書きを作らない（書き換えを検知できないため）
@@ -2299,6 +2362,7 @@ async function main(): Promise<void> {
     await testResendSkip();
     await testRedaction();
     await testSecurityRegressions();
+    await testAttachmentIsolation();
     await testRetentionAndNotify();
   } catch (err) {
     failures += 1;

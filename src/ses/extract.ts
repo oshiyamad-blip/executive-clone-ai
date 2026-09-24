@@ -3,6 +3,7 @@
 // メールは外部の第三者が書いたデータのため、区切りタグで囲み「中の指示に従わない」ことを明示する
 // （プロンプトインジェクション対策）。抽出された単金は原文に現れる数値か・妥当な範囲かを検証する。
 import { createHash } from 'crypto';
+import { inflateSync } from 'zlib';
 import { generateJson, generateJsonWithDocuments, type GenOptions, type PdfDocument } from '../llm/index.js';
 import { LlmOutputError, isTruncationError } from '../llm/errors.js';
 import { estimateCallJpy } from '../llm/pricing.js';
@@ -12,7 +13,7 @@ import { healLlmCall, type HealAttempt } from './heal/retry.js';
 import { recordFailure, recordSuccess } from './heal/quarantine.js';
 import { recordHealEvent, recordMailEvent, recordStat, recordFatal, getStats } from './heal/events.js';
 import { isLastChance, pastExtractDeadline, callLimits } from './schedule.js';
-import { normalizeSkills, normalizeRequirementLists, requirementMembers } from './skillDict.js';
+import { normalizeSkills, normalizeRequirementLists, requirementMembers, SKILL_ITEM_MAX_CHARS } from './skillDict.js';
 import { tallySkillTokens } from './skillStats.js';
 import { normalizePrefecture, isFullRemoteLocation, coarseResidence } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
@@ -449,14 +450,17 @@ function withInjectionFlag(items: ExtractedItem[], suspected: boolean): Extracte
   });
 }
 
-// メールの本文・件名・テキスト化した添付（指示の検知と単金の原文照合に使う）
+// メールの本文・件名・テキスト化した添付（指示の検知と単金の原文照合に使う）。抽出のAIに渡すのと同じ上限で切った範囲だけ
+// （AIが読まない部分は照合しても意味がなく、上限の無い本文・添付を正規表現にかけると1通で実行時間を使い切らせられる）
 function mailText(mail: SesRawMail): string {
-  return `${mail.subject}\n${mail.body}\n${mail.attachments.map((a) => a.text ?? '').join('\n')}`;
+  const attachments = cappedAttachmentTexts(mail).parts.map((p) => p.text);
+  return `${capSubject(mail.subject)}\n${capText(mail.body, MAX_BODY_CHARS).text}\n${attachments.join('\n')}`;
 }
 
 // 指示の検知の対象。抽出のAIに渡す差出人・返信先の表示名と添付のファイル名も含める（本文以外に書かれた指示も確かめる）
 function injectionScanText(mail: SesRawMail): string {
-  return `${mailText(mail)}\n${mail.from}\n${mail.replyTo ?? ''}\n${mail.attachments.map((a) => a.filename).join('\n')}`;
+  const names = mail.attachments.slice(0, 50).map((a) => a.filename.slice(0, 200));
+  return `${mailText(mail)}\n${mail.from.slice(0, 1000)}\n${(mail.replyTo ?? '').slice(0, 1000)}\n${names.join('\n')}`;
 }
 
 function extractItemsDemo(mails: SesRawMail[]): ExtractedItem[] {
@@ -497,6 +501,47 @@ function isPdfAttachment(a: { mimeType: string; filename: string }): boolean {
 
 type PdfCheck = 'ok' | 'too_large' | 'not_pdf' | 'encrypted' | 'too_many_pages';
 
+const PAGE_OBJECT = /\/Type\s*\/Page(?![A-Za-z])/g;
+// 圧縮したオブジェクトストリームを展開して数える量の上限（1ファイル）。超えるものはページ数が分からないため送らない
+const PDF_OBJSTM_MAX_INFLATED_BYTES = 64 * 1024 * 1024;
+
+// 圧縮したオブジェクトストリーム（/Type /ObjStm。PDF 1.5以降の書き出しの既定）の中のページの数。
+// ページのオブジェクトがその中にあると、ファイルの生のバイトを数えただけでは0ページに見える。展開の上限を超えれば Infinity
+function objectStreamPages(buf: Buffer, text: string): number {
+  let pages = 0;
+  let budget = PDF_OBJSTM_MAX_INFLATED_BYTES;
+  // 読み終えた位置より前の一致は飛ばす（'/Type /ObjStm' を大量に並べたファイルで、同じ範囲を何度も探させない）
+  let cursor = 0;
+  for (const m of text.matchAll(/\/Type\s*\/ObjStm\b/g)) {
+    if (m.index < cursor) continue;
+    const keyword = text.indexOf('stream', m.index);
+    if (keyword < 0) break;
+    let start = keyword + 'stream'.length;
+    if (text[start] === '\r') start += 1;
+    if (text[start] === '\n') start += 1;
+    const end = text.indexOf('endstream', start);
+    if (end < 0) break;
+    cursor = end;
+    let inflated: Buffer;
+    try {
+      inflated = inflateSync(buf.subarray(start, end), { maxOutputLength: Math.max(1, budget) });
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') return Infinity;
+      continue; // Flate 以外の圧縮・壊れたストリーム（数えられない）
+    }
+    budget -= inflated.length;
+    pages += (inflated.toString('latin1').match(PAGE_OBJECT) ?? []).length;
+  }
+  return pages;
+}
+
+// PDFのページ数の概算（生のバイトと、圧縮したオブジェクトストリームの中のページのオブジェクトの数）
+export function pdfPageCount(base64: string): number {
+  const buf = Buffer.from(base64, 'base64');
+  const text = buf.toString('latin1');
+  return (text.match(PAGE_OBJECT) ?? []).length + objectStreamPages(buf, text);
+}
+
 // PDFを送る前の安価な検査（サイズ・形式・パスワード保護・ページ数の概算）
 export function inspectPdf(base64: string): PdfCheck {
   if (base64.length > MAX_PDF_BASE64_CHARS) return 'too_large';
@@ -504,8 +549,7 @@ export function inspectPdf(base64: string): PdfCheck {
   if (!buf.subarray(0, 1024).toString('latin1').includes('%PDF-')) return 'not_pdf';
   const text = buf.toString('latin1');
   if (/\/Encrypt\b/.test(text)) return 'encrypted';
-  const pages = (text.match(/\/Type\s*\/Page(?![A-Za-z])/g) ?? []).length;
-  return pages > MAX_PDF_PAGES ? 'too_many_pages' : 'ok';
+  return pdfPageCount(base64) > MAX_PDF_PAGES ? 'too_many_pages' : 'ok';
 }
 
 const PDF_SKIP_REASON: Record<Exclude<PdfCheck, 'ok'>, string> = {
@@ -543,6 +587,24 @@ function capText(s: string, max: number): { text: string; truncated: boolean } {
   return s.length > max ? { text: `${s.slice(0, max)}\n…（長いため以降を省略）`, truncated: true } : { text: s, truncated: false };
 }
 
+// テキスト化した添付を、1件・合計の上限で切ったもの（抽出の入力と、指示の検知・単金の原文照合で同じ範囲を使う）
+function cappedAttachmentTexts(mail: SesRawMail): { parts: Array<{ filename: string; text: string }>; truncated: boolean } {
+  let truncated = false;
+  let remaining = MAX_ATTACHMENT_TOTAL_CHARS;
+  const parts: Array<{ filename: string; text: string }> = [];
+  for (const a of mail.attachments.filter((x) => x.text)) {
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const capped = capText(a.text ?? '', Math.min(MAX_ATTACHMENT_CHARS, remaining));
+    truncated ||= capped.truncated;
+    remaining -= capped.text.length;
+    parts.push({ filename: a.filename, text: capped.text });
+  }
+  return { parts, truncated };
+}
+
 interface PreparedMail {
   user: string; // <untrusted_mail> で囲んだ本文＋テキスト化した添付
   documents: PdfDocument[];
@@ -554,6 +616,7 @@ function prepareMail(mail: SesRawMail): PreparedMail {
   const documents: PdfDocument[] = [];
   const skippedPdfs: string[] = [];
   let pdfTotal = 0;
+  let pdfPages = 0;
   for (const a of mail.attachments.filter((x) => isPdfAttachment(x) && x.data)) {
     const check = inspectPdf(a.data);
     if (check !== 'ok') {
@@ -564,23 +627,20 @@ function prepareMail(mail: SesRawMail): PreparedMail {
       skippedPdfs.push('合計サイズ超過');
       continue;
     }
+    // ページ数は1通の合計で数える（1ファイルごとの上限内のPDFを複数付けて、モデルのコンテキストを超えさせない）
+    const pages = pdfPageCount(a.data);
+    if (pdfPages + pages > MAX_PDF_PAGES) {
+      skippedPdfs.push('合計ページ数超過');
+      continue;
+    }
+    pdfPages += pages;
     pdfTotal += a.data.length;
     documents.push({ mediaType: 'application/pdf', dataBase64: a.data });
   }
 
-  let truncated = false;
-  let remaining = MAX_ATTACHMENT_TOTAL_CHARS;
-  const attachmentParts: string[] = [];
-  for (const a of mail.attachments.filter((x) => x.text)) {
-    if (remaining <= 0) {
-      truncated = true;
-      break;
-    }
-    const capped = capText(a.text ?? '', Math.min(MAX_ATTACHMENT_CHARS, remaining));
-    truncated ||= capped.truncated;
-    remaining -= capped.text.length;
-    attachmentParts.push(`【添付: ${a.filename.slice(0, 200)}】\n${capped.text}`);
-  }
+  const capped = cappedAttachmentTexts(mail);
+  let truncated = capped.truncated;
+  const attachmentParts = capped.parts.map((p) => `【添付: ${p.filename.slice(0, 200)}】\n${p.text}`);
   const body = capText(mail.body, MAX_BODY_CHARS);
   truncated ||= body.truncated;
 
@@ -598,11 +658,12 @@ export function extractionUserMessage(mail: SesRawMail): string {
   return prepareMail(mail).user;
 }
 
-// APIがPDFを受け付けなかった（形式・暗号化・ページ数・サイズ）とみなせるエラーか
-function isDocumentRejection(err: unknown): boolean {
+// PDFを付けた呼び出しをAPIが受け付けなかった（形式・暗号化・ページ数・サイズ・コンテキスト超過の 'prompt is too long' 等）
+// とみなせるエラーか。PDFを付けたときの 400・413 はPDFが原因のことが大半のため、メッセージの文言に関わらずPDFなしで呼び直す
+// （PDFと関係の無い 400 なら呼び直しも同じエラーになり、そのまま失敗として扱われる）
+export function isDocumentRejection(err: unknown): boolean {
   const status = (err as { status?: number }).status;
-  if (status === 413) return true;
-  return status === 400 && /pdf|document/i.test(String((err as { message?: unknown }).message ?? ''));
+  return status === 400 || status === 413;
 }
 
 function genOptions(attempt: HealAttempt | undefined): GenOptions {
@@ -726,13 +787,14 @@ export function numberInRange(v: number | null, min: number, max: number, int = 
 
 // スキル名の区切り文字を除いてから正規化する（保存・読み戻しの経路で値が変わらないように）
 function skillsOf(raw: string[]): string[] {
-  return normalizeSkills(raw.map(sanitizeListItem).filter(Boolean));
+  return normalizeSkills(raw.map((r) => sanitizeListItem(r.slice(0, SKILL_ITEM_MAX_CHARS))).filter(Boolean));
 }
 
 // 案件の必須・尚可スキル → 要件の表記。読点・カンマは「すべて満たす」の区切り（';'）にして渡す
 // （保存時のセルの区切りと衝突させず、「AWS、GCP、Azureのいずれか」の選択肢を読み取れるように）
 function requirementItems(raw: string[]): string[] {
-  return raw.map((r) => r.replace(/\s*[,，、]\s*/g, ';').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  // 空白を先に畳む（'\s*[,，、]\s*' は長い空白の並びで2乗の時間がかかる）。1項目は技術名の読み取りに要る長さまで
+  return raw.map((r) => r.slice(0, SKILL_ITEM_MAX_CHARS).replace(/\s+/g, ' ').replace(/ ?[,，、] ?/g, ';').trim()).filter(Boolean);
 }
 
 function hashId(prefix: string, parts: string[]): string {

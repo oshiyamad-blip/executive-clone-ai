@@ -523,6 +523,7 @@ export interface FakeDriveFile {
   modifiedTime: string;
   parents: string[];
   content?: string; // 本文（PDF・Word等は「ダウンロードした中身」、Googleドキュメントは書き出したテキスト）
+  data?: Buffer; // バイナリの中身（docx・xlsx 等。あれば content より優先してダウンロードで返す）
   trashed?: boolean;
   shortcutTarget?: string; // ショートカット（application/vnd.google-apps.shortcut）の参照先ID
 }
@@ -564,7 +565,7 @@ export class FakeDrive {
                 mimeType: f.mimeType,
                 modifiedTime: f.modifiedTime,
                 webViewLink: `https://drive.example.invalid/file/${f.id}`,
-                ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(Buffer.byteLength(f.content ?? '')) }),
+                ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(f.data ? f.data.length : Buffer.byteLength(f.content ?? '')) }),
                 ...(f.shortcutTarget
                   ? { shortcutDetails: { targetId: f.shortcutTarget, targetMimeType: this.files.get(f.shortcutTarget)?.mimeType ?? '' } }
                   : {}),
@@ -587,7 +588,7 @@ export class FakeDrive {
                 webViewLink: `https://drive.example.invalid/file/${f.id}`,
                 trashed: Boolean(f.trashed),
                 parents: f.parents,
-                ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(Buffer.byteLength(f.content ?? '')) }),
+                ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(f.data ? f.data.length : Buffer.byteLength(f.content ?? '')) }),
               },
             };
           }
@@ -595,7 +596,7 @@ export class FakeDrive {
           if (p.alt !== 'media' || opts?.responseType !== 'arraybuffer') throw new FakeApiError(400, 'fake: unsupported get');
           if (f.mimeType.startsWith(GOOGLE_TYPES)) throw new FakeApiError(403, 'fileNotDownloadable');
           this.downloads.push(f.id);
-          return { data: toArrayBuffer(Buffer.from(f.content ?? '', 'utf-8')) };
+          return { data: toArrayBuffer(f.data ?? Buffer.from(f.content ?? '', 'utf-8')) };
         },
         export: async (p: drive_v3.Params$Resource$Files$Export, opts?: { responseType?: string }) => {
           const f = this.files.get(p.fileId ?? '');
@@ -603,7 +604,7 @@ export class FakeDrive {
           if (!f.mimeType.startsWith(GOOGLE_TYPES)) throw new FakeApiError(403, 'fileNotExportable');
           if (p.mimeType !== 'text/plain' || opts?.responseType !== 'arraybuffer') throw new FakeApiError(400, 'fake: unsupported export');
           this.downloads.push(f.id);
-          return { data: toArrayBuffer(Buffer.from(f.content ?? '', 'utf-8')) };
+          return { data: toArrayBuffer(f.data ?? Buffer.from(f.content ?? '', 'utf-8')) };
         },
       },
     };

@@ -3,9 +3,8 @@
 // Googleドキュメント（テキストで書き出し）/ Googleスプレッドシート（xlsxで書き出して全タブを読む）。
 // ファイル名・本文は個人情報を含むためログに出さない（ファイルIDと件数のみ）。
 import { google, type drive_v3 } from 'googleapis';
-import mammoth from 'mammoth';
 import { properFolderId, properFollowShortcuts } from '../config.js';
-import { spreadsheetBufferToText } from '../parse.js';
+import { spreadsheetBufferToTextIsolated, docxBufferToTextIsolated } from '../spreadsheetIsolated.js';
 import { SafeLogError } from '../redact.js';
 import { withGoogleRetry } from '../../database/sheetBook.js';
 import { properGoogleAuth, properAccessHint } from './auth.js';
@@ -224,15 +223,14 @@ export async function loadSkillSheetContent(file: SkillSheetFile): Promise<Skill
     case 'pdf':
       return { kind: 'pdf', base64: (await download(file.id)).toString('base64') };
     case 'excel':
-      return { kind: 'text', text: clipCsv(spreadsheetBufferToText(await download(file.id))) };
-    case 'docx': {
-      const result = await mammoth.extractRawText({ buffer: await download(file.id) });
-      return { kind: 'text', text: clip(result.value) };
-    }
+      return { kind: 'text', text: clipCsv(await spreadsheetBufferToTextIsolated(await download(file.id))) };
+    case 'docx':
+      // ZIP の検査（宣言サイズ・展開後の大きさ）を通ったものだけを、メモリ上限・時間切れつきのワーカーで読む
+      return { kind: 'text', text: clip(await docxBufferToTextIsolated(await download(file.id))) };
     case 'gdoc':
       return { kind: 'text', text: clip((await exportAs(file.id, 'text/plain')).toString('utf-8')) };
     case 'gsheet':
-      return { kind: 'text', text: clipCsv(spreadsheetBufferToText(await exportAs(file.id, MIME.xlsx))) };
+      return { kind: 'text', text: clipCsv(await spreadsheetBufferToTextIsolated(await exportAs(file.id, MIME.xlsx))) };
     default:
       throw new SafeLogError('未対応の形式です');
   }

@@ -85,6 +85,8 @@ export async function loadFeedback(limit = 200): Promise<MatchFeedback[]> {
 // 1件あたりの長さ上限（UIの入力上限と別に、ここでも切り詰めてプロンプトの膨張を防ぐ）
 const FEWSHOT_TITLE_CHARS = 80;
 const FEWSHOT_NOTE_CHARS = 200;
+// 評価タブのマッチ名を読む長さの上限（「案件名 × 表示名」の形の判定に要る長さ）
+const FEEDBACK_READ_MAX_CHARS = 1000;
 
 function oneLine(s: string, max: number): string {
   const t = dataSafe(s.normalize('NFKC')).replace(/\s+/g, ' ').replace(/[<>＜＞]/g, '').trim();
@@ -95,7 +97,8 @@ function oneLine(s: string, max: number): string {
 // 整えたイニシャルで残す（'KEN' 'Lee' のような短い名前や、表示名に入った氏名を最終判定の入力へ渡さないため）
 // 評価タブに人が手で足した行は「案件名 × 表示名」の形とは限らないため、区切りの無いタイトルは使わず、
 // 区切りの前（案件名）も氏名らしければ伏せ、連絡先は maskPii で伏せる
-export function fewShotTitle(title: string): string {
+export function fewShotTitle(raw: string): string {
+  const title = raw.slice(0, FEEDBACK_READ_MAX_CHARS);
   const i = title.lastIndexOf(' × ');
   if (i < 0) return FEWSHOT_UNKNOWN_TITLE;
   const name = title.slice(i + 3).normalize('NFKC').trim();
@@ -111,7 +114,7 @@ export const FEWSHOT_UNKNOWN_TITLE = '案件 × 要員';
 
 // 評価のメモ（人の自由記述）は氏名・連絡先を伏せてから渡す（最終判定には判定に要る情報だけを渡す）
 export function fewShotNote(note: string): string {
-  return oneLine(maskPii(note), FEWSHOT_NOTE_CHARS);
+  return oneLine(maskPii(note.slice(0, FEWSHOT_NOTE_CHARS * 2)), FEWSHOT_NOTE_CHARS);
 }
 
 // LLM最終判定のユーザー入力に添える few-shot（御社の許容感覚を学習させる）。
@@ -124,7 +127,9 @@ export async function buildFeedbackFewShot(max = 6): Promise<string> {
 // few-shot の本文（純関数）。list は新しい順。案件名は社外のメール由来・メモは人の自由記述のため、
 // AIへの指示らしき記載のある評価は使わず、区切りのタグを値の側から閉じられないようにする
 export function formatFeedbackFewShot(list: MatchFeedback[], max = 6): string {
-  const recent = list.filter((f) => !looksLikeInjection(`${f.matchTitle}\n${f.note ?? ''}`)).slice(0, max);
+  // 評価タブのセルは人が自由に書ける（5万字まで入る）ため、検査・伏せ字の前に表示に使う長さの2倍までに切る
+  const clipped = list.map((f) => ({ ...f, matchTitle: f.matchTitle.slice(0, FEEDBACK_READ_MAX_CHARS), note: f.note ? f.note.slice(0, FEWSHOT_NOTE_CHARS * 2) : f.note }));
+  const recent = clipped.filter((f) => !looksLikeInjection(`${f.matchTitle}\n${f.note ?? ''}`)).slice(0, max);
   if (recent.length === 0) return '';
   const lines = recent.map((f) => {
     const note = f.note ? `（メモ: ${fewShotNote(f.note)}）` : '';

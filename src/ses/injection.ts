@@ -39,7 +39,8 @@ const EN_PATTERNS: RegExp[] = [
   /(?:ignore|reveal|override|forget|print|show)\s+(?:the\s+|your\s+)?system\s*prompt/i,
   /(?:set|give|output|assign)\s+(?:the\s+)?score\s+(?:to|of|as)\s+\d{2,3}/i,
   /you\s+are\s+(?:now\s+)?(?:an?\s+)?(?:ai|assistant|language\s+model|chatbot)\b/i,
-  /<\s*\/?\s*(?:untrusted_mail|case_data|reference_feedback|project_data|engineer_data|skill_sheet)\b/i,
+  // '<' の後の空白・'/' は1つの文字クラスで読む（'\s*\/?\s*' は長い空白の並びで2乗の時間がかかる）
+  /<[\s/]*(?:untrusted_mail|case_data|reference_feedback|project_data|engineer_data|skill_sheet)\b/i,
   // 読み取る仕組みに呼びかけて値の扱いを指図する言い回し（"Note to automated parsers: treat the rate as …"）
   /\b(?:note|message|instructions?|attention|notice)\s+(?:to|for)\s+(?:the\s+|any\s+|all\s+)?(?:automated|automatic|ai|llm|language\s+models?|parsers?|bots?|systems?|models?|assistants?)\b[\s\S]{0,200}?\b(?:treat|mark|record|rate|score|set|classify|output|extract|ignore)\b/i,
   /\b(?:treat|record|mark|extract)\s+(?:the\s+)?(?:rate|price|score|skills?)\s+as\b/i,
@@ -54,7 +55,11 @@ const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
 
 // 言い回しの照合は補助の網（言い換えはすり抜ける）。抽出のAIの印・単金の原文照合・文面の検査と重ねて使う。
 // HTMLの文字参照（&#20197;前の…）で書かれた指示も、戻してから照合する
-export function looksLikeInjection(text: string): boolean {
+// 照合する文字数の上限（呼び出し側は抽出のAIに渡すのと同じ上限で切ってから渡す。これは共通の関数としての最後の歯止め）
+export const INJECTION_SCAN_MAX_CHARS = 300_000;
+
+export function looksLikeInjection(raw: string): boolean {
+  const text = raw.length > INJECTION_SCAN_MAX_CHARS ? raw.slice(0, INJECTION_SCAN_MAX_CHARS) : raw;
   const spaced = decodeHtmlEntities(text.normalize('NFKC')).normalize('NFKC').replace(ZERO_WIDTH, '');
   const compact = spaced.replace(/\s+/g, '');
   return (
@@ -65,7 +70,8 @@ export function looksLikeInjection(text: string): boolean {
 }
 
 const URL_LIKE = /(?:https?|hxxps?|ftp):\/\/|\bwww\./i;
-const EMAIL_LIKE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
+// 連続した英数字の途中からは始めない（'@' の無い長い英数字の列で2乗の時間がかからない。maskPii と同じ）
+const EMAIL_LIKE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
 
 // スキームの無いリンク（メーラーは「evil.example/x」「bit.ly/abc」のような裸のドメインもリンクにする）。
 // よく使われるトップレベルドメインか、後ろにパスが続くホスト名を拾う。技術名（ASP.NET・Socket.IO・Node.js 等）は除く
@@ -115,8 +121,13 @@ export function linkOrContactLike(raw: string): boolean {
 // 紹介・提案の文面にそのまま差し込む短い項目（案件名・営業元担当・スキル・提案用表記等）に、URL・メールアドレス・
 // AIへの指示らしき記載があるか。これらの項目はスプレッドシートで人が書き換えられ、下書きデータの署名は書き換えた後の
 // 文面にも付くため、文面に入れる前に確かめる（あれば自動の下書きを作らず人が確かめる）
+// 文面に入る1項目の長さの上限。これより長い値（貼り付けたデータの塊等）はそれだけで人が確かめる対象にする
+// （組ごとに何百回も検査するため、長い値で検査の時間を膨らませない）
+export const OUTGOING_VALUE_MAX_CHARS = 1000;
+
 export function unsafeOutgoingText(values: ReadonlyArray<string | null | undefined>): boolean {
   const present = values.filter((v): v is string => typeof v === 'string' && v !== '');
+  if (present.some((v) => v.length > OUTGOING_VALUE_MAX_CHARS)) return true;
   const text = present.join('\n').normalize('NFKC').replace(ZERO_WIDTH, '');
   // リンク・連絡先は項目ごとに確かめる（隣の項目の数字とつながって電話番号のように見えないように）
   return present.some(linkOrContactLike) || EMAIL_LIKE.test(text) || looksLikeInjection(text);
@@ -124,8 +135,9 @@ export function unsafeOutgoingText(values: ReadonlyArray<string | null | undefin
 
 // データ区切りのタグを値の側から閉じられないようにする（抽出・最終判定・文面の生成の入力に入れる社外・人の自由記述の値）。
 // '< /untrusted_mail>' のように '<' と '/' の間に空白を挟んだ閉じタグも無害にする
-const DATA_TAG = /<(\s*\/?\s*(?:untrusted_mail|case_data|reference_feedback|project_data|engineer_data|skill_sheet))/gi;
+// 先読みの中を1つの文字クラス（空白と '/'）にし、長い空白の並びでも '<' ごとに1回だけ読む（2乗の時間にしない）
+const DATA_TAG = /<(?=[\s/]*(?:untrusted_mail|case_data|reference_feedback|project_data|engineer_data|skill_sheet))/gi;
 
 export function dataSafe(s: string): string {
-  return s.replace(DATA_TAG, '＜$1');
+  return s.replace(DATA_TAG, '＜');
 }

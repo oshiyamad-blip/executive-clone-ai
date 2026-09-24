@@ -62,7 +62,7 @@ export async function healLlmCall<T>(
     recordHealEvent(
       'warn',
       `${label}: 再試行不能なエラー種別のため修復をスキップ`,
-      maskPii(String(firstError)).slice(0, 120),
+      maskPii(String(firstError).slice(0, 2000)).slice(0, 120),
     );
     return null;
   }
@@ -81,7 +81,7 @@ export async function healLlmCall<T>(
     if (isTruncationError(err)) {
       factor *= 2; // 拡大しても切れた場合は昇格でさらに広げる
     } else if (!isRetryableLlmError(err)) {
-      recordHealEvent('warn', `${label}: 再試行でも恒久的なエラーのため昇格しません`, maskPii(String(err)).slice(0, 120));
+      recordHealEvent('warn', `${label}: 再試行でも恒久的なエラーのため昇格しません`, maskPii(String(err).slice(0, 2000)).slice(0, 120));
       return null;
     }
   }
@@ -97,7 +97,7 @@ export async function healLlmCall<T>(
     recordHealEvent('info', `${label}: 上位モデルへの昇格で成功しました`);
     return value;
   } catch (err) {
-    recordHealEvent('warn', `${label}: 昇格でも失敗しました`, maskPii(String(err)).slice(0, 120));
+    recordHealEvent('warn', `${label}: 昇格でも失敗しました`, maskPii(String(err).slice(0, 2000)).slice(0, 120));
     return null;
   }
 }

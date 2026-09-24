@@ -287,8 +287,9 @@ const REQUIRED_MARK = /必須/;
 
 // 年数・レベル・経験の語（名前には含めない。年数の構造化は後段の施策で扱う）
 const LEVEL_PATTERNS: RegExp[] = [
-  /\d+(?:\.\d+)?\s*[~〜\-]?\s*\d*(?:\.\d+)?\s*(?:年|ヶ月|か月|カ月|ヵ月|箇月)(?:以上|程度|前後|未満|以下|半)?/g,
-  /\d+(?:\.\d+)?\s*\+?\s*(?:years?|yrs?)\b/gi,
+  // 数字の並びの先頭からだけ始め、区切りの前後の空白は1つまで（量指定子が隣り合う形は長い数字・空白の並びで3乗の時間がかかる）
+  /(?<!\d)\d+(?:\.\d+)?(?:\s?[~〜\-]\s?(?:\d+(?:\.\d+)?)?)?\s?(?:年|ヶ月|か月|カ月|ヵ月|箇月)(?:以上|程度|前後|未満|以下|半)?/g,
+  /(?<!\d)\d+(?:\.\d+)?\s?\+?\s?(?:years?|yrs?)\b/gi,
   /(?:等|など|ほか)(?:[のをでがに].*)?$/, // 'PostgreSQL等のDB' 'AWS等を用いた開発' → 'PostgreSQL' 'AWS'
   /(?:でも|も)(?:可|ok|構いません|よい|良い)$/i, // 'Javaも可' → 'Java'
   /(?:の)?(?:いずれか|どれか|どちらか|のうち)(?:の|で|が)?/g,
@@ -723,9 +724,18 @@ function parseWith(text: string, lambdaExpression: boolean): SkillRequirement[] 
   return uniqueReqs([...merge(required), ...merge(preferred), ...tail]);
 }
 
+// 1つの記載として読む文字数の上限（スキルの1項目。長い値は貼り付けの塊等で、技術名の読み取りに要らない）
+export const SKILL_ITEM_MAX_CHARS = 500;
+
+// 空白の並びを1文字にする（改行を含む並びは改行、それ以外は空白）。U+2028・U+FEFF・\f 等も含めてここで畳み、
+// 以降の区切り・年数の正規表現に長い空白の並びを渡さない（空白の並びで2乗・3乗の時間がかかる形を避ける）
+export function collapseWhitespace(s: string): string {
+  return s.replace(/\s+/g, (ws) => (/[\n\r\u2028\u2029\u0085]/.test(ws) ? '\n' : ' '));
+}
+
 function parseUncached(raw: string): SkillRequirement[] {
   // 丸数字は NFKC で数字になり語に付いてしまうため、先に区切りにする
-  const text = raw.replace(/[①-⑳]/g, ' / ').normalize('NFKC').replace(/[ \t]+/g, ' ').trim();
+  const text = collapseWhitespace(raw.slice(0, SKILL_ITEM_MAX_CHARS).replace(/[①-⑳]/g, ' / ').normalize('NFKC')).trim();
   if (!text) return [];
   const whole = resolve(text);
   if (whole) return [singleReq(whole, false)];

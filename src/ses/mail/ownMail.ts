@@ -29,8 +29,19 @@ export interface ParsedAddress {
 // アドレスヘッダを RFC 5322 の解釈（nodemailer の addressparser。送信時に宛先を決めるのと同じ解釈）で分ける。
 // 正規表現で "<...>" を探すと、引用符で囲んだ表示名の中の "<partner@example.jp>" を宛先と取り違えるため使わない。
 // アドレスの無い要素（グループ名だけ等）は除く
+// 解釈するアドレスヘッダの長さの上限。受信したヘッダ・シートの返信メタのどちらにも長さの上限が無いため、
+// 何万字もの宛先で解釈（下書きごとに何度も呼ぶ）の時間を膨らませない。上限で切るときは最後の ',' までにする（途中で切れたアドレスを使わない）
+export const ADDRESS_HEADER_MAX_CHARS = 20_000;
+
+function capAddressHeader(header: string): string {
+  if (header.length <= ADDRESS_HEADER_MAX_CHARS) return header;
+  const cut = header.slice(0, ADDRESS_HEADER_MAX_CHARS);
+  const comma = cut.lastIndexOf(',');
+  return comma > 0 ? cut.slice(0, comma) : '';
+}
+
 export function parseAddressList(header: string): ParsedAddress[] {
-  return addressparser(header ?? '', { flatten: true })
+  return addressparser(capAddressHeader(header ?? ''), { flatten: true })
     .map((a) => {
       const original = (a.address ?? '').trim();
       return { name: (a.name ?? '').replace(/[\r\n]+/g, ' ').trim(), address: original.toLowerCase(), original };
@@ -64,17 +75,22 @@ export interface MailboxValue {
   group?: MailboxValue[];
 }
 
+// 1つのヘッダから組み立てる宛先の上限（件数・表示名の長さ）。送り主が何千件・何万字の宛先を並べても保存・解釈する量を抑える
+export const MAILBOX_LIST_MAX = 100;
+const MAILBOX_NAME_MAX_CHARS = 200;
+
 export function formatMailboxes(values: MailboxValue[]): string {
   const out: string[] = [];
   const walk = (list: MailboxValue[], depth: number) => {
     for (const v of list) {
+      if (out.length >= MAILBOX_LIST_MAX) return;
       if (v.group && depth < 3) {
         walk(v.group, depth + 1);
         continue;
       }
       const address = (v.address ?? '').replace(/[\s<>"]/g, '');
-      if (!address) continue;
-      const name = (v.name ?? '').replace(/[\r\n]+/g, ' ').trim();
+      if (!address || address.length > 254) continue;
+      const name = (v.name ?? '').replace(/\s+/g, ' ').trim().slice(0, MAILBOX_NAME_MAX_CHARS);
       out.push(name ? `"${name.replace(/[\\"]/g, '\\$&')}" <${address}>` : address);
     }
   };

@@ -3,15 +3,28 @@
 // demoは fixture にあらかじめ埋めたテキストをそのまま返す（外部アクセスしない）。
 // 添付は社外の誰からでも届くため、表計算の解析前に形式（先頭バイト）とサイズを確かめ、
 // 解析は数式・スタイル・マクロ等を読まない設定で行い、行数と文字数に上限を設ける。
-import { inflateRawSync } from 'zlib';
-import { read as readXlsx, utils as xlsxUtils } from 'xlsx';
 import { google, sheets_v4, drive_v3 } from 'googleapis';
 import { getServiceAccountAuth } from '../collectors/googleAuth.js';
 import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains, logRedact } from './config.js';
-import { redactable, safeErr, SafeLogError, logId } from './redact.js';
+import { redactable, safeErr, logId } from './redact.js';
 import { GOOGLE_REQUEST_TIMEOUT_MS } from '../database/sheetBook.js';
 import { pastExtractDeadline } from './schedule.js';
+import { spreadsheetBufferToTextIsolated } from './spreadsheetIsolated.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
+
+export {
+  SPREADSHEET_MAX_BYTES,
+  SPREADSHEET_MAX_INFLATED_BYTES,
+  spreadsheetKind,
+  zipInflatesWithin,
+  isPlainOoxmlWorkbook,
+  withConsoleSilenced,
+  spreadsheetBufferToText,
+} from './spreadsheetText.js';
+
+// 1通で解析する表計算の添付の上限（件数）。1件ごとの解析は小さなファイルでも秒単位かかり得るため、
+// 何百件も添付したメール1通で実行時間を使い切らせない（上限を超えた分はテキスト化しない）
+export const MAIL_MAX_SPREADSHEETS = 5;
 
 export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[]> {
   if (isDemo()) return mails; // fixtureは attachments[].text 済み。展開処理をスキップ
@@ -27,7 +40,16 @@ export async function parseAttachments(mails: SesRawMail[]): Promise<SesRawMail[
       continue;
     }
     try {
-      const fileAttachments = await Promise.all(mail.attachments.map(parseAttachment));
+      const fileAttachments: SesAttachment[] = [];
+      let spreadsheets = 0;
+      for (const att of mail.attachments) {
+        const excel = !att.text && Boolean(att.data) && isExcelAttachment(att);
+        if (excel && ++spreadsheets > MAIL_MAX_SPREADSHEETS) {
+          fileAttachments.push(att);
+          continue;
+        }
+        fileAttachments.push(await parseAttachment(att));
+      }
       const sheetAttachments = await parseSheetLinks(mail, linkStats);
       parsed.push({ ...mail, attachments: [...fileAttachments, ...sheetAttachments] });
     } catch (err) {
@@ -62,7 +84,7 @@ async function parseAttachment(att: SesAttachment): Promise<SesAttachment> {
   if (!isExcelAttachment(att) || !att.data) return att; // PDFはbase64を温存しそのまま次段へ
 
   try {
-    return { ...att, text: xlsxToText(att.data) };
+    return { ...att, text: await spreadsheetBufferToTextIsolated(Buffer.from(att.data, 'base64')) };
   } catch (err) {
     if (!logRedact()) console.warn(`SES展開: xlsx解析に失敗 (${redactable(att.filename)}): ${safeErr(err)}`);
     return att;
@@ -78,170 +100,6 @@ function isExcelMime(mimeType: string): boolean {
   return (
     mimeType.includes('spreadsheet') || mimeType.includes('excel') || mimeType === 'application/vnd.ms-excel'
   );
-}
-
-function xlsxToText(base64Data: string): string {
-  return spreadsheetBufferToText(Buffer.from(base64Data, 'base64'));
-}
-
-// 表計算の解析上限。これを超えるファイルは解析しない／以降の行・文字を読まない
-export const SPREADSHEET_MAX_BYTES = 10 * 1024 * 1024;
-// xlsx（ZIP）を展開した後の合計の上限。圧縮後は10MB以内でも展開すると数GBになるファイル（zip bomb）は、
-// SheetJS が全エントリを展開するため1通で数十秒・数GBのメモリを使い、実行時間の上限を超えて毎回同じメールで止まる
-export const SPREADSHEET_MAX_INFLATED_BYTES = 64 * 1024 * 1024;
-const SPREADSHEET_MAX_ROWS = 2000;
-const SPREADSHEET_MAX_TEXT_CHARS = 200_000;
-
-// 先頭バイトで形式を判定する（拡張子・MIMEは送信者が自由に付けられるため）。
-// xlsx は ZIP（PK\x03\x04）、旧形式の xls は OLE 複合文書（D0 CF 11 E0 A1 B1 1A E1）
-export function spreadsheetKind(data: Buffer): 'xlsx' | 'xls' | null {
-  if (data.length >= 4 && data[0] === 0x50 && data[1] === 0x4b && data[2] === 0x03 && data[3] === 0x04) return 'xlsx';
-  const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
-  if (data.length >= 8 && ole.every((b, i) => data[i] === b)) return 'xls';
-  return null;
-}
-
-interface ZipEntry {
-  name: string;
-  method: number;
-  start: number;
-  compressedSize: number;
-}
-
-// ZIP の中央ディレクトリの各エントリ（名前・圧縮方式・ローカルヘッダの直後のデータ位置）。壊れていれば null
-function zipEntries(data: Buffer): ZipEntry[] | null {
-  const eocd = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (eocd < 0 || eocd + 22 > data.length) return null;
-  const count = data.readUInt16LE(eocd + 8);
-  let p = data.readUInt32LE(eocd + 16);
-  const out: ZipEntry[] = [];
-  for (let i = 0; i < count; i++) {
-    if (p + 46 > data.length) return null;
-    const nameLen = data.readUInt16LE(p + 28);
-    if (p + 46 + nameLen > data.length) return null;
-    const name = data.toString('utf8', p + 46, p + 46 + nameLen);
-    const compressedSize = data.readUInt32LE(p + 20);
-    const offset = data.readUInt32LE(p + 42);
-    p += 46 + nameLen + data.readUInt16LE(p + 30) + data.readUInt16LE(p + 32);
-    if (offset + 30 > data.length) return null;
-    const method = data.readUInt16LE(offset + 8);
-    const start = offset + 30 + data.readUInt16LE(offset + 26) + data.readUInt16LE(offset + 28);
-    if (start > data.length) return null;
-    out.push({ name, method, start, compressedSize });
-  }
-  return out;
-}
-
-// xlsx（ZIP）の各エントリを SheetJS と同じ手順（中央ディレクトリの各エントリ→ローカルヘッダの直後のデータ）で、
-// 合計 maxBytes まで実際に展開して確かめる（ヘッダの宣言サイズは偽れるため信用しない）。
-// 上限を超える・壊れている・対応しない圧縮方式なら false（解析しない）
-export function zipInflatesWithin(data: Buffer, maxBytes: number): boolean {
-  const entries = zipEntries(data);
-  if (!entries) return false;
-  let remaining = maxBytes;
-  for (const e of entries) {
-    if (e.method === 0) continue; // 無圧縮（ファイルの大きさ以上にはならない）
-    if (e.method !== 8) return false;
-    try {
-      remaining -= inflateRawSync(data.subarray(e.start), { maxOutputLength: remaining + 1 }).length;
-    } catch {
-      return false; // 上限超過（ERR_BUFFER_TOO_LARGE）・壊れたデータ
-    }
-    if (remaining < 0) return false;
-  }
-  return true;
-}
-
-// ZIP の1エントリの中身（XML等の小さなテキスト。1MBまで）。読めなければ null
-function zipEntryText(data: Buffer, e: ZipEntry): string | null {
-  try {
-    const raw = e.method === 0 ? data.subarray(e.start, e.start + e.compressedSize) : inflateRawSync(data.subarray(e.start), { maxOutputLength: 1024 * 1024 });
-    return raw.toString('utf8');
-  } catch {
-    return null;
-  }
-}
-
-// 解析してよい .bin（SheetJS が読まない付属物: 印刷設定・埋め込みオブジェクト・マクロ）
-const HARMLESS_BIN = /^xl\/(?:printersettings\/[^/]+|embeddings\/[^/]+|vbaproject[^/]*)\.bin$/;
-
-// 通常の xlsx（OOXML の XML 形式のブック）か。ZIP の中身が XLSB（xl/workbook.bin 等のバイナリ形式）・ODS・Numbers だと、
-// SheetJS はそれぞれ別の解析器に回し、その解析器は添付の中の文字列（定義名等）をそのままコンソールに出す。
-// 公開の Actions ログに送り主の文字列が出ないよう、XML 形式のブック以外は解析しない
-export function isPlainOoxmlWorkbook(data: Buffer): boolean {
-  const entries = zipEntries(data);
-  if (!entries) return false;
-  const names = entries.map((e) => e.name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase());
-  const ctIndex = names.indexOf('[content_types].xml');
-  if (ctIndex < 0) return false;
-  const foreign = (n: string) =>
-    n === 'meta-inf/manifest.xml' || n === 'objectdata.xml' || n.startsWith('index/') || n === 'index.zip' || n.endsWith('/index.zip');
-  if (names.some((n) => foreign(n) || (n.endsWith('.bin') && !HARMLESS_BIN.test(n)))) return false;
-  const text = zipEntryText(data, entries[ctIndex]);
-  if (text === null) return false;
-  // 部品の種類の個別登録（Override）で、XLSB のブックの種類や .bin の部品（ブック・シートとして読ませる）があれば解析しない
-  // （拡張子ごとの既定（Default）の bin は通常の xlsx にもあり、SheetJS はブックの判定に使わない）
-  const overrides = text.match(/<(?:[\w-]+:)?Override\b[^>]*>/gi) ?? [];
-  // ブックからシート等への参照（xl/_rels/workbook.xml.rels）が .bin を指すものも、バイナリの解析器に回るため解析しない
-  const relsIndex = names.indexOf('xl/_rels/workbook.xml.rels');
-  const rels = relsIndex < 0 ? '' : zipEntryText(data, entries[relsIndex]);
-  if (rels === null || /Target\s*=\s*["'][^"']*\.bin["']/i.test(rels)) return false;
-  return !overrides.some((tag) => /sheet\.binary/i.test(tag) || /PartName\s*=\s*["'][^"']*\.bin["']/i.test(tag));
-}
-
-// SheetJS は解析できない部品に出会うと、添付の中の文字列を含むメッセージを console に直接書く（ログ秘匿を通らない）。
-// 解析の間だけ console の出力を捨てる（同期処理のため、他の処理の出力を巻き込まない）
-export function withConsoleSilenced<T>(fn: () => T): T {
-  const saved = { log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug, trace: console.trace };
-  const drop = () => undefined;
-  Object.assign(console, { log: drop, info: drop, warn: drop, error: drop, debug: drop, trace: drop });
-  try {
-    return fn();
-  } finally {
-    Object.assign(console, saved);
-  }
-}
-
-// Excel（.xlsx/.xls）の全シートをCSVテキストにする（プロパーのスキルシート読み取りでも使う）
-export function spreadsheetBufferToText(data: Buffer): string {
-  if (data.length > SPREADSHEET_MAX_BYTES) throw new SafeLogError('表計算ファイルが大きすぎるため解析しません（10MB超）');
-  const kind = spreadsheetKind(data);
-  if (!kind) throw new SafeLogError('Excel形式（xlsx/xls）ではないため解析しません');
-  if (kind === 'xlsx' && !zipInflatesWithin(data, SPREADSHEET_MAX_INFLATED_BYTES)) {
-    throw new SafeLogError('表計算ファイルの展開後の大きさが上限を超えるか壊れているため解析しません');
-  }
-  if (kind === 'xlsx' && !isPlainOoxmlWorkbook(data)) {
-    throw new SafeLogError('通常のxlsx（XML形式のブック）ではないため解析しません（xlsb・ods等）');
-  }
-  return withConsoleSilenced(() => workbookToText(data));
-}
-
-function workbookToText(data: Buffer): string {
-  const workbook = readXlsx(data, {
-    type: 'buffer',
-    dense: true,
-    sheetRows: SPREADSHEET_MAX_ROWS,
-    cellFormula: false,
-    cellHTML: false,
-    cellStyles: false,
-    cellNF: false,
-    bookVBA: false,
-    bookFiles: false,
-  });
-  const parts: string[] = [];
-  let total = 0;
-  for (const name of workbook.SheetNames) {
-    const sheet = workbook.Sheets[name];
-    if (!sheet) continue;
-    const part = `【シート: ${name}】\n${xlsxUtils.sheet_to_csv(sheet)}`;
-    if (total + part.length > SPREADSHEET_MAX_TEXT_CHARS) {
-      parts.push(`${part.slice(0, Math.max(0, SPREADSHEET_MAX_TEXT_CHARS - total))}\n…（長いため以降を省略）`);
-      break;
-    }
-    parts.push(part);
-    total += part.length;
-  }
-  return parts.join('\n\n');
 }
 
 const SHEETS_READONLY_SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
