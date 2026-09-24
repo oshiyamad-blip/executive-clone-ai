@@ -221,7 +221,12 @@ function checkMainServiceAccount(label: string): boolean {
     if (leftover.length > 0) {
       warn(`SES_GOOGLE_AUTH=adc のため ${leftover.map((p) => `${p}*`).join('・')} の鍵は使いません（不要になった鍵は Secrets から削除し、Google Cloud でも鍵を削除してください）`);
     }
-    if (!sesGoogleAdcAccountEmail()) warn('SES_GOOGLE_SA_EMAIL（ADC のサービスアカウントのメール）が未設定です — 「_指示混入」タブの保護の編集者を設定できません');
+    if (!sesGoogleAdcAccountEmail()) {
+      // バッチの保護を見分けられず、実行のたびに「_指示混入」タブへ保護を重ねてしまうため、スプレッドシート運用では止める
+      const msg = 'SES_GOOGLE_SA_EMAIL（ADC のサービスアカウントのメール）が未設定です — 「_指示混入」タブの保護の編集者を設定できません';
+      if (dbProvider() === 'sheets') bad(`${msg}（Secret SES_GOOGLE_SA_EMAIL に登録してください）`);
+      else warn(msg);
+    }
     return true;
   }
   const [sesPrefix, legacyPrefix] = sesServiceAccountEnvPrefixes();

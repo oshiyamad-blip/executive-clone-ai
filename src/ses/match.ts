@@ -14,7 +14,7 @@ import {
   isDemo,
   maxCandidatesPerItem,
   maxProjectsPerEngineer,
-  ownDomains,
+  internalMailDomains,
   matchModel,
   matchTimingGraceDays,
   minGrossMarginJpy,
@@ -252,7 +252,8 @@ export function primarySelectDetailed(
   const openProjects = projects.filter((p) => p.status === 'open');
   const availableEngineers = engineers.filter((e) => e.status === 'available');
   const now = opts.now ?? new Date();
-  const own = ownDomains();
+  const own = internalMailDomains();
+  const shared = sharedHeaderDomains([...openProjects, ...availableEngineers], own);
   const stats = emptyPrimaryStats();
   const pending = scope?.pendingMatchIds ?? new Set<string>();
   const evaluatedIds = new Set<string>();
@@ -261,7 +262,7 @@ export function primarySelectDetailed(
   // ルール・再提案抑制を通れば passed に積む（通らなければ false）
   const consider = (project: Project, engineer: Engineer): boolean => {
     stats.evaluated += 1;
-    const r = evaluatePair(project, engineer, now, own);
+    const r = evaluatePair(project, engineer, now, own, shared);
     if ('excluded' in r) {
       stats.reasons[r.excluded] += 1;
       return false;
@@ -346,24 +347,47 @@ export function emailDomain(email: string): string {
 
 // 案件と要員が同じ営業元（同じ会社）から届いたか。貴社の要員を貴社の案件に紹介しない。
 // フリーメール・自社ドメイン（社内の営業が共有した案件・要員）・アドレス不明は判定しない
-export function isSameAgent(projectEmail: string, engineerEmail: string, ownDomainList: string[] = ownDomains()): boolean {
+export function isSameAgent(projectEmail: string, engineerEmail: string, ownDomainList: string[] = internalMailDomains()): boolean {
   const domain = emailDomain(projectEmail);
   if (!domain || domain !== emailDomain(engineerEmail)) return false;
   return !isFreeMailDomain(domain) && !ownDomainList.includes(domain);
 }
 
+type AgentItem = { agentEmail: string; replyTarget?: { from: string; replyTo?: string } };
+
+// ヘッダの返信先（Reply-To、無ければ From）のアドレスとドメイン（末尾の . は除く）
+function headerAgent(item: AgentItem): { address: string; domain: string } {
+  const rt = item.replyTarget;
+  if (!rt) return { address: '', domain: '' };
+  const address = (addressOf(rt.replyTo ?? '') || addressOf(rt.from)).trim();
+  return { address, domain: domainOfAddress(address).replace(/\.$/, '') };
+}
+
+// 複数の会社のメールが同じドメインから届いている（ヘッダのドメインと違う本文の営業元のドメインが2つ以上ある）ヘッダの
+// ドメイン。配信サービス・転送・共用のメールボックスのドメインで、送り主の会社を表さないため同じ営業元の判定に使わない
+export function sharedHeaderDomains(items: AgentItem[], ownDomainList: string[] = internalMailDomains()): Set<string> {
+  const own = ownDomainList.map((d) => d.toLowerCase());
+  const bodyDomains = new Map<string, Set<string>>();
+  for (const item of items) {
+    const { domain } = headerAgent(item);
+    const body = emailDomain(item.agentEmail);
+    if (!domain || !body || body === domain || own.includes(domain) || isFreeMailDomain(domain)) continue;
+    const set = bodyDomains.get(domain) ?? new Set<string>();
+    set.add(body);
+    bodyDomains.set(domain, set);
+  }
+  return new Set([...bodyDomains].filter(([, set]) => set.size >= 2).map(([d]) => d));
+}
+
 // 案件・要員の送り主（会社）を表す値。メールのヘッダから決めた返信先（Reply-To、無ければ From。会社のドメインは
-// ドメイン、フリーメールはアドレス）と、本文から抽出した営業元メールのドメイン。自社ドメインは含めない（社内の営業が共有したもの）
-function agentKeys(item: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } }, ownDomainList: string[]): Set<string> {
+// ドメイン、フリーメールはアドレス）と、本文から抽出した営業元メールのドメイン。社内のドメイン（自社ドメイン・共有メール
+// ボックスのドメイン。社内の営業が転送・共有したもの）と、複数の会社が使うヘッダのドメイン（配信サービス等）は含めない
+function agentKeys(item: AgentItem, ownDomainList: string[], shared: Set<string>): Set<string> {
   const keys = new Set<string>();
   const extracted = emailDomain(item.agentEmail);
   if (extracted && !isFreeMailDomain(extracted) && !ownDomainList.includes(extracted)) keys.add(extracted);
-  const rt = item.replyTarget;
-  if (rt) {
-    const address = (addressOf(rt.replyTo ?? '') || addressOf(rt.from)).trim();
-    const domain = domainOfAddress(address).replace(/\.$/, '');
-    if (domain && !ownDomainList.includes(domain)) keys.add(isFreeMailDomain(domain) ? `addr:${address}` : domain);
-  }
+  const { address, domain } = headerAgent(item);
+  if (domain && !ownDomainList.includes(domain) && !shared.has(domain)) keys.add(isFreeMailDomain(domain) ? `addr:${address}` : domain);
   return keys;
 }
 
@@ -371,25 +395,26 @@ function agentKeys(item: { agentEmail: string; replyTarget?: { from: string; rep
 // 空・別の担当者・親会社のアドレスのことがあり、それだけでは同じ取引先の要員を同じ取引先の案件に紹介してしまうため）。
 // どちらかの値が相手のどちらかの値と一致すれば同じ営業元とみなす
 export function isSameAgentPair(
-  project: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } },
-  engineer: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } },
-  ownDomainList: string[] = ownDomains(),
+  project: AgentItem,
+  engineer: AgentItem,
+  ownDomainList: string[] = internalMailDomains(),
+  shared: Set<string> = new Set(),
 ): boolean {
   if (isSameAgent(project.agentEmail, engineer.agentEmail, ownDomainList)) return true;
   const own = ownDomainList.map((d) => d.toLowerCase());
-  const engineerKeys = agentKeys(engineer, own);
-  return [...agentKeys(project, own)].some((k) => engineerKeys.has(k));
+  const engineerKeys = agentKeys(engineer, own, shared);
+  return [...agentKeys(project, own, shared)].some((k) => engineerKeys.has(k));
 }
 
 type PairEvaluation = { pair: MatchPair; staleDemoted: boolean } | { excluded: ExclusionReason };
 
-function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomainList: string[]): PairEvaluation {
+function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomainList: string[], shared: Set<string>): PairEvaluation {
   const reviewReasons: string[] = [];
   const cautions: string[] = [];
   const notes: string[] = [];
 
   // 1. 同じ営業元の案件と要員は組まない
-  if (isSameAgentPair(project, engineer, ownDomainList)) return { excluded: 'sameAgent' };
+  if (isSameAgentPair(project, engineer, ownDomainList, shared)) return { excluded: 'sameAgent' };
 
   // 2. スキル一致（必須スキルの被覆率・同義辞書・含意考慮）。許容範囲の下限未満は除外。
   // 下限〜強マッチ閾値未満は「参考提案(tentative)」バンド、強マッチ閾値以上は「強マッチ(strong)」。

@@ -90,6 +90,7 @@ jobs:
         if: ${{ inputs.mode != 'デモ' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SES_SINGLE_MAINTAINER: ${{ vars.SES_SINGLE_MAINTAINER }}
         run: node dist/ses/checkMainRuleset.js
 
       - name: デモ（外部に接続しません）
@@ -136,6 +137,11 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      # リポジトリ直下の設定ファイル（.env・.npmrc。PR で足せる）で、ワークフローが渡していない環境変数・npm の接続先を
+      # 書き換えさせない（コードは .env を GitHub Actions では読まないが、念のため鍵を持つジョブの作業場所から消す）
+      - name: 作業場所の .env・.npmrc を消す
+        run: rm -f .env .env.* .npmrc
 
       - name: Node.js を用意
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

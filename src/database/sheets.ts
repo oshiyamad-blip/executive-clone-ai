@@ -268,16 +268,22 @@ async function loadInjectionFlags(): Promise<void> {
 }
 
 // 控えの件数を _状態 の署名付きの件数と比べる（控えの行が消された・タブが作り直された実行では下書きを作らない）。
-// 署名どおりに記録されていた件数（無い・合わなければ null）を返す
+// 署名どおりに記録されていた件数（無い・合わなければ null）を返す。_状態 は保護していないため、控えに行があるのに
+// 記録が無い・空・壊れている・署名が空（鍵の設定前の記録を装える）場合も、その実行は信用しない（次の実行から今の件数で続ける）
 async function checkInjectionLedger(count: number): Promise<number | null> {
   const key = draftSigningKey();
   const state = await readStateJson<{ count?: unknown; sig?: unknown }>(INJECTION_LEDGER_STATE_KEY).catch(() => null);
-  // 署名の鍵を後から設定した場合の署名の無い記録は、比べずに書き直す
-  const unsignedLegacy = Boolean(key) && state?.sig === '';
+  const record = state && typeof state === 'object' ? state : null;
+  const unsigned = Boolean(key) && record?.sig === '';
   const recorded =
-    !unsignedLegacy && typeof state?.count === 'number' && Number.isInteger(state.count) && state.count >= 0 ? state.count : null;
-  if (state && !unsignedLegacy && (recorded === null || (key && state.sig !== ledgerCountSignature(key, recorded)))) {
+    record && !unsigned && typeof record.count === 'number' && Number.isInteger(record.count) && record.count >= 0 ? record.count : null;
+  if (state !== null && !unsigned && (recorded === null || (key && record?.sig !== ledgerCountSignature(key, recorded)))) {
     distrustInjectionLedger('_状態タブの控えの件数の記録が書き換えられています');
+  } else if ((state === null || unsigned) && count > 0) {
+    distrustInjectionLedger(
+      `_状態タブに控えの件数の署名付きの記録がありません（${count}件の控えを確かめられません。署名の鍵を設定した直後・記録の書き込みに失敗した後なら次の実行から続けます）`,
+      'warn',
+    );
   } else if (book.createdTabs().includes(INJECTION_FLAGS_TAB) && (recorded ?? 0) > 0) {
     distrustInjectionLedger(`控えのあったタブが無くなっていたため作り直しました（${recorded}件の印が失われました）`);
   } else if (recorded !== null && count < recorded) {
@@ -316,7 +322,8 @@ async function backfillInjectionFlags(recorded: number | null): Promise<void> {
       if (ids.length > 0) await recordInjectionFlags(tab, ids);
     }
     if (missing.length > 0) console.log(`SheetsDB: 指示混入疑いの印${missing.length}件を「${INJECTION_FLAGS_TAB}」タブに控えました`);
-    if (recorded !== injectionFlagKeys.size && !(recorded === null && injectionFlagKeys.size === 0)) await writeInjectionLedgerCount();
+    // 信用できなかった実行も今の件数で書き直す（0件でも。書き直さないと次の実行以降もずっと下書きを作れない）
+    if (ledgerUntrusted || (recorded !== injectionFlagKeys.size && !(recorded === null && injectionFlagKeys.size === 0))) await writeInjectionLedgerCount();
   } catch (err) {
     warnInjectionLedgerWrite(err);
   }

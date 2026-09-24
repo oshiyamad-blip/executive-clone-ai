@@ -1,5 +1,7 @@
 # 本番の鍵を受け取るワークフロー・依存パッケージ・コードの変更は、所有者のレビューを必須にする
 # （main のルールセットで「Require review from Code Owners」を有効にしたときに効く。手順書 9-1）
+# リポジトリ直下の .env・.npmrc 等（下に並べていないパス）も含め、すべての変更を所有者のレビューの対象にする
+* @oshiyamad-blip
 /.github/ @oshiyamad-blip
 /package.json @oshiyamad-blip
 /package-lock.json @oshiyamad-blip

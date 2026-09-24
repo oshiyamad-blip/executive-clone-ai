@@ -7,7 +7,7 @@
 // テストデータの氏名・会社・アドレスはすべて架空（example ドメイン）。
 import { rmSync } from 'fs';
 import { join } from 'path';
-import { __setSheetsApiForTest } from '../../database/sheetBook.js';
+import { __setSheetsApiForTest, SheetBook } from '../../database/sheetBook.js';
 import {
   resetSheetsCache,
   listDraftRequestRowsSheets,
@@ -2768,16 +2768,27 @@ async function round9LedgerSteps(): Promise<void> {
   sheets.seedTab(ROUND9_BOOK, INJECTION_FLAGS_TAB, [['キー', '日時']]);
   sheets.protectAs(ROUND9_BOOK, INJECTION_FLAGS_TAB, [`mallory@${OWN_DOMAIN}`, `owner@${OWN_DOMAIN}`]);
   sheets.protectAs(ROUND9_BOOK, INJECTION_FLAGS_TAB, [], true);
-  newRun();
-  await checkSheetsTabs(['案件', '要員']);
-  check(
-    '編集者が自分を編集者にした保護・警告だけの保護はバッチの保護とみなさず、バッチの保護を付ける',
-    sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3,
-    String(sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB)),
-  );
-  newRun();
-  await checkSheetsTabs(['案件', '要員']);
-  check('バッチの付けた保護は次の実行でそのまま使う（保護を重ねない）', sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3);
+  // バッチのアカウントが分かる構成（実APIと同じく、保護の編集者には依頼元とオーナーが加わる）
+  const batchSa = 'ses-batch@example-project.iam.gserviceaccount.com';
+  sheets.protectionRequester = batchSa;
+  sheets.protectionOwner = `owner@${OWN_DOMAIN}`;
+  try {
+    await withEnv({ SES_GOOGLE_AUTH: 'adc', SES_GOOGLE_SA_EMAIL: batchSa }, async () => {
+      newRun();
+      await checkSheetsTabs(['案件', '要員']);
+      check(
+        '編集者が自分を編集者にした保護・警告だけの保護はバッチの保護とみなさず、バッチの保護を付ける',
+        sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3,
+        String(sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB)),
+      );
+      newRun();
+      await checkSheetsTabs(['案件', '要員']);
+      check('バッチの付けた保護は次の実行でそのまま使う（保護を重ねない）', sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3);
+    });
+  } finally {
+    sheets.protectionRequester = '';
+    sheets.protectionOwner = '';
+  }
 
   // 控えの導入前・控えの書き込みに失敗した印（列だけにある印）を控えに足す
   const a = project('proj_r9_a', { title: '控えの補充', requiredSkills: ['Java'], agentEmail: 'ichiro@alpha.example.jp', replyTarget: rt('検証一郎', 'ichiro@alpha.example.jp', '【案件】補充', 'r9a') });
@@ -2870,6 +2881,119 @@ async function round9HeaderConflictSteps(): Promise<void> {
   check('控えのタブを読めないときは実行前の確認で止め、下書きを作らない（異常終了として知らせる）', threw && !trusted && hasFatal());
 }
 
+// ===== セキュリティ監査（第11回）: 控えの件数の記録の書き直し・_状態 の記録の改ざん・保護の見分け =====
+
+const ROUND11_BOOK = 'fakeRound11Book';
+const ROUND11_PROT_BOOK = 'fakeRound11ProtBook';
+const LEDGER_STATE_KEY = 'injectionLedger';
+
+async function testSecurityRound11(): Promise<void> {
+  section('セキュリティ監査（第11回）: 控えの件数の記録・_状態 の改ざん・保護の見分け');
+  sheets.createBook(ROUND11_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = ROUND11_BOOK;
+  try {
+    await round11LedgerSteps();
+    await round11ProtectionSteps();
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+}
+
+// 1回分の実行の「下書きを作る前の確認」
+async function ledgerRun(): Promise<boolean> {
+  newRun();
+  await checkSheetsTabs(['案件', '要員']);
+  return injectionLedgerTrustedSheets();
+}
+
+function clearLedgerRow(key: string): void {
+  sheets.setByKey(ROUND11_BOOK, INJECTION_FLAGS_TAB, 'キー', key, '日時', '');
+  sheets.setByKey(ROUND11_BOOK, INJECTION_FLAGS_TAB, 'キー', key, 'キー', '');
+}
+
+async function round11LedgerSteps(): Promise<void> {
+  // (1) 控えが0件の _状態 の記録を編集者が壊しても、その実行だけ下書きを止め、次の実行から続ける
+  check('控えが0件の最初の実行は信用する', await ledgerRun());
+  newRun();
+  await writeStateJson(LEDGER_STATE_KEY, {});
+  const tampered = await ledgerRun();
+  const tamperedFatal = hasFatal();
+  const next = await ledgerRun();
+  check('控えが0件で _状態 の記録が壊されても、その実行だけ下書きを止め、次の実行から続ける（0件でも記録を書き直す）', !tampered && tamperedFatal && next);
+
+  // (2) 控えの行を消して N→0 件にした（オーナーが印を外した・保存期間で整理した後）実行の次は続ける
+  const a = project('proj_r11_a', { title: '控えの削除（0件へ）', requiredSkills: ['Java'], agentEmail: 'ichiro@alpha.example.jp', replyTarget: rt('検証一郎', 'ichiro@alpha.example.jp', '【案件】r11a', 'r11a') });
+  newRun();
+  await saveProjectsSheets([a]);
+  newRun();
+  await markItemsInjectionSuspectedSheets('project', [a.id]);
+  check('印を付けた後の実行は信用する', await ledgerRun());
+  // 印の付いた案件の行が保存期間で整理された後に、オーナーが控えの行も消した
+  sheets.setByKey(ROUND11_BOOK, '案件', 'ID', a.id, 'ID', '');
+  clearLedgerRow(`案件:${a.id}`);
+  const dropped = await ledgerRun();
+  const afterDrop = await ledgerRun();
+  check('控えの行が N→0 件に減った実行は下書きを止め、次の実行は今の件数（0件）で続ける', !dropped && afterDrop, `dropped=${dropped} after=${afterDrop}`);
+
+  // (3) 控えの行を消し、_状態 の記録を空・署名の空の記録・壊れたJSONにしても、その実行では下書きを作らない
+  const ids = ['proj_r11_b', 'proj_r11_c'];
+  newRun();
+  await saveProjectsSheets(ids.map((id) => project(id, { title: `控え ${id}`, requiredSkills: ['Java'], agentEmail: `${id}@beta.example.jp`, replyTarget: rt('検証二郎', `${id}@beta.example.jp`, `【案件】${id}`, id) })));
+  newRun();
+  await markItemsInjectionSuspectedSheets('project', ids);
+  await ledgerRun();
+  const variants: Array<[string, () => Promise<void>]> = [
+    ['署名の空の記録', () => writeStateJson(LEDGER_STATE_KEY, { sig: '' })],
+    ['空の記録', () => writeStateJson(LEDGER_STATE_KEY, '')],
+    ['壊れたJSON', async () => sheets.setByKey(ROUND11_BOOK, '_状態', 'キー', LEDGER_STATE_KEY, 'JSON', '{not json')],
+  ];
+  const leaked: string[] = [];
+  for (const [label, tamper] of variants) {
+    newRun();
+    await tamper();
+    const trusted = await ledgerRun();
+    if (trusted) leaked.push(label);
+    await ledgerRun(); // 次の実行で記録を書き直して続ける
+  }
+  check('控えに行があるのに _状態 の記録が無い・空・署名が空・壊れている実行では、控えを信用せず下書きを作らない', leaked.length === 0, leaked.join(' / '));
+  check('記録を書き直した次の実行は続ける', await ledgerRun());
+}
+
+async function round11ProtectionSteps(): Promise<void> {
+  // 実APIは保護の編集者に依頼元とオーナーを加えて返す。バッチのアカウントが分からない（ADC で SES_GOOGLE_SA_EMAIL 未設定）
+  // ときも、2回目以降の実行で保護を重ねない
+  sheets.createBook(ROUND11_PROT_BOOK);
+  sheets.protectionRequester = 'ses-batch@example-project.iam.gserviceaccount.com';
+  sheets.protectionOwner = `owner@${OWN_DOMAIN}`;
+  const tab = '_保護の確認';
+  const makeBook = () =>
+    new SheetBook({
+      label: 'R11',
+      tabs: { [tab]: ['キー', '日時'] },
+      spreadsheetId: () => ROUND11_PROT_BOOK,
+      createApi: () => null,
+      missingIdMessage: 'id',
+      missingAuthMessage: 'auth',
+      accessHint: 'hint',
+      protectedTabs: { [tab]: '検証' },
+      protectionEditor: () => '',
+    });
+  try {
+    const books = [makeBook(), makeBook(), makeBook()];
+    for (const b of books) await b.ensureTabs();
+    check(
+      'バッチのアカウントが分からなくても実行のたびに保護を重ねず、見分けられない保護は保護できていないタブとして扱う',
+      sheets.protectionCount(ROUND11_PROT_BOOK, tab) === 1 && books[0].unprotectedTabs().length === 0 && books[2].unprotectedTabs().includes(tab),
+      String(sheets.protectionCount(ROUND11_PROT_BOOK, tab)),
+    );
+  } finally {
+    sheets.protectionRequester = '';
+    sheets.protectionOwner = '';
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -2902,6 +3026,7 @@ async function main(): Promise<void> {
     await testSecurityRound5();
     await testGoogleAccessRound6();
     await testSecurityRound9();
+    await testSecurityRound11();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

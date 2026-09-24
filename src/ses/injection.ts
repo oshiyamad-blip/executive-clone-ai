@@ -15,7 +15,7 @@ export const OUTGOING_TEXT_CAUTION =
 // 「生成AIへの移行」「プロンプト設計」「PDFとして出力すること」等は拾わない）。
 // 日本語の言い回しは空白・ゼロ幅文字を除いた本文で照合する（「以前の指示を 無視」「無\u200B視」ですり抜けさせない）
 const JA_PATTERNS: RegExp[] = [
-  /(?:以前|前|上記|これまで|先ほど|今まで|上|前述|先述|既存)の(?:指示|命令|ルール|設定|プロンプト)(?:は|を|も)?(?:すべて|全て|全部)?(?:無視|忘れ|破棄)/,
+  /(?:以前|前|上記|これまで|先ほど|今まで|上|前述|先述|既存|先|従来|上述|前記)の?(?:指示|指図|しじ|命令|ルール|設定|プロンプト)(?:は|を|も)?(?:すべて|全て|全部)?(?:無視|忘れ|破棄)/,
   /(?:新しい|新たな)(?:指示|命令)[:：]/,
   /(?:単金|単価|スコア|点数)(?:は|を)[^。\n]{1,20}(?:として|で)(?:抽出|出力|採点)(?:して|すること|しなさい|せよ|しろ)/,
   /あなたは(?:AI|人工知能|アシスタント|LLM)(?:です|だ)[。.]?(?:以下|次)(?:の(?:指示|命令))?に従/i,
@@ -33,8 +33,10 @@ const JA_PATTERNS: RegExp[] = [
   /(?:紹介文|紹介メール|提案文|文面)(?:では|には|に|で|の中で)[^。\n]{0,40}\d+(?:\.\d+)?万円?[^。\n]{0,20}と(?:明記|記載|記入|書|記|伝え|確約)/,
 ];
 const EN_PATTERNS: RegExp[] = [
-  /ignore\s+(?:all\s+|any\s+|the\s+|everything\s+)?(?:previous|prior|above|earlier|preceding)\b/i,
-  /disregard\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier|preceding)\b/i,
+  // 限定の語（all・your・every 等）はいくつ挟んでもよい（"ignore your previous"・"ignore all of the previous"）
+  /(?:ignore|disregard)\s+(?:(?:all|any|the|your|my|every|each|these|those|everything|of)\s+)*(?:previous|prior|above|earlier|preceding)\b/i,
+  // forget は通常の文（"don't forget the previous schedule"）にも出るため、指示の語まで続くものだけ
+  /forget\s+(?:(?:all|any|the|your|my|every|each|these|those|everything|of)\s+)*(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|rules|prompts?|directions?|commands?)\b/i,
   /(?:ignore|disregard|forget)\s+(?:all\s+|any\s+|the\s+)?(?:instructions|rules|prompts?)\s+(?:above|before|so\s+far)/i,
   /(?:ignore|reveal|override|forget|print|show)\s+(?:the\s+|your\s+)?system\s*prompt/i,
   /(?:set|give|output|assign)\s+(?:the\s+)?score\s+(?:to|of|as)\s+\d{2,3}/i,
@@ -52,6 +54,24 @@ function extraPatterns(): RegExp[] {
 }
 
 const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
+// 英字だけを残した本文で照合する言い回し（"i g n o r e previous instructions"・"ig-nore" の区切りですり抜けさせない）。
+// 区切りを消すと語の境目が分からないため、指示の語まで続くものだけを拾う
+const LETTERS_ONLY_PATTERNS: RegExp[] = [
+  /(?:ignore|disregard|forget)(?:all|any|the|your|my|every|these|those|of)*(?:previous|prior|above|earlier|preceding)(?:instructions?|rules|prompts?|directions?|commands?)/,
+  /(?:ignore|reveal|override|forget)(?:the|your)?systemprompt/,
+];
+// 文字参照を重ねた記載（&amp;#25351; → &#25351; → 指）も戻す。戻らなくなるまで、多くても数回
+const ENTITY_DECODE_ROUNDS = 4;
+
+function decodeEntitiesRepeatedly(text: string): string {
+  let cur = text;
+  for (let i = 0; i < ENTITY_DECODE_ROUNDS; i += 1) {
+    const next = decodeHtmlEntities(cur).normalize('NFKC');
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
 
 // 言い回しの照合は補助の網（言い換えはすり抜ける）。抽出のAIの印・単金の原文照合・文面の検査と重ねて使う。
 // HTMLの文字参照（&#20197;前の…）で書かれた指示も、戻してから照合する
@@ -60,11 +80,13 @@ export const INJECTION_SCAN_MAX_CHARS = 300_000;
 
 export function looksLikeInjection(raw: string): boolean {
   const text = raw.length > INJECTION_SCAN_MAX_CHARS ? raw.slice(0, INJECTION_SCAN_MAX_CHARS) : raw;
-  const spaced = decodeHtmlEntities(text.normalize('NFKC')).normalize('NFKC').replace(ZERO_WIDTH, '');
+  const spaced = decodeEntitiesRepeatedly(text.normalize('NFKC')).replace(ZERO_WIDTH, '');
   const compact = spaced.replace(/\s+/g, '');
+  const letters = spaced.replace(/[^A-Za-z]+/g, '').toLowerCase();
   return (
     JA_PATTERNS.some((p) => p.test(compact)) ||
     EN_PATTERNS.some((p) => p.test(spaced)) ||
+    LETTERS_ONLY_PATTERNS.some((p) => p.test(letters)) ||
     extraPatterns().some((p) => p.test(spaced) || p.test(compact))
   );
 }
@@ -87,30 +109,39 @@ const LINK_TLDS = new Set(
 const TECH_SUFFIXES = new Set(['js', 'ts', 'jsx', 'tsx', 'mjs', 'py', 'rb', 'php', 'java', 'cs', 'rs', 'vue', 'css', 'html', 'xml', 'json', 'yml', 'yaml', 'md', 'txt', 'exe', 'dll', 'jar', 'war', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'zip']);
 const TECH_HOSTS = new Set(['asp.net', 'vb.net', 'ado.net', 'c#.net', 'f#.net', 'socket.io', 'salesforce.com', 'force.com', 'dot.net', 'ml.net', 'entity.framework']);
 const HOST_LIKE = /(?<![A-Za-z0-9@])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}([a-z]{2,24}|xn--[a-z0-9-]{1,59}))(?![\w-])(\/?)/gi;
-// 日本語などを含むホスト名（「悪意.com」。国際化ドメイン名としてリンクになる）。技術名（「業務系.NET」）と区別するため、
-// 末尾は小文字で書かれたよく使われるトップレベルドメインだけを拾う
-const UNICODE_HOST_LIKE = /(?<![\p{L}\p{N}@])((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.){1,8})([a-z]{2,24})(?![\p{L}\p{N}-])/gu;
+// 日本語などを含むホスト名（「悪意.com」「悪意.COM」。国際化ドメイン名としてリンクになる）。技術名（「業務系.NET」）と
+// 区別するため、末尾はよく使われるトップレベルドメインのうち、大文字で書かれたものは技術名・略語と紛れないものだけを拾う
+const UNICODE_HOST_LIKE = /(?<![\p{L}\p{N}@])((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.){1,8})([A-Za-z]{2,24})(?![\p{L}\p{N}-])/gu;
+const UPPERCASE_LINK_TLDS = new Set(['com', 'jp', 'org', 'info', 'biz', 'xyz', 'top', 'site', 'online', 'shop', 'click', 'link', 'ru', 'cn', 'tk', 'ml', 'ga', 'cf', 'gq', 'icu', 'vip']);
+// ブラウザ・国際化ドメイン名の変換が「.」として扱う句点（「evil。com」。NFKC では ｡ も 。 になる）
+const IDEOGRAPHIC_DOTS = /[\u3002\uFF61]/g;
 // 電話番号の区切りに使われるダッシュ類（NFKC では「-」にならない長音符・マイナス記号・ハイフン等）
 const DASH_LIKE = /[\u2010-\u2015\u2212\u30FC\uFF70\uFE63\uFF0D\u2E3A\u2E3B]/g;
 // 区切りを挟んだ数字の並び（10〜11桁の電話番号を区切りを除いて確かめる。括弧・空白・ダッシュ）
-const SEPARATED_DIGITS = /(?<![\d.\/])\+?(?:\d[ \t\-()]{0,2}){8,11}\d(?![\d.\/])/g;
+const SEPARATED_DIGITS = /(?<![\d.\/])\+?(?:\d[ \t\-()]{0,3}){8,11}\d(?![\d.\/])/g;
+// 「.」「・」で区切った電話番号（090.1234.5678・03・1234・5678）。小数の並び（0.5・1.0）と区別するため、番号の3つの塊の形で拾う
+const DOT_SEPARATED_PHONE = /(?<![\d.\/・])(?:\+81[ \t]*|0)\d{0,4}[ \t]*[.・][ \t]*\d{1,4}[ \t]*[.・][ \t]*\d{3,4}(?![\d.\/・])/g;
 const SHORTENERS = /\b(?:bit\.ly|t\.co|tinyurl\.com|goo\.gl|ow\.ly|is\.gd|buff\.ly|t\.ly|cutt\.ly|rebrand\.ly|lin\.ee|amzn\.to|x\.gd|urx\.nu)\b/i;
-const OBFUSCATED = /\[\s*(?:\.|dot|ドット|点)\s*\]|\(\s*(?:dot|ドット)\s*\)|\[\s*(?:at|@|アット)\s*\]|\(\s*(?:at|@|アット)\s*\)|\{\s*(?:at|dot)\s*\}|アットマーク|あっとまーく/i;
+const OBFUSCATED = /\[\s*(?:\.|dot|ドット|点)\s*\]|\(\s*(?:\.|dot|ドット|点)\s*\)|\[\s*(?:at|@|アット)\s*\]|\(\s*(?:at|@|アット)\s*\)|\{\s*(?:at|dot)\s*\}|アットマーク|あっとまーく/i;
 // 日本の電話番号（固定・携帯・+81）。連絡先を文面に入れて相手を社外の窓口へ誘導させない
 const PHONE_LIKE = /(?<![\d.\/-])(?:\+81[ \t-]?\(?0?\)?|\(0\d{1,4}\)|0)\d{1,4}[ \t-]?\(?\d{1,4}\)?[ \t-]?\d{3,4}(?![\d.\/-])|(?<!\d)0\d{9,10}(?!\d)/;
 const MESSENGER = /\bLINE\s*(?:ID|@|アカウント|公式)|ライン\s*(?:ID|アイディー)|line\.me|\b(?:telegram|whatsapp|wechat|skype\s*id|discord|kakaotalk)\b|カカオトーク|テレグラム|ワッツアップ/i;
 
-function bareLinkLike(text: string): boolean {
+// tldOnly: 句点を「.」に置き換えた本文を調べるとき（「Java。AWS/GCP」を「Java.AWS/」のパスとみなさない。
+// よく使われるトップレベルドメインで終わるものと、すべて小文字のホスト名にパスが続くもの（「evil。example/x」）だけを拾う）
+function bareLinkLike(text: string, tldOnly = false): boolean {
   for (const m of text.matchAll(HOST_LIKE)) {
     const host = m[1].toLowerCase();
     const tld = m[2].toLowerCase();
-    const path = m[3] === '/';
+    const path = m[3] === '/' && (!tldOnly || m[1] === host);
     if (TECH_HOSTS.has(host) || isKnownSkill(host)) continue;
     if (LINK_TLDS.has(tld) || tld.startsWith('xn--') || (path && !TECH_SUFFIXES.has(tld))) return true;
   }
   for (const m of text.matchAll(UNICODE_HOST_LIKE)) {
     // ASCII だけのホスト名は上で確かめた
-    if (/[^\x00-\x7f]/.test(m[1]) && LINK_TLDS.has(m[2])) return true;
+    if (!/[^\x00-\x7f]/.test(m[1])) continue;
+    const tld = m[2].toLowerCase();
+    if (m[2] === tld ? LINK_TLDS.has(tld) : UPPERCASE_LINK_TLDS.has(tld)) return true;
   }
   return false;
 }
@@ -119,7 +150,7 @@ function bareLinkLike(text: string): boolean {
 function phoneLike(text: string): boolean {
   const t = text.replace(DASH_LIKE, '-');
   if (PHONE_LIKE.test(t)) return true;
-  for (const m of t.matchAll(SEPARATED_DIGITS)) {
+  for (const m of [...t.matchAll(SEPARATED_DIGITS), ...t.matchAll(DOT_SEPARATED_PHONE)]) {
     const digits = m[0].replace(/[^\d+]/g, '');
     if (/^0\d{9,10}$/.test(digits) || /^\+810?\d{9,10}$/.test(digits)) return true;
   }
@@ -136,7 +167,8 @@ export function linkOrContactLike(raw: string): boolean {
     OBFUSCATED.test(text) ||
     phoneLike(text) ||
     MESSENGER.test(text) ||
-    bareLinkLike(text)
+    bareLinkLike(text) ||
+    (/[\u3002\uFF61]/.test(text) && bareLinkLike(text.replace(IDEOGRAPHIC_DOTS, '.'), true))
   );
 }
 

@@ -9,8 +9,14 @@ interface Rule {
   parameters?: Record<string, unknown> | null;
 }
 
+export interface MainRulesetOptions {
+  // 1人で管理するリポジトリ（書き込みできるのがオーナーだけ）。自分の PR を自分では承認できないため、承認・コードオーナーの
+  // レビュー・最後の push 以外の人の承認を求めない（PR を経ること・force-push と削除の禁止は求める）。変数 SES_SINGLE_MAINTAINER=true
+  singleMaintainer?: boolean;
+}
+
 // 返り値は足りない規則の説明（空なら十分）
-export function mainRulesetProblems(rules: unknown): string[] {
+export function mainRulesetProblems(rules: unknown, opts: MainRulesetOptions = {}): string[] {
   if (!Array.isArray(rules)) return ['GitHub API の応答がルールの一覧ではありません'];
   const list = rules.filter((r): r is Rule => typeof r === 'object' && r !== null);
   const has = (type: string): boolean => list.some((r) => r.type === type);
@@ -19,7 +25,7 @@ export function mainRulesetProblems(rules: unknown): string[] {
   const ok = (pred: (p: Record<string, unknown>) => boolean): boolean => prs.some(pred);
   if (prs.length === 0) {
     problems.push('「Require a pull request before merging」が無い（main に直接 push できる）');
-  } else {
+  } else if (!opts.singleMaintainer) {
     if (!ok((p) => typeof p.required_approving_review_count === 'number' && p.required_approving_review_count >= 1)) {
       problems.push('承認の必要数が 1 以上になっていない');
     }

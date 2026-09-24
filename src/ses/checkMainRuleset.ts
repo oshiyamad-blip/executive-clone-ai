@@ -37,13 +37,19 @@ async function main(): Promise<void> {
     console.error(`❌ main のルールセットを GitHub API で確認できませんでした（${safeErr(e)}）。確かめられないため鍵を渡すジョブを動かしません。時間をおいて再実行してください`);
     process.exit(1);
   }
-  const problems = mainRulesetProblems(rules);
+  const singleMaintainer = process.env.SES_SINGLE_MAINTAINER?.trim().toLowerCase() === 'true';
+  const problems = mainRulesetProblems(rules, { singleMaintainer });
   if (problems.length > 0) {
     console.error(`❌ main のルールセットが足りません。main にレビューなしで push できると、次の実行ですべての鍵が持ち出せます（${MAIN_RULESET_DOC}）:`);
     for (const p of problems) console.error(`  - ${p}`);
     process.exit(1);
   }
-  console.log('✅ main のルールセット（PR・承認・force-push と削除の禁止）を確認しました');
+  if (singleMaintainer) {
+    console.log('::warning::SES_SINGLE_MAINTAINER=true のため、PR の承認・コードオーナーのレビューを求めていません。main に書き込めるのがオーナー1人だけのときに限ってください');
+    console.log('✅ main のルールセット（PR・force-push と削除の禁止。1人で管理）を確認しました');
+  } else {
+    console.log('✅ main のルールセット（PR・承認・force-push と削除の禁止）を確認しました');
+  }
 }
 
 main().catch((e) => {

@@ -60,11 +60,36 @@ export function checkAuthResults(
     trusted = authservIdTrusted(authservIdOf(ar), trustedAuthservIds) && /\bdmarc\s*=/i.test(ar);
     if (trusted && opts.requireReceivedBy) {
       const above = received.filter((x) => x.i < arIndex);
-      trusted = topReceivedByUs && above.every((x) => authservIdTrusted(receivedByHost(x.h.value), trustedAuthservIds));
+      trusted =
+        topReceivedByUs &&
+        above.every((x) => authservIdTrusted(receivedByHost(x.h.value), trustedAuthservIds)) &&
+        receivedFromOutside(entryHop(received.map((x) => x.h.value), trustedAuthservIds));
     }
   }
   const authDomain = trusted ? dmarcPassDomain(headers[arIndex].value, trustedAuthservIds) : '';
   return { authDomain, trusted, receivedByUsWithoutResult: topReceivedByUs && !trusted };
+}
+
+// 上から続く受信サーバーの Received のうち一番下（メールが受信サーバーに入った段）。無ければ ''
+function entryHop(received: readonly string[], trustedAuthservIds: readonly string[]): string {
+  let entry = '';
+  for (const r of received) {
+    if (!authservIdTrusted(receivedByHost(r), trustedAuthservIds)) break;
+    entry = r;
+  }
+  return entry;
+}
+
+// 受信サーバーに入った段が、外のサーバーからの SMTP の受け取り（MX）か。同じ共有サーバーの別の利用者が認証して送った
+// （with ESMTPA・ESMTPSA・Authenticated sender）・サーバーの中から出した（from の無い pickup）メールには、受信サーバーが
+// 自分の認証結果を付けないことがあり、送り主の書いた結果が一番上に来るため信じない
+export function receivedFromOutside(received: string): boolean {
+  if (!received) return false;
+  if (/authenticated\s+sender|\(authenticated\b/i.test(received)) return false;
+  const flat = received.replace(/\([^()]*\)/g, ' ').replace(/\s+/g, ' ');
+  if (!/(?:^|\s)from\s+\S/i.test(flat)) return false;
+  const withProto = flat.match(/(?:^|\s)with\s+([A-Za-z0-9]+)/i)?.[1] ?? '';
+  return /^(?:UTF8)?E?SMTPS?$/i.test(withProto);
 }
 
 // 1回の収集で、受信サーバーの結果を信じられたメールの数から出す警告（無ければ null）。Xserver・Gmail の両経路で使う

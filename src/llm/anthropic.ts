@@ -11,8 +11,11 @@ export { getLlmUsageLog, type LlmUsage };
 // タイムアウトを明示すると、SDKが大きな max_tokens の非ストリーミング呼び出しを事前に拒否する判定も外れる
 // （出力上限を増やしての再試行で使う）
 let _client: Anthropic | null = null;
+// GitHub Actions では接続先を公式の API に固定する（環境変数 ANTHROPIC_BASE_URL で鍵・メール本文を別のサーバーへ送らせない）
+export const ANTHROPIC_OFFICIAL_BASE_URL = 'https://api.anthropic.com';
 function client(): Anthropic {
-  return (_client ??= new Anthropic({ maxRetries: 1, timeout: 10 * 60 * 1000 }));
+  const baseURL = process.env.GITHUB_ACTIONS === 'true' ? ANTHROPIC_OFFICIAL_BASE_URL : undefined;
+  return (_client ??= new Anthropic({ maxRetries: 1, timeout: 10 * 60 * 1000, ...(baseURL ? { baseURL } : {}) }));
 }
 const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-opus-4-8';
 

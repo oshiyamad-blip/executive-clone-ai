@@ -517,11 +517,15 @@ export class SheetBook {
     if (wanted.length === 0) return;
     const editor = this.opts.protectionEditor?.() ?? '';
     const whole = new Set<number>();
+    // バッチのアカウントが分からない（ADC で SES_GOOGLE_SA_EMAIL が未設定）ときは、APIが編集者に加えて返す依頼元・オーナーの
+    // 2人の保護がバッチのものか見分けられない。保護を重ねず（実行のたびに増やさない）、保護できていないタブとして扱う
+    const unverifiable = new Set<number>();
     for (const sh of meta.sheets ?? []) {
       for (const pr of sh.protectedRanges ?? []) {
         const r = pr.range;
         if (r && typeof r.sheetId === 'number' && r.startRowIndex == null && r.endRowIndex == null && r.startColumnIndex == null && r.endColumnIndex == null) {
           if (isBatchProtection(pr, editor)) whole.add(r.sheetId);
+          else if (!editor && isBatchProtection(pr, (pr.editors?.users ?? [])[0] ?? '')) unverifiable.add(r.sheetId);
         }
       }
     }
@@ -534,6 +538,10 @@ export class SheetBook {
         continue;
       }
       if (whole.has(sheetId)) continue;
+      if (unverifiable.has(sheetId)) {
+        this.unprotected.add(tab);
+        continue;
+      }
       targets.push(tab);
       requests.push({
         addProtectedRange: {

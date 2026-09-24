@@ -147,6 +147,9 @@ export class FakeSheets {
   readonly validations: Array<{ spreadsheetId: string; sheetId: number; column: number; options: string[] }> = [];
   // タブ全体の保護範囲（addProtectedRange）。editors は編集できるアカウント
   readonly protections: Array<{ spreadsheetId: string; sheetId: number; editors: string[]; warningOnly?: boolean }> = [];
+  // 実APIは保護の編集者に依頼元のアカウントとスプレッドシートのオーナーを必ず加えて返す（'' なら加えない）
+  protectionRequester = '';
+  protectionOwner = '';
 
   // タブが保護されているか（タブ全体の保護範囲があるか）
   isProtected(spreadsheetId: string, title: string): boolean {
@@ -466,7 +469,8 @@ export class FakeSheets {
         replies.push({});
       } else if (r.addProtectedRange) {
         const pr = r.addProtectedRange.protectedRange!;
-        this.protections.push({ spreadsheetId: id, sheetId: pr.range!.sheetId!, editors: pr.editors?.users ?? [], warningOnly: pr.warningOnly ?? false });
+        const editors = [...new Set([...(pr.editors?.users ?? []), this.protectionRequester, this.protectionOwner].filter(Boolean))];
+        this.protections.push({ spreadsheetId: id, sheetId: pr.range!.sheetId!, editors, warningOnly: pr.warningOnly ?? false });
         replies.push({ addProtectedRange: { protectedRange: pr } });
       } else if (r.setDataValidation) {
         const v = r.setDataValidation;
