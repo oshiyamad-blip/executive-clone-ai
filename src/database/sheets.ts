@@ -1125,6 +1125,29 @@ export function properEngineerIdOfCandidate(candidateId: string): string {
   return at > 0 ? rest.slice(0, at) : '';
 }
 
+// 募集終了の連絡に合わせて、同じ送信元ドメインの募集中の案件のうち、連絡に案件名が出てくるものを「終了」にする。
+// 人が付けたステータス（終了以外の値を含む）は、募集中・空欄のときだけ書き換える。閉じた行数を返す
+export async function closeProjectsForNoticesSheets(
+  notices: Array<{ domain: string; subject: string; body: string }>,
+  mentions: (notice: { subject: string; body: string }, title: string) => boolean,
+): Promise<number> {
+  if (!configured() || notices.length === 0) return 0;
+  const tab = '案件';
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  let closed = 0;
+  for (const r of await readRows(tab)) {
+    const status = c(r.cells, 'ステータス');
+    if (status !== '' && status !== '募集中') continue;
+    const domain = (c(r.cells, '営業元メール').match(/@([A-Za-z0-9.-]+)/)?.[1] ?? '').toLowerCase();
+    if (!domain) continue;
+    const title = c(r.cells, '案件名');
+    if (!notices.some((n) => n.domain === domain && mentions(n, title))) continue;
+    await book.writeCells(tab, r, [['ステータス', '終了']]);
+    closed += 1;
+  }
+  return closed;
+}
+
 // プロパーの社員ID。スキルシートのDriveのファイルIDはそのままファイルのURLになり、リンク共有のスキルシートを
 // 案件スプレッドシートの閲覧者が開けてしまうため、一方向のハッシュにする（元のIDはプロパー管理表にだけ置く）
 export function properEngineerIdOf(fileId: string): string {
@@ -1310,7 +1333,7 @@ export async function appendMetricsRowSheets(values: Record<string, Cell>): Prom
 
 // 除外 = 自分たちのメール（サマリ・自社ドメイン等）として取り込まなかったもの
 // 再送スキップ = 直近に抽出した内容と同じ再送として、抽出せずに処理済みにしたもの
-export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ' | '解析不可' | '要員スキップ';
+export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ' | '解析不可' | '要員スキップ' | '募集終了';
 
 // 処理済みメールに付ける再送判定用の指紋（本文は含まない）と、元にしたメール
 export interface ProcessedFingerprint {

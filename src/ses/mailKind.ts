@@ -57,3 +57,23 @@ export function splitByKind(mails: SesRawMail[], projectsOnly: boolean): KindSpl
   }
   return { extract, skippedEngineerMailIds };
 }
+
+// 募集終了・充足の連絡か（抽出せず、同じ送信元の募集中の案件を閉じる）。
+// 件名の先頭のタグか、本文の完了形の文だけで判定する（「★1名参画決定★」「決定実績あり」は募集中の案件、
+// 「募集終了となった場合はご容赦」「スキル充足度」は通常の案件メールの定型文のため当てない）
+const CLOSED_SUBJECT = /^[\s★☆※]*(?:re|fw|fwd)?[\s:：]*[【\[［](?:募集終了|募集締切|募集締め切り|充足|CLOSE|クローズ|終了)[】\]］]/i;
+const CLOSED_BODY = /募集(?:枠)?(?:充足|終了|締め?切り?).{0,20}(?:となりました|とさせて(?:頂|いただ)きます|いたしました|致しました)|CLOSEとなりました|一度募集終了とさせて/;
+
+export function isClosedNotice(mail: Pick<SesRawMail, 'subject' | 'body'>): boolean {
+  if (CLOSED_SUBJECT.test(mail.subject.normalize('NFKC').slice(0, 200))) return true;
+  const body = mail.body.normalize('NFKC').slice(0, 3000);
+  return CLOSED_BODY.test(body);
+}
+
+// 募集終了の連絡の本文・件名に、募集中の案件の案件名が含まれるか（空白・記号を除いて比べる。短すぎる名前は使わない）
+export function mentionsTitle(notice: Pick<SesRawMail, 'subject' | 'body'>, title: string): boolean {
+  const norm = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\s　【】\[\]［］()（）「」『』、。・:：/／\-ー_~〜★☆※!！?？]/g, '');
+  const t = norm(title);
+  if (t.length < 6) return false;
+  return norm(`${notice.subject}\n${notice.body.slice(0, 5000)}`).includes(t);
+}

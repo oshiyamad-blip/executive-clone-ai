@@ -39,6 +39,7 @@ import {
   pruneProcessedMailSheets,
   pruneStalePersonalDataSheets,
   sheetsDbConfigured,
+  closeProjectsForNoticesSheets,
   countUnmatchedBeyondPoolSheets,
   INJECTION_FLAGS_TAB,
 } from '../database/sheets.js';
@@ -85,7 +86,7 @@ import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS, pickForExtraction
 import { redactable, safeErr, logId } from './redact.js';
 import { acquireRunLease, releaseRunLease } from './lease.js';
 import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
-import { splitByKind } from './mailKind.js';
+import { splitByKind, isClosedNotice, mentionsTitle } from './mailKind.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
 
@@ -468,7 +469,8 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   const unparsableMarked = await markMailProcessed(parsedMails.unparsableMailIds, '解析不可');
   // 案件だけモードで抽出しなかった要員メールも記録し、次回から本文を取得し直さない
   const engineerSkipMarked = await markMailProcessed(parsedMails.skippedEngineerMailIds, '要員スキップ');
-  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked || !engineerSkipMarked) {
+  const closedMarked = await markMailProcessed(parsedMails.closedNoticeMailIds, '募集終了');
+  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked || !engineerSkipMarked || !closedMarked) {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
   return stored;
@@ -497,6 +499,7 @@ async function collectAndParse(): Promise<{
   unparsableMailIds: string[];
   resend: ResendSplit;
   skippedEngineerMailIds: string[];
+  closedNoticeMailIds: string[];
 }> {
   let mails: SesRawMail[] = [];
   let excludedMailIds: string[] = [];
@@ -516,9 +519,14 @@ async function collectAndParse(): Promise<{
   if (mails.length === 0 && !collectFailed) {
     console.log('SES収集: 未処理の新着メールはありません（続く場合はメーリスの配信・転送設定を確認してください）');
   }
-  const resend = await splitResendMails(mails);
+  // 募集終了・充足の連絡は抽出せず、同じ送信元の募集中の案件を閉じる（終わった案件への提案を防ぐ）。
+  // 再送の判定より先に分ける（件名の【募集終了】は再送の正規化で消えるため、元の案件メールの再送と誤判定される）
+  const closedNotices = mails.filter((m) => isClosedNotice(m));
+  await closeProjectsForNotices(closedNotices);
+  const resend = await splitResendMails(mails.filter((m) => !isClosedNotice(m)));
+  const openMails = resend.fresh;
   // 案件だけモード: 要員の紹介メールは添付の展開も抽出もしない（要員は要員管理表の登録分だけを使う）
-  const kinds = splitByKind(resend.fresh, sesTarget() === 'projects');
+  const kinds = splitByKind(openMails, sesTarget() === 'projects');
   if (kinds.skippedEngineerMailIds.length > 0) {
     console.log(`SES収集: 案件だけモードのため要員の紹介メール${kinds.skippedEngineerMailIds.length}通を抽出しません`);
   }
@@ -543,7 +551,31 @@ async function collectAndParse(): Promise<{
   } catch (err) {
     console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }
-  return { mails: parsedMails, excludedMailIds, unparsableMailIds, resend, skippedEngineerMailIds: kinds.skippedEngineerMailIds };
+  return {
+    mails: parsedMails,
+    excludedMailIds,
+    unparsableMailIds,
+    resend,
+    skippedEngineerMailIds: kinds.skippedEngineerMailIds,
+    closedNoticeMailIds: closedNotices.map((m) => m.id),
+  };
+}
+
+// 募集終了の連絡に合わせて募集中の案件を閉じる（Sheets運用のみ。失敗しても続行し、次の回の連絡で閉じ直せる）
+async function closeProjectsForNotices(notices: SesRawMail[]): Promise<void> {
+  if (notices.length === 0) return;
+  console.log(`SES収集: 募集終了の連絡${notices.length}通（抽出しません）`);
+  recordStat('closedNotices', notices.length);
+  if (dbProvider() !== 'sheets' || !sheetsDbConfigured() || isDemo()) return;
+  try {
+    const closed = await closeProjectsForNoticesSheets(
+      notices.map((m) => ({ domain: (m.from.match(/@([A-Za-z0-9.-]+)/)?.[1] ?? '').toLowerCase(), subject: m.subject, body: m.body })),
+      mentionsTitle,
+    );
+    if (closed > 0) console.log(`SES収集: 募集終了の連絡に合わせて案件${closed}件を「終了」にしました`);
+  } catch (err) {
+    console.warn(`SES収集: 募集終了の連絡に合わせて案件を閉じられません: ${safeErr(err)}`);
+  }
 }
 
 // 抽出の前に、直近に抽出した内容と同じ再送を分ける（Haikuの抽出を呼ばない。件数だけログに出す）

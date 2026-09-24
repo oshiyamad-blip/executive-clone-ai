@@ -38,6 +38,7 @@ export interface BatchStats {
   draftsCreated: number; // 用意した紹介文面（下書き）の通数
   resendSkipped: number; // 直近に抽出した内容と同じ再送として抽出しなかったメール
   engineerMailsSkipped: number; // 案件だけモードで抽出しなかった要員の紹介メール
+  closedNotices: number; // 募集終了・充足の連絡（抽出せず案件を閉じる）
 }
 
 let events: HealEvent[] = [];
@@ -47,6 +48,7 @@ function emptyStats(): BatchStats {
   return {
     resendSkipped: 0,
     engineerMailsSkipped: 0,
+    closedNotices: 0,
     collected: 0,
     extractedItems: 0,
     extractFailures: 0,

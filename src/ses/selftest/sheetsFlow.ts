@@ -13,6 +13,7 @@ import {
   listDraftRequestRowsSheets,
   saveProperCandidatesSheets,
   saveProjectsSheets,
+  closeProjectsForNoticesSheets,
   markItemsMatchedSheets,
   markItemsInjectionSuspectedSheets,
   updateMatchStatusSheets,
@@ -70,6 +71,7 @@ import { collectSesMail } from '../collect.js';
 import { markMailProcessed, loadFingerprintRecords, touchLastSeen, loadProcessedMailIds } from '../store.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from '../mail/ownMail.js';
 import { splitResends, serializeFingerprint } from '../resend.js';
+import { isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { recordFailure, recordSuccess, listQuarantined } from '../heal/quarantine.js';
 import { resetHealEvents, hasFatal } from '../heal/events.js';
 import { materializePendingDrafts } from '../pendingDrafts.js';
@@ -2221,6 +2223,35 @@ async function testSecurityRegressions(): Promise<void> {
   );
 }
 
+const CLOSE_BOOK = 'fakeCloseBook';
+
+async function testClosedNotices(): Promise<void> {
+  section('募集終了の連絡で同じ送信元の案件を閉じる');
+  sheets.createBook(CLOSE_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = CLOSE_BOOK;
+  try {
+    newRun();
+    await saveProjectsSheets([
+      { ...p1, id: 'proj_close_a', title: '在庫管理システム改修（Java）', agentEmail: 'ichiro@alpha.example.jp' },
+      { ...p1, id: 'proj_close_b', title: '販売管理システム改修（Java）', agentEmail: 'ichiro@alpha.example.jp' },
+      { ...p1, id: 'proj_close_c', title: '在庫管理システム改修（Java）', agentEmail: 'jiro@beta.example.jp' },
+    ]);
+    const notice = { ...rawMail('sesmail_close', '検証一郎 <ichiro@alpha.example.jp>', '【募集終了】在庫管理システム改修（Java）', 5), body: 'ご案内した案件は募集終了となりました。' };
+    const closed = await closeProjectsForNoticesSheets(
+      [notice].filter((m) => isClosedNotice(m)).map((m) => ({ domain: 'alpha.example.jp', subject: m.subject, body: m.body })),
+      mentionsTitle,
+    );
+    const st = (id: string) => sheets.record(CLOSE_BOOK, '案件', 'ID', id)?.['ステータス'];
+    check('同じ送信元で案件名の合う案件だけを「終了」にする（別の案件・別の送信元はそのまま）', closed === 1 && st('proj_close_a') === '終了' && st('proj_close_b') === '募集中' && st('proj_close_c') === '募集中', `${closed} ${st('proj_close_a')} ${st('proj_close_b')} ${st('proj_close_c')}`);
+    newRun();
+    check('閉じた案件は突合の対象から外れる', !(await fetchOpenProjects(10)).some((p) => p.id === 'proj_close_a'));
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+}
+
 const RESEND_BOOK = 'fakeResendBook';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -3021,6 +3052,7 @@ async function main(): Promise<void> {
     await testResumeAndDurability();
     await testReviewRegressions();
     await testResendSkip();
+    await testClosedNotices();
     await testRedaction();
     await testSecurityRegressions();
     await testAttachmentIsolation();

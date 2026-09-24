@@ -115,7 +115,7 @@ import {
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt } from '../schedule.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
-import { classifyMailKind, splitByKind } from '../mailKind.js';
+import { classifyMailKind, splitByKind, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -3504,6 +3504,24 @@ function mailBodyChecks(): void {
   check('シートのリンクは HTML のリンク先から拾う（表示テキストに URL が無くても）', links.length === 1 && links[0].startsWith('https://docs.google.com/spreadsheets/d/AbC_123-x/edit') && !links[0].includes('"'), links.join());
 }
 
+// ===== 募集終了の連絡 =====
+
+function closedNoticeChecks(): void {
+  section('募集終了・充足の連絡');
+  const n = (subject: string, body = '') => isClosedNotice({ subject, body });
+  check('件名の先頭の【募集終了】は終了連絡', n('【募集終了】在庫管理システム改修（Java）'));
+  check('件名の先頭の【充足】・［CLOSE］も終了連絡', n('【充足】Web系PM支援') && n('［CLOSE］基盤更改'));
+  check('本文の完了形「募集終了となりました」は終了連絡', n('Java案件のご連絡', '先日ご案内した案件は、募集終了となりました。ありがとうございました。'));
+  check('「★1名参画決定★」「決定実績あり！」は募集中の案件', !n('★1名参画決定★ 追加でもう1名募集') && !n('決定実績あり！Java案件'));
+  check('定型文「募集終了となった場合はご容赦ください」は終了連絡ではない', !n('【案件】Java改修', '※募集終了となった場合はご容赦ください。'));
+  check('「スキル充足度（○△×）」は終了連絡ではない', !n('【案件】Java改修', 'スキル充足度（○△×）をご記入ください'));
+  check('件名の途中の【終了】は見ない（先頭のタグだけ）', !n('Java案件（前任者の契約【終了】に伴う募集）'));
+  const notice = { subject: '【募集終了】在庫管理システム改修（Java）', body: '' };
+  check('連絡に案件名が出てくれば、その案件を閉じる対象', mentionsTitle(notice, '在庫管理システム改修（Java）') && mentionsTitle(notice, '在庫管理システム 改修'));
+  check('短すぎる案件名（6文字未満）では閉じない', !mentionsTitle(notice, 'Java'));
+  check('別の案件名では閉じない', !mentionsTitle(notice, '販売管理システム改修'));
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3539,6 +3557,7 @@ async function main(): Promise<void> {
     manualEngineerChecks();
     hourlyScheduleChecks();
     mailBodyChecks();
+    closedNoticeChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();
