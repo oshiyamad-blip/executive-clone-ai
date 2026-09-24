@@ -363,15 +363,24 @@ function headerAgent(item: AgentItem): { address: string; domain: string } {
   return { address, domain: domainOfAddress(address).replace(/\.$/, '') };
 }
 
-// 複数の会社のメールが同じドメインから届いている（ヘッダのドメインと違う本文の営業元のドメインが2つ以上ある）ヘッダの
-// ドメイン。配信サービス・転送・共用のメールボックスのドメインで、送り主の会社を表さないため同じ営業元の判定に使わない
+// 本文の営業元メールが会社のドメイン（フリーメール・社内・ヘッダと同じドメインでない）なら、そのドメイン。無ければ ''
+function companyBodyDomain(item: AgentItem, headerDomain: string, own: string[]): string {
+  const body = emailDomain(item.agentEmail);
+  return body && body !== headerDomain && !isFreeMailDomain(body) && !own.includes(body) ? body : '';
+}
+
+// 複数の会社のメールが同じドメインから届いている（ヘッダのドメインと違う、会社の本文の営業元のドメインが2つ以上ある）ヘッダの
+// ドメイン。配信サービス・転送・共用のメールボックスのドメインで、送り主の会社を表さないことがある。
+// フリーメールの署名（営業が個人のアドレスで書く）は数えない。ヘッダ（特に Reply-To）は誰でも書けるため、この集合で
+// ヘッダのドメインを外すのは、自分の本文に別の会社の営業元がある項目だけ（agentKeys・isSameAgentPair）
 export function sharedHeaderDomains(items: AgentItem[], ownDomainList: string[] = internalMailDomains()): Set<string> {
   const own = ownDomainList.map((d) => d.toLowerCase());
   const bodyDomains = new Map<string, Set<string>>();
   for (const item of items) {
     const { domain } = headerAgent(item);
-    const body = emailDomain(item.agentEmail);
-    if (!domain || !body || body === domain || own.includes(domain) || isFreeMailDomain(domain)) continue;
+    if (!domain || own.includes(domain) || isFreeMailDomain(domain)) continue;
+    const body = companyBodyDomain(item, domain, own);
+    if (!body) continue;
     const set = bodyDomains.get(domain) ?? new Set<string>();
     set.add(body);
     bodyDomains.set(domain, set);
@@ -379,21 +388,31 @@ export function sharedHeaderDomains(items: AgentItem[], ownDomainList: string[] 
   return new Set([...bodyDomains].filter(([, set]) => set.size >= 2).map(([d]) => d));
 }
 
+// ヘッダのドメインを送り主の会社として使わない項目か（複数の会社が使うヘッダのドメインで、本文に別の会社の営業元がある）
+function headerDomainSuppressed(item: AgentItem, domain: string, own: string[], shared: Set<string>): boolean {
+  return shared.has(domain) && companyBodyDomain(item, domain, own) !== '';
+}
+
 // 案件・要員の送り主（会社）を表す値。メールのヘッダから決めた返信先（Reply-To、無ければ From。会社のドメインは
 // ドメイン、フリーメールはアドレス）と、本文から抽出した営業元メールのドメイン。社内のドメイン（自社ドメイン・共有メール
-// ボックスのドメイン。社内の営業が転送・共有したもの）と、複数の会社が使うヘッダのドメイン（配信サービス等）は含めない
+// ボックスのドメイン。社内の営業が転送・共有したもの）と、複数の会社が使うヘッダのドメインで本文に別の会社の営業元がある
+// 項目のヘッダのドメインは含めない
 function agentKeys(item: AgentItem, ownDomainList: string[], shared: Set<string>): Set<string> {
   const keys = new Set<string>();
   const extracted = emailDomain(item.agentEmail);
   if (extracted && !isFreeMailDomain(extracted) && !ownDomainList.includes(extracted)) keys.add(extracted);
   const { address, domain } = headerAgent(item);
-  if (domain && !ownDomainList.includes(domain) && !shared.has(domain)) keys.add(isFreeMailDomain(domain) ? `addr:${address}` : domain);
+  if (domain && !ownDomainList.includes(domain) && !headerDomainSuppressed(item, domain, ownDomainList, shared)) {
+    keys.add(isFreeMailDomain(domain) ? `addr:${address}` : domain);
+  }
   return keys;
 }
 
 // 案件と要員が同じ営業元から届いたか（isSameAgent に加え、ヘッダの返信先でも判定する。本文の営業元メールは
 // 空・別の担当者・親会社のアドレスのことがあり、それだけでは同じ取引先の要員を同じ取引先の案件に紹介してしまうため）。
-// どちらかの値が相手のどちらかの値と一致すれば同じ営業元とみなす
+// どちらかの値が相手のどちらかの値と一致すれば同じ営業元とみなす。複数の会社が使うヘッダのドメインでも、どちらかの
+// 本文に別の会社の営業元が無ければ（空・フリーメール）ヘッダのドメインが同じ組は同じ営業元とみなす（外から送られた
+// メールで共有とみなされたドメインでも、その会社の案件・要員を組ませないため）
 export function isSameAgentPair(
   project: AgentItem,
   engineer: AgentItem,
@@ -403,7 +422,11 @@ export function isSameAgentPair(
   if (isSameAgent(project.agentEmail, engineer.agentEmail, ownDomainList)) return true;
   const own = ownDomainList.map((d) => d.toLowerCase());
   const engineerKeys = agentKeys(engineer, own, shared);
-  return [...agentKeys(project, own, shared)].some((k) => engineerKeys.has(k));
+  if ([...agentKeys(project, own, shared)].some((k) => engineerKeys.has(k))) return true;
+  const p = headerAgent(project).domain;
+  const e = headerAgent(engineer).domain;
+  if (!p || p !== e || own.includes(p) || isFreeMailDomain(p) || !shared.has(p)) return false;
+  return !companyBodyDomain(project, p, own) || !companyBodyDomain(engineer, e, own);
 }
 
 type PairEvaluation = { pair: MatchPair; staleDemoted: boolean } | { excluded: ExclusionReason };

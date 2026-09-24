@@ -43,3 +43,28 @@ export function mainRulesetProblems(rules: unknown, opts: MainRulesetOptions = {
   if (!has('deletion')) problems.push('「Restrict deletions」が無効');
   return problems;
 }
+
+// SES_SINGLE_MAINTAINER=true の宣言を確かめる。GET /repos/{repo}/collaborators?affiliation=all の結果から、書き込み
+// （push・maintain・admin）できる人がリポジトリのオーナーだけか（組織のリポジトリなら1人だけか）を調べる。
+// 宣言したまま共同作業者を足すと、その人が承認なしの PR で main を書き換え、次の定時実行で鍵を持ち出せるため。
+// 返り値は問題の説明（空なら十分）
+export function singleMaintainerProblems(collaborators: unknown, repo: string): string[] {
+  if (!Array.isArray(collaborators)) return ['GitHub API の応答が共同作業者の一覧ではありません'];
+  const owner = (repo.split('/')[0] ?? '').toLowerCase();
+  const writers = collaborators
+    .filter((c): c is { login?: unknown; permissions?: Record<string, unknown> | null } => typeof c === 'object' && c !== null)
+    .filter((c) => {
+      const p = c.permissions ?? {};
+      return p.push === true || p.maintain === true || p.admin === true;
+    })
+    .map((c) => (typeof c.login === 'string' ? c.login.toLowerCase() : '?'));
+  const others = writers.filter((l) => l !== owner);
+  const allowed = writers.includes(owner) ? 0 : 1;
+  if (others.length > allowed) {
+    return [
+      `SES_SINGLE_MAINTAINER=true ですが、main に書き込めるのがオーナーのほかに${others.length}人います（Actions のログは公開のため名前は出しません）。` +
+        '変数を消して承認を求めるルールセットに戻すか、共同作業者の書き込み権限を外してください',
+    ];
+  }
+  return [];
+}

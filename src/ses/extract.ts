@@ -759,6 +759,36 @@ export function sourceNumbers(text: string): Set<string> {
   return out;
 }
 
+// 漢数字（〇〜九十九・位取りの並び）→ 算用数字。年齢・経験年数の原文照合用
+function kanjiToArabic(text: string): string {
+  const digit: Record<string, number> = { 〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  return text.replace(/[〇零一二三四五六七八九十]+/g, (m) => {
+    if (!m.includes('十')) return [...m].map((c) => String(digit[c])).join('');
+    const [tens, ones] = m.split('十');
+    if (m.split('十').length > 2 || tens.length > 1 || ones.length > 1) return m;
+    return String((tens ? digit[tens] : 1) * 10 + (ones ? digit[ones] : 0));
+  });
+}
+
+// 年齢・経験年数の原文照合に使う数値の集合。原文の数値に加え、漢数字・「X年半」（X.5）・生まれ年（西暦・昭和・平成）から
+// 数えた受信日時点の年齢（誕生日の前後で ±1）も原文にあるものとみなす（書き方の違いで正しい値を捨てないため）
+export function profileSourceNumbers(text: string, receivedAt: Date): Set<string> {
+  const normalized = kanjiToArabic(text.normalize('NFKC'));
+  const out = sourceNumbers(normalized);
+  for (const m of normalized.matchAll(/(\d+)\s*年\s*半/g)) out.add(String(Number(m[1]) + 0.5));
+  const year = Number.isNaN(receivedAt.getTime()) ? new Date().getFullYear() : receivedAt.getFullYear();
+  const addBirthYear = (y: number) => {
+    if (y < 1940 || y > year) return;
+    out.add(String(year - y));
+    out.add(String(year - y - 1));
+  };
+  for (const m of normalized.matchAll(/((?:19|20)\d{2})\s*(?:年\s*)?(?:生まれ|生|年生)/g)) addBirthYear(Number(m[1]));
+  for (const m of normalized.matchAll(/(昭和|平成|S|H)\s*(\d{1,2})\s*年\s*(?:生まれ|生)/g)) {
+    addBirthYear((m[1] === '昭和' || m[1] === 'S' ? 1925 : 1988) + Number(m[2]));
+  }
+  return out;
+}
+
 const rateInRange = (man: number) => man >= RATE_MIN_MAN && man <= RATE_MAX_MAN;
 
 // 原文に現れる数値だけを通す（numbers=null は照合を省く）。単金と同じく、突合の点数に効く数値（年齢・経験年数）を
@@ -858,13 +888,14 @@ export function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number,
   const residence = residenceWithStation(coarseResidence(raw.residence), raw.nearestStation);
   const skills = skillsOf(raw.skills);
   tallySkillTokens(skills, [raw.displayName, raw.agentCompany, raw.agentContact, raw.agentEmail]);
+  const profileNumbers = numbers ? profileSourceNumbers(mailText(mail), mail.receivedAt) : null;
   return {
     id: itemIdOf('eng', mail.id, index),
     // AIへの指示に反してフルネームが返っても、イニシャルだけを残す（決められなければ「（イニシャル不明）」）
     displayName: toInitials(raw.displayName),
-    age: numberInRange(sourceBacked(raw.age, numbers), 18, 75, true),
+    age: numberInRange(sourceBacked(raw.age, profileNumbers), 18, 75, true),
     skills,
-    experienceYears: numberInRange(sourceBacked(raw.experienceYears, numbers), 0, 50),
+    experienceYears: numberInRange(sourceBacked(raw.experienceYears, profileNumbers), 0, 50),
     desiredRate: verifiedRate(raw.desiredRate, raw.desiredRateUnit, numbers),
     residence,
     prefecture: normalizePrefecture(residence),

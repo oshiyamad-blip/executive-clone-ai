@@ -181,6 +181,8 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
    「Require a pull request before merging」は有効のまま承認の必要数を 0 にし（最後の push 以外の承認・Code Owners もオフで可）、
    **Variables に `SES_SINGLE_MAINTAINER` = `true`** を登録します（確認のステップが承認を求めず、PR を経ること・force-push と削除の禁止だけを
    確かめます）。この設定のまま共同作業者（Collaborators）を足さないでください。足す場合は `SES_SINGLE_MAINTAINER` を消し、上の厳しい設定に戻します。
+   確認のステップは毎回 GitHub API で共同作業者の一覧を読み、**オーナー以外に書き込み（Write・Maintain・Admin）できる人がいれば
+   失敗し、鍵を持つジョブを動かしません**（一覧を読めないときも止めます）。
    ルールセットを一時的に無効にして取り込むと、その間は定時実行が「main のルールセットを確認」で止まります（戻し忘れに気づけるように）
 6. **Environment「production」を作る**: **Settings → Environments → New environment** で名前を `production` にして作成し、
    **Deployment branches and tags** を **「Selected branches and tags」→ `main`** だけにします。

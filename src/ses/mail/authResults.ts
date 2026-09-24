@@ -6,8 +6,16 @@
 // 一番上のヘッダが送り主の書いたものになるため。設定が無い・一致しないときは認証されていない扱い（fail closed）
 
 // Authentication-Results の値の authserv-id（小文字。無ければ ''）
+// ヘッダの値からコメント（括弧）を入れ子も含めて取り除き、空白を1つにする。Postfix の TLS のコメント
+// （using TLSv1.3 with cipher ... (256/256 bits) ...）のように括弧の中に括弧と with があるため、1回では取り除けない
+export function stripHeaderComments(value: string): string {
+  let s = value ?? '';
+  for (let i = 0; i < 20 && /\([^()]*\)/.test(s); i++) s = s.replace(/\([^()]*\)/g, ' ');
+  return s.replace(/\s+/g, ' ');
+}
+
 export function authservIdOf(authResults: string): string {
-  const value = (authResults ?? '').replace(/\([^()]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const value = stripHeaderComments(authResults).trim();
   const first = value.split(';')[0]?.trim() ?? '';
   return (first.split(' ')[0] ?? '').toLowerCase().replace(/\.$/, '');
 }
@@ -26,7 +34,7 @@ export function authservIdTrusted(id: string, trusted: readonly string[]): boole
 
 // Received ヘッダの値 → 受け取ったサーバー（by の後の名前。小文字。無ければ ''）
 export function receivedByHost(received: string): string {
-  const value = (received ?? '').replace(/\([^()]*\)/g, ' ').replace(/\s+/g, ' ');
+  const value = stripHeaderComments(received);
   return (value.match(/(?:^|\s)by\s+([^\s;]+)/i)?.[1] ?? '').toLowerCase().replace(/\.$/, '');
 }
 
@@ -63,21 +71,40 @@ export function checkAuthResults(
       trusted =
         topReceivedByUs &&
         above.every((x) => authservIdTrusted(receivedByHost(x.h.value), trustedAuthservIds)) &&
-        receivedFromOutside(entryHop(received.map((x) => x.h.value), trustedAuthservIds));
+        enteredFromOutside(received, arIndex, trustedAuthservIds);
     }
   }
   const authDomain = trusted ? dmarcPassDomain(headers[arIndex].value, trustedAuthservIds) : '';
   return { authDomain, trusted, receivedByUsWithoutResult: topReceivedByUs && !trusted };
 }
 
-// 上から続く受信サーバーの Received のうち一番下（メールが受信サーバーに入った段）。無ければ ''
-function entryHop(received: readonly string[], trustedAuthservIds: readonly string[]): string {
-  let entry = '';
-  for (const r of received) {
-    if (!authservIdTrusted(receivedByHost(r), trustedAuthservIds)) break;
-    entry = r;
-  }
-  return entry;
+// 結果より上の受信サーバーの段と、結果を付けた段（結果のすぐ下の受信サーバーの Received。無ければ結果より上の一番下の段）から、
+// メールが外のサーバーからの SMTP で受信サーバーに入ったか。結果より下の段は送り主も書けるため、すぐ下の1段より下は見ない。
+// 結果より上に認証して送った段・サーバーの中から出した段（from の無い pickup）があれば、結果は送り主が書いたもの
+// （受信サーバーは認証して送られたメールに結果を付けないことがある）なので信じない。ローカル配送（LMTP 等）の段は構わない
+function enteredFromOutside(
+  received: ReadonlyArray<{ h: HeaderField; i: number }>,
+  arIndex: number,
+  trustedAuthservIds: readonly string[],
+): boolean {
+  const above = received.filter((x) => x.i < arIndex).map((x) => x.h.value);
+  if (above.some((r) => !receivedFromOutside(r) && !isLocalDelivery(r))) return false;
+  const next = received.find((x) => x.i > arIndex);
+  const entry =
+    next && authservIdTrusted(receivedByHost(next.h.value), trustedAuthservIds) ? next.h.value : [...above].reverse().find((r) => !isLocalDelivery(r)) ?? '';
+  return receivedFromOutside(entry);
+}
+
+// Received の値 → by の後の with のプロトコル（大文字。無ければ ''）。from 句のコメントの中の with（TLS の cipher 等）は読まない
+function receivedProtocol(flat: string): string {
+  const afterBy = flat.match(/(?:^|\s)by\s+\S+(.*)$/i)?.[1] ?? '';
+  return (afterBy.match(/(?:^|\s)with\s+([A-Za-z0-9]+)/i)?.[1] ?? '').toUpperCase();
+}
+
+// サーバーの中の配送の段（LMTP・local。from を持たないことが多い）
+function isLocalDelivery(received: string): boolean {
+  if (/authenticated\s+sender|\(authenticated\b/i.test(received)) return false;
+  return /^(?:LMTPS?|LOCAL)$/.test(receivedProtocol(stripHeaderComments(received)));
 }
 
 // 受信サーバーに入った段が、外のサーバーからの SMTP の受け取り（MX）か。同じ共有サーバーの別の利用者が認証して送った
@@ -86,13 +113,11 @@ function entryHop(received: readonly string[], trustedAuthservIds: readonly stri
 export function receivedFromOutside(received: string): boolean {
   if (!received) return false;
   if (/authenticated\s+sender|\(authenticated\b/i.test(received)) return false;
-  const flat = received.replace(/\([^()]*\)/g, ' ').replace(/\s+/g, ' ');
-  if (!/(?:^|\s)from\s+\S/i.test(flat)) return false;
-  const withProto = flat.match(/(?:^|\s)with\s+([A-Za-z0-9]+)/i)?.[1] ?? '';
-  return /^(?:UTF8)?E?SMTPS?$/i.test(withProto);
+  const flat = stripHeaderComments(received);
+  if (!/^\s*from\s+\S/i.test(flat)) return false;
+  return /^(?:UTF8)?E?SMTPS?$/.test(receivedProtocol(flat));
 }
 
-// 1回の収集で、受信サーバーの結果を信じられたメールの数から出す警告（無ければ null）。Xserver・Gmail の両経路で使う
 export function authResultsWarning(
   label: string,
   setting: string,
@@ -117,7 +142,7 @@ export function authResultsWarning(
 // authserv-id が信頼する値と一致しなければ（設定が無ければ）''
 export function dmarcPassDomain(topAuthResults: string, trustedAuthservIds: readonly string[]): string {
   if (!authservIdTrusted(authservIdOf(topAuthResults), trustedAuthservIds)) return '';
-  const value = (topAuthResults ?? '').replace(/\([^()]*\)/g, ' ').replace(/\s+/g, ' ');
+  const value = stripHeaderComments(topAuthResults);
   for (const part of value.split(';').slice(1)) {
     const m = part.trim().match(/^dmarc\s*=\s*([a-z]+)\b(.*)$/i);
     if (!m) continue;

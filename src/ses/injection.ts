@@ -15,11 +15,11 @@ export const OUTGOING_TEXT_CAUTION =
 // 「生成AIへの移行」「プロンプト設計」「PDFとして出力すること」等は拾わない）。
 // 日本語の言い回しは空白・ゼロ幅文字を除いた本文で照合する（「以前の指示を 無視」「無\u200B視」ですり抜けさせない）
 const JA_PATTERNS: RegExp[] = [
-  /(?:以前|前|上記|これまで|先ほど|今まで|上|前述|先述|既存|先|従来|上述|前記)の?(?:指示|指図|しじ|命令|ルール|設定|プロンプト)(?:は|を|も)?(?:すべて|全て|全部)?(?:無視|忘れ|破棄)/,
+  /(?:以前|前|上記|これまで|先ほど|今まで|上|前述|先述|既存|先|従来|上述|前記)の?(?:指示|指図|しじ|命令|ルール|設定|プロンプト|インストラクション)(?:は|を|も)?(?:すべて|全て|全部|一切|全く|完全に)*(?:無視|忘れ|破棄|スルー|従わ(?:ず|ない|なく))(?!(?:でき|出来)(?:ない|ず|ません))/,
   /(?:新しい|新たな)(?:指示|命令)[:：]/,
   /(?:単金|単価|スコア|点数)(?:は|を)[^。\n]{1,20}(?:として|で)(?:抽出|出力|採点)(?:して|すること|しなさい|せよ|しろ)/,
   /あなたは(?:AI|人工知能|アシスタント|LLM)(?:です|だ)[。.]?(?:以下|次)(?:の(?:指示|命令))?に従/i,
-  /(?:指示|命令|ルール|プロンプト)(?:は|を|も)(?:すべて|全て|全部)?(?:無視|忘れ)(?:して|せよ|しろ|すること|しなさい)/,
+  /(?:指示|命令|ルール|プロンプト|インストラクション)(?:は|を|も)(?:すべて|全て|全部|一切|全く|完全に)*(?:無視|忘れ|スルー)(?:して|せよ|しろ|すること|しなさい)/,
   /(?:システム)?プロンプト(?:は|を|も)(?:無視|忘れ|上書き|破棄|変更|表示|出力)/,
   /(?:AI|LLM|ChatGPT|GPT|Claude|Gemini|アシスタント|人工知能)(?:への|に対する|に向けた)(?:指示|命令)/i,
   /(?:AI|LLM|ChatGPT|GPT|Claude|Gemini|アシスタント|人工知能)(?:は|が)(?:次|以下)の(?:指示|命令)に従/i,
@@ -53,6 +53,24 @@ function extraPatterns(): RegExp[] {
   return injectionExtraPatterns();
 }
 
+// 文字・数字以外をすべて除いた本文でも照合する、指示を無視させる言い回し（「以・前・の・指・示・を・無・視」「以前の指示を、無視」）。
+// 句読点で文を区切る言い回し（単金の指図等）は文をまたいで誤って拾うため、ここには入れない
+const DENSE_JA_PATTERNS: RegExp[] = [JA_PATTERNS[0], JA_PATTERNS[4], JA_PATTERNS[5]];
+
+// 英字と見分けのつかないキリル文字・ギリシャ文字（「ignorе」の е）をラテン文字に寄せる（英語の言い回しの照合用）
+const CONFUSABLES: Record<string, string> = {
+  а: 'a', в: 'b', е: 'e', ё: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x', і: 'i', ї: 'i', ј: 'j', ѕ: 's',
+  ԁ: 'd', ԛ: 'q', ԝ: 'w', һ: 'h', ӏ: 'l', ɡ: 'g', ɑ: 'a', ı: 'i',
+  А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', У: 'Y', Х: 'X', І: 'I', Ј: 'J', Ѕ: 'S',
+  α: 'a', β: 'b', ε: 'e', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', γ: 'y',
+  Α: 'A', Β: 'B', Ε: 'E', Ζ: 'Z', Η: 'H', Ι: 'I', Κ: 'K', Μ: 'M', Ν: 'N', Ο: 'O', Ρ: 'P', Τ: 'T', Υ: 'Y', Χ: 'X',
+};
+const CONFUSABLE_CHARS = new RegExp(`[${Object.keys(CONFUSABLES).join('')}]`, 'g');
+
+function toLatinLookalikes(text: string): string {
+  return text.replace(CONFUSABLE_CHARS, (c) => CONFUSABLES[c] ?? c);
+}
+
 const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
 // 英字だけを残した本文で照合する言い回し（"i g n o r e previous instructions"・"ig-nore" の区切りですり抜けさせない）。
 // 区切りを消すと語の境目が分からないため、指示の語まで続くものだけを拾う
@@ -82,10 +100,13 @@ export function looksLikeInjection(raw: string): boolean {
   const text = raw.length > INJECTION_SCAN_MAX_CHARS ? raw.slice(0, INJECTION_SCAN_MAX_CHARS) : raw;
   const spaced = decodeEntitiesRepeatedly(text.normalize('NFKC')).replace(ZERO_WIDTH, '');
   const compact = spaced.replace(/\s+/g, '');
-  const letters = spaced.replace(/[^A-Za-z]+/g, '').toLowerCase();
+  const dense = spaced.replace(/[^\p{L}\p{N}]+/gu, '');
+  const latin = toLatinLookalikes(spaced);
+  const letters = latin.replace(/[^A-Za-z]+/g, '').toLowerCase();
   return (
     JA_PATTERNS.some((p) => p.test(compact)) ||
-    EN_PATTERNS.some((p) => p.test(spaced)) ||
+    DENSE_JA_PATTERNS.some((p) => p.test(dense)) ||
+    EN_PATTERNS.some((p) => p.test(latin)) ||
     LETTERS_ONLY_PATTERNS.some((p) => p.test(letters)) ||
     extraPatterns().some((p) => p.test(spaced) || p.test(compact))
   );
@@ -121,8 +142,16 @@ const DASH_LIKE = /[\u2010-\u2015\u2212\u30FC\uFF70\uFE63\uFF0D\u2E3A\u2E3B]/g;
 const SEPARATED_DIGITS = /(?<![\d.\/])\+?(?:\d[ \t\-()]{0,3}){8,11}\d(?![\d.\/])/g;
 // 「.」「・」で区切った電話番号（090.1234.5678・03・1234・5678）。小数の並び（0.5・1.0）と区別するため、番号の3つの塊の形で拾う
 const DOT_SEPARATED_PHONE = /(?<![\d.\/・])(?:\+81[ \t]*|0)\d{0,4}[ \t]*[.・][ \t]*\d{1,4}[ \t]*[.・][ \t]*\d{3,4}(?![\d.\/・])/g;
+// 「_」「/」「,」「~」「〜」「:」等で区切った電話番号（090_1234_5678・+81.90.1234.5678・(090)1234.5678）。
+// 番号の塊の形（市外局番・市内局番・加入者番号）で拾い、区切りを除いた桁数で確かめる（日付・小数の並びと区別する）
+const PHONE_SEP = '[ \\t_/,~〜～:・･.\\-()]';
+const GROUPED_PHONE = new RegExp(
+  `(?<![\\d])(?:\\+81${PHONE_SEP}{0,3}0?\\d{1,4}|\\(?0\\d{1,4}\\)?)${PHONE_SEP}{0,3}\\d{1,4}${PHONE_SEP}{1,3}\\d{3,4}(?![\\d])`,
+  'g',
+);
 const SHORTENERS = /\b(?:bit\.ly|t\.co|tinyurl\.com|goo\.gl|ow\.ly|is\.gd|buff\.ly|t\.ly|cutt\.ly|rebrand\.ly|lin\.ee|amzn\.to|x\.gd|urx\.nu)\b/i;
-const OBFUSCATED = /\[\s*(?:\.|dot|ドット|点)\s*\]|\(\s*(?:\.|dot|ドット|点)\s*\)|\[\s*(?:at|@|アット)\s*\]|\(\s*(?:at|@|アット)\s*\)|\{\s*(?:at|dot)\s*\}|アットマーク|あっとまーく/i;
+// 括弧の種類は問わない（[.]・(.)・【.】・〔.〕・{dot}・<at>・《@》 等）
+const OBFUSCATED = /[\[({<【〔《「『〈]\s*(?:\.|dot|ドット|点|at|@|アット)\s*[\])}>】〕》」』〉]|アットマーク|あっとまーく/i;
 // 日本の電話番号（固定・携帯・+81）。連絡先を文面に入れて相手を社外の窓口へ誘導させない
 const PHONE_LIKE = /(?<![\d.\/-])(?:\+81[ \t-]?\(?0?\)?|\(0\d{1,4}\)|0)\d{1,4}[ \t-]?\(?\d{1,4}\)?[ \t-]?\d{3,4}(?![\d.\/-])|(?<!\d)0\d{9,10}(?!\d)/;
 const MESSENGER = /\bLINE\s*(?:ID|@|アカウント|公式)|ライン\s*(?:ID|アイディー)|line\.me|\b(?:telegram|whatsapp|wechat|skype\s*id|discord|kakaotalk)\b|カカオトーク|テレグラム|ワッツアップ/i;
@@ -150,7 +179,7 @@ function bareLinkLike(text: string, tldOnly = false): boolean {
 function phoneLike(text: string): boolean {
   const t = text.replace(DASH_LIKE, '-');
   if (PHONE_LIKE.test(t)) return true;
-  for (const m of [...t.matchAll(SEPARATED_DIGITS), ...t.matchAll(DOT_SEPARATED_PHONE)]) {
+  for (const m of [...t.matchAll(SEPARATED_DIGITS), ...t.matchAll(DOT_SEPARATED_PHONE), ...t.matchAll(GROUPED_PHONE)]) {
     const digits = m[0].replace(/[^\d+]/g, '');
     if (/^0\d{9,10}$/.test(digits) || /^\+810?\d{9,10}$/.test(digits)) return true;
   }
