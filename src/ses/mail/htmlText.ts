@@ -125,3 +125,26 @@ export function htmlToPlainText(html: string, maxInput = HTML_TO_TEXT_MAX_INPUT)
   }
   return lines.join('\n').trim();
 }
+
+// text/plain が「表示されない方はこちら」だけ・件名だけの1行など中身の無い代替本文（スタブ）か。
+// 日次の一覧配信に多く、そのまま使うと抽出が空振りし、毎日同じ本文になって再送と誤判定される
+const STUB_PATTERN = /うまく表示されない|正しく表示されない|表示されない(方|場合)|ブラウザで(表示|見る|ご覧)|HTML(形式|メール)で(ご覧|表示)|view (it |this (e-?mail|message) )?in (your |a )?browser/i;
+
+// 本文に使うテキストを選ぶ（Gmail・Xserver の両経路で同じ規則にし、再送判定の指紋も揃える）。
+// text/plain が無い・スタブ・HTMLのテキストの1/3未満の長さなら、HTMLをテキストにしたものを使う
+export function chooseMailBody(plain: string | undefined | null, html: string | undefined | null): string {
+  const p = (plain ?? '').trim();
+  if (!html) return plain ?? '';
+  const h = htmlToPlainText(html).trim();
+  if (!p) return h;
+  if (h.length > 0 && (STUB_PATTERN.test(p.slice(0, 2000)) || p.length * 3 < h.length)) return h;
+  return plain ?? '';
+}
+
+// HTMLのリンク先（href）にある Google スプレッドシートのURL（表示テキストと違うことがあるため、リンク先を優先して拾う）
+export function sheetLinksInHtml(html: string | undefined | null): string[] {
+  if (!html) return [];
+  const s = decodeHtmlEntities(html.slice(0, HTML_TO_TEXT_MAX_INPUT));
+  const m = s.match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]+[^\s"'<>]*/g);
+  return m ? [...new Set(m)] : [];
+}

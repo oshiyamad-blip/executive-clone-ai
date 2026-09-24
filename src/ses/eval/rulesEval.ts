@@ -114,6 +114,7 @@ import {
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt } from '../schedule.js';
+import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { classifyMailKind, splitByKind } from '../mailKind.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
@@ -3488,6 +3489,21 @@ function hourlyScheduleChecks(): void {
   check('枠に余裕があれば古いメールも全部入れる', few.picked.length === 3 && few.deferred.length === 0);
 }
 
+// ===== 本文の選び方（HTMLだけ・中身の無い代替本文） =====
+
+function mailBodyChecks(): void {
+  section('本文の選び方（HTMLだけのメール・スタブ）');
+  const html = '<html><head><style>.c{width:500px;font-size:12px}</style></head><body><p>【案件名】：在庫管理改修<br>【単価】：70万円/月<br>【場所】：田町</p><img src="https://t.example/p.gif" width="1"></body></html>';
+  const onlyHtml = chooseMailBody('', html);
+  check('text/plain が無ければ HTML をテキストにする（CSSの数値・タグを残さない）', onlyHtml.includes('【案件名】：在庫管理改修') && onlyHtml.includes('【単価】：70万円/月') && !onlyHtml.includes('<') && !onlyHtml.includes('500'), onlyHtml);
+  check('「表示されない方はこちら」だけの代替本文は HTML を使う', chooseMailBody('メールが正しく表示されない方はこちら https://example.com/v/1', html).includes('【場所】：田町'));
+  check('HTMLより極端に短い text/plain（件名だけの1行など）は HTML を使う', chooseMailBody('【案件】在庫管理改修', html + '<p>' + '詳細'.repeat(100) + '</p>').includes('【単価】'));
+  const plain = '【案件名】：在庫管理改修\n【単価】：70万円/月\n【場所】：田町';
+  check('ふつうの text/plain はそのまま使う', chooseMailBody(plain, html) === plain);
+  const links = sheetLinksInHtml('<a href="https://docs.google.com/spreadsheets/d/AbC_123-x/edit?usp=sharing&amp;x=1">一覧はこちら</a>');
+  check('シートのリンクは HTML のリンク先から拾う（表示テキストに URL が無くても）', links.length === 1 && links[0].startsWith('https://docs.google.com/spreadsheets/d/AbC_123-x/edit') && !links[0].includes('"'), links.join());
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3522,6 +3538,7 @@ async function main(): Promise<void> {
     mailKindChecks();
     manualEngineerChecks();
     hourlyScheduleChecks();
+    mailBodyChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

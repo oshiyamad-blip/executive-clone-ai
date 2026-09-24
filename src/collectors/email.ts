@@ -2,7 +2,7 @@ import { google, gmail_v1 } from 'googleapis';
 import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
 import { attachmentsWithinLimits, capMailBody, MAIL_MAX_BYTES } from '../ses/mail/attachmentLimits.js';
-import { htmlToPlainText } from '../ses/mail/htmlText.js';
+import { chooseMailBody, sheetLinksInHtml } from '../ses/mail/htmlText.js';
 import { checkAuthResults, authResultsWarning } from '../ses/mail/authResults.js';
 import { normalizeAddressHeader } from '../ses/mail/ownMail.js';
 import { recordHealEvent } from '../ses/heal/events.js';
@@ -229,7 +229,8 @@ async function buildSesRawMail(
   const from = normalizeAddressHeader(header('From'));
   const to = normalizeAddressHeader(header('To'));
   const cc = normalizeAddressHeader(header('Cc'));
-  const body = capMailBody(extractSesBody(msg.payload));
+  const extracted = extractSesBody(msg.payload);
+  const body = capMailBody(extracted.body);
   const dateMs = Number(msg.internalDate ?? Date.now());
   const attachments = await collectAttachments(gmail, msg.id ?? '', msg.payload);
   // 受信サーバー（Gmail）が付けた一番上の Authentication-Results だけを読む（下にあるものは送り主が書ける）
@@ -255,7 +256,7 @@ async function buildSesRawMail(
     references: header('References'),
     receivedAt: new Date(dateMs),
     attachments,
-    sheetLinks: extractSheetLinks(body),
+    sheetLinks: [...new Set([...sheetLinksInHtml(extracted.html), ...extractSheetLinks(body)])],
     ...(authDomain ? { authDomain } : {}),
   };
   return { mail, trustedAuthResults: auth.trusted };
@@ -282,13 +283,14 @@ function findBodyPart(p: BodyPart | undefined, mimeType: string, depth = 0): Bod
 
 // SES用の本文: text/plain があればそれ、無ければ text/html をテキストにする（生のHTML（コメント・非表示の要素・
 // 文字参照）のまま指示の検知と抽出のAIに渡さない。Xserver経路と同じテキストにする）
-function extractSesBody(payload: unknown): string {
+// 本文（Xserver 経路と同じ chooseMailBody の規則）と、HTML のリンク先の原文（シートのリンクを拾うため）
+function extractSesBody(payload: unknown): { body: string; html: string } {
   const root = payload as BodyPart | undefined;
-  const plain = findBodyPart(root, 'text/plain');
-  if (plain?.body?.data) return decodeBase64Url(plain.body.data, charsetOf(plain.headers ?? undefined));
-  const html = findBodyPart(root, 'text/html');
-  if (html?.body?.data) return htmlToPlainText(decodeBase64Url(html.body.data, charsetOf(html.headers ?? undefined)));
-  return '';
+  const plainPart = findBodyPart(root, 'text/plain');
+  const htmlPart = findBodyPart(root, 'text/html');
+  const plain = plainPart?.body?.data ? decodeBase64Url(plainPart.body.data, charsetOf(plainPart.headers ?? undefined)) : '';
+  const html = htmlPart?.body?.data ? decodeBase64Url(htmlPart.body.data, charsetOf(htmlPart.headers ?? undefined)) : '';
+  return { body: chooseMailBody(plain, html), html };
 }
 
 // 添付ファイル（Excel/PDF）をダウンロードしbase64（標準）のまま保持する。テキスト化は parse 段で行う

@@ -11,7 +11,7 @@ import { pickForRun, pastRunDeadline } from '../schedule.js';
 import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
-import { htmlToPlainText } from './htmlText.js';
+import { chooseMailBody, sheetLinksInHtml } from './htmlText.js';
 import { formatMailboxes, messageIdMailId, type MailboxValue } from './ownMail.js';
 import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
 import {
@@ -327,10 +327,9 @@ function headerFields(p: ParsedMail): HeaderField[] {
   return (p.headerLines ?? []).map((h) => ({ key: h.key, value: h.line.replace(/^[^:]*:/, '').replace(/\r?\n[ \t]+/g, ' ').trim() }));
 }
 
-// text/plain が無ければ HTML を切り詰めてからテキストにする。保持する本文にも上限を設ける
+// 本文は chooseMailBody で選ぶ（text/plain が無い・スタブなら HTML をテキストにする）。保持する本文にも上限を設ける
 function bodyText(p: ParsedMail): string {
-  if (typeof p.text === 'string' && p.text.trim()) return capMailBody(p.text);
-  return typeof p.html === 'string' && p.html ? capMailBody(htmlToPlainText(p.html)) : capMailBody(p.text ?? '');
+  return capMailBody(chooseMailBody(p.text, typeof p.html === 'string' ? p.html : ''));
 }
 
 function refsText(r: string | string[] | undefined): string {
@@ -382,7 +381,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): ParsedRawMai
     // 送信側の Date ヘッダではなくサーバーの受信日時（古い Date のメールを最初から「窓の端」と誤判定しないため）
     receivedAt,
     attachments,
-    sheetLinks: extractSheetLinks(body),
+    sheetLinks: [...new Set([...sheetLinksInHtml(typeof p.html === 'string' ? p.html : ''), ...extractSheetLinks(body)])],
     ...(authDomain ? { authDomain } : {}),
   };
   return { mail, droppedAttachments: dropped, trustedAuthResults: auth.trusted, receivedByUsWithoutResult: auth.receivedByUsWithoutResult };
