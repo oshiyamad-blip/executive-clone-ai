@@ -32,6 +32,7 @@ import { listSkillSheetFiles } from '../ses/proper/drive.js';
 import { properGoogleAuth, properAccessHint } from '../ses/proper/auth.js';
 import { probeImap, probeSmtp } from '../ses/mail/xserver.js';
 import { probeGmail } from '../ses/mail/gmail.js';
+import { WEB_TOKEN_MIN_CHARS } from '../web/httpSecurity.js';
 
 // 環境診断（セットアップ確認用）
 // 使い方: npm run doctor
@@ -276,8 +277,15 @@ async function main(): Promise<void> {
   if (envSet('EXECUTIVE_NAME')) ok(`経営者名: ${logRedact() ? '設定済み' : process.env.EXECUTIVE_NAME}`);
   else warn('EXECUTIVE_NAME が未設定です');
   checkExecutiveProfilePlacement();
-  if (envSet('WEB_ACCESS_TOKEN')) ok('WEB_ACCESS_TOKEN 設定済み（Web UIに認証あり）');
-  else warn('WEB_ACCESS_TOKEN 未設定 — Web UIはローカル(127.0.0.1)でのみ使ってください');
+  for (const name of ['WEB_ACCESS_TOKEN', 'SES_WEB_ACCESS_TOKEN']) {
+    const v = process.env[name]?.trim() ?? '';
+    if (!v) warn(`${name} 未設定 — そのUIはこのPCのブラウザから直接（プロキシを通さず）だけ使えます`);
+    else if (v.length < WEB_TOKEN_MIN_CHARS) warn(`${name} が${WEB_TOKEN_MIN_CHARS}文字未満です（UIは起動を中止します）`);
+    else ok(`${name} 設定済み（Web UIに認証あり）`);
+  }
+  if (envSet('WEB_ACCESS_TOKEN') && process.env.WEB_ACCESS_TOKEN?.trim() === process.env.SES_WEB_ACCESS_TOKEN?.trim()) {
+    warn('WEB_ACCESS_TOKEN と SES_WEB_ACCESS_TOKEN が同じ値です（UIは起動を中止します。別の値にしてください）');
+  }
 
   // まとめ
   console.log('');

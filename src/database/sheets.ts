@@ -8,12 +8,13 @@
 // 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
 import { createHash, randomUUID } from 'crypto';
 import { google } from 'googleapis';
-import { getServiceAccountAuth } from '../collectors/googleAuth.js';
+import { getServiceAccountAuth, loadServiceAccountCredentials } from '../collectors/googleAuth.js';
 import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
 import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { normalizePrefecture, coarseResidence } from '../ses/prefecture.js';
 import { toInitials } from '../ses/pii.js';
-import { SafeLogError, logId } from '../ses/redact.js';
+import { SafeLogError, logId, safeErr } from '../ses/redact.js';
+import { recordHealEvent } from '../ses/heal/events.js';
 import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
 import {
   remoteLabel,
@@ -68,6 +69,10 @@ export const JUDGE_COLUMN = '判定';
 export const INJECTION_COLUMN = '指示混入疑い';
 const INJECTION_MARK = 'あり';
 
+// 指示混入疑いの印の控え（タブ:ID を1行ずつ。バッチ専用の保護したタブ）。列の印や返信メタは人が編集・版の履歴から
+// 巻き戻せるため、一度付いた印はこのタブにも残し、ここにある行は列・返信メタによらず要確認として扱う
+export const INJECTION_FLAGS_TAB = '_指示混入';
+
 // バッチごとの健全性の記録（件数・比率だけ。人名・案件名・スキル語そのものは書かない）。1回の実行で1行を追記する。
 // 比率の列は % の値（0〜100。母数が0なら空欄）
 export const METRICS_TAB = 'メトリクス';
@@ -103,6 +108,7 @@ const TABS: Record<string, string[]> = {
   スキル同義: ['スキルA', 'スキルB', '追加者', '日時'],
   処理済みメール: ['メールID', '処理日時', '結果', '指紋', '元メール'],
   _状態: ['キー', 'JSON', '更新日時'],
+  [INJECTION_FLAGS_TAB]: ['キー', '日時'],
   [METRICS_TAB]: METRICS_COLUMNS,
   // プロパー（自社社員のスキルシート）× 案件の候補。提案は案件側への1通だけなので要員側の下書き列は持たない
   [PROPER_CANDIDATE_TAB]: [
@@ -124,6 +130,8 @@ const book = new SheetBook({
   missingAuthMessage: 'Google認証（GOOGLE_SA_KEY_JSON または GOOGLE_SA_CLIENT_EMAIL/GOOGLE_SA_PRIVATE_KEY）が未設定',
   accessHint: 'IDが正しいか、サービスアカウントのメールアドレスに編集者として共有済みかを確認してください',
   dropdowns: { [PROPER_CANDIDATE_TAB]: { ステータス: Object.values(MATCH_STATUS_LABEL) } },
+  protectedTabs: { [INJECTION_FLAGS_TAB]: 'SESバッチ専用（指示混入疑いの印の控え）。編集しないでください' },
+  protectionEditor: () => sheetsDbImpersonate() || loadServiceAccountCredentials()?.clientEmail || '',
 });
 
 function configured(): boolean {
@@ -138,6 +146,8 @@ export function sheetsDbConfigured(): boolean {
 // バッチ開始時に呼ぶ（前回実行の状態を持ち越さない）
 export function resetSheetsCache(): void {
   book.reset();
+  injectionFlagKeys = new Set();
+  warnedInjectionFlags = false;
 }
 
 function colIndex(tab: string, name: string): number {
@@ -187,20 +197,75 @@ function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[]
 
 // 保存済みの行に指示混入疑いの印（列、または署名した返信メタの中）があれば、保存し直す行の返信メタにも印を含めて署名する
 // （同じメールの抽出し直しで返信メタを書き直しても、列の印を人が消せば外れる状態に戻さないため）
-function withKeptInjection<T extends { injectionSuspected?: boolean }>(tab: string, item: T, existing: string[] | null): T {
-  if (item.injectionSuspected || !existing) return item;
+function withKeptInjection<T extends { id: string; injectionSuspected?: boolean }>(tab: string, item: T, existing: string[] | null): T {
+  if (item.injectionSuspected) return item;
+  if (injectionFlagKeys.has(injectionFlagKey(tab, item.id))) return { ...item, injectionSuspected: true };
+  if (!existing) return item;
   const marked = cellStr(existing, colIndex(tab, INJECTION_COLUMN)) !== '' || replyMetaInjection(cellStr(existing, colIndex(tab, '返信メタ')));
   return marked ? { ...item, injectionSuspected: true } : item;
 }
 
+// ===== 指示混入疑いの印の控え =====
+
+let injectionFlagKeys = new Set<string>();
+let warnedInjectionFlags = false;
+
+function injectionFlagKey(tab: string, id: string): string {
+  return `${tab}:${id.trim()}`;
+}
+
+// 控えのタブを読み直す（読めなければ前回までの控えのまま続ける）
+async function loadInjectionFlags(): Promise<void> {
+  await book.ensureTabs(); // スプレッドシート自体を開けない失敗は呼び出し元へ（原因の分かる例外のまま）
+  try {
+    const rows = await readRows(INJECTION_FLAGS_TAB);
+    const keys = new Set(injectionFlagKeys);
+    for (const r of rows) {
+      const k = cellStr(r.cells, colIndex(INJECTION_FLAGS_TAB, 'キー'));
+      if (k) keys.add(k);
+    }
+    injectionFlagKeys = keys;
+  } catch (err) {
+    if (!warnedInjectionFlags) console.warn(`SheetsDB: 「${INJECTION_FLAGS_TAB}」タブを読めません（列・返信メタの印だけで判断します）: ${safeErr(err)}`);
+    warnedInjectionFlags = true;
+  }
+  if (!warnedInjectionFlags && book.unprotectedTabs().includes(INJECTION_FLAGS_TAB)) {
+    warnedInjectionFlags = true;
+    recordHealEvent('warn', `「${INJECTION_FLAGS_TAB}」タブを保護できていません（編集者が指示混入疑いの印を外せます。スプレッドシートのオーナーがタブを保護してください）`);
+  }
+}
+
+// 指示混入疑いの印を控えに足す（控えから消すことはしない）
+async function recordInjectionFlags(tab: string, ids: string[]): Promise<void> {
+  const fresh = [...new Set(ids.filter(Boolean).map((id) => injectionFlagKey(tab, id)))].filter((k) => !injectionFlagKeys.has(k));
+  if (fresh.length === 0) return;
+  const at = new Date().toISOString();
+  await appendRows(INJECTION_FLAGS_TAB, fresh.map((k) => [k, at]));
+  fresh.forEach((k) => injectionFlagKeys.add(k));
+}
+
+// 保存した行のうち指示混入疑いの印のあるものを控えに足す（失敗しても保存は続ける。列・返信メタの印は付いている）
+async function recordSavedInjectionFlags(tab: string, rows: Map<string, Cell[]>): Promise<void> {
+  const ids = [...rows].filter(([, row]) => rowCell(tab, row, INJECTION_COLUMN) !== '').map(([id]) => id);
+  try {
+    await recordInjectionFlags(tab, ids);
+  } catch (err) {
+    console.warn(`SheetsDB: 指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした: ${safeErr(err)}`);
+  }
+}
+
 // 受信日の解釈。機械が書くISO形式に加え、人が手で入れた「2026/9/1」「2026年9月1日」「9/1」（年なし＝直近のその日）を受け付ける。
-// 空欄・読めない値は null（受信日で絞る突合の対象から外す。「今」とみなして毎回の突合に紛れ込ませない）
+// 空欄・読めない値は null（受信日で絞る突合の対象から外す。「今」とみなして毎回の突合に紛れ込ませない）。
+// 未来（今から1日より先）の日付も null（年の打ち間違い・意図的な未来日付で、終わった案件・要員が突合の対象の先頭に
+// 居座り続けないように）
+const RECEIVED_AT_FUTURE_SLACK_MS = 24 * 60 * 60 * 1000;
+
 export function parseReceivedAt(raw: string, now = new Date()): Date | null {
   const s = raw.normalize('NFKC').trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
     const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? null : d;
+    return Number.isNaN(d.getTime()) || d.getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS ? null : d;
   }
   const full = s.match(/^(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?$/);
   const short = full ? null : s.match(/^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$/);
@@ -219,7 +284,8 @@ export function parseReceivedAt(raw: string, now = new Date()): Date | null {
   const year = full ? Number(full[1]) : jstYear;
   if (month < 1 || month > 12 || hour > 23 || minute > 59 || !exists(year)) return null;
   // 年なしで未来になる日付は前年（12月の受信を1月に手入力した等）
-  if (!full && at(year).getTime() > now.getTime() + 24 * 60 * 60 * 1000) return exists(year - 1) ? at(year - 1) : null;
+  if (!full && at(year).getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS) return exists(year - 1) ? at(year - 1) : null;
+  if (at(year).getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS) return null;
   return at(year);
 }
 
@@ -243,7 +309,7 @@ function warnUnknownReceivedAt(tab: string, items: Array<{ receivedAt: Date }>):
   const unknown = items.filter((x) => x.receivedAt.getTime() === UNKNOWN_RECEIVED_AT).length;
   if (unknown === 0 || warnedUnknownReceivedAt.has(tab)) return;
   warnedUnknownReceivedAt.add(tab);
-  console.warn(`SheetsDB: 「${tab}」タブに受信日が空欄・読めない行が${unknown}件あります（直近の突合の対象から外します。YYYY-MM-DD 等で入力してください）`);
+  console.warn(`SheetsDB: 「${tab}」タブに受信日が空欄・読めない・未来の日付の行が${unknown}件あります（直近の突合の対象から外します。YYYY-MM-DD 等で入力してください）`);
 }
 
 // ===== 案件 =====
@@ -296,7 +362,9 @@ function projectToRow(p: Project): Cell[] {
 
 export async function saveProjectSheets(project: Project): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', project, existing)), existing));
+  await loadInjectionFlags();
+  const row = await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', project, existing)), existing));
+  await recordSavedInjectionFlags('案件', new Map([[project.id, row]]));
   return project.id;
 }
 
@@ -327,7 +395,7 @@ function rowToProject(cells: string[]): Project {
     status: c('ステータス') === '終了' ? 'closed' : 'open',
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
     matched: c(MATCHED_COLUMN) !== '',
-    ...(c(INJECTION_COLUMN) !== '' || reply.injection ? { injectionSuspected: true } : {}),
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection || injectionFlagKeys.has(injectionFlagKey('案件', c('ID'))) ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -353,6 +421,7 @@ export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date)
 }
 
 async function openProjects(): Promise<Project[]> {
+  await loadInjectionFlags();
   const rows = await readRows('案件');
   const stCol = colIndex('案件', 'ステータス');
   const open = rows.filter((r) => cellStr(r.cells, stCol) !== '終了').map((r) => rowToProject(r.cells));
@@ -374,7 +443,9 @@ function engineerToRow(e: Engineer): Cell[] {
 
 export async function saveEngineerSheets(engineer: Engineer): Promise<string> {
   if (!configured()) return '';
-  await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', engineer, existing)), existing));
+  await loadInjectionFlags();
+  const row = await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', engineer, existing)), existing));
+  await recordSavedInjectionFlags('要員', new Map([[engineer.id, row]]));
   return engineer.id;
 }
 
@@ -408,7 +479,7 @@ function rowToEngineer(cells: string[]): Engineer {
     status: c('ステータス') === '決定済' ? 'assigned' : 'available',
     notionPageId: c('ID'),
     matched: c(MATCHED_COLUMN) !== '',
-    ...(c(INJECTION_COLUMN) !== '' || reply.injection ? { injectionSuspected: true } : {}),
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection || injectionFlagKeys.has(injectionFlagKey('要員', c('ID'))) ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -423,6 +494,7 @@ export async function fetchAvailableEngineersSheets(limit = 100, receivedSince?:
 }
 
 async function availableEngineers(): Promise<Engineer[]> {
+  await loadInjectionFlags();
   const rows = await readRows('要員');
   const stCol = colIndex('要員', 'ステータス');
   const available = rows.filter((r) => cellStr(r.cells, stCol) !== '決定済').map((r) => rowToEngineer(r.cells));
@@ -444,6 +516,7 @@ export async function countUnmatchedBeyondPoolSheets(limit: number, since: Date)
 // 対応付けてIDを決めるために使う
 export async function fetchItemsByMailSheets(mailIds: Set<string>): Promise<{ projects: Project[]; engineers: Engineer[] }> {
   if (!configured() || mailIds.size === 0) return { projects: [], engineers: [] };
+  await loadInjectionFlags();
   const pick = async <T>(tab: string, toItem: (cells: string[]) => T): Promise<T[]> => {
     const col = colIndex(tab, '元メールID');
     const items = (await readRows(tab)).filter((r) => mailIds.has(cellStr(r.cells, col))).map((r) => toItem(r.cells));
@@ -514,7 +587,9 @@ function rowCell(tab: string, row: Cell[], name: string): string {
 }
 
 export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSaveResult<Project>> {
+  if (configured()) await loadInjectionFlags();
   const { failed, rows } = await saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', p, existing)), existing));
+  await recordSavedInjectionFlags('案件', rows);
   const saved = new Map<string, Project>();
   for (const p of projects) {
     const row = rows.get(p.id);
@@ -529,7 +604,9 @@ export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSav
 }
 
 export async function saveEngineersSheets(engineers: Engineer[]): Promise<SheetsSaveResult<Engineer>> {
+  if (configured()) await loadInjectionFlags();
   const { failed, rows } = await saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', e, existing)), existing));
+  await recordSavedInjectionFlags('要員', rows);
   const saved = new Map<string, Engineer>();
   for (const e of engineers) {
     const row = rows.get(e.id);
@@ -564,6 +641,12 @@ export async function markItemsInjectionSuspectedSheets(kind: 'project' | 'engin
   if (!configured() || ids.length === 0) return 0;
   const tab = kind === 'project' ? '案件' : '要員';
   const unique = [...new Set(ids)];
+  await loadInjectionFlags();
+  try {
+    await recordInjectionFlags(tab, unique);
+  } catch (err) {
+    console.warn(`SheetsDB: 指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした: ${safeErr(err)}`);
+  }
   const metaById = new Map<string, string>();
   if (draftSigningKey()) {
     const wanted = new Set(unique);
@@ -733,6 +816,7 @@ export async function fetchItemsByIdsSheets(
   engineerIds: Set<string>,
 ): Promise<{ projects: Project[]; engineers: Engineer[] }> {
   if (!configured() || (projectIds.size === 0 && engineerIds.size === 0)) return { projects: [], engineers: [] };
+  await loadInjectionFlags();
   const pick = async <T>(tab: string, ids: Set<string>, toItem: (cells: string[]) => T): Promise<T[]> => {
     if (ids.size === 0) return [];
     const col = colIndex(tab, 'ID');
@@ -1231,20 +1315,41 @@ interface MigrationState {
 // 「突合済」列の導入前からある行を突合済みにする（新しい仕組みに切り替えた最初の実行で、保存済みの全案件・要員の組を
 // 判定し直して費用がかさまないように）。列をどのプロセスが追加したか（確認UI・自社社員探し等でも追加される）に依らず、
 // _状態タブの印で1回だけ行う。印は書き込みがすべて済んでから「完了」にするため、途中で失敗しても次の実行でやり直す
+// 移行の印の形の検査（人が消した・書き換えた印を「未移行」と読んで、突合前の行を黙って突合済みにしないため）
+function migrationStateOf(raw: unknown): MigrationState | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const st = (raw as { state?: unknown }).state;
+  const at = (raw as { at?: unknown }).at;
+  return (st === 'started' || st === 'done') && typeof at === 'string' ? { state: st, at } : null;
+}
+
+// 印が無い・壊れているときに、移行を行ってよいか。突合済の列に機械が書いた日時（ISO形式）が1行でもあるタブは、
+// すでに新しい仕組みで突合している＝移行済み（印を人が消した・_状態タブを消した）とみなし、空欄の行（期限・予算で
+// 後回しにした突合前の行）を突合済みにしない。以前の版の移行の印（「移行 …」）がある場合も同じ
+export function matchedColumnNeedsMigration(matchedCells: string[]): boolean {
+  return !matchedCells.some((v) => v.startsWith(MIGRATED_MARK) || /^\d{4}-\d{2}-\d{2}T/.test(v.trim()));
+}
+
 async function migrateMatchedColumn(tab: string): Promise<void> {
   const key = `migration:${MATCHED_COLUMN}:${tab}`;
-  const state = await readStateJson<MigrationState>(key);
+  const rawState = await readStateJson<unknown>(key);
+  const state = migrationStateOf(rawState);
   if (state?.state === 'done') return;
   const col = colIndex(tab, MATCHED_COLUMN);
   const rows = await readRows(tab);
-  // 以前の版（列を追加したプロセスだけが移行した）で移行済みのタブは、その後に保存した突合前の行（空欄）を触らない
-  const migratedBefore = !state && rows.some((r) => cellStr(r.cells, col).startsWith(MIGRATED_MARK));
-  const ids = migratedBefore ? [] : rows.filter((r) => !cellStr(r.cells, col)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))).filter(Boolean);
+  // 途中で止まった移行（印が started）は続ける。印が無い・壊れている場合は、突合済の列の中身で移行済みかを判断する
+  const needed = state?.state === 'started' || matchedColumnNeedsMigration(rows.map((r) => cellStr(r.cells, col)));
+  const ids = needed ? rows.filter((r) => !cellStr(r.cells, col)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))).filter(Boolean) : [];
   const at = new Date().toISOString();
+  if (!state && rawState !== null) {
+    recordHealEvent('warn', `_状態タブの「${key}」の値が読めない形でした（移行済みとして書き直します）`);
+  }
   if (ids.length > 0) {
     await writeStateJson(key, { state: 'started', at } satisfies MigrationState);
     const marked = await book.writeCellsByKey(tab, 'ID', ids.map((id) => ({ key: id, cells: [[MATCHED_COLUMN, `${MIGRATED_MARK} ${at}`]] })));
-    if (marked > 0) console.log(`SheetsDB: 「${tab}」タブの既存${marked}行を突合済みにしました（${MATCHED_COLUMN}列の導入に伴う移行）`);
+    if (marked > 0) {
+      recordHealEvent('warn', `「${tab}」タブの突合前の${marked}行を突合済みにしました（${MATCHED_COLUMN}列の導入に伴う移行。新着として突合されません）`);
+    }
   }
   await writeStateJson(key, { state: 'done', at } satisfies MigrationState);
 }

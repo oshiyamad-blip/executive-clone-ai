@@ -403,13 +403,18 @@ export async function draftExists(draftKey: string): Promise<boolean | null> {
   const client = imapClient();
   try {
     await client.connect();
-    const lock = await client.getMailboxLock(xserverDraftsMailbox(), { readOnly: true });
-    try {
-      const uids = searchResult(await client.search({ header: { [DRAFT_KEY_HEADER]: draftKey } }, { uid: true }), 'Xserver下書き');
-      return uids.length > 0;
-    } finally {
-      lock.release();
-    }
+    const found = async (mailbox: string): Promise<boolean> => {
+      const lock = await client.getMailboxLock(mailbox, { readOnly: true });
+      try {
+        return searchResult(await client.search({ header: { [DRAFT_KEY_HEADER]: draftKey } }, { uid: true }), 'Xserver下書き').length > 0;
+      } finally {
+        lock.release();
+      }
+    };
+    if (await found(xserverDraftsMailbox())) return true;
+    // 担当者が送信済みの下書きは送信済みフォルダに移る（送信時にヘッダが残るメールソフトなら、そこで見つかる）
+    const sent = (await client.list()).find((b) => b.specialUse === '\\Sent')?.path;
+    return sent ? await found(sent) : false;
   } finally {
     try {
       await client.logout();

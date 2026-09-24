@@ -10,7 +10,8 @@ import { computeBandMetrics } from './metrics.js';
 import {
   sesWebPort,
   sesWebHost,
-  webAccessToken,
+  sesWebAccessToken,
+  chatWebAccessToken,
   sesWebTlsCertPath,
   sesWebTlsKeyPath,
   sesWebBehindTls,
@@ -27,22 +28,21 @@ import {
   runHandler,
   securityHeaders,
   sendJson as json,
-  unsafeBind,
-  plaintextExposure,
+  webStartupProblem,
 } from '../web/httpSecurity.js';
 import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
 
 // SESマッチ確認UI（複数人運用）。バッチ/自社社員探しが書き出したレビュー成果を一覧表示し、
 // 紹介メール下書きを確認し、ステータス更新・妥当/ズレ評価・スキル同義追加を行う。
 // 評価と操作には「名前」を添えて誰の操作かを記録する（共有の正は本番=Notion/Sheets / demo=ローカルJSON）。
-// アクセス制御: WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証。ホストは SES_WEB_HOST（既定ローカル）。
+// アクセス制御: SES_WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証（chat UI の WEB_ACCESS_TOKEN とは別の値）。ホストは SES_WEB_HOST（既定ローカル）。
 // UIはLLMを呼ばないため、demoかどうかは LLM の鍵の有無ではなく DEMO_MODE の明示だけで決める
 // （本番のUIを鍵無しで起動したときに、評価や下書きがdemo扱いでローカルに消えないように）
 setDemoOverride(demoModeExplicit());
 
 const HOST = sesWebHost();
 const PORT = sesWebPort();
-const ACCESS_TOKEN = webAccessToken();
+const ACCESS_TOKEN = sesWebAccessToken();
 const VALID_STATUSES: MatchStatus[] = ['unconfirmed', 'introduced', 'closed_won', 'dropped'];
 
 // 入力の長さ上限（メモはLLM最終判定の参考として毎回プロンプトに載るため短く保つ）
@@ -145,6 +145,11 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
           error: 'Sheets運用では、スプレッドシートの「担当者メール」列にあなたのアドレスを入れて下書きを依頼してください（次回のバッチで作成します。二重作成を防ぐため確認UIからは作成しません）',
         });
       }
+      if (result.reason === 'unleased') {
+        return json(res, 409, {
+          error: 'この構成（DB_PROVIDER=sheets 以外）では確認UIから下書きを作りません（別の実行と二重に作らないため。単独の運用なら SES_ALLOW_UNLEASED=true）',
+        });
+      }
       return result.reason === 'already_created'
         ? json(res, 409, { error: 'この側の下書きは作成済み（または作成中）です' })
         : json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
@@ -205,22 +210,24 @@ function loadTls(): { cert: Buffer; key: Buffer } | null | 'error' {
 }
 
 function main(): void {
-  if (unsafeBind(HOST, ACCESS_TOKEN)) {
-    console.error(`❌ SES_WEB_HOST=${HOST} で公開するには WEB_ACCESS_TOKEN の設定が必要です（ローカルのみなら 127.0.0.1）。起動を中止します`);
-    process.exitCode = 1;
-    return;
-  }
   const tls = loadTls();
   if (tls === 'error') {
     process.exitCode = 1;
     return;
   }
-  if (plaintextExposure(HOST, tls !== null || sesWebBehindTls())) {
-    console.error(
-      `❌ SES_WEB_HOST=${HOST} で公開するには HTTPS が必要です（平文HTTPでは、アクセストークンと要員の個人情報・単金・下書き本文が` +
-        '同じネットワークの誰からも読めます）。SES_WEB_TLS_CERT / SES_WEB_TLS_KEY に証明書と秘密鍵のファイルを指定するか、' +
-        'HTTPS のリバースプロキシ・VPN の内側でだけ公開する場合は SES_WEB_BEHIND_TLS=true を設定してください。起動を中止します',
-    );
+  const problem = webStartupProblem({
+    host: HOST,
+    token: ACCESS_TOKEN,
+    tlsProtected: tls !== null || sesWebBehindTls(),
+    behindTlsDeclared: sesWebBehindTls(),
+    hostVar: 'SES_WEB_HOST',
+    tokenVar: 'SES_WEB_ACCESS_TOKEN',
+    behindTlsVar: 'SES_WEB_BEHIND_TLS',
+    otherTokens: [{ name: 'WEB_ACCESS_TOKEN（chat UI）', value: chatWebAccessToken() }],
+    tlsHint: 'SES_WEB_TLS_CERT / SES_WEB_TLS_KEY に証明書と秘密鍵のファイルを指定する',
+  });
+  if (problem) {
+    console.error(`❌ ${problem}。起動を中止します`);
     process.exitCode = 1;
     return;
   }
@@ -228,7 +235,8 @@ function main(): void {
     console.warn('⚠️  レビュー成果がまだありません。先に `npm run ses:demo`（本番は `npm run ses`）や `npm run ses:own-match` を実行してください。');
   }
   if (!ACCESS_TOKEN) {
-    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。ローカル(127.0.0.1)からのみ利用できます。');
+    console.warn('⚠️  SES_WEB_ACCESS_TOKEN が未設定です。このPCのブラウザから直接（プロキシを通さず）のみ利用できます。');
+    if (chatWebAccessToken()) console.warn('⚠️  WEB_ACCESS_TOKEN は chat UI 用で、確認UIでは使いません（確認UIには別の値の SES_WEB_ACCESS_TOKEN を設定）。');
   }
 
   const page = renderPage();

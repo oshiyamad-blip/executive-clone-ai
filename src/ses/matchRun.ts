@@ -111,6 +111,13 @@ export function groupPairs(
   return [...groups.values()].sort((a, b) => lastChance(b) - lastChance(a) || b.receivedAt - a.receivedAt);
 }
 
+// 最後の機会の組の判定に使ってよい額（この突合の開始からの合計。通常の予算の倍まで。予算なし=0 は上限なし）
+export const LAST_CHANCE_BUDGET_FACTOR = 2;
+
+export function lastChanceBudgetJpy(limitJpy: number): number {
+  return limitJpy > 0 ? limitJpy * LAST_CHANCE_BUDGET_FACTOR : 0;
+}
+
 // 次回の実行では突合の対象期間を外れる（今回が最後の機会の）グループか
 export function isLastChanceGroup(g: Pick<Group, 'receivedAt' | 'inWindow'>, now = new Date()): boolean {
   return g.inWindow && isLastChance(new Date(g.receivedAt), matchLookbackDays(), now);
@@ -169,6 +176,9 @@ export async function matchIncrementally(
   const fewShot = await prepareJudging();
   // 最終判定と紹介文面の生成のコストを、この突合の開始から数える
   const budget = startJudgeBudget();
+  // 最後の機会の組（予算の対象外）にも上限を設ける。最後の機会かは人が編集できる受信日の列で決まるため、
+  // 受信日を対象期間の端に書き換え続けて予算を超えた判定・文面生成を毎回させないように
+  const lastChanceBudget = startJudgeBudget(lastChanceBudgetJpy(budget.limitJpy));
   const tallyBefore = judgeTallySnapshot();
   // この実行で判定した組を控え、選び直しの一次選抜で判定済み・枠を使わない組として扱う
   const judged = new Set(scope.judgedMatchIds);
@@ -248,7 +258,7 @@ export async function matchIncrementally(
         const normal = step.filter((g) => !isLastChanceGroup(g)).flatMap((g) => g.pairs);
         // 期限を過ぎたら判定し残したペアは次回へ（そのペアを持つ案件・要員は突合済にしない）
         const judgedStep = [
-          ...(await judgePairs(exempt, fewShot, { stopAtDeadline: true })),
+          ...(await judgePairs(exempt, fewShot, { stopAtDeadline: true, budget: lastChanceBudget })),
           ...(await judgePairs(normal, fewShot, { stopAtDeadline: true, budget })),
         ];
         const drafted = await createDrafts(judgedStep, allProjects, allEngineers);

@@ -559,14 +559,19 @@ npm run ses:web        # http://127.0.0.1:8788（既定はこのパソコンか�
 複数人でLAN共有する場合は、**トークンと HTTPS の両方が必要**です。平文の HTTP ではアクセストークンと、要員の個人情報・単金・
 取引先のアドレス・下書き本文が同じネットワーク（社内・共用 Wi-Fi 等）の誰からも読めるため、`127.0.0.1` 以外で待ち受けるときは
 次のどちらかが無いと起動を中止します（トークン無しで `127.0.0.1` 以外に公開しようとした場合も中止します。
-トークン無しの運用では `localhost`/`127.0.0.1` 以外のホスト名での要求と、他サイトからの送信を拒否します）。
+トークン無しの運用では `localhost`/`127.0.0.1` 以外のホスト名での要求、リバースプロキシを経由した要求（`X-Forwarded-For` 等の
+ヘッダ付き）と、他サイトからの送信を拒否します）。
+
+アクセストークンは確認UI専用の `SES_WEB_ACCESS_TOKEN` に**ランダムな32文字以上**を設定します（短いと起動を中止します）。
+chat UI（`npm run web`）の `WEB_ACCESS_TOKEN` とは**別の値**にしてください（同じ値だと起動を中止します。片方のUIで漏れた
+トークンでもう片方を開けないようにするため）。
 
 - **A. UI 自身が HTTPS で待ち受ける**（社内の認証局やサーバー証明書の PEM ファイルを指定）
 
   ```
   SES_WEB_HOST=0.0.0.0
   SES_WEB_PORT=8788
-  WEB_ACCESS_TOKEN=<共有トークン（ランダムな32文字以上）>
+  SES_WEB_ACCESS_TOKEN=<共有トークン（ランダムな32文字以上）>
   SES_WEB_TLS_CERT=/path/to/server.crt
   SES_WEB_TLS_KEY=/path/to/server.key
   ```
@@ -574,12 +579,15 @@ npm run ses:web        # http://127.0.0.1:8788（既定はこのパソコンか�
   証明書・秘密鍵のファイルは**リポジトリのフォルダの外**（例: `~/.config/ses/`）に置いてください（公開リポジトリに誤ってコミットしないため。
   `.gitignore` でも `*.key` `*.crt` `*.pem` を除外しています）。
 
-- **B. HTTPS のリバースプロキシ・VPN の内側でだけ公開する**（プロキシが同じパソコンなら `SES_WEB_HOST=127.0.0.1` のままでよく、
-  下の設定は不要です。別のマシンのプロキシ・VPN の内側のアドレスで待ち受ける場合だけ、そのことを明示します）
+- **B. HTTPS のリバースプロキシ・VPN の内側でだけ公開する**。**この場合も `SES_WEB_ACCESS_TOKEN` は必須です**
+  （プロキシが同じパソコンでも同じです。プロキシは既定で `Host: 127.0.0.1` を転送するため、トークンが無いと LAN の誰でも
+  プロキシ越しに一覧・下書き本文を読み、評価やステータスを書き換えられます。トークン無しでプロキシ経由の要求は拒否します）。
+  プロキシが同じパソコンなら `SES_WEB_HOST=127.0.0.1` のままでよく、`SES_WEB_HOST`・`SES_WEB_BEHIND_TLS` の設定は不要です
+  （トークンは必要）。別のマシンのプロキシ・VPN の内側のアドレスで待ち受ける場合は、次のように明示します
 
   ```
   SES_WEB_HOST=<VPN・社内プロキシからだけ届くアドレス>
-  WEB_ACCESS_TOKEN=<共有トークン>
+  SES_WEB_ACCESS_TOKEN=<共有トークン（ランダムな32文字以上）>
   SES_WEB_BEHIND_TLS=true
   ```
 
@@ -650,5 +658,5 @@ UIでできること:
 - 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`
 - 交渉: `ENABLE_NEGOTIATION` `NEGOTIATION_MAX_PROJECT_RAISE_MAN` `NEGOTIATION_MAX_ENGINEER_CUT_MAN`
 - Notion: `NOTION_PROJECT_DB_ID` `NOTION_ENGINEER_DB_ID` `NOTION_MATCH_DB_ID` `NOTION_OWN_ENGINEER_DB_ID` `NOTION_FEEDBACK_DB_ID` `NOTION_SKILL_EQUIV_DB_ID`
-- 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `WEB_ACCESS_TOKEN` `SES_WEB_TLS_CERT` `SES_WEB_TLS_KEY` `SES_WEB_BEHIND_TLS` `SES_REVIEW_DATA_DIR`
+- 確認UI: `SES_WEB_HOST` `SES_WEB_PORT` `SES_WEB_ACCESS_TOKEN` `SES_WEB_TLS_CERT` `SES_WEB_TLS_KEY` `SES_WEB_BEHIND_TLS` `SES_REVIEW_DATA_DIR`
 - 自己修復・パッチ案: `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_HEAL_DATA_DIR` `JPY_PER_USD` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `ANTHROPIC_MODEL_REPAIR`

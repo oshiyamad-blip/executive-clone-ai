@@ -75,6 +75,7 @@ import {
   geminiApiAcknowledged,
   internalMailDomains,
   notifyAllowExternal,
+  sesAllowUnleased,
 } from './config.js';
 import {
   isPlainEmailAddress,
@@ -313,6 +314,12 @@ function checkDatabase(): void {
   }
   if (provider === 'notion') {
     if (onGithubActions()) warn('GitHub Actions の定時実行は DB_PROVIDER=sheets を前提にしています（Notionでも動きますが手順書はスプレッドシート運用です）');
+    if (sesAllowUnleased()) {
+      warn('SES_ALLOW_UNLEASED=true: 実行中の印を使わずに本番の SES バッチを動かします（定時実行と重なると同じメール・下書きを二重に処理します）');
+    } else {
+      bad('DB_PROVIDER=notion では実行中の印を使えないため、本番の SES バッチは SES_ALLOW_UNLEASED=true が無いと何もせず止まります（単独の運用だけ true）');
+    }
+    info('Notion の返信メタは SES_DRAFT_SIGNING_KEY で署名します（鍵の登録前に保存したページは下書きの宛先に使いません）');
     if (settingValue('NOTION_TOKEN')) ok('NOTION_TOKEN: 設定済み');
     else bad('NOTION_TOKEN が未設定です');
     for (const [name, value] of [

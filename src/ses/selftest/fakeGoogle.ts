@@ -145,6 +145,14 @@ export class FakeSheets {
   private nextSheetId = 100;
   readonly calls: FakeCall[] = [];
   readonly validations: Array<{ spreadsheetId: string; sheetId: number; column: number; options: string[] }> = [];
+  // タブ全体の保護範囲（addProtectedRange）。editors は編集できるアカウント
+  readonly protections: Array<{ spreadsheetId: string; sheetId: number; editors: string[] }> = [];
+
+  // タブが保護されているか（タブ全体の保護範囲があるか）
+  isProtected(spreadsheetId: string, title: string): boolean {
+    const t = this.book(spreadsheetId).get(title);
+    return Boolean(t && this.protections.some((p) => p.spreadsheetId === spreadsheetId && p.sheetId === t.sheetId));
+  }
   readonly violations: string[] = []; // 実APIなら拒否される・本番で起きてはならない呼び方
   deletedRows = 0;
   private readonly failRules: FailRule[] = [];
@@ -373,6 +381,9 @@ export class FakeSheets {
             index,
             gridProperties: { rowCount: Math.max(t.rowCount, t.rows.length), columnCount: t.columnCount },
           },
+          protectedRanges: this.protections
+            .filter((pr) => pr.spreadsheetId === p.spreadsheetId && pr.sheetId === t.sheetId)
+            .map((pr) => ({ range: { sheetId: pr.sheetId }, editors: { users: pr.editors } })),
         })),
       },
     };
@@ -398,6 +409,9 @@ export class FakeSheets {
         const range = r.deleteDimension.range;
         if (range?.dimension !== 'ROWS') throw new FakeApiError(400, 'fake: unsupported deleteDimension');
         if (![...book.values()].some((t) => t.sheetId === range.sheetId)) throw new FakeApiError(400, 'fake: no such sheetId');
+      } else if (r.addProtectedRange) {
+        const sheetId = r.addProtectedRange.protectedRange?.range?.sheetId ?? -1;
+        if (![...book.values()].some((t) => t.sheetId === sheetId)) throw new FakeApiError(400, 'fake: no such sheetId');
       } else if (!r.setDataValidation) {
         throw new FakeApiError(400, 'fake: unsupported request');
       }
@@ -429,6 +443,10 @@ export class FakeSheets {
         t.rows.splice(start, end - start);
         this.deletedRows += end - start;
         replies.push({});
+      } else if (r.addProtectedRange) {
+        const pr = r.addProtectedRange.protectedRange!;
+        this.protections.push({ spreadsheetId: id, sheetId: pr.range!.sheetId!, editors: pr.editors?.users ?? [] });
+        replies.push({ addProtectedRange: { protectedRange: pr } });
       } else if (r.setDataValidation) {
         const v = r.setDataValidation;
         const sheetId = v.range?.sheetId ?? -1;

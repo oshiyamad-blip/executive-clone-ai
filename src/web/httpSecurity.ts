@@ -60,12 +60,24 @@ function hostnameOf(hostHeader: string): string {
   return h.split(':')[0];
 }
 
+// リバースプロキシ・ロードバランサが付けるヘッダ。同じPCのプロキシは既定で Host: 127.0.0.1 を転送するため、
+// Host だけでは「このPCの人だけ」を確かめられない
+const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via'];
+
+export function viaProxy(req: IncomingMessage): boolean {
+  return PROXY_HEADERS.some((h) => req.headers[h] !== undefined);
+}
+
 // 要求を受け付けてよいか。拒否する場合は理由（ステータスと文言）を返す
 export function rejectReason(req: IncomingMessage, opts: { tokenRequired: boolean }): HttpError | null {
   const host = String(req.headers.host ?? '');
   // トークン認証が無い運用ではループバック名以外の Host を拒否する（攻撃者のドメインを127.0.0.1に向ける手口を防ぐ）
   if (!opts.tokenRequired && !isLoopbackHost(hostnameOf(host))) {
     return new HttpError(403, 'このUIはローカル（127.0.0.1 / localhost）からのみ利用できます');
+  }
+  // トークン無しの運用はプロキシ経由の要求を受け付けない（同じPCのプロキシ越しに LAN の誰でも使えてしまうため）
+  if (!opts.tokenRequired && viaProxy(req)) {
+    return new HttpError(403, 'トークンが必要です（プロキシ経由で使うにはアクセストークンの設定が必要です）');
   }
   if (req.method === 'POST') {
     const origin = req.headers.origin;
@@ -100,6 +112,46 @@ export function runHandler(res: ServerResponse, handler: () => Promise<void>): v
       sendJson(res, 500, { error: '処理中にエラーが発生しました' });
     }
   });
+}
+
+// アクセストークンの最短文字数（UIには推測の回数制限が無いため、総当たりできない長さを求める）
+export const WEB_TOKEN_MIN_CHARS = 32;
+
+// 起動時の確認。起動してはいけない理由（日本語の文言）を返す。問題なければ null
+export function webStartupProblem(opts: {
+  host: string;
+  token: string;
+  tlsProtected: boolean; // HTTPS で待ち受ける、または TLS 終端の内側と明示した
+  behindTlsDeclared: boolean; // 〜_BEHIND_TLS=true（プロキシ・VPN の内側）
+  hostVar: string;
+  tokenVar: string;
+  behindTlsVar: string;
+  otherTokens?: Array<{ name: string; value: string }>; // 共用してはいけない他のUIのトークン
+  tlsHint?: string; // HTTPS で待ち受ける設定の案内（あれば平文の拒否文言に添える）
+}): string | null {
+  const { host, token, hostVar, tokenVar, behindTlsVar } = opts;
+  if (unsafeBind(host, token)) {
+    return `${hostVar}=${host} で公開するには ${tokenVar} の設定が必要です（ローカルのみなら 127.0.0.1）`;
+  }
+  if (opts.behindTlsDeclared && !token) {
+    return `${behindTlsVar}=true（プロキシ・VPN の内側で公開）には ${tokenVar} の設定が必要です（同じPCのプロキシでも、トークン無しでは LAN の誰でも使えます）`;
+  }
+  if (token && token.length < WEB_TOKEN_MIN_CHARS) {
+    return `${tokenVar} は推測されないようランダムな${WEB_TOKEN_MIN_CHARS}文字以上にしてください`;
+  }
+  for (const other of opts.otherTokens ?? []) {
+    if (token && other.value && token === other.value) {
+      return `${tokenVar} は ${other.name} と別の値にしてください（片方のUIで漏れたトークンで、もう片方も開けてしまうため）`;
+    }
+  }
+  if (plaintextExposure(host, opts.tlsProtected)) {
+    return (
+      `${hostVar}=${host} で公開するには HTTPS が必要です（平文HTTPでは、アクセストークンと画面の中身が同じネットワークの誰からも読めます）。` +
+      (opts.tlsHint ? `${opts.tlsHint}か、` : '') +
+      `HTTPS のリバースプロキシ・VPN の内側でだけ公開する場合は ${behindTlsVar}=true を設定してください`
+    );
+  }
+  return null;
 }
 
 // トークン無しで非ループバックに公開しようとしていないか（起動時の確認）

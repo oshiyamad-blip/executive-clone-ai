@@ -4,8 +4,9 @@ import '../env.js';
 // （demoは fixture の自社社員で突合と提案文面の作成だけ。件数のみ表示）。
 import { runOwnMatch } from './ownMatch.js';
 import { runProperFlow } from './proper/index.js';
-import { liveConfigError } from './config.js';
+import { liveConfigError, isDemo, dbProvider } from './config.js';
 import { safeErr } from './redact.js';
+import { acquireRunLease, releaseRunLease } from './lease.js';
 
 async function main(): Promise<void> {
   const configError = liveConfigError();
@@ -14,12 +15,27 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { projects } = await runOwnMatch();
+  // Sheets運用の本番は、定時のバッチ（同じプロパー管理表・プロパー候補タブに書く）と重ならないよう同じ実行中の印を取る
+  let lease = '';
+  if (!isDemo() && dbProvider() === 'sheets') {
+    const r = await acquireRunLease();
+    if (!r.ok) {
+      console.error(`自社社員探し: 🚨 ${r.reason}`);
+      process.exitCode = 1;
+      return;
+    }
+    lease = r.token;
+  }
   try {
-    await runProperFlow(projects);
-  } catch (err) {
-    console.error(`プロパー候補: 失敗: ${safeErr(err)}`);
-    process.exitCode = 1;
+    const { projects } = await runOwnMatch();
+    try {
+      await runProperFlow(projects);
+    } catch (err) {
+      console.error(`プロパー候補: 失敗: ${safeErr(err)}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await releaseRunLease(lease);
   }
 }
 

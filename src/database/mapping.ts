@@ -164,12 +164,17 @@ export const DRAFT_STATE = {
   retired: '不要（稼働可の社員ではなくなりました）',
   // AI判定を次回に回した組（判定の結果、下書きを作る区分になれば「未作成」、ならなければ「不要」に変わる）
   awaitingJudge: '判定待ち（次回のバッチでAI判定します）',
+  // 作成の応答が途中で途切れ（タイムアウト・切断）、作成できたか分からない側。自動では作り直さない
+  // （下書きフォルダで見つかれば次回「作成済」にする。見つからなければ人が下書き・送信済みフォルダを確かめて直す）
+  unknown: '要確認',
 } as const;
 
-// 作成済・送信済・作成中は機械が上書きしない（文面・下書きデータも固定する）
+// 作成済・送信済・作成中・要確認（作成できたか不明）は機械が上書きしない（文面・下書きデータも固定する）
 export function isDraftStateLocked(state: string): boolean {
   const s = state.trim();
-  return s.startsWith(DRAFT_STATE.created) || s.startsWith(DRAFT_STATE.sent) || s.startsWith(DRAFT_STATE.inProgress);
+  return (
+    s.startsWith(DRAFT_STATE.created) || s.startsWith(DRAFT_STATE.sent) || s.startsWith(DRAFT_STATE.inProgress) || s.startsWith(DRAFT_STATE.unknown)
+  );
 }
 
 // 文面の作り直し待ち（バッチが判定し直す）の状態か

@@ -1,5 +1,7 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import { readFileSync } from 'fs';
 import { createHash, timingSafeEqual } from 'crypto';
 import {
   loadCloneContext,
@@ -17,7 +19,7 @@ import {
   runHandler,
   securityHeaders,
   sendJson,
-  unsafeBind,
+  webStartupProblem,
 } from './httpSecurity.js';
 
 // ② Web チャットUI（要件3.4 意思決定シミュレーション対話 / 4.1 アクセス制御）
@@ -29,6 +31,10 @@ import {
 const HOST = process.env.WEB_HOST?.trim() || '127.0.0.1';
 const PORT = Number(process.env.WEB_PORT?.trim() || '8787') || 8787;
 const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN?.trim() ?? '';
+// ループバック以外で待ち受けるには HTTPS（証明書・秘密鍵のPEMファイル）か、TLS終端（リバースプロキシ・VPN）の内側の明示が必要
+const TLS_CERT = process.env.WEB_TLS_CERT?.trim() ?? '';
+const TLS_KEY = process.env.WEB_TLS_KEY?.trim() ?? '';
+const BEHIND_TLS = /^(1|true|yes|on)$/i.test(process.env.WEB_BEHIND_TLS?.trim() ?? '');
 
 // JSONボディの mode は型保証がないため、既知のモードのみ受け付けて chat に縮退する
 function normalizeMode(mode: unknown): CloneMode {
@@ -122,13 +128,45 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       sources: result.sources.map((s) => ({ tag: s.tag, label: s.label, url: s.url ?? null })),
     });
   } catch (err) {
-    json(res, 502, { error: `生成に失敗しました: ${String(err)}` });
+    // 例外の文言（接続先・設定・入力の断片を含みうる）は画面に返さず、サーバーのログに種類だけ残す
+    console.error(`Web UI: 生成に失敗: ${err instanceof Error ? err.name : typeof err}`);
+    json(res, 502, { error: '生成に失敗しました（しばらくしてから再度お試しください）' });
+  }
+}
+
+function loadTls(): { cert: Buffer; key: Buffer } | null | 'error' {
+  if (!TLS_CERT && !TLS_KEY) return null;
+  if (!TLS_CERT || !TLS_KEY) {
+    console.error('❌ HTTPS で待ち受けるには WEB_TLS_CERT と WEB_TLS_KEY の両方を指定してください。起動を中止します');
+    return 'error';
+  }
+  try {
+    return { cert: readFileSync(TLS_CERT), key: readFileSync(TLS_KEY) };
+  } catch (err) {
+    console.error(`❌ WEB_TLS_CERT / WEB_TLS_KEY のファイルを読めません（${err instanceof Error ? err.name : typeof err}）。起動を中止します`);
+    return 'error';
   }
 }
 
 async function main(): Promise<void> {
-  if (unsafeBind(HOST, ACCESS_TOKEN)) {
-    console.error(`❌ WEB_HOST=${HOST} で公開するには WEB_ACCESS_TOKEN の設定が必要です（ローカルのみなら 127.0.0.1）。起動を中止します`);
+  const tls = loadTls();
+  if (tls === 'error') {
+    process.exitCode = 1;
+    return;
+  }
+  const problem = webStartupProblem({
+    host: HOST,
+    token: ACCESS_TOKEN,
+    tlsProtected: tls !== null || BEHIND_TLS,
+    behindTlsDeclared: BEHIND_TLS,
+    hostVar: 'WEB_HOST',
+    tokenVar: 'WEB_ACCESS_TOKEN',
+    behindTlsVar: 'WEB_BEHIND_TLS',
+    otherTokens: [{ name: 'SES_WEB_ACCESS_TOKEN（SESマッチ確認UI）', value: process.env.SES_WEB_ACCESS_TOKEN?.trim() ?? '' }],
+    tlsHint: 'WEB_TLS_CERT / WEB_TLS_KEY に証明書と秘密鍵のファイルを指定する',
+  });
+  if (problem) {
+    console.error(`❌ ${problem}。起動を中止します`);
     process.exitCode = 1;
     return;
   }
@@ -136,12 +174,12 @@ async function main(): Promise<void> {
   const ctx = await getContext();
   console.log(`✅ コンテキスト読込（シグナル${ctx.signals.length}件 / ストーリー${ctx.stories.length}件）`);
   if (!ACCESS_TOKEN) {
-    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。ローカル(127.0.0.1)以外に公開しないでください。');
+    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。このPCのブラウザから直接（プロキシを通さず）のみ利用できます。');
   }
 
   const page = renderPage(ctx.profile.name);
 
-  const server = createServer((req, res) => {
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
     const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
     if (blocked) return json(res, blocked.status, { error: blocked.message });
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -154,10 +192,11 @@ async function main(): Promise<void> {
       return;
     }
     json(res, 404, { error: 'not found' });
-  });
+  };
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key, minVersion: 'TLSv1.2' }, handle) : createServer(handle);
 
   server.listen(PORT, HOST, () => {
-    console.log(`\n🌐 http://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
+    console.log(`\n🌐 ${tls ? 'https' : 'http'}://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
   });
 }
 
@@ -216,8 +255,10 @@ function renderPage(name: string): string {
   const input = document.getElementById('input');
   const send = document.getElementById('send');
   const tokenEl = document.getElementById('token');
-  tokenEl.value = localStorage.getItem('ec_token') || '';
-  tokenEl.addEventListener('change', () => localStorage.setItem('ec_token', tokenEl.value));
+  // アクセストークンはタブを閉じれば消える sessionStorage に置く（共用PCのブラウザに残さない）。以前の保存分は消す
+  try { localStorage.removeItem('ec_token'); } catch (e) {}
+  try { tokenEl.value = sessionStorage.getItem('ec_token') || ''; } catch (e) {}
+  tokenEl.addEventListener('change', () => { try { sessionStorage.setItem('ec_token', tokenEl.value); } catch (e) {} });
 
   // モードごとに会話履歴と表示欄を分離する。
   // 採用モードに貼られた候補者情報が、他モードのリクエストに紛れ込むのを防ぐ。

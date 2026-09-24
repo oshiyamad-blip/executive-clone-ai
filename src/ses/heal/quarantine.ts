@@ -53,12 +53,20 @@ function toEntry(v: unknown): QuarantineEntry | null {
     mailId: e.mailId.slice(0, 120),
     subject: reducedSubject(str(e.subject, 1000)), // 以前の版で伏せ字だけにして保存した件名も、読み出しの時点で縮める
     from: str(e.from),
-    attempts: typeof e.attempts === 'number' && Number.isFinite(e.attempts) ? e.attempts : 0,
+    // 回数は 0〜上限の整数に収める（負の値を書き込んで、失敗し続けるメールを隔離させず毎回修復させない）
+    attempts: typeof e.attempts === 'number' && Number.isFinite(e.attempts) ? Math.min(Math.max(Math.floor(e.attempts), 0), healMaxAttempts()) : 0,
     lastError: str(e.lastError, 500),
     firstFailedAt: str(e.firstFailedAt, 40),
     lastFailedAt: str(e.lastFailedAt, 40),
-    quarantinedAt: typeof e.quarantinedAt === 'string' && e.quarantinedAt ? e.quarantinedAt : null,
+    quarantinedAt: typeof e.quarantinedAt === 'string' && e.quarantinedAt ? pastIsoOrNow(e.quarantinedAt) : null,
   };
+}
+
+// 隔離した日時は読める過去の日時だけ受け付け、それ以外（読めない・未来）は今にする（隔離のまま・期限は今から数える）
+function pastIsoOrNow(raw: string): string {
+  const t = Date.parse(raw);
+  const now = Date.now();
+  return Number.isFinite(t) && t <= now ? raw.slice(0, 40) : new Date(now).toISOString();
 }
 
 // 保存された値（「_状態」タブのセルは人も編集できる）を隔離リストとして解釈する（純関数）。

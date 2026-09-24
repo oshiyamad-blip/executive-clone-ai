@@ -10,6 +10,7 @@ import {
   notionOwnEngineerDbId,
   notionFeedbackDbId,
   notionSkillEquivDbId,
+  draftSigningKey,
 } from '../ses/config.js';
 import { safeErr } from '../ses/redact.js';
 import { recordHealEvent } from '../ses/heal/events.js';
@@ -23,6 +24,8 @@ import {
   parseAgentInfo,
   replyMetaJson,
   parseReplyMeta,
+  verifyReplyMeta,
+  replyMetaInjection,
   sanitizeListItem,
   JUDGE_VERDICT_LABEL,
   judgeVerdictLabel,
@@ -349,7 +352,7 @@ export async function saveProject(project: Project): Promise<string> {
     営業元メール: { rich_text: toRichText(project.agentEmail) },
     元メールID: { rich_text: toRichText(project.sourceMailId) },
     // 全員に返信の再現用（--match-only 経路のため。DBにプロパティが必要 → 導入マニュアル4-1参照）
-    返信メタ: { rich_text: toRichText(replyMetaJson(project.replyTarget)) },
+    返信メタ: { rich_text: toRichText(replyMetaJson(project.replyTarget, notionReplyBinding('案件', project.id, project.agentEmail), { injection: project.injectionSuspected })) },
     受信日: { date: { start: project.receivedAt.toISOString() } },
     ステータス: { select: { name: project.status === 'closed' ? '終了' : '募集中' } },
   };
@@ -392,7 +395,11 @@ export async function saveEngineer(engineer: Engineer): Promise<string> {
     営業元: { rich_text: toRichText(combineAgentInfo(engineer.agentCompany, engineer.agentContact, engineer.agentEmail)) },
     元メールID: { rich_text: toRichText(engineer.sourceMailId) },
     // 全員に返信の再現用（--match-only 経路のため。DBにプロパティが必要 → 導入マニュアル4-2参照）
-    返信メタ: { rich_text: toRichText(replyMetaJson(engineer.replyTarget)) },
+    返信メタ: {
+      rich_text: toRichText(
+        replyMetaJson(engineer.replyTarget, notionReplyBinding('要員', engineer.id, engineerAgentEmail(engineer)), { injection: engineer.injectionSuspected }),
+      ),
+    },
     受信日: { date: { start: engineer.receivedAt.toISOString() } },
     ステータス: { select: { name: engineer.status === 'assigned' ? '決定済' : '提案可' } },
   };
@@ -522,13 +529,32 @@ export async function markItemsInjectionSuspected(kind: 'project' | 'engineer', 
   for (const id of new Set(ids)) {
     const pageId = await findPageIdByText(dataSourceId, `${label}ID`, id);
     if (!pageId) continue;
-    const properties = hasColumn
+    const properties: Record<string, unknown> = hasColumn
       ? { [sheetsDb.INJECTION_COLUMN]: { rich_text: toRichText('あり') } }
       : { ステータス: { select: { name: kind === 'project' ? '終了' : '決定済' } } };
+    // 署名どおりの返信メタには印を含めて署名し直す（列の印を人が消しても要確認のままにする）
+    const resigned = await resignedInjectionMeta(pageId, label, id);
+    if (resigned) properties['返信メタ'] = { rich_text: toRichText(resigned) };
     await throttle(() => notion.pages.update({ page_id: pageId, properties } as never));
     marked += 1;
   }
   return marked;
+}
+
+async function resignedInjectionMeta(pageId: string, label: string, id: string): Promise<string | null> {
+  if (!draftSigningKey()) return null;
+  try {
+    const page = (await throttle(() => notion.pages.retrieve({ page_id: pageId }))) as { properties?: Record<string, unknown> };
+    const props = page.properties ?? {};
+    const meta = readRichText(props['返信メタ']);
+    const agentEmail = label === '案件' ? readRichText(props['営業元メール']) : parseAgentInfo(readRichText(props['営業元'])).email;
+    const binding = notionReplyBinding(label, id, agentEmail);
+    if (!meta || !verifyReplyMeta(meta, binding) || replyMetaInjection(meta)) return null;
+    return replyMetaJson(parseReplyMeta(meta), binding, { injection: true });
+  } catch (err) {
+    console.warn(`Notion: 返信メタに指示混入疑いの印を含められませんでした: ${safeErr(err)}`);
+    return null;
+  }
 }
 
 // マッチの判定の控え（判定済み・枠を使わない判定済み・判定待ちの組）。since 以降に検出したものに絞る（Notion）。
@@ -665,13 +691,48 @@ export async function fetchAvailableEngineers(limit = 100, opts: { receivedSince
   return pages.map((page) => engineerFromPage(page));
 }
 
+// 返信メタの署名（Sheets運用と同じ仕組み。タブ名に notion: を付けて Sheets の行の値と取り違えない）。
+// 編集者が返信メタ・営業元メールを書き換えた・署名の無いページは宛先に使わず、署名に残した指示混入疑いの印は
+// 列の印を消しても外れない
+function notionReplyBinding(tab: string, id: string, agentEmail: string) {
+  return { key: draftSigningKey(), tab: `notion:${tab}`, id, agentEmail };
+}
+
+// 要員の営業元メールは「営業元」列に会社・担当とまとめて保存するため、読み戻したときと同じ値で署名する
+function engineerAgentEmail(e: Pick<Engineer, 'agentCompany' | 'agentContact' | 'agentEmail'>): string {
+  return parseAgentInfo(combineAgentInfo(e.agentCompany, e.agentContact, e.agentEmail)).email;
+}
+
+let untrustedNotionReplies = 0;
+
+function trustedNotionReply(
+  tab: string,
+  id: string,
+  agentEmail: string,
+  meta: string,
+): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string; injection: boolean } {
+  if (verifyReplyMeta(meta, notionReplyBinding(tab, id, agentEmail))) {
+    return { replyTarget: parseReplyMeta(meta), agentEmail, injection: replyMetaInjection(meta) };
+  }
+  untrustedNotionReplies += 1;
+  if (untrustedNotionReplies === 1) {
+    console.warn(
+      'Notion: 返信メタ・営業元メールの署名が無い・合わないページがあります（書き換えられた可能性があるため、下書きの宛先には使いません。' +
+        'SES_DRAFT_SIGNING_KEY を登録する前に保存したページも含みます）',
+    );
+  }
+  return { replyTarget: undefined, agentEmail: '', injection: false };
+}
+
 function projectFromPage(page: unknown): Project {
   const p = page as { id: string; properties?: Record<string, unknown> };
   const props = p.properties ?? {};
   const location = readRichText(props['勤務地']);
+  const id = readRichText(props['案件ID']) || p.id;
+  const reply = trustedNotionReply('案件', id, readRichText(props['営業元メール']), readRichText(props['返信メタ']));
   return {
     // 収集経路と同じ決定的ID（マッチIDの一致に必要）。列が無い古いページだけページIDで代用する
-    id: readRichText(props['案件ID']) || p.id,
+    id,
     title: readTitle(props['案件名']),
     // 人がNotion上で直接編集したスキル（'JS'/'k8s' 等の表記ゆれ）もマッチングに乗るよう読出時に正規化する
     ...requirementsOf(readMultiSelect(props['必須スキル']), readMultiSelect(props['尚可スキル'])),
@@ -686,13 +747,13 @@ function projectFromPage(page: unknown): Project {
     businessFlow: readRichText(props['商流メモ']),
     agentCompany: readRichText(props['営業元会社']),
     agentContact: readRichText(props['営業元担当']),
-    agentEmail: readRichText(props['営業元メール']),
+    agentEmail: reply.agentEmail,
     sourceMailId: readRichText(props['元メールID']),
-    replyTarget: parseReplyMeta(readRichText(props['返信メタ'])),
+    replyTarget: reply.replyTarget,
     receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
     status: readSelect(props['ステータス']) === '終了' ? 'closed' : 'open',
     notionPageId: p.id,
-    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) ? { injectionSuspected: true } : {}),
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) || reply.injection ? { injectionSuspected: true } : {}),
   };
 }
 
@@ -701,8 +762,10 @@ function engineerFromPage(page: unknown): Engineer {
   const props = p.properties ?? {};
   const residence = readRichText(props['居住地']);
   const agentInfo = parseAgentInfo(readRichText(props['営業元']));
+  const id = readRichText(props['要員ID']) || p.id;
+  const reply = trustedNotionReply('要員', id, agentInfo.email, readRichText(props['返信メタ']));
   return {
-    id: readRichText(props['要員ID']) || p.id,
+    id,
     // 以前の版で保存したフルネーム・人が手で入れた氏名も、読み出しの時点でイニシャルだけにする
     displayName: toInitials(readTitle(props['表示名'])),
     age: null,
@@ -718,13 +781,13 @@ function engineerFromPage(page: unknown): Engineer {
     remoteWish: labelToRemote(readSelect(props['リモート希望'])),
     agentCompany: agentInfo.company,
     agentContact: agentInfo.contact,
-    agentEmail: agentInfo.email,
+    agentEmail: reply.agentEmail,
     sourceMailId: readRichText(props['元メールID']),
-    replyTarget: parseReplyMeta(readRichText(props['返信メタ'])),
+    replyTarget: reply.replyTarget,
     receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
     status: readSelect(props['ステータス']) === '決定済' ? 'assigned' : 'available',
     notionPageId: p.id,
-    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) ? { injectionSuspected: true } : {}),
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) || reply.injection ? { injectionSuspected: true } : {}),
   };
 }
 

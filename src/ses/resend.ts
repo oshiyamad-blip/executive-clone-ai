@@ -129,6 +129,30 @@ export function senderIdentity(mail: Pick<SesRawMail, 'from' | 'replyTo' | 'auth
   return `${who}|reply:${replyTarget}`;
 }
 
+// 再送スキップしたメールで元の案件・要員の最終受信日を延ばしてよいか。延ばすのは受信サーバーの認証（DMARC）に合格した
+// 会社ドメインの送り主からの再送だけ（From を偽った第三者が同じ本文を送り続けて、終わった案件・要員を突合の対象に
+// 残し続けられないように。認証の無い再送も処理済み＝再送スキップにはするが、最終受信日は動かさない）
+export function refreshesLastSeen(mail: Pick<SesRawMail, 'from' | 'authDomain'>): boolean {
+  const domain = domainOfAddress(addressOf(mail.from)).toLowerCase().replace(/\.$/, '');
+  const auth = (mail.authDomain ?? '').toLowerCase().replace(/\.$/, '');
+  return Boolean(domain && auth === domain && !isFreeMailDomain(domain));
+}
+
+// 再送スキップから、元のメールIDごとの最終受信日（受信サーバーの受信日時。未来の日時は now に切り詰める）
+export function lastSeenUpdates(
+  skipped: Array<{ mail: Pick<SesRawMail, 'from' | 'authDomain' | 'receivedAt'>; rootMailId: string }>,
+  now = new Date(),
+): Map<string, Date> {
+  const lastSeen = new Map<string, Date>();
+  for (const { mail, rootMailId } of skipped) {
+    if (!refreshesLastSeen(mail) || Number.isNaN(mail.receivedAt.getTime())) continue;
+    const at = mail.receivedAt.getTime() > now.getTime() ? now : mail.receivedAt;
+    const prev = lastSeen.get(rootMailId);
+    if (!prev || prev.getTime() < at.getTime()) lastSeen.set(rootMailId, at);
+  }
+  return lastSeen;
+}
+
 export function fingerprintOf(mail: SesRawMail): MailFingerprint {
   const body = normalizeBody(mail.body);
   const text = `${normalizeSubject(mail.subject)}\n${body}`;

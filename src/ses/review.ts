@@ -12,6 +12,7 @@ import { reviewDataDir, demoDataDir, isDemo, matchLookbackDays, retentionDays } 
 import { updateMatchStatus } from '../database/index.js';
 import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
 import { draftRequestsEnabled } from './pendingDrafts.js';
+import { currentUnleasedLiveProblem } from './lease.js';
 import { safeErr, logId } from './redact.js';
 import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef } from '../types/index.js';
 
@@ -182,7 +183,7 @@ function writeReviewMatches2(matches: ReviewMatch[]): void {
 // demo=Fromを入れてローカル保存、prod=本人のGmail／共有の下書きフォルダにスレッド返信下書きを作成。
 // 同じ側の下書きが作成済みなら作らない（二重の紹介メール防止）。作成の待ち時間中に他の操作・バッチが
 // 書いた内容を古い写しで上書きしないよう、作成後に読み直してこのマッチのこの側だけを書き換える
-export type DraftCreateResult = { ok: true; ref: DraftRef } | { ok: false; reason: 'not_found' | 'already_created' | 'use_sheet' };
+export type DraftCreateResult = { ok: true; ref: DraftRef } | { ok: false; reason: 'not_found' | 'already_created' | 'use_sheet' | 'unleased' };
 
 export async function createReplyDraftForSender(
   matchId: string,
@@ -192,6 +193,9 @@ export async function createReplyDraftForSender(
   // Sheets運用の本番では、下書きはスプレッドシートの「担当者メール」列からバッチだけが作る（作成中の印・下書きの識別子で
   // 二重作成を防ぐ）。確認UIから直接作るとシートの状態列に作成済みが残らず、同じ組の依頼からバッチがもう1通作ってしまう
   if (draftRequestsEnabled()) return { ok: false, reason: 'use_sheet' };
+  // 実行中の印を使えない本番（Sheets運用でない）では、別の場所で動くバッチ・確認UIと同じ組の下書きを二重に作りうるため、
+  // 単独の運用であることの明示（SES_ALLOW_UNLEASED=true）が無ければ作らない
+  if (currentUnleasedLiveProblem()) return { ok: false, reason: 'unleased' };
   const target = readReviewMatches().find((m) => m.id === matchId);
   const ref = target && (side === 'project' ? target.draftProject : target.draftEngineer);
   if (!target || !ref) return { ok: false, reason: 'not_found' };

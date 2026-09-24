@@ -196,6 +196,10 @@ export interface SheetBookOptions {
   accessHint: string; // スプレッドシートを開けないときの確認事項
   // タブを新規作成するときに付ける入力規則（列名 → 選択肢のプルダウン）
   dropdowns?: Record<string, Record<string, string[]>>;
+  // 人に編集させないタブ（タブ名 → 保護の説明）。タブ全体を保護範囲にし、編集者をバッチの実行アカウントだけにする
+  // （スプレッドシートのオーナーは常に編集できる）
+  protectedTabs?: Record<string, string>;
+  protectionEditor?: () => string; // 保護範囲の編集者にするアカウント（サービスアカウント・代理のユーザー）
 }
 
 function normalizeCells(cells: unknown[], width: number): string[] {
@@ -245,6 +249,7 @@ export class SheetBook {
   private tabsEnsured: Promise<void> | null = null;
   // ヘッダー行から定義の列を特定できないタブ（取り違えて別の列に読み書きしないよう、このタブへの読み書きはすべて例外にする）
   private readonly headerConflicts = new Map<string, string>();
+  private readonly unprotected = new Set<string>();
   private readonly layouts = new Map<string, TabLayout>();
   private readonly sheetIds = new Map<string, number>();
   private readonly tabCache = new Map<string, TabCache>();
@@ -357,7 +362,9 @@ export class SheetBook {
         await throttle(() =>
           sheetsApi.spreadsheets.get({
             spreadsheetId,
-            fields: 'sheets.properties(title,sheetId,gridProperties(rowCount,columnCount))',
+            fields:
+              'sheets.properties(title,sheetId,gridProperties(rowCount,columnCount)),' +
+              'sheets.protectedRanges(protectedRangeId,range(sheetId,startRowIndex,endRowIndex,startColumnIndex,endColumnIndex),editors)',
           }),
         )
       ).data;
@@ -423,6 +430,7 @@ export class SheetBook {
       );
       const ranges = res.data.valueRanges ?? [];
       const widen: sheets_v4.Schema$Request[] = [];
+      const appends: Array<{ tab: string; header: string[]; plan: Extract<HeaderPlan, { kind: 'append' }> }> = [];
       present.forEach((tab, i) => {
         const header = trimHeader(ranges[i]?.values?.[0] ?? []);
         const plan = planHeaderMigration(header, this.columns(tab));
@@ -433,6 +441,22 @@ export class SheetBook {
         if (plan.kind === 'ok') {
           this.layouts.set(tab, { header, defToLive: plan.defToLive, checkedAt: now });
           return;
+        }
+        appends.push({ tab, header, plan });
+      });
+      // 見出しを足す列（見出しが空のタブは全体）に2行目以降の値が既にあれば、その値を新しい列の値として読み違えるため
+      // 自動で見出しを書かない（見出しの無いメモ列の上に「突合済」等を足すと、メモのある行がすべて突合済みになる）
+      const occupied = await this.occupiedAppendTargets(appends, gridColumns);
+      for (const { tab, header, plan } of appends) {
+        if (occupied.has(tab)) {
+          this.markConflict(
+            tab,
+            header.length === 0
+              ? '見出し行が空ですが2行目以降に値があります。見出しを入れ直してください'
+              : `見出しの無い列（${columnLetter(plan.fromIndex)}列〜）に値があるため「${plan.cells.join('」「')}」列を追加できません。` +
+                  'その列に見出しを付けるか、値を別の場所へ移してください',
+          );
+          continue;
         }
         headerWrites.push({ range: `${quoteTab(tab)}!${columnLetter(plan.fromIndex)}1`, values: [plan.cells] });
         if (header.length === 0) created.push(tab); // 空のタブ（前回の作成の応答が失われた等）は新規と同じ扱い
@@ -447,7 +471,7 @@ export class SheetBook {
         const newHeader = [...header];
         plan.cells.forEach((c, j) => (newHeader[plan.fromIndex + j] = c));
         this.layouts.set(tab, { header: newHeader.map((h) => h ?? ''), defToLive: plan.defToLive, checkedAt: now });
-      });
+      }
       if (widen.length > 0) {
         await throttle(() => sheetsApi.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: widen } }));
       }
@@ -463,6 +487,59 @@ export class SheetBook {
     }
     await this.addDropdowns(created);
     if (created.length > 0) console.log(`${label}: タブを自動生成しました（${created.join(', ')}）`);
+    await this.protectTabs(meta);
+  }
+
+  // 保護するタブ（protectedTabs）のうち、タブ全体の保護範囲が無いものに保護を付ける。付けられなかったタブは
+  // unprotectedTabs() で分かる（呼び出し側がそのタブの内容を信用しない・警告する）
+  private async protectTabs(meta: sheets_v4.Schema$Spreadsheet): Promise<void> {
+    const wanted = Object.entries(this.opts.protectedTabs ?? {});
+    this.unprotected.clear();
+    if (wanted.length === 0) return;
+    const whole = new Set<number>();
+    for (const sh of meta.sheets ?? []) {
+      for (const pr of sh.protectedRanges ?? []) {
+        const r = pr.range;
+        if (r && typeof r.sheetId === 'number' && r.startRowIndex == null && r.endRowIndex == null && r.startColumnIndex == null && r.endColumnIndex == null) {
+          whole.add(r.sheetId);
+        }
+      }
+    }
+    const editor = this.opts.protectionEditor?.() ?? '';
+    const requests: sheets_v4.Schema$Request[] = [];
+    const targets: string[] = [];
+    for (const [tab, description] of wanted) {
+      const sheetId = this.sheetIds.get(tab);
+      if (sheetId === undefined) {
+        this.unprotected.add(tab);
+        continue;
+      }
+      if (whole.has(sheetId)) continue;
+      targets.push(tab);
+      requests.push({
+        addProtectedRange: {
+          protectedRange: {
+            range: { sheetId },
+            description,
+            warningOnly: false,
+            editors: { users: editor ? [editor] : [], domainUsersCanEdit: false },
+          },
+        },
+      });
+    }
+    if (requests.length === 0) return;
+    try {
+      await throttle(() => this.api().spreadsheets.batchUpdate({ spreadsheetId: this.id(), requestBody: { requests } }));
+      console.log(`${this.opts.label}: 「${targets.join('」「')}」タブを保護しました（バッチ専用。人は編集できません）`);
+    } catch (err) {
+      targets.forEach((t) => this.unprotected.add(t));
+      console.warn(`${this.opts.label}: 「${targets.join('」「')}」タブを保護できませんでした: ${safeErr(err)}`);
+    }
+  }
+
+  // 保護するタブのうち、保護を確かめられなかったもの（直近のタブ確認時点）
+  unprotectedTabs(): string[] {
+    return [...this.unprotected];
   }
 
   // 新規作成したタブの指定列に選択肢のプルダウンを付ける（人の入力ゆれで判定を外さないため。失敗しても続行）
@@ -493,6 +570,37 @@ export class SheetBook {
     } catch (err) {
       console.warn(`${this.opts.label}: 入力規則（プルダウン）の設定に失敗しました（手動で設定できます）: ${safeErr(err)}`);
     }
+  }
+
+  // 見出しを追記しようとしている列（見出しが空のタブは全体）の2行目以降に値があるタブ
+  private async occupiedAppendTargets(
+    appends: Array<{ tab: string; header: string[]; plan: Extract<HeaderPlan, { kind: 'append' }> }>,
+    gridColumns: Map<string, number>,
+  ): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (appends.length === 0) return out;
+    const have = (tab: string) => gridColumns.get(tab) ?? 0;
+    // シートの列数より右は値を持てない（読む範囲がシートの外になると API が拒否するため除く）
+    const targets = appends
+      .map(({ tab, header, plan }) => {
+        const from = header.length === 0 ? 0 : plan.fromIndex;
+        const to = Math.min(header.length === 0 ? Math.max(have(tab), plan.cells.length) : plan.fromIndex + plan.cells.length, have(tab)) - 1;
+        return { tab, from, to };
+      })
+      .filter((t) => t.to >= t.from);
+    if (targets.length === 0) return out;
+    const res = await throttle(() =>
+      this.api().spreadsheets.values.batchGet({
+        spreadsheetId: this.id(),
+        ranges: targets.map((t) => `${quoteTab(t.tab)}!${columnLetter(t.from)}2:${columnLetter(t.to)}`),
+      }),
+    );
+    const ranges = res.data.valueRanges ?? [];
+    targets.forEach((t, i) => {
+      const rows = ranges[i]?.values ?? [];
+      if (rows.some((r) => (r ?? []).some((v) => String(v ?? '').trim() !== ''))) out.add(t.tab);
+    });
+    return out;
   }
 
   // 見出し行から列の対応を作り直す。定義の列を特定できなければ以後このタブへの読み書きを止める

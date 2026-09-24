@@ -612,6 +612,12 @@ export function dbProvider(): string {
   return envStr('DB_PROVIDER', 'notion').toLowerCase();
 }
 
+// DB_PROVIDER=sheets 以外（スプレッドシートの実行中の印を使えない）で本番のバッチを動かすことの明示。
+// 定時実行（Actions）と共有の受信箱を使う構成で手元の実行が重なると、同じメールの抽出・同じ下書きを二重に行うため既定は false
+export function sesAllowUnleased(): boolean {
+  return envBool('SES_ALLOW_UNLEASED', false);
+}
+
 // DB_PROVIDER=sheets のときに使うスプレッドシートID（URLの /d/ と /edit の間の文字列）
 export function sheetsDbSpreadsheetId(): string {
   return driveIdFrom(process.env.SHEETS_DB_SPREADSHEET_ID);
@@ -737,14 +743,19 @@ export function sesWebPort(): number {
   return envNum('SES_WEB_PORT', 8788, { min: 1, max: 65535, int: true });
 }
 
-// マッチ確認UIの待受ホスト。複数人でLAN共有する場合は 0.0.0.0 等を設定（要 WEB_ACCESS_TOKEN）。
+// マッチ確認UIの待受ホスト。複数人でLAN共有する場合は 0.0.0.0 等を設定（要 SES_WEB_ACCESS_TOKEN）。
 // 既定は安全側でローカルのみ。
 export function sesWebHost(): string {
   return env('SES_WEB_HOST') || env('WEB_HOST') || '127.0.0.1';
 }
 
-// 確認UIのアクセストークン（共有）。空なら認証なし＝ローカル専用運用
-export function webAccessToken(): string {
+// 確認UIのアクセストークン（確認UI専用。chat UI の WEB_ACCESS_TOKEN とは別の値にする）。空なら認証なし＝ローカル専用運用
+export function sesWebAccessToken(): string {
+  return env('SES_WEB_ACCESS_TOKEN');
+}
+
+// chat UI（npm run web）のアクセストークン。確認UIでは使わず、同じ値の使い回しを検出するためだけに読む
+export function chatWebAccessToken(): string {
   return env('WEB_ACCESS_TOKEN');
 }
 

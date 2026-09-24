@@ -33,6 +33,8 @@ import {
   acquireBatchLeaseSheets,
   releaseBatchLeaseSheets,
   readStateJson,
+  writeStateJson,
+  INJECTION_FLAGS_TAB,
 } from '../../database/sheets.js';
 import {
   saveProject,
@@ -2335,6 +2337,166 @@ async function linkCountSteps(): Promise<void> {
   check('秘匿モードではリンクの読取・読めず・社内の件数をログに出さない', out.includes('スプレッドシートのリンク') && !/\d+件/.test(out), out);
 }
 
+// ===== 13. セキュリティ監査（第5回）: シートの改ざん・下書きの二重作成 =====
+
+const ROUND5_BOOK = 'fakeRound5Book';
+const ROUND5_MEMO_BOOK = 'fakeRound5MemoBook';
+
+async function testSecurityRound5(): Promise<void> {
+  section('セキュリティ監査（第5回）の回帰（シートの改ざん・同じIDの行・作成できたか不明な下書き）');
+  sheets.createBook(ROUND5_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = ROUND5_BOOK;
+  try {
+    await round5Steps();
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+  await round5MemoColumnSteps();
+}
+
+async function round5Steps(): Promise<void> {
+  // 移行の印は、行が1件も無い最初の確認で「完了」になる
+  newRun();
+  await checkSheetsTabs(['案件', '要員']);
+  check('指示混入疑いの控えのタブを作り、バッチ専用に保護する', sheets.isProtected(ROUND5_BOOK, INJECTION_FLAGS_TAB));
+
+  // 1) 指示混入疑いの印: 印の付く前の返信メタ（版の履歴から）を貼り戻し、列の印を消しても要確認のまま
+  const injP = project('proj_r5_inj', { title: '印の巻き戻し検証', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】巻き戻し', 'r5inj') });
+  newRun();
+  await saveProjectsSheets([injP]);
+  const unflaggedMeta = sheets.record(ROUND5_BOOK, '案件', 'ID', injP.id)?.['返信メタ'] ?? '';
+  newRun();
+  await markItemsInjectionSuspectedSheets('project', [injP.id]);
+  sheets.setByKey(ROUND5_BOOK, '案件', 'ID', injP.id, '返信メタ', unflaggedMeta);
+  sheets.setByKey(ROUND5_BOOK, '案件', 'ID', injP.id, INJECTION_COLUMN, '');
+  newRun();
+  const rolled = (await fetchOpenProjects(1000)).find((x) => x.id === injP.id);
+  check(
+    '印の付く前の返信メタを貼り戻して列の印を消しても、保護したタブの控えで要確認のまま',
+    unflaggedMeta !== '' && rolled?.injectionSuspected === true && rolled.replyTarget !== undefined,
+    JSON.stringify({ inj: rolled?.injectionSuspected, rt: Boolean(rolled?.replyTarget) }),
+  );
+  newRun();
+  await saveProjectsSheets([{ ...injP, injectionSuspected: undefined }]);
+  check(
+    '印の控えのある案件を抽出し直して保存しても、列と返信メタに印を付け直す',
+    sheets.record(ROUND5_BOOK, '案件', 'ID', injP.id)?.[INJECTION_COLUMN] !== '',
+  );
+
+  // 2) 突合済の移行の印を人が消した・壊しても、新しい仕組みで突合した行があれば突合前の行を突合済みにしない
+  const pa = project('proj_r5_a', { title: '突合済の案件', requiredSkills: ['Go'], agentEmail: 'miko@gamma.example.jp', replyTarget: rt('検証三子', 'miko@gamma.example.jp', '【案件】A', 'r5a') });
+  const pb = project('proj_r5_b', { title: '突合前の案件', requiredSkills: ['Go'], agentEmail: 'miko@gamma.example.jp', replyTarget: rt('検証三子', 'miko@gamma.example.jp', '【案件】B', 'r5b') });
+  newRun();
+  await saveProjectsSheets([pa, pb]);
+  await markItemsMatchedSheets('project', [pa.id]);
+  sheets.setByKey(ROUND5_BOOK, '_状態', 'キー', `migration:${MATCHED_COLUMN}:案件`, 'JSON', '"done"');
+  newRun();
+  await checkSheetsTabs(['案件']);
+  check(
+    '移行の印が壊れていても、突合済の日時のある行があれば突合前の行を「移行」で突合済みにしない',
+    (sheets.record(ROUND5_BOOK, '案件', 'ID', pb.id)?.[MATCHED_COLUMN] ?? 'x') === '',
+    sheets.record(ROUND5_BOOK, '案件', 'ID', pb.id)?.[MATCHED_COLUMN],
+  );
+
+  // 3) 未来の受信日（年の打ち間違い・意図的な未来日付）は受信日不明として突合の対象から外す
+  const pf = project('proj_r5_future', { title: '未来の受信日', requiredSkills: ['Go'], agentEmail: 'miko@gamma.example.jp', replyTarget: rt('検証三子', 'miko@gamma.example.jp', '【案件】F', 'r5f') });
+  newRun();
+  await saveProjectsSheets([pf]);
+  sheets.setByKey(ROUND5_BOOK, '案件', 'ID', pf.id, LAST_SEEN_COLUMN, '2099-01-01T00:00:00.000Z');
+  sheets.setByKey(ROUND5_BOOK, '案件', 'ID', pf.id, '受信日', `${new Date().getUTCFullYear() + 1}/1/1`);
+  newRun();
+  const future = (await fetchOpenProjects(1000)).find((x) => x.id === pf.id);
+  check('未来の受信日・最終受信日の案件は突合の対象期間に入れない', future === undefined || future.receivedAt.getTime() === 0, String(future?.receivedAt.toISOString()));
+
+  // 4) 同じIDの行が2行（人が行を複製した）なら、どちらの行からも下書きを作らない
+  const dp = project('proj_r5_dup', { title: '複製行の検証', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】複製', 'r5dup') });
+  const de = engineer('eng_r5_dup', { displayName: 'D.P.', skills: ['Java'], agentEmail: 'jiro@beta.example.jp', replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【要員】複製', 'r5dup-e') });
+  const dm = makeMatch(dp, de, 'confirmed');
+  newRun();
+  await saveMatch(dm);
+  sheets.setByKey(ROUND5_BOOK, 'マッチ', 'ID', dm.id, '担当者メール', `taro@${OWN_DOMAIN}`);
+  const matchRows = sheets.rawRows(ROUND5_BOOK, 'マッチ');
+  const original = matchRows.find((r) => r[0] === dm.id)!;
+  sheets.insertRowAt(ROUND5_BOOK, 'マッチ', matchRows.length + 1, original);
+  const beforeDup = mail.drafts.length;
+  newRun();
+  const dupResult = await materializePendingDrafts();
+  const dupRows = sheets.records(ROUND5_BOOK, 'マッチ').filter((r) => r['ID'] === dm.id);
+  check(
+    '同じIDの行が複数あれば下書きを作らず、どちらの行にも「同じIDの行が複数あります」を書く',
+    mail.drafts.length === beforeDup && dupResult.created === 0 && dupRows.length === 2 && dupRows.every((r) => (r['案件側下書き状態'] ?? '').includes('同じIDの行が複数')),
+    JSON.stringify({ n: mail.drafts.length - beforeDup, r: dupResult, s: dupRows.map((r) => r['案件側下書き状態']) }),
+  );
+  // 複製した行を消せば、残った行の依頼から作る
+  const dupIndex = sheets.rawRows(ROUND5_BOOK, 'マッチ').map((r, i) => (r[0] === dm.id ? i : -1)).filter((i) => i >= 0);
+  sheets.blankRow(ROUND5_BOOK, 'マッチ', dupIndex[1] + 1);
+  newRun();
+  await materializePendingDrafts();
+  check('複製した行を消せば、残った1行の依頼から下書きを作る', mail.drafts.length === beforeDup + 2, `${mail.drafts.length - beforeDup}`);
+
+  // 5) 応答が途切れて作成できたか分からない下書きは「要確認」にし、下書きフォルダに無くても（送信済み等）作り直さない
+  const ap = project('proj_r5_amb', { title: '応答切れの検証', requiredSkills: ['Java'], agentEmail: 'hanako@alpha.example.jp', replyTarget: rt('検証花子', 'hanako@alpha.example.jp', '【案件】応答切れ', 'r5amb') });
+  const ae = engineer('eng_r5_amb', { displayName: 'A.M.', skills: ['Java'], agentEmail: 'jiro@beta.example.jp', replyTarget: rt('検証次郎', 'jiro@beta.example.jp', '【要員】応答切れ', 'r5amb-e') });
+  const am = makeMatch(ap, ae, 'confirmed');
+  newRun();
+  await saveMatch(am);
+  const ambSender = `amb5@${OWN_DOMAIN}`;
+  sheets.setByKey(ROUND5_BOOK, 'マッチ', 'ID', am.id, '担当者メール', ambSender);
+  mail.ambiguousDraftFrom.add(ambSender);
+  newRun();
+  await materializePendingDrafts();
+  mail.ambiguousDraftFrom.delete(ambSender);
+  const ambState = sheets.record(ROUND5_BOOK, 'マッチ', 'ID', am.id)?.['案件側下書き状態'] ?? '';
+  // 担当者が下書きを送信した（下書きフォルダから消えた）状態
+  mail.drafts = mail.drafts.filter((d) => d.from !== ambSender);
+  const beforeAmb = mail.drafts.length;
+  newRun();
+  const ambResult = await materializePendingDrafts();
+  const ambAfter = sheets.record(ROUND5_BOOK, 'マッチ', 'ID', am.id)?.['案件側下書き状態'] ?? '';
+  check(
+    '作成できたか分からない下書きは「要確認」にし、次の実行で下書きフォルダに無くても作り直さない（人に確かめてもらう）',
+    ambState.startsWith(DRAFT_STATE.unknown) && ambAfter.startsWith(DRAFT_STATE.unknown) && mail.drafts.length === beforeAmb && (ambResult.stale ?? 0) >= 1,
+    JSON.stringify({ ambState, ambAfter, n: mail.drafts.length - beforeAmb, stale: ambResult.stale }),
+  );
+
+  // 6) 知らせ損ねたマッチの控えを人が書き換えても（署名が合わない）、サマリに載せない
+  await writeStateJson('unnotifiedMatches', { ids: [dm.id], overflow: 0 });
+  newRun();
+  const carried = await loadUnnotifiedMatches();
+  check('署名の無い「知らせ損ねたマッチ」の控えは使わない（編集者がサマリメールに文面を載せられない）', carried.ids.length === 0 && carried.rows.length === 0, JSON.stringify(carried.ids));
+  await rememberUnnotified([], [{ ...dm, category: 'confirmed' }]);
+  newRun();
+  const signed = await loadUnnotifiedMatches();
+  check('バッチが書いた（署名した）控えは次の実行で読める', signed.ids.includes(dm.id), JSON.stringify(signed.ids));
+  await clearUnnotified();
+}
+
+// 見出しの無い列に人のメモがあるタブには、その上に新しい列の見出しを足さない
+async function round5MemoColumnSteps(): Promise<void> {
+  const header = ['ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート', '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス'];
+  const row = header.map((h) => (h === 'ID' ? 'proj_memo' : h === 'ステータス' ? '募集中' : ''));
+  sheets.seedTab(ROUND5_MEMO_BOOK, '案件', [header, [...row, '営業メモ: 来週電話']]);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = ROUND5_MEMO_BOOK;
+  let message = '';
+  try {
+    newRun();
+    await fetchOpenProjects(10);
+  } catch (err) {
+    message = err instanceof SafeLogError ? err.message : `unexpected: ${String(err)}`;
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+  check(
+    '見出しの無い列に値があるタブには新しい列の見出しを書かず、読み書きを止める（メモを突合済等と読み違えない）',
+    !sheets.header(ROUND5_MEMO_BOOK, '案件').includes(MATCHED_COLUMN) && message.includes('見出し'),
+    `${sheets.header(ROUND5_MEMO_BOOK, '案件').slice(19).join(',')} / ${message}`,
+  );
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -2364,6 +2526,7 @@ async function main(): Promise<void> {
     await testSecurityRegressions();
     await testAttachmentIsolation();
     await testRetentionAndNotify();
+    await testSecurityRound5();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

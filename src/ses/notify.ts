@@ -8,7 +8,7 @@ import { saveMatches } from '../database/index.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, fetchMatchSummariesSheets, type MatchSummaryRow } from '../database/sheets.js';
 import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
 import { SUMMARY_SUBJECT } from './mail/ownMail.js';
-import { isDemo, sesNotifyTo, notifyRecipients, logRedact, mailProvider, requireLive, dbProvider } from './config.js';
+import { isDemo, sesNotifyTo, notifyRecipients, logRedact, mailProvider, requireLive, dbProvider, draftSigningKey } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
 import { buildDiagnosisReport, recordFatal } from './heal/events.js';
@@ -16,7 +16,15 @@ import { redactable, safeErr, logId } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
 import { primarySelectTally, DEAL_BREAKER_CODES, DEAL_BREAKER_LABEL } from './match.js';
-import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, INJECTION_CAUTION, OUTGOING_TEXT_CAUTION, linkOrContactLike } from './injection.js';
+import {
+  INJECTION_REVIEW_REASON,
+  OUTGOING_TEXT_REVIEW_REASON,
+  INJECTION_CAUTION,
+  OUTGOING_TEXT_CAUTION,
+  linkOrContactLike,
+  unsafeOutgoingText,
+} from './injection.js';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { collectBatchMetrics, recordBatchMetrics, formatMetricsLines, metricsRowValues } from './batchMetrics.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
@@ -72,6 +80,30 @@ const CARRIED_LIST_MAX = 30;
 interface UnnotifiedState {
   ids: string[];
   overflow: number; // 上限を超えて控えられなかった件数
+  sig?: string; // SES_DRAFT_SIGNING_KEY による署名（「_状態」タブは人も編集できるため、書き換えた控えをサマリに載せない）
+}
+
+function unnotifiedSignature(ids: string[], overflow: number, key: string): string {
+  return createHmac('sha256', key).update(JSON.stringify(['unnotifiedMatches', ids, overflow])).digest('base64url');
+}
+
+// 控えに署名する（鍵が無ければ署名しない）
+export function signUnnotified(state: { ids: string[]; overflow: number }, key: string): UnnotifiedState {
+  return key ? { ...state, sig: unnotifiedSignature(state.ids, state.overflow, key) } : { ...state };
+}
+
+// 保存された控えを読む。鍵があるのに署名が無い・合わない控えは使わない（null）
+export function verifiedUnnotified(raw: unknown, key: string): { ids: string[]; overflow: number } | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Partial<UnnotifiedState>;
+  if (!Array.isArray(o.ids) || !o.ids.every((id) => typeof id === 'string')) return null;
+  const overflow = typeof o.overflow === 'number' && Number.isFinite(o.overflow) ? o.overflow : 0;
+  if (key) {
+    const expected = Buffer.from(unnotifiedSignature(o.ids, overflow, key));
+    const actual = Buffer.from(typeof o.sig === 'string' ? o.sig : '');
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  }
+  return { ids: o.ids, overflow: Math.min(Math.max(Math.floor(overflow), 0), 1_000_000) };
 }
 
 function carryEnabled(): boolean {
@@ -92,9 +124,13 @@ export async function loadUnnotifiedMatches(): Promise<{ ids: string[]; rows: Ma
   persisted = '';
   if (!carryEnabled()) return { ids: [], rows: [] };
   try {
-    const state = await readStateJson<UnnotifiedState>(UNNOTIFIED_KEY);
-    const ids = Array.isArray(state?.ids) ? state.ids.filter((id): id is string => typeof id === 'string') : [];
-    carriedOverflow = typeof state?.overflow === 'number' ? state.overflow : 0;
+    const raw = await readStateJson<unknown>(UNNOTIFIED_KEY);
+    const state = verifiedUnnotified(raw, draftSigningKey());
+    if (raw !== null && !state) {
+      console.warn('SES通知: 知らせ損ねたマッチの控えの署名が合わないため使いません（「_状態」タブの unnotifiedMatches）');
+    }
+    const ids = state?.ids ?? [];
+    carriedOverflow = state?.overflow ?? 0;
     persisted = stateJson({ ids, overflow: carriedOverflow });
     return { ids, rows: await fetchMatchSummariesSheets(ids) };
   } catch (err) {
@@ -115,15 +151,26 @@ export async function rememberUnnotified(carriedIds: string[], saved: MatchResul
   };
   const json = stateJson(state);
   if (json === persisted) return;
-  await writeStateJson(UNNOTIFIED_KEY, state);
+  await writeStateJson(UNNOTIFIED_KEY, signUnnotified(state, draftSigningKey()));
   persisted = json;
 }
 
 // サマリを送れた（または送る先が無い）ので控えを消す
 export async function clearUnnotified(): Promise<void> {
   if (!carryEnabled() || persisted === '') return;
-  await writeStateJson(UNNOTIFIED_KEY, { ids: [], overflow: 0 } satisfies UnnotifiedState);
+  await writeStateJson(UNNOTIFIED_KEY, signUnnotified({ ids: [], overflow: 0 }, draftSigningKey()));
   persisted = '';
+}
+
+// 持ち越しの行はこの回に作った値ではなく、人も編集できるマッチタブのセルから読むため、短く切り、リンク・連絡先・
+// 指示らしき記載があれば中身を載せない（公式のサマリメールとしてフィッシングの文面を送らせない）
+const CARRIED_REASON_CHARS = 200;
+export const CARRIED_UNSAFE_TEXT = 'スプレッドシートで確認してください';
+
+export function carriedText(s: string, max: number): string {
+  const oneLine = (s ?? '').replace(/[\r\n\u2028\u2029]+/g, ' ');
+  const capped = oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+  return unsafeOutgoingText([capped]) || /[@＠]/.test(capped) ? CARRIED_UNSAFE_TEXT : capped;
 }
 
 function carriedSection(carried: MatchSummaryRow[], savedIds: Set<string>): string[] {
@@ -132,8 +179,8 @@ function carriedSection(carried: MatchSummaryRow[], savedIds: Set<string>): stri
   const lines = [`【前回までの実行でお知らせできなかったマッチ（${rows.length + carriedOverflow}件）】`];
   for (const r of rows.slice(0, CARRIED_LIST_MAX)) {
     const margin = r.grossMarginJpy !== null ? `粗利${(r.grossMarginJpy / 10000).toFixed(1)}万円/月, ` : '';
-    lines.push(`・${summaryTitle(r.title)} — ${margin}適合スコア${r.score ?? '-'}点`);
-    lines.push(`  根拠: ${summaryText(r.reason)}`);
+    lines.push(`・${carriedText(r.title, SUMMARY_TITLE_CHARS)} — ${margin}適合スコア${r.score ?? '-'}点`);
+    lines.push(`  根拠: ${carriedText(r.reason, CARRIED_REASON_CHARS)}`);
   }
   const more = rows.length - Math.min(rows.length, CARRIED_LIST_MAX) + carriedOverflow;
   if (more > 0) lines.push(`  ほか${more}件（スプレッドシート「マッチ」タブの検出日時で確認してください）`);

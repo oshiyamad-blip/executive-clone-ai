@@ -8,6 +8,7 @@ import { join } from 'path';
 import { isDemo, demoDataDir, durableStateInSheets } from './config.js';
 import { safeErr } from './redact.js';
 import { hasKnownInitials } from './pii.js';
+import { addressOf, domainOfAddress, isFreeMailDomain } from './mail/ownMail.js';
 import {
   sheetsDbConfigured,
   loadProcessedMailIdsSheets,
@@ -230,10 +231,35 @@ function nonEmpty(s: string): string | null {
   return t ? t : null;
 }
 
-// 単金以外の属性（別のメール・勤務地・営業元）が同じ案件でありえるか
+// 返信先（メールのヘッダから決めた値。本文から抽出した営業元名・アドレスは送り主が自由に書けるため使わない）の識別。
+// 会社のドメインはドメイン単位、フリーメールはアドレス単位。返信先が無ければ null
+function replySenderKey(item: { replyTarget?: { from: string; replyTo?: string } }): string | null {
+  const rt = item.replyTarget;
+  if (!rt) return null;
+  const address = (addressOf(rt.replyTo ?? '') || addressOf(rt.from)).trim().toLowerCase();
+  if (!address) return null;
+  const domain = domainOfAddress(address).replace(/\.$/, '');
+  return domain && !isFreeMailDomain(domain) ? domain : address;
+}
+
+// 同じ送り主（返信先）から届いたものか。別の送り主から同じ内容が届いたものを「再送」として捨てると、先に保存された
+// 側（なりすまし・転載を含む）の返信先に下書きが向かうため、送り主の違うものは別の行として残す。
+// 両方とも返信先が無いもの（手入力・demo）は内容だけで判定し、片方だけ無いものは別の送り主として扱う
+export function sameReplySender(
+  a: { replyTarget?: { from: string; replyTo?: string } },
+  b: { replyTarget?: { from: string; replyTo?: string } },
+): boolean {
+  const ka = replySenderKey(a);
+  const kb = replySenderKey(b);
+  if (ka === null && kb === null) return true;
+  return ka !== null && ka === kb;
+}
+
+// 単金以外の属性（別のメール・同じ送り主・勤務地・営業元）が同じ案件でありえるか
 function projectsCompatibleIgnoringRate(a: Project, b: Project): boolean {
   return (
     a.sourceMailId !== b.sourceMailId &&
+    sameReplySender(a, b) &&
     sameIfKnown(a.prefecture, b.prefecture, (x, y) => x === y) &&
     sameIfKnown(nonEmpty(a.agentCompany), nonEmpty(b.agentCompany), (x, y) => x === y)
   );
@@ -252,6 +278,7 @@ function engineersCompatibleIgnoringRate(a: Engineer, b: Engineer): boolean {
   const sameIdentity = nameA !== null || nameB !== null ? nameA === nameB : sameWithoutInitials(a, b);
   return (
     a.sourceMailId !== b.sourceMailId &&
+    sameReplySender(a, b) &&
     sameIdentity &&
     sameIfKnown(a.age, b.age, (x, y) => Math.abs(x - y) <= 1) &&
     sameIfKnown(nonEmpty(a.nearestStation), nonEmpty(b.nearestStation), (x, y) => x === y) &&

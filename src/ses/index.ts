@@ -40,8 +40,6 @@ import {
   pruneStalePersonalDataSheets,
   sheetsDbConfigured,
   countUnmatchedBeyondPoolSheets,
-  acquireBatchLeaseSheets,
-  releaseBatchLeaseSheets,
 } from '../database/sheets.js';
 import {
   isDemo,
@@ -80,7 +78,8 @@ import {
 import { runRepair } from './heal/repair.js';
 import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule.js';
 import { redactable, safeErr, logId } from './redact.js';
-import { splitResends, serializeFingerprint, type ResendSplit } from './resend.js';
+import { acquireRunLease, releaseRunLease } from './lease.js';
+import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
 
@@ -145,7 +144,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
       await persistUnknownSkillTokens();
     }
   } finally {
-    if (lease) await releaseLease(lease);
+    if (lease) await releaseRunLease(lease);
     stopRunClock();
     if (hasFatal()) {
       console.error(`=== SESバッチ: 異常終了扱い（要因${fatalReasons().length}件）: ${fatalReasons().join(' / ')} ===`);
@@ -154,33 +153,13 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   }
 }
 
-// 実行中の印の期限。ジョブの制限時間（40分）を含む長さにする（打ち切られた実行の印は期限で無効になる）
-const LEASE_EXTRA_MINUTES = 30;
-
 // 同時に動くバッチを1つに限る（定時実行と手元・自前の定期実行が重なると、同じ依頼の下書き・同じメールの行を二重に作るため）。
-// 実行してよければ印の識別子、だめなら null（異常終了として知らせる）。Sheets運用の本番以外は印を使わない（''）
+// 実行してよければ印の識別子、だめなら null（異常終了として知らせる）。印を使わない実行（demo 等）は ''
 async function acquireLease(): Promise<string | null> {
-  if (isDemo() || dbProvider() !== 'sheets' || !sheetsDbConfigured()) return '';
-  try {
-    const r = await acquireBatchLeaseSheets((runDeadlineMinutes() + LEASE_EXTRA_MINUTES) * 60_000);
-    if (r.ok) return r.token;
-    recordFatal(
-      `別のバッチが実行中のため、この実行では何もしませんでした（その実行の印の期限: ${r.until}）。` +
-        '前回の実行が打ち切られた場合は、期限を過ぎれば次の実行から動きます（急ぐ場合はスプレッドシート「_状態」タブの batchLease の行を消してください）',
-    );
-  } catch (err) {
-    console.error(`SES: 実行中の印を確かめられません: ${safeErr(err)}`);
-    recordFatal('実行中の印（スプレッドシート「_状態」タブ）を確かめられないため、この実行では何もしませんでした（共有・見出しを確認してください）');
-  }
+  const r = await acquireRunLease();
+  if (r.ok) return r.token;
+  recordFatal(r.reason);
   return null;
-}
-
-async function releaseLease(token: string): Promise<void> {
-  try {
-    await releaseBatchLeaseSheets(token);
-  } catch (err) {
-    console.warn(`SES: 実行中の印を消せませんでした（期限を過ぎれば無効になります）: ${safeErr(err)}`);
-  }
 }
 
 async function runStages(opts: SesBatchOptions): Promise<void> {
@@ -462,14 +441,11 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
     recordFatal(`抽出した案件・要員${saveFailures}件を保存できませんでした（元のメールは処理済みにせず次回再処理します）`);
   }
   const quarantinedMarked = await markMailProcessed(quarantinedMailIds, '隔離');
-  // 再送スキップ: 抽出せずに処理済みにし、元の案件・要員の最終受信日を更新する（直近の突合の対象から外れないように）
+  // 再送スキップ: 抽出せずに処理済みにし、元の案件・要員の最終受信日を更新する（直近の突合の対象から外れないように）。
+  // 最終受信日を延ばすのは送り主の認証に合格した再送だけ（lastSeenUpdates）
   const skippedIds = parsedMails.resend.skipped.map((x) => x.mail.id);
   const skippedMarked = await markMailProcessed(skippedIds, '再送スキップ', processedFingerprints(parsedMails.resend, skippedIds));
-  const lastSeen = new Map<string, Date>();
-  for (const { mail, rootMailId } of parsedMails.resend.skipped) {
-    const prev = lastSeen.get(rootMailId);
-    if (!prev || prev.getTime() < mail.receivedAt.getTime()) lastSeen.set(rootMailId, mail.receivedAt);
-  }
+  const lastSeen = lastSeenUpdates(parsedMails.resend.skipped);
   await touchLastSeen(lastSeen);
   // 自分たちのメールとして除外した分も記録し、次回から本文を取得し直さない
   const excludedMarked = await markMailProcessed(parsedMails.excludedMailIds, '除外');

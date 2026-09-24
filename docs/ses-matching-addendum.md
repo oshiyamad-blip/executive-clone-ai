@@ -113,7 +113,7 @@
 ### 5-4. 複数人運用
 - 確認UIに**名前入力**を追加。ステータス変更・評価・同義追加に評価者名を記録。
 - **共有の正はNotion**（マッチ／評価ログ／同義辞書）。ローカルJSONはdemo・単体作業用に降格。
-- 待受ホスト `SES_WEB_HOST`（既定ローカル）とアクセストークン `WEB_ACCESS_TOKEN` を設定してLAN共有。
+- 待受ホスト `SES_WEB_HOST`（既定ローカル）とアクセストークン `SES_WEB_ACCESS_TOKEN`（chat UI の `WEB_ACCESS_TOKEN` とは別の値）を設定してLAN共有。
 - env追加: `SKILL_MATCH_STRONG_THRESHOLD` / `NOTION_FEEDBACK_DB_ID` / `NOTION_SKILL_EQUIV_DB_ID` / `SES_WEB_HOST` / `WEB_ACCESS_TOKEN`
 
 ## 6. 共有メーリス収集 ＋「全員に返信」＋ 営業個人アドレス送信（日本の商習慣対応）

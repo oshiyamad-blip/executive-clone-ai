@@ -114,7 +114,7 @@ npm run chat           # 壁打ちで応答確認
 ## 4. セキュリティの注意（引き渡し時に口頭で伝える）
 
 - `.env.local` にすべての鍵が入る。**端末のログインパスワード＋ディスク暗号化（Mac: FileVault / Windows: BitLocker）を有効に**
-- Web UI を社内の他端末から使う場合は `WEB_ACCESS_TOKEN` を設定し、VPN/HTTPS 経由で公開する（既定はローカルのみ）
+- Web UI を社内の他端末から使う場合は `WEB_ACCESS_TOKEN`（SES確認UIは別の値の `SES_WEB_ACCESS_TOKEN`、どちらも32文字以上）を設定し、VPN/HTTPS 経由で公開する（既定はローカルのみ。同じPCのリバースプロキシ越しでもトークンは必須）
 - 極秘データを扱うため、LLM は将来的に Vertex AI（データが自社GCP内に留まる）への切替も可能（`.env.example` の (B) 参照）
 
 ## 5. うまくいかないときは

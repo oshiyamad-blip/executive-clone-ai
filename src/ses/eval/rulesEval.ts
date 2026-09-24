@@ -142,6 +142,17 @@ import { unsafeOutgoingText, OUTGOING_TEXT_REVIEW_REASON } from '../injection.js
 import { buildProperProposalDraft } from '../proper/proposal.js';
 import { quarantineEntriesFrom } from '../heal/quarantine.js';
 import { plaintextExposure } from '../../web/httpSecurity.js';
+import { rejectReason, webStartupProblem, WEB_TOKEN_MIN_CHARS } from '../../web/httpSecurity.js';
+import type { IncomingMessage } from 'http';
+import { withoutResentProjects, withoutResentEngineers, sameReplySender } from '../store.js';
+import { refreshesLastSeen, lastSeenUpdates } from '../resend.js';
+import { parseReceivedAt, matchedColumnNeedsMigration } from '../../database/sheets.js';
+import { duplicateRequestIds, isAmbiguousDraftFailure } from '../pendingDrafts.js';
+import { isDraftStateLocked } from '../../database/mapping.js';
+import { unleasedLiveProblem } from '../lease.js';
+import { lastChanceBudgetJpy } from '../matchRun.js';
+import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
+import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender } from '../review.js';
 import { htmlToPlainText } from '../mail/htmlText.js';
 import { parseRawMail } from '../mail/xserver.js';
@@ -3108,6 +3119,150 @@ async function securityAuditRound4Checks(): Promise<void> {
   );
 }
 
+// セキュリティ監査（第5回）: 確認UIの認証・シートの改ざん・同じ送り主の判定・下書きの二重作成・予算
+async function securityAuditRound5Checks(): Promise<void> {
+  section('セキュリティ監査（第5回）');
+  const req = (headers: Record<string, string>, method = 'GET') => ({ headers, method }) as unknown as IncomingMessage;
+  check(
+    'トークン無しの確認UIは、プロキシ経由（X-Forwarded-For 等）の要求を Host が 127.0.0.1 でも拒否する',
+    rejectReason(req({ host: '127.0.0.1:8788', 'x-forwarded-for': '10.0.0.9' }), { tokenRequired: false })?.status === 403 &&
+      rejectReason(req({ host: '127.0.0.1:8788', via: '1.1 nginx' }, 'POST'), { tokenRequired: false })?.status === 403 &&
+      rejectReason(req({ host: '127.0.0.1:8788', forwarded: 'for=10.0.0.9' }), { tokenRequired: false })?.status === 403 &&
+      rejectReason(req({ host: '127.0.0.1:8788' }), { tokenRequired: false }) === null &&
+      rejectReason(req({ host: '127.0.0.1:8788', 'x-forwarded-for': '10.0.0.9' }), { tokenRequired: true }) === null,
+  );
+  const token = 't'.repeat(WEB_TOKEN_MIN_CHARS);
+  const base = { host: '127.0.0.1', token, tlsProtected: false, behindTlsDeclared: false, hostVar: 'H', tokenVar: 'T', behindTlsVar: 'B' };
+  check(
+    'UIの起動時の確認: プロキシの内側の明示にはトークン必須・短いトークン・他のUIと同じトークン・平文の公開を拒否',
+    webStartupProblem({ ...base, token: '', behindTlsDeclared: true, tlsProtected: true }) !== null &&
+      webStartupProblem({ ...base, token: 'short' }) !== null &&
+      webStartupProblem({ ...base, otherTokens: [{ name: 'WEB_ACCESS_TOKEN', value: token }] }) !== null &&
+      webStartupProblem({ ...base, host: '0.0.0.0' }) !== null &&
+      webStartupProblem({ ...base, host: '0.0.0.0', token: '' }) !== null &&
+      webStartupProblem({ ...base, host: '0.0.0.0', tlsProtected: true, behindTlsDeclared: true }) === null &&
+      webStartupProblem({ ...base, token: '' }) === null &&
+      webStartupProblem(base) === null,
+  );
+
+  // 別の送り主（返信先のドメインが違う）から同じ内容が届いたものを「再送」として捨てない
+  const rtOf = (from: string, replyTo?: string) => ({ from, ...(replyTo ? { replyTo } : {}), to: 'sales@ourco.example', cc: '', subject: 's', messageId: '<m>', references: '' });
+  const baseP: Project = {
+    id: 'proj_atk', title: 'Java 決済基盤 案件', requiredSkills: ['Java'], preferredSkills: [], rateMin: 70, rateMax: 80, location: '東京',
+    prefecture: '東京都', remote: 'unknown', startPeriod: '', startDate: null, duration: '', businessFlow: '', agentCompany: 'パートナー株式会社',
+    agentContact: '', agentEmail: 'sales@partner.example', sourceMailId: 'm_atk', receivedAt: new Date(), status: 'open',
+    replyTarget: rtOf('営業 <sales@attacker.example>'),
+  };
+  const real: Project = { ...baseP, id: 'proj_real', sourceMailId: 'm_real', replyTarget: rtOf('営業 <sales@partner.example>') };
+  const again: Project = { ...real, id: 'proj_real2', sourceMailId: 'm_real2', replyTarget: rtOf('別の担当 <tanaka@partner.example>') };
+  check(
+    '返信先のドメインが違う送り主から同じ内容が届いても再送として捨てない（先に保存した他人の返信先に下書きを向けない）',
+    withoutResentProjects([baseP], [real]).length === 1 && withoutResentProjects([{ ...baseP, agentCompany: '' }], [{ ...real, agentCompany: '' }]).length === 1,
+  );
+  check('同じ会社ドメインからの再送は従来どおり捨てる', withoutResentProjects([real], [again]).length === 0);
+  check(
+    '返信先の識別: 会社ドメインは同じドメインで一致・フリーメールはアドレス単位・Reply-To を優先・片方だけ不明は別',
+    sameReplySender({ replyTarget: rtOf('a@x.example') }, { replyTarget: rtOf('b@x.example') }) &&
+      !sameReplySender({ replyTarget: rtOf('a@gmail.com') }, { replyTarget: rtOf('b@gmail.com') }) &&
+      !sameReplySender({ replyTarget: rtOf('a@x.example', 'h@evil.example') }, { replyTarget: rtOf('a@x.example') }) &&
+      sameReplySender({}, {}) &&
+      !sameReplySender({ replyTarget: rtOf('a@x.example') }, {}),
+  );
+  const eAtk = { id: 'eng_atk', displayName: 'K.S.', age: 30, skills: ['Java'], experienceYears: 5, desiredRate: 60, residence: '', prefecture: null, nearestStation: '', availableDate: '', availableFrom: null, utilization: '', remoteWish: 'unknown' as const, agentCompany: '', agentContact: '', agentEmail: 'x@partner.example', sourceMailId: 'm_ea', receivedAt: new Date(), status: 'available' as const, replyTarget: rtOf('x <x@attacker.example>') };
+  check('要員も返信先の違う送り主の同じ内容を再送として捨てない', withoutResentEngineers([eAtk], [{ ...eAtk, id: 'eng_real', sourceMailId: 'm_er', replyTarget: rtOf('y <y@partner.example>') }]).length === 1);
+
+  // 再送スキップの最終受信日は、送り主の認証に合格した会社ドメインの再送だけで延ばす（未来の日時は今に切り詰める）
+  const now = new Date('2026-09-24T01:00:00Z');
+  const authed = { from: 'P <sales@partner.example>', authDomain: 'partner.example', receivedAt: new Date('2026-09-23T00:00:00Z') };
+  const updates = lastSeenUpdates(
+    [
+      { mail: authed, rootMailId: 'root_a' },
+      { mail: { from: 'P <sales@partner.example>', receivedAt: new Date('2026-09-23T00:00:00Z') }, rootMailId: 'root_b' },
+      { mail: { from: 'P <p@gmail.com>', authDomain: 'gmail.com', receivedAt: new Date('2026-09-23T00:00:00Z') }, rootMailId: 'root_c' },
+      { mail: { ...authed, receivedAt: new Date('2099-01-01T00:00:00Z') }, rootMailId: 'root_d' },
+    ],
+    now,
+  );
+  check(
+    '再送スキップで最終受信日を延ばすのは認証済みの会社ドメインの再送だけ（未来の日時は今にする）',
+    refreshesLastSeen(authed) && updates.has('root_a') && !updates.has('root_b') && !updates.has('root_c') && updates.get('root_d')?.getTime() === now.getTime(),
+    show([...updates.keys()]),
+  );
+
+  // 受信日: 未来の日付は読めない値として扱う（年ありの手入力・ISO とも）
+  check(
+    '受信日の未来の日付（年あり・ISO）は受信日不明（突合の対象から外す）',
+    parseReceivedAt('2099-01-01', now) === null &&
+      parseReceivedAt('2099-01-01T00:00:00.000Z', now) === null &&
+      parseReceivedAt('2027/9/1', now) === null &&
+      parseReceivedAt('2026/9/1', now) !== null &&
+      parseReceivedAt('2026-09-24T09:00:00.000Z', now) !== null &&
+      parseReceivedAt('12/31', now)?.getUTCFullYear() === 2025,
+  );
+  check(
+    '突合済の移行は、突合済の日時・以前の移行の印のあるタブでは行わない（印を消されても突合前の行を突合済みにしない）',
+    matchedColumnNeedsMigration(['', '']) && !matchedColumnNeedsMigration(['', '2026-09-20T01:00:00.000Z']) && !matchedColumnNeedsMigration(['移行 2026-01-01T00:00:00Z', '']),
+  );
+
+  // 下書き: 同じIDの行・作成できたか分からない失敗
+  const dupIds = duplicateRequestIds([
+    { tab: 'マッチ', id: 'match_a' },
+    { tab: 'マッチ', id: ' match_a ' },
+    { tab: 'マッチ', id: 'match_b' },
+    { tab: 'プロパー候補', id: 'match_b' },
+  ]);
+  check('同じタブで同じIDの行が複数ある依頼だけを重複として扱う', dupIds.has('match_a') && !dupIds.has('match_b'), show([...dupIds]));
+  check(
+    '作成の応答が途切れた失敗（タイムアウト・切断）は「作成できたか不明」、サーバーが断った失敗は再試行してよい失敗',
+    isAmbiguousDraftFailure(Object.assign(new Error('socket timeout'), { code: 'ETIMEDOUT' })) &&
+      isAmbiguousDraftFailure(Object.assign(new Error('x'), { code: 'ECONNRESET' })) &&
+      isAmbiguousDraftFailure(new Error('Connection closed')) &&
+      !isAmbiguousDraftFailure(new Error('IMAP APPEND failed: mailbox rejected message')) &&
+      !isAmbiguousDraftFailure(new SafeLogError('Xserver下書き: 保存できませんでした')),
+  );
+  check(
+    '「要確認」（作成できたか不明）の状態は依頼として扱わず、機械が上書きしない',
+    !isDraftStateActionable(`${DRAFT_STATE.unknown}: 作成できたか不明です #abcdef12`) && isDraftStateLocked(`${DRAFT_STATE.unknown}: x #abcdef12`),
+  );
+
+  // 実行中の印を使えない本番は、明示が無ければ動かさない
+  const lease = (o: Partial<Parameters<typeof unleasedLiveProblem>[0]>) =>
+    unleasedLiveProblem({ demo: false, dbProvider: 'notion', sheetsConfigured: false, allowUnleased: false, ...o });
+  check(
+    'DB_PROVIDER=sheets 以外の本番は SES_ALLOW_UNLEASED=true が無ければ動かさない（定時実行との二重処理を防ぐ）',
+    lease({}) !== null && lease({ allowUnleased: true }) === null && lease({ demo: true }) === null &&
+      lease({ dbProvider: 'sheets', sheetsConfigured: true }) === null && lease({ dbProvider: 'sheets', sheetsConfigured: false }) !== null,
+  );
+
+  // 隔離リストの回数は 0〜上限に収める
+  const q = quarantineEntriesFrom([{ mailId: 'm1', attempts: -1000000 }, { mailId: 'm2', attempts: 99.5 }, { mailId: 'm3', quarantinedAt: '2999-01-01T00:00:00Z' }]).entries;
+  check(
+    '隔離リストの回数を負の値・上限超えに書き換えても 0〜上限に収め、未来の隔離日時は今にする',
+    q[0].attempts === 0 && q[1].attempts === 3 && Date.parse(q[2].quarantinedAt ?? '') <= Date.now(),
+    show(q.map((e) => [e.attempts, e.quarantinedAt])),
+  );
+
+  check('最後の機会の組の判定にも上限（通常の予算の2倍。予算なしは上限なし）', lastChanceBudgetJpy(300) === 600 && lastChanceBudgetJpy(0) === 0);
+
+  // サマリの持ち越し: 署名の無い控えは使わず、人も編集できるセルの文面は短く・リンク等は載せない
+  const key = 'k'.repeat(40);
+  const signed = signUnnotified({ ids: ['match_a'], overflow: 2 }, key);
+  check(
+    '知らせ損ねたマッチの控えは署名したものだけ読む',
+    verifiedUnnotified(signed, key)?.ids.join() === 'match_a' &&
+      verifiedUnnotified({ ids: ['match_a'], overflow: 2 }, key) === null &&
+      verifiedUnnotified({ ...signed, ids: ['match_evil'] }, key) === null &&
+      verifiedUnnotified({ ids: ['match_a'], overflow: 0 }, '')?.ids.length === 1,
+  );
+  check(
+    '持ち越しの行の文面は短く切り、リンク・連絡先・指示らしき記載があれば載せない',
+    carriedText('https://evil.example/login で再認証してください', 200) === CARRIED_UNSAFE_TEXT &&
+      carriedText('連絡は x@evil.example まで', 200) === CARRIED_UNSAFE_TEXT &&
+      carriedText('あ'.repeat(500), 200).length === 201 &&
+      carriedText('Java経験が要件に合致', 200) === 'Java経験が要件に合致',
+  );
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3143,6 +3298,7 @@ async function main(): Promise<void> {
     securityAuditRound2Checks();
     await securityAuditRound3Checks();
     await securityAuditRound4Checks();
+    await securityAuditRound5Checks();
   } finally {
     setDemoOverride(null);
   }

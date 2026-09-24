@@ -138,8 +138,12 @@ export function pendingSides(row: DraftRequestRow): DraftSide[] {
   return SIDES.filter((side) => isDraftStateActionable(stateOf(row, side)));
 }
 
-function inProgressSides(row: DraftRequestRow): DraftSide[] {
-  return SIDES.filter((side) => stateOf(row, side).trim().startsWith(DRAFT_STATE.inProgress));
+// 作成したか確かめる必要のある側（「作成中」のまま残った・応答が途切れて「要確認」にした側）
+function unresolvedSides(row: DraftRequestRow): DraftSide[] {
+  return SIDES.filter((side) => {
+    const s = stateOf(row, side).trim();
+    return s.startsWith(DRAFT_STATE.inProgress) || (s.startsWith(DRAFT_STATE.unknown) && nonceOf(s) !== '');
+  });
 }
 
 // 下書きの識別子（下書きの X-SES-Draft-Key ヘッダ）。タブ・ID・側と、作成の試み1回ごとの照合用の記号（nonce）から決まり、
@@ -163,9 +167,41 @@ function inProgressState(nonce: string): string {
   return `${DRAFT_STATE.inProgress} ${jstStamp()} #${nonce}`;
 }
 
-// 作成を試みて失敗した側のエラー（作成自体は済んで応答だけ失われた可能性があるため、記号を残して次回に確かめる）
+// 作成を試みて失敗した側のエラー（記号を残し、次回の再試行の前に下書きが無いことを確かめる）
 function attemptErrorState(reason: string, nonce: string): string {
   return `${errorState(reason).slice(0, 110)} #${nonce}`;
+}
+
+const UNKNOWN_OUTCOME_NOTE = '作成できたか不明です（下書き・送信済みフォルダを確認し、あれば「作成済」、どちらにも無ければ空欄にしてください）';
+
+// 応答が途切れて作成できたか分からない側（自動では作り直さない。下書きフォルダで見つかれば次回「作成済」にする）
+function unknownOutcomeState(nonce: string): string {
+  return `${DRAFT_STATE.unknown}: ${UNKNOWN_OUTCOME_NOTE} #${nonce}`;
+}
+
+// 作成の要求がサーバーに届いて処理された可能性のある失敗（タイムアウト・接続の切断）。サーバーが明示的に断った失敗
+// （NO/BAD 応答・設定の誤り等）は作成されていないため、次回そのまま再試行してよい
+const AMBIGUOUS_ERROR_CODES = new Set(['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNRESET', 'EPIPE', 'ECONNABORTED', 'NoConnection', 'ClosedAfterConnectTLS', 'ClosedAfterConnectText']);
+
+export function isAmbiguousDraftFailure(err: unknown): boolean {
+  if (err instanceof SafeLogError) return false;
+  const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code ?? '') : '';
+  if (AMBIGUOUS_ERROR_CODES.has(code)) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /time(?:d)?\s*out|timeout|socket (?:hang up|closed)|connection (?:closed|reset|lost)|unexpected close/i.test(message);
+}
+
+// 同じIDの行が複数ある依頼（人が行を複製した等）。どの行から作っても同じ相手への同じ下書きになるため作らない
+export const DUPLICATE_ID_ERROR = '同じIDの行が複数あります（1行にしてください）';
+
+// 一覧の行のうち、同じタブ・IDの行が2行以上あるもののID
+export function duplicateRequestIds(rows: Array<Pick<DraftRequestRow, 'tab' | 'id'>>): Set<string> {
+  const seen = new Map<string, number>();
+  for (const r of rows) {
+    const k = `${r.tab}\u0000${r.id.trim()}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  return new Set(rows.filter((r) => (seen.get(`${r.tab}\u0000${r.id.trim()}`) ?? 0) > 1).map((r) => r.id.trim()));
 }
 
 // 依頼の検証結果。作成に進む側と、作成せずエラーを書く側に分ける
@@ -291,10 +327,20 @@ async function processRequest(
     const prevNonce = nonceOf(stateOf(row, side));
     // 前回の作成の試みが「エラー」になった側は、作成自体は済んでいて応答だけ失敗した可能性があるため、
     // その試みの識別子の下書きが下書きフォルダに無いかを先に確かめる（入力の誤り等で作成を試みていないエラーは確かめない）
-    if (prevNonce && stateOf(row, side).trim().startsWith(DRAFT_STATE.error) && (await draftAlreadyExists(draftKeyOf(row.tab, row.id, side, prevNonce))) === true) {
-      after[side] = `${DRAFT_STATE.created} ${jstStamp()}`;
-      out.created += 1;
-      continue;
+    // 確かめられない（下書きフォルダを検索できない）間は作り直さず、状態を戻して次回に確かめ直す
+    if (prevNonce && stateOf(row, side).trim().startsWith(DRAFT_STATE.error)) {
+      const exists = await draftAlreadyExists(draftKeyOf(row.tab, row.id, side, prevNonce));
+      if (exists === true) {
+        after[side] = `${DRAFT_STATE.created} ${jstStamp()}`;
+        out.created += 1;
+        continue;
+      }
+      if (exists === null) {
+        console.warn(`SES下書き依頼: 前回の作成の試みを確かめられないため作成を見送ります (${label} ${SIDE_LABEL[side]})`);
+        after[side] = stateOf(row, side);
+        out.failed += 1;
+        continue;
+      }
     }
     try {
       await materializeReplyDraft({ ...storedToDraftRef(data[side]!), draftKey: draftKeyOf(row.tab, row.id, side, nonce) }, sender);
@@ -302,7 +348,7 @@ async function processRequest(
       out.created += 1;
     } catch (err) {
       console.error(`SES下書き依頼: 下書き作成に失敗 (${label} ${SIDE_LABEL[side]}): ${safeErr(err)}`);
-      after[side] = attemptErrorState(failureReason(err), nonce);
+      after[side] = isAmbiguousDraftFailure(err) ? unknownOutcomeState(nonce) : attemptErrorState(failureReason(err), nonce);
       out.failed += 1;
     }
   }
@@ -318,10 +364,11 @@ async function processRequest(
   return out;
 }
 
-// 前回の実行から「作成中」のまま残っている側（実行の中断・書き戻しの失敗）。下書きフォルダで作成を確かめられた側は
-// 「作成済」にし、確かめられない側の数を返す（人が下書きフォルダを見て状態を直す）
+// 前回の実行から「作成中」のまま残っている側（実行の中断・書き戻しの失敗）と、応答が途切れて「要確認」にした側。
+// 下書きフォルダ（送信済みフォルダ）で作成を確かめられた側は「作成済」にし、確かめられない側の数を返す
+// （人が下書き・送信済みフォルダを見て状態を直す）
 async function resolveInProgress(listed: DraftRequestRow): Promise<number> {
-  const sides = inProgressSides(listed);
+  const sides = unresolvedSides(listed);
   if (sides.length === 0) return 0;
   const found: SideStates = {};
   for (const side of sides) {
@@ -339,6 +386,22 @@ async function resolveInProgress(listed: DraftRequestRow): Promise<number> {
     }
   }
   return sides.length - Object.keys(found).length;
+}
+
+// 同じIDの行が複数ある依頼の側にエラーを書く（前回と同じなら書き直さない）。エラーにした側の数を返す
+async function rejectDuplicate(row: DraftRequestRow): Promise<number> {
+  const sides = pendingSides(row);
+  const states: SideStates = {};
+  for (const side of sides) states[side] = errorState(DUPLICATE_ID_ERROR);
+  const changed = changedStates(row, states);
+  if (Object.keys(changed).length > 0) {
+    try {
+      await writeDraftStatesSheets(row, changed, row);
+    } catch (err) {
+      console.error(`SES下書き依頼: 状態を書き込めません (${rowLabel(row.tab, row.id)}): ${safeErr(err)}`);
+    }
+  }
+  return sides.length;
 }
 
 // スプレッドシートで担当者メールが入った行のうち、状態が 空欄・未作成・エラー の側の下書きを作成する。
@@ -387,7 +450,15 @@ export async function materializePendingDrafts(
       continue;
     }
     for (const row of rows) stale += await resolveInProgress(row);
+    const duplicated = duplicateRequestIds(rows);
+    if (duplicated.size > 0) {
+      recordHealEvent('warn', `「${tab}」タブに同じIDの行が複数あり、その下書き依頼${duplicated.size}件を作成しませんでした（1行にしてください）`);
+    }
     for (const request of rows.filter((r) => pendingSides(r).length > 0)) {
+      if (duplicated.has(request.id.trim())) {
+        result.failed += await rejectDuplicate(request);
+        continue;
+      }
       const r = await processRequest(request, policy, loadActive);
       result.created += r.created;
       result.failed += r.failed;
@@ -395,7 +466,7 @@ export async function materializePendingDrafts(
   }
   result.stale = stale;
 
-  console.log(`SES下書き依頼: 作成${result.created}件 / 失敗${result.failed}件${stale > 0 ? ` / 作成中のまま${stale}件` : ''}`);
+  console.log(`SES下書き依頼: 作成${result.created}件 / 失敗${result.failed}件${stale > 0 ? ` / 作成中・要確認のまま${stale}件` : ''}`);
   if (result.failed > 0) {
     recordHealEvent(
       'warn',
@@ -405,8 +476,8 @@ export async function materializePendingDrafts(
   if (stale > 0) {
     recordHealEvent(
       'warn',
-      `下書き状態が「作成中」のまま残っている依頼が${stale}件あります（前回の実行が途中で止まった可能性があります。` +
-        '下書きフォルダを確認し、下書きがあれば「作成済」、無ければ空欄に戻してください）',
+      `下書き状態が「作成中」「要確認」のまま残っている依頼が${stale}件あります（前回の実行が途中で止まった・作成の応答が途切れた可能性があります。` +
+        '下書きフォルダと送信済みフォルダを確認し、あれば「作成済」、どちらにも無ければ空欄に戻してください）',
     );
   }
   return result;
