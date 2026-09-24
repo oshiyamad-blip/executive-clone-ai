@@ -5,7 +5,7 @@ import { generateJson, LlmOutputError } from '../llm/index.js';
 import { totalLlmCostJpy } from '../llm/pricing.js';
 import { isModelUnavailableError } from '../llm/errors.js';
 import { maskPii } from './pii.js';
-import { isFreeMailDomain } from './mail/ownMail.js';
+import { isFreeMailDomain, addressOf, domainOfAddress } from './mail/ownMail.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManUp, roundManDown } from './pricing.js';
 import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
@@ -352,6 +352,35 @@ export function isSameAgent(projectEmail: string, engineerEmail: string, ownDoma
   return !isFreeMailDomain(domain) && !ownDomainList.includes(domain);
 }
 
+// 案件・要員の送り主（会社）を表す値。メールのヘッダから決めた返信先（Reply-To、無ければ From。会社のドメインは
+// ドメイン、フリーメールはアドレス）と、本文から抽出した営業元メールのドメイン。自社ドメインは含めない（社内の営業が共有したもの）
+function agentKeys(item: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } }, ownDomainList: string[]): Set<string> {
+  const keys = new Set<string>();
+  const extracted = emailDomain(item.agentEmail);
+  if (extracted && !isFreeMailDomain(extracted) && !ownDomainList.includes(extracted)) keys.add(extracted);
+  const rt = item.replyTarget;
+  if (rt) {
+    const address = (addressOf(rt.replyTo ?? '') || addressOf(rt.from)).trim();
+    const domain = domainOfAddress(address).replace(/\.$/, '');
+    if (domain && !ownDomainList.includes(domain)) keys.add(isFreeMailDomain(domain) ? `addr:${address}` : domain);
+  }
+  return keys;
+}
+
+// 案件と要員が同じ営業元から届いたか（isSameAgent に加え、ヘッダの返信先でも判定する。本文の営業元メールは
+// 空・別の担当者・親会社のアドレスのことがあり、それだけでは同じ取引先の要員を同じ取引先の案件に紹介してしまうため）。
+// どちらかの値が相手のどちらかの値と一致すれば同じ営業元とみなす
+export function isSameAgentPair(
+  project: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } },
+  engineer: { agentEmail: string; replyTarget?: { from: string; replyTo?: string } },
+  ownDomainList: string[] = ownDomains(),
+): boolean {
+  if (isSameAgent(project.agentEmail, engineer.agentEmail, ownDomainList)) return true;
+  const own = ownDomainList.map((d) => d.toLowerCase());
+  const engineerKeys = agentKeys(engineer, own);
+  return [...agentKeys(project, own)].some((k) => engineerKeys.has(k));
+}
+
 type PairEvaluation = { pair: MatchPair; staleDemoted: boolean } | { excluded: ExclusionReason };
 
 function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomainList: string[]): PairEvaluation {
@@ -360,7 +389,7 @@ function evaluatePair(project: Project, engineer: Engineer, now: Date, ownDomain
   const notes: string[] = [];
 
   // 1. 同じ営業元の案件と要員は組まない
-  if (isSameAgent(project.agentEmail, engineer.agentEmail, ownDomainList)) return { excluded: 'sameAgent' };
+  if (isSameAgentPair(project, engineer, ownDomainList)) return { excluded: 'sameAgent' };
 
   // 2. スキル一致（必須スキルの被覆率・同義辞書・含意考慮）。許容範囲の下限未満は除外。
   // 下限〜強マッチ閾値未満は「参考提案(tentative)」バンド、強マッチ閾値以上は「強マッチ(strong)」。

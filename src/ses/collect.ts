@@ -4,7 +4,7 @@
 // 1回に抽出する件数には上限を設ける。次回の実行までに収集の窓を外れるメールを先に、残りは新しい順に選び、
 // 本文は選んだメールだけ取得する（超過分は次回以降。窓を外れて処理できなくなる分は異常終了として知らせる）。
 import { collectMail, collectMailReady } from './mail/index.js';
-import { splitOwnMails } from './mail/ownMail.js';
+import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from './mail/ownMail.js';
 import { loadFixtureMails } from './fixtures/mails.js';
 import { isDemo, requireLive, maxMailsPerRun, collectDays } from './config.js';
 import { loadProcessedMailIds } from './store.js';
@@ -38,11 +38,15 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
   const fetched = await collectMail((id) => processed.has(id), { limit, now });
   const unprocessed = fetched.mails.filter((m) => !processed.has(m.id));
 
-  const own = splitOwnMails(unprocessed);
+  // 取り込み済み（処理済み）のメールへの社内からの返信を References で見分ける（Xserver 経路のIDは Message-ID から作るため）
+  const own = splitOwnMails(unprocessed, currentOwnMailPolicy(), (mid) => {
+    const id = messageIdMailId(mid);
+    return id !== '' && processed.has(id);
+  });
   const excludedTotal = own.excluded.length;
   if (excludedTotal > 0) {
     console.log(
-      `SES収集: 自分たちのメール${excludedTotal}件を除外（送信元が本バッチ${own.counts.self}件・サマリ/修復レポート${own.counts.report}件・自社ドメイン${own.counts.ownDomain}件）`,
+      `SES収集: 自分たちのメール${excludedTotal}件を除外（送信元が本バッチ${own.counts.self}件・サマリ/修復レポート${own.counts.report}件・自社ドメイン${own.counts.ownDomain}件・社内からの返信${own.counts.ownReply}件）`,
     );
   }
 

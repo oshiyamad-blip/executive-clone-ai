@@ -568,7 +568,9 @@ async function reviewFindingChecks(project: Project): Promise<void> {
       ownMailReason('taro@example.co.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', { ...policy, collectOwnDomain: true }) === 'report' &&
       ownMailReason('x@partner.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', policy) === null &&
       ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', policy) === 'ownDomain' &&
-      ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', { ...policy, collectOwnDomain: true }) === null &&
+      // 自社ドメインも収集する運用でも、社内の人の返信（バッチの下書きを送った控え）は取り込まない。転送・新規の共有は取り込む
+      ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', { ...policy, collectOwnDomain: true }) === 'ownReply' &&
+      ownMailReason('taro@example.co.jp', 'Fwd: 【案件】Java', { ...policy, collectOwnDomain: true }) === null &&
       ownMailReason('partner@agent.jp', '【案件】Java', policy) === null,
   );
 

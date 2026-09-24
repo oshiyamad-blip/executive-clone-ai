@@ -12,6 +12,7 @@ import { addressOf, parseAddressList, currentOwnMailPolicy, isFreeMailDomain } f
 import { isDemo, matchModel, demoDataDir, allowedSenders } from './config.js';
 import { fmtMan } from './pricing.js';
 import { writeDemoArtifact } from './store.js';
+import { injectionLedgerTrusted } from '../database/index.js';
 import { redactable, safeErr, logId } from './redact.js';
 import { recordHealEvent, recordStat } from './heal/events.js';
 import { hasKnownInitials, toInitials, UNKNOWN_INITIALS } from './pii.js';
@@ -282,6 +283,14 @@ export async function createDrafts(
   projects: Project[],
   engineers: Engineer[],
 ): Promise<MatchResult[]> {
+  // 指示混入疑いの印の控えを信用できない実行（控えを読めない・行が消された・作り直された）では下書きを作らず、
+  // 「文面を用意できませんでした」にして控えの直った後の実行で作り直す（印を外された案件・要員の下書きを作らない）
+  if (!isDemo() && !(await injectionLedgerTrusted())) {
+    const eligible = (m: MatchResult) => !m.needsReview && (m.category === 'confirmed' || m.category === 'negotiable');
+    const held = matches.filter(eligible).length;
+    if (held > 0) console.warn(`SES下書き: 指示混入疑いの控えを信用できないため、成立候補・交渉提案${held}件の下書きを次回以降に回します`);
+    return matches.map((m) => (eligible(m) ? { ...m, draftFailed: true } : m));
+  }
   const projectMap = new Map(projects.map((p) => [p.id, p]));
   const engineerMap = new Map(engineers.map((e) => [e.id, e]));
 

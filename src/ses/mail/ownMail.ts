@@ -3,8 +3,9 @@
 // Cc に共有メーリスを入れたりすると、次回の収集でそれを「案件・要員のメール」として取り込み直してしまう。
 // 収集時に「このバッチ自身の送信元」「サマリ・修復レポートの件名」「自社ドメイン（SES_OWN_DOMAINS）」からの
 // メールを除く。除外件数だけをログに出す（件名・アドレスは出さない）。
+import { createHash } from 'crypto';
 import addressparser from 'nodemailer/lib/addressparser/index.js';
-import { mailProvider, xserverSharedUser, sesTargetGmail, ownDomains, collectOwnDomain } from '../config.js';
+import { mailProvider, xserverSharedUser, sesTargetGmail, ownDomains, collectOwnDomain, allowedSenders } from '../config.js';
 import type { SesRawMail } from '../../types/index.js';
 
 // バッチが送るメールの件名（サマリ・修復レポート）。収集時の除外判定と送信側で同じ定数を使う
@@ -18,12 +19,24 @@ function isOwnReportSubject(base: string): boolean {
   return OWN_SUBJECTS.some((x) => base === x || (base.startsWith(x) && /^\s*\(\d{1,2}:\d{2}\)$/.test(base.slice(x.length))));
 }
 
-export type OwnMailReason = 'self' | 'report' | 'ownDomain';
+export type OwnMailReason = 'self' | 'report' | 'ownDomain' | 'ownReply';
 
 export interface OwnMailPolicy {
   selfAddresses: string[]; // このバッチ自身の送信元（小文字）
   ownDomains: string[]; // 自社ドメイン（小文字）
   collectOwnDomain: boolean;
+  internalSenders?: string[]; // 下書きの送信元になる社内の営業（SES_ALLOWED_SENDERS。小文字）
+}
+
+// Message-ID から作る処理済みの記録用のメールID（Xserver 経路）。Message-ID が無ければ ''
+export function messageIdMailId(messageId: string): string {
+  const mid = (messageId ?? '').trim().replace(/^<|>$/g, '').toLowerCase();
+  return mid ? `sesmail_m${createHash('sha256').update(mid).digest('hex').slice(0, 24)}` : '';
+}
+
+// References / In-Reply-To に並んだ Message-ID（<...> ごと）
+export function referencedMessageIds(references: string): string[] {
+  return ((references ?? '').slice(0, ADDRESS_HEADER_MAX_CHARS).match(/<[^<>\s]{1,998}>/g) ?? []).slice(0, 200);
 }
 
 export interface ParsedAddress {
@@ -141,8 +154,28 @@ function baseSubject(subject: string): string {
   }
 }
 
-// 除外すべき理由。収集対象なら null
-export function ownMailReason(from: string, subject: string, policy: OwnMailPolicy): OwnMailReason | null {
+function isReplySubject(subject: string): boolean {
+  return /^(re|返信)\s*[:：]/i.test(subject.normalize('NFKC').trim());
+}
+
+// 社内の人（自社ドメイン・共有メールボックスのドメイン・SES_ALLOWED_SENDERS）からのメールか。
+// 共有メールボックスがフリーメール（SES_TARGET_GMAIL が gmail.com 等）のときは、そのドメインを社内とみなさない
+function isInternalSender(addr: string, domain: string, policy: OwnMailPolicy): boolean {
+  if (!addr) return false;
+  if ((policy.internalSenders ?? []).includes(addr)) return true;
+  if (!domain) return false;
+  const selfDomains = policy.selfAddresses.map(domainOfAddress).filter((d) => d && !isFreeMailDomain(d));
+  return policy.ownDomains.includes(domain) || selfDomains.includes(domain);
+}
+
+// 除外すべき理由。収集対象なら null。
+// isHandledMessageId: 取り込み済みのメールの Message-ID か（References で取り込み済みのメールへの返信を見分ける。分からなければ省略）
+export function ownMailReason(
+  from: string,
+  subject: string,
+  policy: OwnMailPolicy,
+  thread?: { references?: string; isHandledMessageId?: (messageId: string) => boolean },
+): OwnMailReason | null {
   const addr = addressOf(from);
   if (addr && policy.selfAddresses.includes(addr)) return 'self';
   const domain = addr.includes('@') ? addr.slice(addr.lastIndexOf('@') + 1) : '';
@@ -151,6 +184,14 @@ export function ownMailReason(from: string, subject: string, policy: OwnMailPoli
   const ownReportSenders = [...policy.ownDomains, ...policy.selfAddresses.map(domainOfAddress)];
   if (isOwnReportSubject(baseSubject(subject)) && domain && ownReportSenders.includes(domain)) return 'report';
   if (!policy.collectOwnDomain && domain && policy.ownDomains.includes(domain)) return 'ownDomain';
+  // 社内の営業がバッチの下書き（取引先のメールへの全員に返信。Cc に共有メーリスが入る）を送ると、その控えが共有メーリスに届く。
+  // 取り込むと自社の提案単価の要員・案件として取り込み直し、別の取引先へ紹介し直す（送るたびに増える）ため、
+  // 社内の人からの返信（件名が Re: か、取り込み済みのメールを References に含むもの）は取り込まない。転送（Fwd:）・新規の共有は取り込む
+  if (isInternalSender(addr, domain, policy)) {
+    if (isReplySubject(subject)) return 'ownReply';
+    const handled = thread?.isHandledMessageId;
+    if (handled && referencedMessageIds(thread?.references ?? '').some((mid) => handled(mid))) return 'ownReply';
+  }
   return null;
 }
 
@@ -161,6 +202,7 @@ export function currentOwnMailPolicy(): OwnMailPolicy {
     selfAddresses: [self].filter((a) => a.includes('@')).map((a) => a.toLowerCase()),
     ownDomains: ownDomains(),
     collectOwnDomain: collectOwnDomain(),
+    internalSenders: allowedSenders(),
   };
 }
 
@@ -170,12 +212,16 @@ export interface OwnMailSplit {
   counts: Record<OwnMailReason, number>;
 }
 
-export function splitOwnMails(mails: SesRawMail[], policy: OwnMailPolicy = currentOwnMailPolicy()): OwnMailSplit {
-  const counts: Record<OwnMailReason, number> = { self: 0, report: 0, ownDomain: 0 };
+export function splitOwnMails(
+  mails: SesRawMail[],
+  policy: OwnMailPolicy = currentOwnMailPolicy(),
+  isHandledMessageId?: (messageId: string) => boolean,
+): OwnMailSplit {
+  const counts: Record<OwnMailReason, number> = { self: 0, report: 0, ownDomain: 0, ownReply: 0 };
   const kept: SesRawMail[] = [];
   const excluded: SesRawMail[] = [];
   for (const m of mails) {
-    const reason = ownMailReason(m.from, m.subject, policy);
+    const reason = ownMailReason(m.from, m.subject, policy, { references: m.references, isHandledMessageId });
     if (reason) {
       counts[reason] += 1;
       excluded.push(m);

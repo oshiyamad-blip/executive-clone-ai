@@ -26,6 +26,7 @@ import { safeErr, errKind, SafeLogError, logId } from './redact.js';
 import { isPlainEmailAddress } from './settingsFormat.js';
 import {
   sheetsDbConfigured,
+  injectionLedgerTrustedSheets,
   draftRequestTabs,
   draftBinding,
   listDraftRequestRowsSheets,
@@ -419,6 +420,10 @@ export async function materializePendingDrafts(
   if (!sheetsDbConfigured()) return result;
   if (!replyDraftReady()) {
     console.warn('SES下書き依頼: メールの下書き作成設定が未完了のためスキップします（依頼は設定後のバッチで処理されます）');
+    return result;
+  }
+  if (!(await injectionLedgerTrustedSheets())) {
+    console.warn('SES下書き依頼: 指示混入疑いの控えを信用できないため、この実行では依頼を処理しません（依頼は控えの直った後のバッチで処理されます）');
     return result;
   }
   const policy = currentSenderPolicy();

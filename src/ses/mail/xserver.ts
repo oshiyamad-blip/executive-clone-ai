@@ -2,7 +2,6 @@
 // 共有メーリス(sales@)を IMAP で収集し、全員に返信の下書きを下書きフォルダに APPEND、
 // サマリは SMTP で送信する。Google Workspace 不要。
 // 設定不足時の扱い（CIでは異常終了・手元ではスキップ）は呼び出し側（collect.ts / notify.ts）が決める。
-import { createHash } from 'crypto';
 import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import nodemailer from 'nodemailer';
@@ -13,7 +12,7 @@ import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
 import { htmlToPlainText } from './htmlText.js';
-import { formatMailboxes, type MailboxValue } from './ownMail.js';
+import { formatMailboxes, messageIdMailId, type MailboxValue } from './ownMail.js';
 import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
 import {
   xserverImapHost,
@@ -312,9 +311,8 @@ function attachmentKindsOf(node: MessageStructureObject, out: SesAttachmentKind[
 // 振り直されても、同じメールを新着として抽出し直さないため）。無いメールと、以前の形式で記録済みのメールは UID で判定する
 function mailIdsOf(uidValidity: string, uid: number, messageId: string | undefined): string[] {
   const legacy = `sesmail_x${uidValidity}_${uid}`;
-  const mid = (messageId ?? '').trim().replace(/^<|>$/g, '').toLowerCase();
-  if (!mid) return [legacy];
-  return [`sesmail_m${createHash('sha256').update(mid).digest('hex').slice(0, 24)}`, legacy];
+  const id = messageIdMailId(messageId ?? '');
+  return id ? [id, legacy] : [legacy];
 }
 
 // 解釈済みの宛先から表記を組み立て直す（mailparser の .text は表示名の '"' をエスケープしないため使わない。ownMail.formatMailboxes）

@@ -146,7 +146,7 @@ export class FakeSheets {
   readonly calls: FakeCall[] = [];
   readonly validations: Array<{ spreadsheetId: string; sheetId: number; column: number; options: string[] }> = [];
   // タブ全体の保護範囲（addProtectedRange）。editors は編集できるアカウント
-  readonly protections: Array<{ spreadsheetId: string; sheetId: number; editors: string[] }> = [];
+  readonly protections: Array<{ spreadsheetId: string; sheetId: number; editors: string[]; warningOnly?: boolean }> = [];
 
   // タブが保護されているか（タブ全体の保護範囲があるか）
   isProtected(spreadsheetId: string, title: string): boolean {
@@ -199,6 +199,27 @@ export class FakeSheets {
       r.splice(index, 0, i === 0 ? header : undefined);
     });
     t.columnCount += 1;
+  }
+
+  // 人（オーナー）のタブの削除（タブの保護も一緒に消える）
+  deleteTab(spreadsheetId: string, title: string): void {
+    const t = this.tab(spreadsheetId, title);
+    this.book(spreadsheetId).delete(title);
+    for (let i = this.protections.length - 1; i >= 0; i -= 1) {
+      if (this.protections[i].spreadsheetId === spreadsheetId && this.protections[i].sheetId === t.sheetId) this.protections.splice(i, 1);
+    }
+  }
+
+  // 人がタブを保護する（編集者を editors にした保護・警告だけの保護）
+  protectAs(spreadsheetId: string, title: string, editors: string[], warningOnly = false): void {
+    const t = this.tab(spreadsheetId, title);
+    this.protections.push({ spreadsheetId, sheetId: t.sheetId, editors, warningOnly });
+  }
+
+  // バッチが付けた保護の数（タブ単位）
+  protectionCount(spreadsheetId: string, title: string): number {
+    const t = this.book(spreadsheetId).get(title);
+    return t ? this.protections.filter((p) => p.spreadsheetId === spreadsheetId && p.sheetId === t.sheetId).length : 0;
   }
 
   // 人の見出しの変更
@@ -383,7 +404,7 @@ export class FakeSheets {
           },
           protectedRanges: this.protections
             .filter((pr) => pr.spreadsheetId === p.spreadsheetId && pr.sheetId === t.sheetId)
-            .map((pr) => ({ range: { sheetId: pr.sheetId }, editors: { users: pr.editors } })),
+            .map((pr) => ({ range: { sheetId: pr.sheetId }, warningOnly: pr.warningOnly ?? false, editors: { users: pr.editors } })),
         })),
       },
     };
@@ -445,7 +466,7 @@ export class FakeSheets {
         replies.push({});
       } else if (r.addProtectedRange) {
         const pr = r.addProtectedRange.protectedRange!;
-        this.protections.push({ spreadsheetId: id, sheetId: pr.range!.sheetId!, editors: pr.editors?.users ?? [] });
+        this.protections.push({ spreadsheetId: id, sheetId: pr.range!.sheetId!, editors: pr.editors?.users ?? [], warningOnly: pr.warningOnly ?? false });
         replies.push({ addProtectedRange: { protectedRange: pr } });
       } else if (r.setDataValidation) {
         const v = r.setDataValidation;

@@ -6,7 +6,7 @@
 // 認証は既定でサービスアカウント自身（シートをSAのメールアドレスに編集者として共有するだけでよい）。
 // SHEETS_DB_IMPERSONATE 指定時のみDWDでそのユーザーになりすます。
 // 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
-import { createHash, randomUUID } from 'crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { google } from 'googleapis';
 import { sheetsDbAuth, sheetsDbEditorAccount } from '../ses/googleCreds.js';
 import { sheetsDbSpreadsheetId, draftSigningKey } from '../ses/config.js';
@@ -149,6 +149,9 @@ export function resetSheetsCache(): void {
   book.reset();
   injectionFlagKeys = new Set();
   warnedInjectionFlags = false;
+  warnedUnprotectedLedger = false;
+  ledgerChecked = false;
+  ledgerUntrusted = '';
 }
 
 function colIndex(tab: string, name: string): number {
@@ -209,31 +212,132 @@ function withKeptInjection<T extends { id: string; injectionSuspected?: boolean 
 // ===== 指示混入疑いの印の控え =====
 
 let injectionFlagKeys = new Set<string>();
-let warnedInjectionFlags = false;
+let warnedInjectionFlags = false; // 控えを読めない・書けない警告（1回だけ）
+let warnedUnprotectedLedger = false;
+let ledgerChecked = false; // この実行で控えの件数の確認・補充を済ませたか
+let ledgerUntrusted = ''; // この実行では控えを信用できない理由（空なら信用できる）
+
+const INJECTION_LEDGER_STATE_KEY = 'injectionLedger';
 
 function injectionFlagKey(tab: string, id: string): string {
   return `${tab}:${id.trim()}`;
 }
 
-// 控えのタブを読み直す（読めなければ前回までの控えのまま続ける）
+// 控えを信用できないとき: この実行では自動の下書き・担当者の下書き依頼を作らない（指示混入疑いの印を外された案件・要員の
+// 下書きを作らないため）。異常終了として知らせる
+function distrustInjectionLedger(reason: string, severity: 'critical' | 'warn' = 'critical'): void {
+  if (ledgerUntrusted) return;
+  ledgerUntrusted = reason;
+  recordHealEvent(severity, `「${INJECTION_FLAGS_TAB}」タブ（指示混入疑いの印の控え）を信用できません: ${reason}（この実行では下書きを作りません）`);
+}
+
+function ledgerCountSignature(key: string, count: number): string {
+  return key ? createHmac('sha256', key).update(JSON.stringify(['injectionLedger', count])).digest('base64url') : '';
+}
+
+// 控えのタブを読み直す（読めなければ前回までの控えのまま続け、この実行では下書きを作らない）
 async function loadInjectionFlags(): Promise<void> {
   await book.ensureTabs(); // スプレッドシート自体を開けない失敗は呼び出し元へ（原因の分かる例外のまま）
+  let rows: CachedRow[];
   try {
-    const rows = await readRows(INJECTION_FLAGS_TAB);
-    const keys = new Set(injectionFlagKeys);
-    for (const r of rows) {
-      const k = cellStr(r.cells, colIndex(INJECTION_FLAGS_TAB, 'キー'));
-      if (k) keys.add(k);
-    }
-    injectionFlagKeys = keys;
+    rows = await readRows(INJECTION_FLAGS_TAB);
   } catch (err) {
-    if (!warnedInjectionFlags) console.warn(`SheetsDB: 「${INJECTION_FLAGS_TAB}」タブを読めません（列・返信メタの印だけで判断します）: ${safeErr(err)}`);
+    if (!warnedInjectionFlags) console.warn(`SheetsDB: 「${INJECTION_FLAGS_TAB}」タブを読めません: ${safeErr(err)}`);
     warnedInjectionFlags = true;
+    distrustInjectionLedger('タブを読めません（見出し行を元に戻してください）');
+    return;
   }
-  if (!warnedInjectionFlags && book.unprotectedTabs().includes(INJECTION_FLAGS_TAB)) {
-    warnedInjectionFlags = true;
+  const keys = new Set(injectionFlagKeys);
+  const ledgerKeys = new Set<string>();
+  for (const r of rows) {
+    const k = cellStr(r.cells, colIndex(INJECTION_FLAGS_TAB, 'キー'));
+    if (k) {
+      keys.add(k);
+      ledgerKeys.add(k);
+    }
+  }
+  injectionFlagKeys = keys;
+  if (!warnedUnprotectedLedger && book.unprotectedTabs().includes(INJECTION_FLAGS_TAB)) {
+    warnedUnprotectedLedger = true;
     recordHealEvent('warn', `「${INJECTION_FLAGS_TAB}」タブを保護できていません（編集者が指示混入疑いの印を外せます。スプレッドシートのオーナーがタブを保護してください）`);
   }
+  if (ledgerChecked) return;
+  ledgerChecked = true;
+  const recorded = await checkInjectionLedger(ledgerKeys.size);
+  await backfillInjectionFlags(recorded);
+}
+
+// 控えの件数を _状態 の署名付きの件数と比べる（控えの行が消された・タブが作り直された実行では下書きを作らない）。
+// 署名どおりに記録されていた件数（無い・合わなければ null）を返す
+async function checkInjectionLedger(count: number): Promise<number | null> {
+  const key = draftSigningKey();
+  const state = await readStateJson<{ count?: unknown; sig?: unknown }>(INJECTION_LEDGER_STATE_KEY).catch(() => null);
+  // 署名の鍵を後から設定した場合の署名の無い記録は、比べずに書き直す
+  const unsignedLegacy = Boolean(key) && state?.sig === '';
+  const recorded =
+    !unsignedLegacy && typeof state?.count === 'number' && Number.isInteger(state.count) && state.count >= 0 ? state.count : null;
+  if (state && !unsignedLegacy && (recorded === null || (key && state.sig !== ledgerCountSignature(key, recorded)))) {
+    distrustInjectionLedger('_状態タブの控えの件数の記録が書き換えられています');
+  } else if (book.createdTabs().includes(INJECTION_FLAGS_TAB) && (recorded ?? 0) > 0) {
+    distrustInjectionLedger(`控えのあったタブが無くなっていたため作り直しました（${recorded}件の印が失われました）`);
+  } else if (recorded !== null && count < recorded) {
+    // オーナーが印を外すために行を消した場合もここに来る（その実行だけ下書きを見送り、次の実行から今の件数で続ける）
+    distrustInjectionLedger(`控えの行が減っています（${recorded}件 → ${count}件。オーナーが印を外したのでなければ、版の履歴で確かめてください）`, 'warn');
+  }
+  return ledgerUntrusted ? null : recorded;
+}
+
+async function writeInjectionLedgerCount(): Promise<void> {
+  const count = injectionFlagKeys.size;
+  await writeStateJson(INJECTION_LEDGER_STATE_KEY, { count, sig: ledgerCountSignature(draftSigningKey(), count) });
+}
+
+// 案件・要員の行に残る指示混入疑いの印（列・返信メタ）のうち控えに無いものを控えに足す（控えの導入前・控えの書き込みに
+// 失敗した印・作り直した控えを補う）。印を足すだけで外すことはしない
+async function backfillInjectionFlags(recorded: number | null): Promise<void> {
+  const missing: Array<{ tab: string; id: string }> = [];
+  for (const tab of ['案件', '要員']) {
+    let rows: CachedRow[];
+    try {
+      rows = await readRows(tab);
+    } catch {
+      continue; // 読めないタブは読み出しの側で異常終了になる
+    }
+    for (const r of rows) {
+      const id = cellStr(r.cells, colIndex(tab, 'ID'));
+      if (!id || injectionFlagKeys.has(injectionFlagKey(tab, id))) continue;
+      const marked = cellStr(r.cells, colIndex(tab, INJECTION_COLUMN)) !== '' || replyMetaInjection(cellStr(r.cells, colIndex(tab, '返信メタ')));
+      if (marked) missing.push({ tab, id });
+    }
+  }
+  try {
+    for (const tab of ['案件', '要員']) {
+      const ids = missing.filter((m) => m.tab === tab).map((m) => m.id);
+      if (ids.length > 0) await recordInjectionFlags(tab, ids);
+    }
+    if (missing.length > 0) console.log(`SheetsDB: 指示混入疑いの印${missing.length}件を「${INJECTION_FLAGS_TAB}」タブに控えました`);
+    if (recorded !== injectionFlagKeys.size && !(recorded === null && injectionFlagKeys.size === 0)) await writeInjectionLedgerCount();
+  } catch (err) {
+    warnInjectionLedgerWrite(err);
+  }
+}
+
+function warnInjectionLedgerWrite(err: unknown): void {
+  if (!warnedInjectionFlags) {
+    recordHealEvent('warn', `指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした（次の実行で列・返信メタの印から控え直します）: ${safeErr(err)}`);
+  }
+  warnedInjectionFlags = true;
+}
+
+// この実行で指示混入疑いの控えを信用できるか（下書きを作る前に呼ぶ。未設定なら信用できる扱い）
+export async function injectionLedgerTrustedSheets(): Promise<boolean> {
+  if (!configured()) return true;
+  try {
+    await loadInjectionFlags();
+  } catch (err) {
+    distrustInjectionLedger(`スプレッドシートを確かめられません（${safeErr(err)}）`);
+  }
+  return ledgerUntrusted === '';
 }
 
 // 指示混入疑いの印を控えに足す（控えから消すことはしない）
@@ -243,6 +347,7 @@ async function recordInjectionFlags(tab: string, ids: string[]): Promise<void> {
   const at = new Date().toISOString();
   await appendRows(INJECTION_FLAGS_TAB, fresh.map((k) => [k, at]));
   fresh.forEach((k) => injectionFlagKeys.add(k));
+  if (ledgerChecked) await writeInjectionLedgerCount();
 }
 
 // 保存した行のうち指示混入疑いの印のあるものを控えに足す（失敗しても保存は続ける。列・返信メタの印は付いている）
@@ -251,7 +356,7 @@ async function recordSavedInjectionFlags(tab: string, rows: Map<string, Cell[]>)
   try {
     await recordInjectionFlags(tab, ids);
   } catch (err) {
-    console.warn(`SheetsDB: 指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした: ${safeErr(err)}`);
+    warnInjectionLedgerWrite(err);
   }
 }
 
@@ -646,7 +751,7 @@ export async function markItemsInjectionSuspectedSheets(kind: 'project' | 'engin
   try {
     await recordInjectionFlags(tab, unique);
   } catch (err) {
-    console.warn(`SheetsDB: 指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした: ${safeErr(err)}`);
+    warnInjectionLedgerWrite(err);
   }
   const metaById = new Map<string, string>();
   if (draftSigningKey()) {
@@ -1217,13 +1322,14 @@ const APPEND_CHUNK = 500;
 
 // 収集期間を十分過ぎた処理済みメールの記録を削除する（収集の窓の外のメールは二度と取得しないため記録は不要。
 // 追記だけだとスプレッドシートのセル数の上限に近づく）。少ないうちは消さない（毎回の行削除を避ける）。削除した行数を返す
-export async function pruneProcessedMailSheets(before: Date, minRows = 200): Promise<number> {
+// 未来の処理日時（シートの編集者が書いた値）の行も古い行として消す（いつまでも残って再送スキップの元にならないように）
+export async function pruneProcessedMailSheets(before: Date, minRows = 200, now = new Date()): Promise<number> {
   if (!configured()) return 0;
   const tab = '処理済みメール';
   const col = colIndex(tab, '処理日時');
   const isOld = (r: CachedRow) => {
     const t = Date.parse(cellStr(r.cells, col));
-    return Number.isFinite(t) && t < before.getTime();
+    return Number.isFinite(t) && (t < before.getTime() || t > now.getTime() + PROCESSED_AT_SKEW_MS);
   };
   if ((await readRows(tab)).filter(isOld).length < minRows) return 0;
   return book.deleteRowsWhere(tab, isOld); // 消す直前に読み直した行番号で消す
@@ -1355,6 +1461,33 @@ async function migrateMatchedColumn(tab: string): Promise<void> {
   await writeStateJson(key, { state: 'done', at } satisfies MigrationState);
 }
 
+// 処理日時の未来側の許容幅（実行環境の時計のずれ）
+const PROCESSED_AT_SKEW_MS = 10 * 60 * 1000;
+const PROCESSED_SIG_SEP = '~';
+
+// 再送判定の記録（メールID・処理日時・結果・指紋・元メール）の署名（SES_DRAFT_SIGNING_KEY。未設定なら ''）。
+// 処理済みメールタブのセルはシートの編集者が書けるため、写した・書き換えた行を再送スキップ・最終受信日の更新の元にしない
+function processedRowSignature(key: string, mailId: string, at: string, result: string, fingerprint: string, root: string): string {
+  if (!key) return '';
+  return createHmac('sha256', key).update(JSON.stringify(['processedMail', mailId, at, result, fingerprint, root])).digest('base64url').slice(0, 32);
+}
+
+export function signProcessedFingerprint(key: string, mailId: string, at: string, result: string, fingerprint: string, root: string): string {
+  const sig = processedRowSignature(key, mailId, at, result, fingerprint, root);
+  return sig ? `${fingerprint}${PROCESSED_SIG_SEP}${sig}` : fingerprint;
+}
+
+// 署名を確かめた指紋（鍵が無ければそのまま）。確かめられなければ null
+export function verifiedProcessedFingerprint(key: string, mailId: string, at: string, result: string, cell: string, root: string): string | null {
+  if (!key) return cell.includes(PROCESSED_SIG_SEP) ? cell.slice(0, cell.lastIndexOf(PROCESSED_SIG_SEP)) : cell;
+  const i = cell.lastIndexOf(PROCESSED_SIG_SEP);
+  if (i < 0) return null;
+  const fingerprint = cell.slice(0, i);
+  const want = Buffer.from(processedRowSignature(key, mailId, at, result, fingerprint, root));
+  const got = Buffer.from(cell.slice(i + 1));
+  return want.length === got.length && timingSafeEqual(want, got) ? fingerprint : null;
+}
+
 export async function markMailProcessedSheets(
   ids: string[],
   result: ProcessedMailResult,
@@ -1368,28 +1501,51 @@ export async function markMailProcessedSheets(
       '処理済みメール',
       fresh.slice(i, i + APPEND_CHUNK).map((id) => {
         const fp = fingerprints?.get(id);
-        return [id, at, result, fp?.fingerprint ?? '', fp && fp.rootMailId !== id ? fp.rootMailId : ''];
+        const root = fp && fp.rootMailId !== id ? fp.rootMailId : '';
+        return [id, at, result, fp?.fingerprint ? signProcessedFingerprint(draftSigningKey(), id, at, result, fp.fingerprint, root) : '', root];
       }),
     );
   }
 }
 
-// 再送の判定に使う、since 以降に抽出済み・再送スキップにしたメールの指紋（隔離・除外は元にしない）
+// 再送の判定に使う、since 以降に抽出済み・再送スキップにしたメールの指紋（隔離・除外は元にしない）。
+// 未来の処理日時の行（いつまでも再送スキップの元になる）・署名の合わない行（SES_DRAFT_SIGNING_KEY があるとき）は使わない。
+// 元メールは、このタブに「抽出済」として記録されたメールIDのときだけ使う（任意のIDを書いて別の行の最終受信日を更新させない）
 export async function loadFingerprintRowsSheets(
   since: Date,
+  now = new Date(),
 ): Promise<Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }>> {
   if (!configured()) return [];
   const tab = '処理済みメール';
   const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  const rows = await readRows(tab);
+  const extracted = new Set(rows.filter((r) => c(r.cells, '結果') === '抽出済').map((r) => c(r.cells, 'メールID')).filter(Boolean));
+  const key = draftSigningKey();
   const out: Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }> = [];
-  for (const r of await readRows(tab)) {
-    const fingerprint = c(r.cells, '指紋');
+  let rejected = 0;
+  for (const r of rows) {
+    const cell = c(r.cells, '指紋');
     const result = c(r.cells, '結果');
-    const at = new Date(c(r.cells, '処理日時'));
-    if (!fingerprint || (result !== '抽出済' && result !== '再送スキップ')) continue;
+    const rawAt = c(r.cells, '処理日時');
+    const at = new Date(rawAt);
+    if (!cell || (result !== '抽出済' && result !== '再送スキップ')) continue;
     if (Number.isNaN(at.getTime()) || at.getTime() < since.getTime()) continue;
     const mailId = c(r.cells, 'メールID');
-    out.push({ mailId, rootMailId: c(r.cells, '元メール') || mailId, at, fingerprint });
+    const root = c(r.cells, '元メール');
+    const fingerprint = verifiedProcessedFingerprint(key, mailId, rawAt, result, cell, root);
+    const future = at.getTime() > now.getTime() + PROCESSED_AT_SKEW_MS;
+    if (!mailId || fingerprint === null || future) {
+      // 署名の無い行（署名の導入前の記録）は黙って使わない。署名が合わない・未来の日時の行は書き換えとして知らせる
+      if (future || cell.includes(PROCESSED_SIG_SEP)) rejected += 1;
+      continue;
+    }
+    out.push({ mailId, rootMailId: root && extracted.has(root) ? root : mailId, at, fingerprint });
+  }
+  if (rejected > 0) {
+    recordHealEvent(
+      'warn',
+      `「${tab}」タブの${rejected}行は署名が合わないか処理日時が未来のため、再送の判定に使いませんでした（編集・コピーしないでください）`,
+    );
   }
   return out;
 }

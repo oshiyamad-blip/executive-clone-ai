@@ -51,6 +51,18 @@ export const GOOGLE_REQUEST_TIMEOUT_MS = 60_000;
 // 処理されたか分からない通信の失敗（接続断・タイムアウト。gaxios はタイムアウトを TimeoutError/AbortError の code で返す）
 const AMBIGUOUS_NETWORK_CODES = ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNABORTED', 'TimeoutError', 'AbortError'];
 
+// 既存のタブ全体の保護が、バッチの付けた保護と同じ強さか（警告だけでない・ドメイン全員・グループが編集できない・
+// バッチのアカウントが編集者に入っている・それ以外の編集者はスプレッドシートのオーナー（APIが常に編集者として返す）の1人まで）
+export function isBatchProtection(pr: sheets_v4.Schema$ProtectedRange, editor: string): boolean {
+  if (pr.warningOnly) return false;
+  const e = pr.editors;
+  if (!e || e.domainUsersCanEdit || (e.groups ?? []).length > 0) return false;
+  const users = (e.users ?? []).map((u) => u.trim().toLowerCase()).filter(Boolean);
+  const me = editor.trim().toLowerCase();
+  if (me && !users.includes(me)) return false;
+  return users.filter((u) => u !== me).length <= 1;
+}
+
 function statusOf(err: unknown): number {
   const e = err as { status?: unknown; code?: unknown; response?: { status?: unknown } };
   return Number(e.response?.status ?? e.status ?? (typeof e.code === 'number' ? e.code : NaN));
@@ -250,6 +262,7 @@ export class SheetBook {
   // ヘッダー行から定義の列を特定できないタブ（取り違えて別の列に読み書きしないよう、このタブへの読み書きはすべて例外にする）
   private readonly headerConflicts = new Map<string, string>();
   private readonly unprotected = new Set<string>();
+  private readonly created = new Set<string>();
   private readonly layouts = new Map<string, TabLayout>();
   private readonly sheetIds = new Map<string, number>();
   private readonly tabCache = new Map<string, TabCache>();
@@ -335,6 +348,7 @@ export class SheetBook {
     this.layouts.clear();
     this.sheetIds.clear();
     this.warnedDuplicates.clear();
+    this.created.clear();
     this.totalCells = 0;
   }
 
@@ -364,7 +378,8 @@ export class SheetBook {
             spreadsheetId,
             fields:
               'sheets.properties(title,sheetId,gridProperties(rowCount,columnCount)),' +
-              'sheets.protectedRanges(protectedRangeId,range(sheetId,startRowIndex,endRowIndex,startColumnIndex,endColumnIndex),editors)',
+              'sheets.protectedRanges(protectedRangeId,range(sheetId,startRowIndex,endRowIndex,startColumnIndex,endColumnIndex),' +
+              'warningOnly,editors(users,groups,domainUsersCanEdit))',
           }),
         )
       ).data;
@@ -486,26 +501,30 @@ export class SheetBook {
       );
     }
     await this.addDropdowns(created);
+    this.created.clear();
+    created.forEach((t) => this.created.add(t));
     if (created.length > 0) console.log(`${label}: タブを自動生成しました（${created.join(', ')}）`);
     await this.protectTabs(meta);
   }
 
-  // 保護するタブ（protectedTabs）のうち、タブ全体の保護範囲が無いものに保護を付ける。付けられなかったタブは
-  // unprotectedTabs() で分かる（呼び出し側がそのタブの内容を信用しない・警告する）
+  // 保護するタブ（protectedTabs）のうち、バッチの保護（タブ全体・警告だけではない・編集者がバッチのアカウントと
+  // スプレッドシートのオーナーだけ）が無いものに保護を付ける。付けられなかったタブは unprotectedTabs() で分かる
+  // （呼び出し側がそのタブの内容を信用しない・警告する）。編集者が先に同じ名前のタブを作って自分を編集者にした保護・
+  // 警告だけの保護は、バッチの保護とみなさない（その人が控えの行を消せるため）
   private async protectTabs(meta: sheets_v4.Schema$Spreadsheet): Promise<void> {
     const wanted = Object.entries(this.opts.protectedTabs ?? {});
     this.unprotected.clear();
     if (wanted.length === 0) return;
+    const editor = this.opts.protectionEditor?.() ?? '';
     const whole = new Set<number>();
     for (const sh of meta.sheets ?? []) {
       for (const pr of sh.protectedRanges ?? []) {
         const r = pr.range;
         if (r && typeof r.sheetId === 'number' && r.startRowIndex == null && r.endRowIndex == null && r.startColumnIndex == null && r.endColumnIndex == null) {
-          whole.add(r.sheetId);
+          if (isBatchProtection(pr, editor)) whole.add(r.sheetId);
         }
       }
     }
-    const editor = this.opts.protectionEditor?.() ?? '';
     const requests: sheets_v4.Schema$Request[] = [];
     const targets: string[] = [];
     for (const [tab, description] of wanted) {
@@ -535,6 +554,11 @@ export class SheetBook {
       targets.forEach((t) => this.unprotected.add(t));
       console.warn(`${this.opts.label}: 「${targets.join('」「')}」タブを保護できませんでした: ${safeErr(err)}`);
     }
+  }
+
+  // 直近のタブ確認で新しく作った（または見出しの無い空のタブだった）タブ
+  createdTabs(): string[] {
+    return [...this.created];
   }
 
   // 保護するタブのうち、保護を確かめられなかったもの（直近のタブ確認時点）

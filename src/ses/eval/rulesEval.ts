@@ -62,6 +62,7 @@ import {
   primarySelectDetailed,
   comparePairs,
   isSameAgent,
+  isSameAgentPair,
   emailDomain,
   formatPrimaryStats,
   buildHeuristicResult,
@@ -118,7 +119,7 @@ import { deflateRawSync } from 'zlib';
 import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { redactIdsIn } from '../redact.js';
 import { planReplyAddresses } from '../draft.js';
-import { addressOf, ownMailReason, type OwnMailPolicy } from '../mail/ownMail.js';
+import { addressOf, ownMailReason, messageIdMailId, type OwnMailPolicy } from '../mail/ownMail.js';
 import {
   zipInflatesWithin,
   spreadsheetBufferToText,
@@ -146,7 +147,8 @@ import { rejectReason, webStartupProblem, WEB_TOKEN_MIN_CHARS } from '../../web/
 import type { IncomingMessage } from 'http';
 import { withoutResentProjects, withoutResentEngineers, sameReplySender } from '../store.js';
 import { refreshesLastSeen, lastSeenUpdates } from '../resend.js';
-import { parseReceivedAt, matchedColumnNeedsMigration } from '../../database/sheets.js';
+import { parseReceivedAt, matchedColumnNeedsMigration, signProcessedFingerprint, verifiedProcessedFingerprint } from '../../database/sheets.js';
+import { isBatchProtection } from '../../database/sheetBook.js';
 import { duplicateRequestIds, isAmbiguousDraftFailure } from '../pendingDrafts.js';
 import { classifyDelegationProbe, sameServiceAccount } from '../googleCreds.js';
 import { shortcutTargetAllowed } from '../proper/drive.js';
@@ -3384,6 +3386,7 @@ async function main(): Promise<void> {
     await securityAuditRound5Checks();
     securityAuditRound6Checks();
     securityAuditRound8Checks();
+    securityAuditRound9Checks();
   } finally {
     setDemoOverride(null);
   }
@@ -3531,4 +3534,77 @@ function securityAuditRound8Checks(): void {
     else process.env.SES_REVIEW_DATA_DIR = prevDir;
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function securityAuditRound9Checks(): void {
+  section('セキュリティ（第9回）: 社内の人がバッチの下書きを送った控えを取り込み直さない');
+  const policy: OwnMailPolicy = { selfAddresses: ['sales@our.jp'], ownDomains: ['our.jp'], collectOwnDomain: true, internalSenders: ['hanako@group.jp'] };
+  const handledMid = '<orig@partnera.jp>';
+  const handled = (mid: string) => messageIdMailId(mid) === messageIdMailId(handledMid);
+  check(
+    '自社ドメインも収集する運用でも、社内の人の返信（Re:）・取り込み済みのメールを References に含むメールは除外する',
+    ownMailReason('太郎 <taro@our.jp>', 'Re: 【案件】Java開発', policy) === 'ownReply' &&
+      ownMailReason('taro@our.jp', '【ご紹介】Java要員', policy, { references: `<a@x.jp> ${handledMid}`, isHandledMessageId: handled }) === 'ownReply' &&
+      ownMailReason('Hanako <hanako@group.jp>', 'RE: 【要員】K.S.', policy) === 'ownReply',
+  );
+  check(
+    '社内の人の転送・新規の共有、取引先の返信は取り込む',
+    ownMailReason('taro@our.jp', 'Fwd: 【案件】Java開発', policy) === null &&
+      ownMailReason('taro@our.jp', '【案件】Go開発', policy, { references: '<other@x.jp>', isHandledMessageId: handled }) === null &&
+      ownMailReason('田中 <tanaka@partnera.jp>', 'Re: 【案件】Java開発', policy, { references: handledMid, isHandledMessageId: handled }) === null,
+  );
+  const gmailPolicy: OwnMailPolicy = { selfAddresses: ['team.sales@gmail.com'], ownDomains: [], collectOwnDomain: true };
+  check('共有メールボックスがフリーメールでも、同じフリーメールの取引先の返信は社内とみなさない', ownMailReason('p@gmail.com', 'Re: 【案件】', gmailPolicy) === null);
+  check('Message-ID から作るメールIDは <> と大文字小文字によらない', messageIdMailId('<ABC@x.jp>') === messageIdMailId('abc@x.jp') && messageIdMailId('') === '');
+
+  section('セキュリティ（第9回）: 同じ営業元の判定にヘッダの返信先も使う');
+  const rtOf = (from: string, replyTo?: string) => ({ from, replyTo, to: 'sales@our.jp', cc: '', subject: 's', messageId: '<m@x>', references: '' });
+  const own = ['our.jp'];
+  check(
+    '本文の営業元メールが空・別のアドレスでも、ヘッダの返信先が同じ会社なら組まない',
+    isSameAgentPair({ agentEmail: '', replyTarget: rtOf('a@p.jp') }, { agentEmail: 'x@parent.jp', replyTarget: rtOf('B <b@p.jp>') }, own) &&
+      isSameAgentPair({ agentEmail: 'a@p.jp' }, { agentEmail: '', replyTarget: rtOf('b@p.jp') }, own) &&
+      isSameAgentPair({ agentEmail: '', replyTarget: rtOf('me@gmail.com') }, { agentEmail: '', replyTarget: rtOf('me@gmail.com') }, own),
+  );
+  check(
+    '別の会社・同じフリーメールの別人・自社ドメインの共有（本文の営業元が別会社）は組む',
+    !isSameAgentPair({ agentEmail: '', replyTarget: rtOf('a@p.jp') }, { agentEmail: '', replyTarget: rtOf('b@q.jp') }, own) &&
+      !isSameAgentPair({ agentEmail: '', replyTarget: rtOf('a@gmail.com') }, { agentEmail: '', replyTarget: rtOf('b@gmail.com') }, own) &&
+      !isSameAgentPair({ agentEmail: 'a@p.jp', replyTarget: rtOf('taro@our.jp') }, { agentEmail: 'b@q.jp', replyTarget: rtOf('jiro@our.jp') }, own) &&
+      isSameAgentPair({ agentEmail: 'a@p.jp', replyTarget: rtOf('taro@our.jp') }, { agentEmail: '', replyTarget: rtOf('b@p.jp') }, own),
+  );
+  const pairOf = primarySelectDetailed(
+    [project({ agentEmail: '', replyTarget: rtOf('a@alpha.co.jp'), receivedAt: NOW })],
+    [engineer(['Java'], { agentEmail: '', replyTarget: rtOf('b@alpha.co.jp'), receivedAt: NOW })],
+    undefined,
+    { now: NOW },
+  );
+  check('一次選別でもヘッダの返信先で同一営業元として除外する（理由コード sameAgent）', pairOf.pairs.length === 0 && pairOf.stats.reasons.sameAgent === 1);
+
+  section('セキュリティ（第9回）: 控えのタブの保護はバッチの保護だけを認める');
+  check(
+    'バッチのアカウントとオーナーだけが編集できる保護は認め、警告だけ・ドメイン全員・グループ・他の編集者のいる保護は認めない',
+    isBatchProtection({ editors: { users: ['sa@p.iam.gserviceaccount.com', 'owner@our.jp'] } }, 'sa@p.iam.gserviceaccount.com') &&
+      isBatchProtection({ editors: { users: [] } }, '') &&
+      !isBatchProtection({ warningOnly: true }, '') &&
+      !isBatchProtection({ editors: { users: ['sa@p.iam.gserviceaccount.com'], domainUsersCanEdit: true } }, 'sa@p.iam.gserviceaccount.com') &&
+      !isBatchProtection({ editors: { users: ['sa@p.iam.gserviceaccount.com'], groups: ['sales@our.jp'] } }, 'sa@p.iam.gserviceaccount.com') &&
+      !isBatchProtection({ editors: { users: ['mallory@our.jp', 'owner@our.jp'] } }, 'sa@p.iam.gserviceaccount.com') &&
+      !isBatchProtection({ editors: { users: ['sa@p.iam.gserviceaccount.com', 'mallory@our.jp', 'owner@our.jp'] } }, 'sa@p.iam.gserviceaccount.com') &&
+      !isBatchProtection({}, ''),
+  );
+
+  section('セキュリティ（第9回）: 処理済みメールの記録の署名');
+  const key = 'k'.repeat(40);
+  const at = '2026-09-01T00:00:00.000Z';
+  const cell = signProcessedFingerprint(key, 'm1', at, '抽出済', 'v1|a|b|c|0|d|e', '');
+  check(
+    '署名した記録だけを通し、処理日時・元メール・結果・メールIDを変えた行・署名の無い行は通さない',
+    verifiedProcessedFingerprint(key, 'm1', at, '抽出済', cell, '') === 'v1|a|b|c|0|d|e' &&
+      verifiedProcessedFingerprint(key, 'm1', '2099-01-01T00:00:00.000Z', '抽出済', cell, '') === null &&
+      verifiedProcessedFingerprint(key, 'm1', at, '抽出済', cell, 'other') === null &&
+      verifiedProcessedFingerprint(key, 'm2', at, '抽出済', cell, '') === null &&
+      verifiedProcessedFingerprint(key, 'm1', at, '抽出済', 'v1|a|b|c|0|d|e', '') === null,
+  );
+  check('署名の鍵が無ければ記録をそのまま使う', verifiedProcessedFingerprint('', 'm1', at, '抽出済', 'v1|a', '') === 'v1|a' && signProcessedFingerprint('', 'm1', at, '抽出済', 'v1|a', '') === 'v1|a');
 }

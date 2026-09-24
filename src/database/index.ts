@@ -536,6 +536,12 @@ export async function markItemsMatched(kind: 'project' | 'engineer', ids: string
   return 0;
 }
 
+// この実行で指示混入疑いの印の控えを信用できるか（Sheets運用のみ確かめる。信用できなければ下書きを作らない）
+export async function injectionLedgerTrusted(): Promise<boolean> {
+  if (dbProvider() === 'sheets') return sheetsDb.injectionLedgerTrustedSheets();
+  return true;
+}
+
 // 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける（次回以降もAI判定・自動の下書きに回さない）。
 // Notion は列を追加できなければ、印が消えないよう突合の対象外（終了・決定済）にする。付けた件数を返す
 export async function markItemsInjectionSuspected(kind: 'project' | 'engineer', ids: string[]): Promise<number> {

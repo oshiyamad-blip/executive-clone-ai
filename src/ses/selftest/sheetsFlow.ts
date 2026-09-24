@@ -35,6 +35,7 @@ import {
   readStateJson,
   writeStateJson,
   INJECTION_FLAGS_TAB,
+  injectionLedgerTrustedSheets,
 } from '../../database/sheets.js';
 import {
   saveProject,
@@ -66,7 +67,8 @@ import {
 import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
 import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
 import { collectSesMail } from '../collect.js';
-import { markMailProcessed, loadFingerprintRecords, touchLastSeen } from '../store.js';
+import { markMailProcessed, loadFingerprintRecords, touchLastSeen, loadProcessedMailIds } from '../store.js';
+import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from '../mail/ownMail.js';
 import { splitResends, serializeFingerprint } from '../resend.js';
 import { recordFailure, recordSuccess, listQuarantined } from '../heal/quarantine.js';
 import { resetHealEvents, hasFatal } from '../heal/events.js';
@@ -2739,6 +2741,135 @@ async function testGoogleAccessRound6(): Promise<void> {
   }
 }
 
+// ===== セキュリティ監査（第9回）: 指示混入疑いの控えの保護・補充・信用、処理済みメールの記録、社内からの返信 =====
+
+const ROUND9_BOOK = 'fakeRound9Book';
+const ROUND9_HDR_BOOK = 'fakeRound9HeaderBook';
+
+async function testSecurityRound9(): Promise<void> {
+  section('セキュリティ監査（第9回）: 指示混入疑いの控え・処理済みメールの記録・社内からの返信');
+  sheets.createBook(ROUND9_BOOK);
+  const prevBook = process.env.SHEETS_DB_SPREADSHEET_ID;
+  process.env.SHEETS_DB_SPREADSHEET_ID = ROUND9_BOOK;
+  try {
+    await round9LedgerSteps();
+    await round9ProcessedSteps();
+    await round9OwnReplySteps();
+    process.env.SHEETS_DB_SPREADSHEET_ID = ROUND9_HDR_BOOK;
+    await round9HeaderConflictSteps();
+  } finally {
+    process.env.SHEETS_DB_SPREADSHEET_ID = prevBook;
+    newRun();
+  }
+}
+
+async function round9LedgerSteps(): Promise<void> {
+  // 編集者が先に「_指示混入」タブを作り、自分を編集者にした保護・警告だけの保護を付けておく
+  sheets.seedTab(ROUND9_BOOK, INJECTION_FLAGS_TAB, [['キー', '日時']]);
+  sheets.protectAs(ROUND9_BOOK, INJECTION_FLAGS_TAB, [`mallory@${OWN_DOMAIN}`, `owner@${OWN_DOMAIN}`]);
+  sheets.protectAs(ROUND9_BOOK, INJECTION_FLAGS_TAB, [], true);
+  newRun();
+  await checkSheetsTabs(['案件', '要員']);
+  check(
+    '編集者が自分を編集者にした保護・警告だけの保護はバッチの保護とみなさず、バッチの保護を付ける',
+    sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3,
+    String(sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB)),
+  );
+  newRun();
+  await checkSheetsTabs(['案件', '要員']);
+  check('バッチの付けた保護は次の実行でそのまま使う（保護を重ねない）', sheets.protectionCount(ROUND9_BOOK, INJECTION_FLAGS_TAB) === 3);
+
+  // 控えの導入前・控えの書き込みに失敗した印（列だけにある印）を控えに足す
+  const a = project('proj_r9_a', { title: '控えの補充', requiredSkills: ['Java'], agentEmail: 'ichiro@alpha.example.jp', replyTarget: rt('検証一郎', 'ichiro@alpha.example.jp', '【案件】補充', 'r9a') });
+  newRun();
+  await saveProjectsSheets([a]);
+  sheets.setByKey(ROUND9_BOOK, '案件', 'ID', a.id, INJECTION_COLUMN, '要確認');
+  newRun();
+  const trusted = await injectionLedgerTrustedSheets();
+  check(
+    '列に指示混入疑いの印があり控えに無い案件を、次の実行で控えに足す',
+    trusted && sheets.records(ROUND9_BOOK, INJECTION_FLAGS_TAB).some((r) => r['キー'] === `案件:${a.id}`),
+  );
+
+  // 控えのタブを消して（オーナー）印の付く前の返信メタを貼り戻し、列の印を消す → その実行では下書きを作らない
+  const b = project('proj_r9_b', { title: '控えの削除', requiredSkills: ['Java'], agentEmail: 'jiro@beta.example.jp', replyTarget: rt('検証二郎', 'jiro@beta.example.jp', '【案件】削除', 'r9b') });
+  newRun();
+  await saveProjectsSheets([b]);
+  const unflaggedMeta = sheets.record(ROUND9_BOOK, '案件', 'ID', b.id)?.['返信メタ'] ?? '';
+  newRun();
+  await markItemsInjectionSuspectedSheets('project', [b.id]);
+  sheets.deleteTab(ROUND9_BOOK, INJECTION_FLAGS_TAB);
+  sheets.setByKey(ROUND9_BOOK, '案件', 'ID', b.id, '返信メタ', unflaggedMeta);
+  sheets.setByKey(ROUND9_BOOK, '案件', 'ID', b.id, INJECTION_COLUMN, '');
+  newRun();
+  const afterDelete = await injectionLedgerTrustedSheets();
+  check(
+    '控えのタブが消されて作り直した実行は、控えを信用せず下書きを作らない（異常終了として知らせる）',
+    unflaggedMeta !== '' && !afterDelete && hasFatal() && sheets.isProtected(ROUND9_BOOK, INJECTION_FLAGS_TAB),
+  );
+  const draftsBefore = mail.drafts.length;
+  const pending = await materializePendingDrafts();
+  check('控えを信用できない実行では担当者の下書き依頼も処理しない', pending.created === 0 && mail.drafts.length === draftsBefore);
+}
+
+async function round9ProcessedSteps(): Promise<void> {
+  newRun();
+  const first = { ...rawMail('sesmail_r9_1', '検証一郎 <ichiro@alpha.example.jp>', '【要員】定期 検証', 60), body: '要員：K.S.\n単金：60万' };
+  const since = new Date(NOW.getTime() - 14 * DAY_MS);
+  const fp = splitResends([first], [], { since, threshold: 0.9 }).fingerprints.get(first.id)!;
+  const cell = serializeFingerprint(fp.fp);
+  await markMailProcessed([first.id], '抽出済', new Map([[first.id, { fingerprint: cell, rootMailId: first.id }]]));
+  const signedCell = sheets.record(ROUND9_BOOK, '処理済みメール', 'メールID', first.id)?.['指紋'] ?? '';
+  // シートの編集者が行を写して処理日時を未来にする・元メールを別のIDにする・署名の無い行を足す
+  const rows = sheets.rawRows(ROUND9_BOOK, '処理済みメール').length;
+  sheets.insertRowAt(ROUND9_BOOK, '処理済みメール', rows + 1, ['sesmail_r9_future', '2099-01-01T00:00:00.000Z', '抽出済', signedCell, '']);
+  sheets.insertRowAt(ROUND9_BOOK, '処理済みメール', rows + 2, ['sesmail_r9_forged', new Date().toISOString(), '再送スキップ', signedCell, 'sesmail_other']);
+  sheets.insertRowAt(ROUND9_BOOK, '処理済みメール', rows + 3, ['sesmail_r9_unsigned', new Date().toISOString(), '抽出済', cell, '']);
+  newRun();
+  const records = await loadFingerprintRecords(since);
+  check(
+    '処理済みメールの記録は署名の合う行だけを使い、未来の処理日時・任意の元メールの行は再送の判定に使わない',
+    signedCell !== cell && records.length === 1 && records[0].mailId === first.id && records[0].rootMailId === first.id,
+    JSON.stringify(records.map((r) => [r.mailId, r.rootMailId])),
+  );
+  newRun();
+  await pruneProcessedMailSheets(new Date(NOW.getTime() - 67 * DAY_MS), 1);
+  check('未来の処理日時の行は整理で消す', !sheets.record(ROUND9_BOOK, '処理済みメール', 'メールID', 'sesmail_r9_future'));
+}
+
+async function round9OwnReplySteps(): Promise<void> {
+  // 社内の営業がバッチの下書き（取引先のメールへの全員に返信）を送った控えが共有メーリスに届く
+  newRun();
+  const originalMid = '<orig-r9@alpha.example.jp>';
+  await markMailProcessed([messageIdMailId(originalMid)], '抽出済');
+  const processed = await loadProcessedMailIds();
+  const sent = { ...rawMail('sesmail_r9_sent', `太郎 <taro@${OWN_DOMAIN}>`, '【ご紹介】Java要員のご提案', 5), references: originalMid };
+  const fwd = { ...rawMail('sesmail_r9_fwd', `太郎 <taro@${OWN_DOMAIN}>`, 'Fwd: 【案件】Java開発', 5) };
+  const partner = { ...rawMail('sesmail_r9_partner', '検証一郎 <ichiro@alpha.example.jp>', 'Re: 【案件】Java開発', 5), references: originalMid };
+  await withEnv({ SES_COLLECT_OWN_DOMAIN: 'true' }, () => {
+    const split = splitOwnMails([sent, fwd, partner], currentOwnMailPolicy(), (mid) => processed.has(messageIdMailId(mid)));
+    check(
+      '自社ドメインも収集する運用でも、取り込み済みのメールへの社内からの返信は取り込まない（転送・取引先の返信は取り込む）',
+      split.excluded.map((m) => m.id).join() === 'sesmail_r9_sent' && split.counts.ownReply === 1 && split.kept.length === 2,
+      JSON.stringify(split.counts),
+    );
+  });
+}
+
+async function round9HeaderConflictSteps(): Promise<void> {
+  // 見出し行が空で2行目に値のある控えのタブ（読めない）
+  sheets.seedTab(ROUND9_HDR_BOOK, INJECTION_FLAGS_TAB, [[], ['x']]);
+  newRun();
+  let threw = false;
+  try {
+    await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール', '_状態', INJECTION_FLAGS_TAB]);
+  } catch {
+    threw = true;
+  }
+  const trusted = await injectionLedgerTrustedSheets();
+  check('控えのタブを読めないときは実行前の確認で止め、下書きを作らない（異常終了として知らせる）', threw && !trusted && hasFatal());
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -2770,6 +2901,7 @@ async function main(): Promise<void> {
     await testRetentionAndNotify();
     await testSecurityRound5();
     await testGoogleAccessRound6();
+    await testSecurityRound9();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

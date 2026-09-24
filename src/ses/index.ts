@@ -40,6 +40,7 @@ import {
   pruneStalePersonalDataSheets,
   sheetsDbConfigured,
   countUnmatchedBeyondPoolSheets,
+  INJECTION_FLAGS_TAB,
 } from '../database/sheets.js';
 import {
   isDemo,
@@ -306,8 +307,9 @@ async function loadStorePool(): Promise<StorePool | null> {
   const since = new Date(Date.now() - matchLookbackDays() * DAY_MS);
   try {
     if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
-      // _状態（隔離リスト等）も先に確かめる（読めないまま抽出すると、失敗したメールを隔離できずに取りこぼすため）
-      await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール', '_状態']);
+      // _状態（隔離リスト等）も先に確かめる（読めないまま抽出すると、失敗したメールを隔離できずに取りこぼすため）。
+      // 指示混入疑いの控えも（読めないまま続けると、印を外された案件・要員を自動の下書きに回すため）
+      await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール', '_状態', INJECTION_FLAGS_TAB]);
       const cells = sheetsCellCount();
       if (cells > SHEETS_CELL_LIMIT * 0.8) {
         recordHealEvent(
