@@ -118,6 +118,7 @@ import { pickForExtraction, nextRunAt } from '../schedule.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { classifyMailKind, splitByKind, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
+import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
@@ -3567,6 +3568,32 @@ function rateFormatChecks(): void {
   check('抽出の指示: 参画の条件を商流メモに入れる', EXTRACT_SYSTEM.includes('businessFlow（商流メモ）には、参画の条件を'));
 }
 
+// ===== 相場の判定 =====
+
+function marketRateChecks(): void {
+  section('相場の判定');
+  const mk = (id: string, rate: number | null, over: Partial<Project> = {}) =>
+    project({ id, title: `案件${id}`, requiredSkills: ['Java', 'Spring Boot'], rateMin: null, rateMax: rate, remote: 'none', prefecture: '東京都', ...over });
+  const pool = [55, 58, 60, 60, 62, 64, 65, 66, 68, 70].map((r, i) => mk(`p${i}`, r));
+  check('主なスキルは必須の先頭の技術（役割・工程は除く）', primarySkillOf({ requiredSkills: ['PM', 'Java'], preferredSkills: [] }) === 'Java');
+  check('地域: 東京・神奈川は首都圏、フルリモートは別の地域', regionOf({ remote: 'none', prefecture: '神奈川県' }) === '首都圏' && regionOf({ remote: 'full', prefecture: '東京都' }) === 'フルリモート');
+  const high = marketLabelOf(mk('t_high', 80), pool);
+  check('同じ条件の案件より高い単価は「高め」（上位何%・件数・中央値つき）', high?.level === 'high' && /上位\d+%/.test(high.text) && high.text.includes('Java×首都圏') && high.text.includes('10件'), high?.text);
+  check('真ん中の単価は「相場なみ」', marketLabelOf(mk('t_mid', 63), pool)?.level === 'normal');
+  check('低い単価は「低め」', marketLabelOf(mk('t_low', 50), pool)?.level === 'low');
+  const osaka = marketLabelOf(mk('t_osaka', 80, { prefecture: '大阪府' }), pool);
+  check('同じ地域の件数が足りなければスキルだけの条件に広げる', osaka?.level === 'high' && osaka.text.includes('Javaの直近'), osaka?.text);
+  check('どの条件でも件数が足りなければ「参考」', marketLabelOf(mk('t_few', 80), pool.slice(0, 3))?.level === 'insufficient');
+  check('単価の無い案件は判定しない', marketLabelOf(mk('t_none', null), pool) === null);
+  check('自分自身は分布に入れない', marketLabelOf(pool[9], pool)?.text.includes(' 9件') === true && marketLabelOf(pool[9], [...pool, mk('extra', 61)])?.text.includes('10件') === true);
+  resetMarketHighlights();
+  recordMarketHighlights([{ project: mk('t_high', 80), label: high! }]);
+  const mail = marketSummaryLines(true).join('\n');
+  const log = marketSummaryLines(false).join('\n');
+  check('サマリメールには案件名つき、ログには件数だけ', mail.includes('案件t_high') && !log.includes('案件t_high') && log.includes('1件'));
+  resetMarketHighlights();
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3605,6 +3632,7 @@ async function main(): Promise<void> {
     closedNoticeChecks();
     participationChecks();
     rateFormatChecks();
+    marketRateChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

@@ -79,6 +79,9 @@ export const METRICS_TAB = 'メトリクス';
 // 同じ内容の再送を抽出せずにスキップしたとき、元の案件・要員が直近の突合の対象から外れないよう更新する最終受信日
 export const LAST_SEEN_COLUMN = '最終受信日';
 
+// 案件の単価が、直近に届いた同じ条件の案件の中でどの位置か（marketRate.ts。集計だけでLLMは使わない）
+export const MARKET_COLUMN = '相場';
+
 export const METRICS_COLUMNS = [
   '実行日時', 'モード', 'メール数', '抽出件数(案件)', '抽出件数(要員)',
   'null率(単金)', 'null率(都道府県)', 'null率(開始日)', 'null率(希望単金)', '必須スキル空率', '未知スキル語数',
@@ -92,7 +95,7 @@ const TABS: Record<string, string[]> = {
   案件: [
     'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
     '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
-    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN,
+    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN,
   ],
   要員: [
     'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
@@ -190,7 +193,7 @@ function rawCell(cells: string[], idx: number): string {
 // 再保存で巻き戻さない。同じメールを再抽出して同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。
 // 既存が空欄なら機械の値を入れる（指示混入疑いを外すのは人だけ）
 function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[] {
-  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN]) {
+  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN]) {
     const col = colIndex(tab, name);
     if (col < 0) continue;
     const prev = existing ? cellStr(existing, col) : '';
@@ -531,6 +534,19 @@ export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date)
   }
   const open = await openProjects();
   return newestFirst(open, limit, receivedSince);
+}
+
+// 相場の集計に使う、since 以降に受信した案件（終了した案件も含む。単価の分布を作るため）
+export async function fetchRecentProjectsSheets(since: Date): Promise<Project[]> {
+  if (!configured()) return [];
+  const rows = await readRows('案件');
+  return newestSince(rows.map((r) => rowToProject(r.cells)), since);
+}
+
+// 案件ID → 相場の文を「相場」列に書く。書いた行数を返す
+export async function writeMarketLabelsSheets(labels: Map<string, string>): Promise<number> {
+  if (!configured() || labels.size === 0) return 0;
+  return book.writeCellsByKey('案件', 'ID', [...labels].map(([key, text]) => ({ key, cells: [[MARKET_COLUMN, text]] })));
 }
 
 async function openProjects(): Promise<Project[]> {

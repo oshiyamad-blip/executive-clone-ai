@@ -25,6 +25,7 @@ import {
   unsafeOutgoingText,
 } from './injection.js';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { marketSummaryLines } from './marketRate.js';
 import { collectBatchMetrics, recordBatchMetrics, formatMetricsLines, metricsRowValues } from './batchMetrics.js';
 import type { MatchResult, Project, Engineer, DraftRef } from '../types/index.js';
 
@@ -58,8 +59,8 @@ export async function notifyResults(
   const metricsLines = formatMetricsLines(metrics);
   // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
   const base = buildSummary(saved, requestedDrafts, carried);
-  let summary = `${base}\n${properSummaryLines(proper, true).join('\n')}`;
-  const consoleSummary = `${base}\n${properSummaryLines(proper, false).join('\n')}`;
+  let summary = `${base}\n${[...properSummaryLines(proper, true), ...marketSummaryLines(true)].join('\n')}`;
+  const consoleSummary = `${base}\n${[...properSummaryLines(proper, false), ...marketSummaryLines(false)].join('\n')}`;
   // 本番のみ、自動検証・修復の診断レポート（コスト概算・異常検知・隔離状況・メトリクス）をサマリ末尾に添える
   if (!isDemo()) {
     summary = `${summary}\n${await buildDiagnosisReport({ lines: metricsLines, values: metricsRowValues(metrics) })}`;

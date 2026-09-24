@@ -40,6 +40,8 @@ import {
   pruneStalePersonalDataSheets,
   sheetsDbConfigured,
   closeProjectsForNoticesSheets,
+  fetchRecentProjectsSheets,
+  writeMarketLabelsSheets,
   countUnmatchedBeyondPoolSheets,
   INJECTION_FLAGS_TAB,
 } from '../database/sheets.js';
@@ -87,6 +89,7 @@ import { redactable, safeErr, logId } from './redact.js';
 import { acquireRunLease, releaseRunLease } from './lease.js';
 import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
 import { splitByKind, isClosedNotice, mentionsTitle } from './mailKind.js';
+import { marketLabelOf, recordMarketHighlights, resetMarketHighlights, MARKET_LOOKBACK_DAYS, type MarketLabel } from './marketRate.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
 
@@ -143,6 +146,7 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
   startHealBatch();
   resetHealEvents();
   resetSkillTokenTally();
+  resetMarketHighlights();
   resetPrimarySelectTally();
   resetJudgeTally();
   resetSheetsCache();
@@ -197,6 +201,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   let stored: StoredItems = { projects: [], engineers: [] };
   if (pool) {
     stored = await collectAndStoreLive(pool);
+    await updateMarketLabels(stored.projects);
     if (opts.collectOnly) {
       // サマリは送らないが、抽出の不明率等は「メトリクス」タブに残す
       await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
@@ -559,6 +564,22 @@ async function collectAndParse(): Promise<{
     skippedEngineerMailIds: kinds.skippedEngineerMailIds,
     closedNoticeMailIds: closedNotices.map((m) => m.id),
   };
+}
+
+// 今回保存した案件の相場（直近90日の同じ条件の案件の中での単価の位置）を「相場」列に書き、高めの案件をサマリに載せる。
+// 集計だけでLLMは使わない。Sheets運用のみ。失敗しても続行する
+async function updateMarketLabels(projects: Project[]): Promise<void> {
+  if (projects.length === 0 || dbProvider() !== 'sheets' || !sheetsDbConfigured() || isDemo()) return;
+  try {
+    const pool = await fetchRecentProjectsSheets(new Date(Date.now() - MARKET_LOOKBACK_DAYS * DAY_MS));
+    const labeled = projects.map((p) => ({ project: p, label: marketLabelOf(p, pool) })).filter((x): x is { project: Project; label: MarketLabel } => x.label !== null);
+    await writeMarketLabelsSheets(new Map(labeled.map((x) => [x.project.id, x.label.text])));
+    recordMarketHighlights(labeled);
+    const high = labeled.filter((x) => x.label.level === 'high').length;
+    console.log(`SES相場: 案件${labeled.length}件の相場を記録（高め${high}件）`);
+  } catch (err) {
+    console.warn(`SES相場: 相場を記録できません: ${safeErr(err)}`);
+  }
 }
 
 // 募集終了の連絡に合わせて募集中の案件を閉じる（Sheets運用のみ。失敗しても続行し、次の回の連絡で閉じ直せる）

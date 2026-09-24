@@ -27,6 +27,7 @@ import {
   JUDGE_COLUMN,
   INJECTION_COLUMN,
   LAST_SEEN_COLUMN,
+  MARKET_COLUMN,
   METRICS_TAB,
   METRICS_COLUMNS,
   RETIRED_PROPER_VERDICT,
@@ -386,7 +387,7 @@ const OLD_PROJECT_HEADER = [
   '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
   '元メールID', '返信メタ', '受信日', 'ステータス',
 ];
-const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN];
+const PROJECT_HEADER = [...OLD_PROJECT_HEADER, MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN];
 const ENGINEER_HEADER = [
   'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
   '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス',
@@ -1535,7 +1536,7 @@ async function testHeaderByName(): Promise<void> {
     const savedRow = sheets.record(CONFLICT_BOOK, '案件', 'ID', p1.id);
     check(
       '途中にメモ列のある案件タブにも、定義の列へ正しく保存する（増えた列は右端に追記）',
-      header.slice(-3).join(',') === `${MATCHED_COLUMN},${INJECTION_COLUMN},${LAST_SEEN_COLUMN}` && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
+      header.slice(-4).join(',') === `${MATCHED_COLUMN},${INJECTION_COLUMN},${LAST_SEEN_COLUMN},${MARKET_COLUMN}` && savedRow?.['案件名'] === p1.title && savedRow?.['単金上限'] === '75' && savedRow?.['社内メモ'] === '',
       header.join(','),
     );
     const read = await fetchOpenProjects(10);
