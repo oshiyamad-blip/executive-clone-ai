@@ -115,6 +115,7 @@ import {
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt } from '../schedule.js';
+import { shouldSendSummary } from '../notify.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { classifyMailKind, splitByKind, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
@@ -3479,9 +3480,9 @@ function manualEngineerChecks(): void {
 function hourlyScheduleChecks(): void {
   section('毎時の実行・抽出の枠');
   const jst = (s: string) => new Date(`${s}+09:00`);
-  check('平日の9:30の次の回は10:00', nextRunAt(jst('2026-09-24T09:30:00').getTime()) === jst('2026-09-24T10:00:00').getTime());
-  check('平日の19:10の次の回は翌平日の9:00', nextRunAt(jst('2026-09-24T19:10:00').getTime()) === jst('2026-09-25T09:00:00').getTime());
-  check('金曜19:10の次の回は月曜9:00', nextRunAt(jst('2026-09-25T19:10:00').getTime()) === jst('2026-09-28T09:00:00').getTime());
+  check('平日の8:30の次の回は10:00（10〜19時の毎時）', nextRunAt(jst('2026-09-24T08:30:00').getTime()) === jst('2026-09-24T10:00:00').getTime());
+  check('平日の19:10の次の回は翌平日の10:00', nextRunAt(jst('2026-09-24T19:10:00').getTime()) === jst('2026-09-25T10:00:00').getTime());
+  check('金曜19:10の次の回は月曜10:00', nextRunAt(jst('2026-09-25T19:10:00').getTime()) === jst('2026-09-28T10:00:00').getTime());
   const now = jst('2026-09-24T10:00:00');
   const at = (h: number) => ({ id: `m${h}`, receivedAt: new Date(now.getTime() - h * 3600_000) });
   const items = [at(1), at(2), at(3), at(167), at(166), at(165), at(164), at(5)]; // 16x時間前 = 7日の窓の端
@@ -3594,6 +3595,24 @@ function marketRateChecks(): void {
   resetMarketHighlights();
 }
 
+// ===== サマリメールを送る回 =====
+
+function summarySendChecks(): void {
+  section('サマリメールを送る回（新しい候補がある回だけ）');
+  setDemoOverride(false);
+  try {
+    const m = (category: MatchResult['category']) => ({ category }) as MatchResult;
+    const proper = (added: number) => ({ added }) as unknown as Parameters<typeof shouldSendSummary>[1];
+    check('新しい候補が無い回は送らない', !shouldSendSummary([], proper(0), []));
+    check('不適合・判定待ちだけの回も送らない', !shouldSendSummary([m('rejected'), m('deferred')], null, []));
+    check('成立・交渉・参考・要確認のどれかがあれば送る', shouldSendSummary([m('tentative')], null, []) && shouldSendSummary([m('review')], null, []));
+    check('初めて見つかったプロパー候補があれば送る', shouldSendSummary([], proper(1), []));
+    check('前回知らせ損ねた分があれば送る', shouldSendSummary([], null, [{} as never]));
+  } finally {
+    setDemoOverride(true);
+  }
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3633,6 +3652,7 @@ async function main(): Promise<void> {
     participationChecks();
     rateFormatChecks();
     marketRateChecks();
+    summarySendChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

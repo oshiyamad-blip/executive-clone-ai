@@ -1190,6 +1190,14 @@ async function migrateLegacyProperIds(): Promise<void> {
 // 候補を ID で upsert する。人の列（ステータス・担当者メール・案件側下書き状態）は保持し、
 // 内容が変わらない行は書き込まない（毎回の実行で候補数ぶんのAPI呼び出しをしないため）。新規行はまとめて追記。
 // 保存（追記・更新）した行数を返す
+// まだ「プロパー候補」タブに無い（今回初めて見つかった）候補のID
+export async function newProperCandidateIdsSheets(ids: string[]): Promise<Set<string>> {
+  if (!configured() || ids.length === 0) return new Set();
+  const tab = PROPER_CANDIDATE_TAB;
+  const known = new Set((await readRows(tab)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))));
+  return new Set(ids.filter((id) => !known.has(id)));
+}
+
 export async function saveProperCandidatesSheets(candidates: ProperCandidate[]): Promise<number> {
   if (!configured() || candidates.length === 0) return 0;
   const tab = PROPER_CANDIDATE_TAB;

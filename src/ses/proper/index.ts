@@ -12,6 +12,7 @@ import { loadFixtureProperEngineers } from '../fixtures/ownEngineers.js';
 import { fetchOpenProjects } from '../../database/index.js';
 import {
   saveProperCandidatesSheets,
+  newProperCandidateIdsSheets,
   retireProperCandidatesSheets,
   sheetsDbConfigured,
   PROPER_CANDIDATE_TAB,
@@ -27,6 +28,7 @@ export interface ProperRunResult {
   projects: number; // 突合対象の案件数
   candidates: ProperCandidate[];
   saved: number; // 「プロパー候補」タブに追加・更新した行数
+  added: number; // 今回初めて見つかった候補（サマリを送るかの判断に使う）
   retired: number; // 稼働可でなくなった社員の候補として退役させた行数
 }
 
@@ -63,7 +65,7 @@ function runProperDemo(projects: Project[]): ProperRunResult {
   const candidates = buildProperCandidates(engineers, projects);
   writeDemoArtifact('proper-candidates', candidates);
   const result: ProperRunResult = {
-    demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0, retired: 0,
+    demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0, added: candidates.length, retired: 0,
   };
   logCounts('プロパー候補(DEMO・fixture社員)', result);
   return result;
@@ -98,7 +100,9 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
 
   let saved = 0;
   let retired = 0;
+  let added = 0;
   if (sheetsDbConfigured()) {
+    added = (await newProperCandidateIdsSheets(candidates.map((c) => c.id))).size;
     saved = await saveProperCandidatesSheets(candidates);
     // 管理表を読めたとき（未設定で空に見えているのではないとき）だけ、稼働可でなくなった社員の候補を退役させる
     if (properMasterConfigured()) retired = await retireProperCandidatesSheets(new Set(engineers.map((e) => e.id)));
@@ -106,7 +110,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
-  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, retired };
+  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired };
   logCounts('プロパー候補', result);
   return result;
 }

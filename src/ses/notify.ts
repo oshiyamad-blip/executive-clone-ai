@@ -8,10 +8,10 @@ import { saveMatches } from '../database/index.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson, fetchMatchSummariesSheets, type MatchSummaryRow } from '../database/sheets.js';
 import { sendPlainMailViaMail, sendMailReady } from './mail/index.js';
 import { SUMMARY_SUBJECT } from './mail/ownMail.js';
-import { isDemo, sesNotifyTo, notifyRecipients, logRedact, mailProvider, requireLive, dbProvider, draftSigningKey } from './config.js';
+import { isDemo, sesNotifyTo, notifyRecipients, logRedact, mailProvider, requireLive, dbProvider, draftSigningKey, notifyAlways } from './config.js';
 import { writeDemoArtifact } from './store.js';
 import { writeReviewMatches } from './review.js';
-import { buildDiagnosisReport, recordFatal } from './heal/events.js';
+import { buildDiagnosisReport, recordFatal, hasFatal } from './heal/events.js';
 import { redactable, safeErr, logId } from './redact.js';
 import { draftRequestsEnabled, type PendingDraftResult } from './pendingDrafts.js';
 import { properSummaryLines, type ProperRunResult } from './proper/index.js';
@@ -57,6 +57,12 @@ export async function notifyResults(
   const metrics = collectBatchMetrics({ requestedDrafts: requestedDrafts.created });
   await recordBatchMetrics(metrics);
   const metricsLines = formatMetricsLines(metrics);
+  // 毎時の実行のため、新しい候補（今回判定したマッチ・初めて見つかったプロパー候補・前回知らせ損ねた分）が無い回は
+  // サマリを送らない（重大な異常は送る。GitHub の失敗通知とは別に内容を知らせるため）。メトリクスは上で記録済み
+  if (!shouldSendSummary(saved, proper, carried)) {
+    console.log('SES通知: 新しい候補が無いため、今回はサマリメールを送りません');
+    return 'skipped';
+  }
   // プロパー候補の節は、メールには氏名・案件名つき、コンソールには件数だけを載せる
   const base = buildSummary(saved, requestedDrafts, carried);
   let summary = `${base}\n${[...properSummaryLines(proper, true), ...marketSummaryLines(true)].join('\n')}`;
@@ -66,6 +72,16 @@ export async function notifyResults(
     summary = `${summary}\n${await buildDiagnosisReport({ lines: metricsLines, values: metricsRowValues(metrics) })}`;
   }
   return notifySummary(summary, consoleSummary, countLine(saved, proper), metricsLines);
+}
+
+const CANDIDATE_CATEGORIES: ReadonlyArray<MatchResult['category']> = ['confirmed', 'negotiable', 'tentative', 'review'];
+
+// サマリを送るか（SES_NOTIFY_ALWAYS=true なら毎回送る）
+export function shouldSendSummary(saved: MatchResult[], proper: ProperRunResult | null, carried: MatchSummaryRow[]): boolean {
+  if (notifyAlways() || isDemo() || hasFatal()) return true;
+  if (carried.length > 0) return true;
+  if (saved.some((m) => CANDIDATE_CATEGORIES.includes(m.category))) return true;
+  return (proper?.added ?? 0) > 0;
 }
 
 // ===== サマリで知らせ損ねたマッチの持ち越し（Sheets運用の本番のみ） =====

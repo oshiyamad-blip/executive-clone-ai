@@ -1,5 +1,5 @@
 // 定時バッチの実行時刻と、1回の実行の持ち時間。
-// - 次の実行時刻（.github/workflows/ses-batch.yml の cron と同じ平日9:00〜19:00 JST の毎時）から、メールが次回の実行時に
+// - 次の実行時刻（.github/workflows/ses-batch.yml の cron と同じ平日10:00〜19:00 JST の毎時）から、メールが次回の実行時に
 //   収集の窓（SES_COLLECT_DAYS）を外れるか（＝今回が最後の機会か）を決める
 // - 1回の実行で新しい処理を始めてよい期限（SES_RUN_DEADLINE_MINUTES）と、LLM呼び出し1回の待ち時間の上限を管理する
 import { runDeadlineMinutes } from './config.js';
@@ -9,7 +9,7 @@ export const DAY_MS = 24 * HOUR_MS;
 const JST_OFFSET_MS = 9 * HOUR_MS; // 日本時間は夏時間がないため固定オフセットで足りる
 
 // 定時バッチ（.github/workflows/ses-batch.yml）の平日の実行時刻（日本時間）
-export const RUN_HOURS_JST = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+export const RUN_HOURS_JST = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
 // GitHub Actions の定時実行は混雑で遅れることがあるため、次回の実行時刻にこの分の遅れを見込む
 export const RUN_DELAY_MARGIN_MS = 3 * HOUR_MS;

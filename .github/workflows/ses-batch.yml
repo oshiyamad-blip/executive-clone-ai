@@ -26,12 +26,12 @@ name: SESマッチング定時バッチ
 
 on:
   schedule:
-    # 時刻はUTCで書きます。平日（月〜金）の 00:00〜10:00 UTC の毎時 = 日本時間 9:00〜19:00 の毎時（1日11回）。
+    # 時刻はUTCで書きます。平日（月〜金）の 01:00〜10:00 UTC の毎時 = 日本時間 10:00〜19:00 の毎時（1日10回）。
     # 1回あたりの量を小さくし（実メールは平日1日約2,900通）、再送の束ねを効かせ、提案の鮮度を最大1時間遅れに抑えるため。
     # GitHub の混雑状況により数分〜数十分遅れることがあります。祝日も動きます。
     # 定時実行はデフォルトブランチ（main）にあるこのファイルだけが対象です。
     # 時刻を変える場合は src/ses/schedule.ts の RUN_HOURS_JST も合わせてください（再試行・取りこぼし判定に使います）。
-    - cron: '0 0-10 * * 1-5'
+    - cron: '0 1-10 * * 1-5'
   workflow_dispatch:
     inputs:
       mode:
@@ -255,6 +255,7 @@ jobs:
           SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
           # 案件だけモード（既定）。パートナーの要員メールも抽出して仲介まで行うときは Variable SES_TARGET=all
           SES_TARGET: ${{ vars.SES_TARGET || 'projects' }}
+          SES_NOTIFY_ALWAYS: ${{ vars.SES_NOTIFY_ALWAYS }}
           SES_RESEND_WINDOW_DAYS: ${{ vars.SES_RESEND_WINDOW_DAYS }}
           SES_RESEND_SIMILARITY: ${{ vars.SES_RESEND_SIMILARITY }}
           SES_MATCH_POOL_LIMIT: ${{ vars.SES_MATCH_POOL_LIMIT }}
