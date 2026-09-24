@@ -28,7 +28,7 @@ import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyT
 
 export { validIsoDate } from './dates.js';
 
-const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリングサービス）業界の営業メールを解析する専門家です。
+export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリングサービス）業界の営業メールを解析する専門家です。
 メール本文・添付ファイルのテキスト・PDFから、「案件情報」と「要員（エンジニア）情報」を抽出してください。
 
 入力の扱い（最優先）:
@@ -41,9 +41,13 @@ const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリング�
 抽出のルール:
 - 1通のメールに複数の案件・複数の要員が記載されている場合は、それぞれを配列の別要素として抽出してください
 - 単金（金額）は原文の単位をそのまま rateUnit / desiredRateUnit で指定してください
-  （万円/月表記は manYenPerMonth、円/時給表記は yenPerHour、円/月表記は yenPerMonth）
-- 「スキル見合い」「応相談」など金額が読み取れない場合は rateMin/rateMax/desiredRate を null にし、
+  （万円/月表記は manYenPerMonth、円/時給表記は yenPerHour、円/月表記は yenPerMonth、「700千円」のような千円表記は thousandYenPerMonth）
+- 金額の書かれ方と値: 「〜85万円」「〜75万円程度」「100万円（超える場合は要相談）」は rateMax のみ。「60万円」のような単一の金額は
+  rateMin と rateMax の両方に同じ値。「80〜85万」は rateMin 80・rateMax 85。
+  「90万円（スキル見合い）」「〜100万円 ※スキル見合い」のように金額と「スキル見合い」が並ぶときは、その金額を使ってください
+- 金額がまったく書かれず「スキル見合い」「応相談」だけの場合は rateMin/rateMax/desiredRate を null にし、
   rateUnit/desiredRateUnit は manYenPerMonth を設定してください（nullなら単位は無視されます）
+- 役割ごとに単価が違う案件（「リーダー：〜70万円／メンバー：〜65万円」など）は、役割ごとに別の案件として出力してください
 - 開始時期・稼働可能日から具体的な日付が読み取れる場合はISO 8601形式（YYYY-MM-DD）で
   startDateIso / availableFromIso に設定し、読み取れなければ null にしてください。
   日付は <untrusted_mail> の前にある「受信日」を基準に解釈します:
@@ -97,7 +101,7 @@ const CIRCUIT_BREAK_CONSECUTIVE = 5;
 const RATE_MIN_MAN = 5;
 const RATE_MAX_MAN = 300;
 
-const RATE_UNIT_ENUM = ['manYenPerMonth', 'yenPerHour', 'yenPerMonth'] as const;
+const RATE_UNIT_ENUM = ['manYenPerMonth', 'yenPerHour', 'yenPerMonth', 'thousandYenPerMonth'] as const;
 const REMOTE_ENUM = ['full', 'partial', 'none', 'unknown'] as const;
 
 const PROJECT_ITEM_SCHEMA = {

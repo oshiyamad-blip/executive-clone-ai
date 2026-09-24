@@ -102,6 +102,7 @@ import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
   verifiedRate,
+  EXTRACT_SYSTEM,
   sourceNumbers,
   orderedRates,
   numberInRange,
@@ -3553,6 +3554,19 @@ function participationChecks(): void {
   check('「貴社1社先まで」ならパートナーの要員も組む', !violatesHops(flowConstraints('貴社1社先まで'), 'partner'));
 }
 
+// ===== 単価の書き方（実メールの書式を合成で再現） =====
+
+function rateFormatChecks(): void {
+  section('単価の書き方');
+  check('「700千円まで」は千円表記として70万円', verifiedRate(700, 'thousandYenPerMonth', sourceNumbers('9)単金：700千円まで')) === 70);
+  check('千円表記でも原文に無い数字は通さない', verifiedRate(800, 'thousandYenPerMonth', sourceNumbers('9)単金：700千円まで')) === null);
+  check('「万」の脱字（〜100円/月）は既存の補正で100万円', verifiedRate(100, 'yenPerMonth', sourceNumbers('単金：～100円/月')) === 100);
+  check('抽出の指示: 金額と「スキル見合い」が並ぶときは金額を使う', EXTRACT_SYSTEM.includes('金額と「スキル見合い」が並ぶときは、その金額を使って'));
+  check('抽出の指示: 単一の金額は下限・上限の両方に入れる', EXTRACT_SYSTEM.includes('単一の金額は\n  rateMin と rateMax の両方'));
+  check('抽出の指示: 役割ごとの単価は別の案件に分ける', EXTRACT_SYSTEM.includes('役割ごとに別の案件として出力'));
+  check('抽出の指示: 参画の条件を商流メモに入れる', EXTRACT_SYSTEM.includes('businessFlow（商流メモ）には、参画の条件を'));
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3590,6 +3604,7 @@ async function main(): Promise<void> {
     mailBodyChecks();
     closedNoticeChecks();
     participationChecks();
+    rateFormatChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();
