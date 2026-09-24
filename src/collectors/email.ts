@@ -3,7 +3,7 @@ import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
 import { attachmentsWithinLimits, capMailBody, MAIL_MAX_BYTES } from '../ses/mail/attachmentLimits.js';
 import { htmlToPlainText } from '../ses/mail/htmlText.js';
-import { dmarcPassDomain } from '../ses/mail/authResults.js';
+import { checkAuthResults, authResultsWarning } from '../ses/mail/authResults.js';
 import { normalizeAddressHeader } from '../ses/mail/ownMail.js';
 import { recordHealEvent } from '../ses/heal/events.js';
 import { maxMailMbPerRun } from '../ses/config.js';
@@ -121,6 +121,7 @@ export async function collectSesRawMail(
   const mails: SesRawMail[] = [];
   let skipped = 0;
   let failed = 0;
+  let trustedAuthResults = 0;
 
   // 一覧（IDだけ・新しい順）を先に全部読み、処理済みを除く（本文は上限まで選んだものだけ取得する）
   const unprocessed: string[] = [];
@@ -180,7 +181,9 @@ export async function collectSesRawMail(
       }
       budgetLeft -= size;
       const msg = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
-      mails.push(await buildSesRawMail(gmail, msg.data));
+      const built = await buildSesRawMail(gmail, msg.data);
+      if (built.trustedAuthResults) trustedAuthResults++;
+      mails.push(built.mail);
     } catch (err) {
       failed += 1;
       console.error(`SESメール収集: メッセージ取得に失敗 (${id}): ${safeErr(err)}`);
@@ -193,6 +196,13 @@ export async function collectSesRawMail(
   if (overBudget > 0) {
     recordHealEvent('warn', `SESメール収集: 1回の取得量の上限（SES_MAX_MAIL_MB_PER_RUN=${maxMailMbPerRun()}MB）を超えるため、${overBudget}件を次回以降に回します`);
   }
+  // Gmail が一番上に自分の結果を付けているかを毎回確かめる（付いていない経路のメールの送り主は認証されていない扱い）
+  const authWarning = authResultsWarning('SESメール収集', `authserv-id（${GMAIL_AUTHSERV_IDS.join(',')}）`, {
+    mails: mails.length,
+    trusted: trustedAuthResults,
+    receivedByUsWithoutResult: 0,
+  });
+  if (authWarning) recordHealEvent('warn', authWarning);
   if (skipped > 0) console.log(`SESメール収集: ${skipped}件は処理済みのため取得をスキップ`);
   if (failed > 0) console.warn(`SESメール収集: ${failed}件は取得に失敗しました（次回の実行で再取得します）`);
   console.log(`SESメール収集: ${mails.length}件を収集${deferred.length > 0 ? `（上限超過で次回以降に回した未処理 ${deferred.length}件）` : ''}`);
@@ -203,9 +213,13 @@ function sesMailId(gmailMessageId: string): string {
   return `sesmail_${gmailMessageId}`;
 }
 
-const GMAIL_AUTHSERV_IDS: readonly string[] = ['mx.google.com'];
+// Gmail が受信時に一番上に付ける Authentication-Results の authserv-id（Xserver の XSERVER_AUTHSERV_ID とは別に持つ）
+export const GMAIL_AUTHSERV_IDS: readonly string[] = ['mx.google.com'];
 
-async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Message): Promise<SesRawMail> {
+async function buildSesRawMail(
+  gmail: gmail_v1.Gmail,
+  msg: gmail_v1.Schema$Message,
+): Promise<{ mail: SesRawMail; trustedAuthResults: boolean }> {
   const headers = msg.payload?.headers ?? [];
   const header = (name: string) =>
     headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? '';
@@ -220,9 +234,15 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
   const attachments = await collectAttachments(gmail, msg.id ?? '', msg.payload);
   // 受信サーバー（Gmail）が付けた一番上の Authentication-Results だけを読む（下にあるものは送り主が書ける）
   // authserv-id が mx.google.com のものだけを信じる（Gmail は受信時に必ず自分の結果を一番上に付ける）
-  const authDomain = dmarcPassDomain(header('Authentication-Results'), GMAIL_AUTHSERV_IDS);
+  // Gmail の一番上の Received は内部の名前（IPv6 等）のため、Received の並びは確かめない（Gmail は偽の結果を取り除く）
+  const auth = checkAuthResults(
+    headers.map((h) => ({ key: h.name ?? '', value: h.value ?? '' })),
+    GMAIL_AUTHSERV_IDS,
+    { requireReceivedBy: false },
+  );
+  const authDomain = auth.authDomain;
 
-  return {
+  const mail: SesRawMail = {
     id: sesMailId(msg.id ?? ''),
     from,
     to,
@@ -238,6 +258,7 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
     sheetLinks: extractSheetLinks(body),
     ...(authDomain ? { authDomain } : {}),
   };
+  return { mail, trustedAuthResults: auth.trusted };
 }
 
 type BodyPart = {

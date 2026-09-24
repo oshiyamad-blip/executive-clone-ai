@@ -463,7 +463,16 @@ function checkMail(): void {
         'XSERVER_AUTHSERV_ID が未設定です — 受信サーバーが付けた送信ドメイン認証（DMARC）の結果を使いません（再送の識別はアドレス＋返信先だけ・' +
           '再送で最終受信日を延ばしません）。受信したメールの一番上の Authentication-Results の最初の名前を確かめて設定してください',
       );
-    } else ok('XSERVER_AUTHSERV_ID: 設定済み（一致する一番上の Authentication-Results だけを信じます）');
+    } else if (xserverAuthservIds().some((id) => id.includes('*'))) {
+      bad('XSERVER_AUTHSERV_ID にワイルドカード（*）は使えません（同じドメインの別のサーバー名は誰でも名乗れるため）。受信サーバーの名前を1つだけ設定してください');
+    } else if (xserverAuthservIds().length > 1) {
+      bad('XSERVER_AUTHSERV_ID は1つだけ設定してください（受信サーバーの名前。カンマ区切りの複数は受け付けません）');
+    } else {
+      ok('XSERVER_AUTHSERV_ID: 設定済み（一致する一番上の Authentication-Results のうち、受信サーバーの Received より上に他のサーバーの Received が無いものだけを信じます）');
+      if (xserverImapHost() && xserverAuthservIds()[0] !== xserverImapHost().toLowerCase()) {
+        warn('XSERVER_AUTHSERV_ID が XSERVER_IMAP_HOST と違います（通常は同じサーバー名です。受信したメールのヘッダで確かめてください）');
+      }
+    }
     return;
   }
   if (provider === 'gmail') {
@@ -472,6 +481,7 @@ function checkMail(): void {
     checkDedicatedKey(prefix, 'Gmail用のサービスアカウント鍵（DWD）');
     const problem = gmailAuthProblem();
     if (problem) bad(problem);
+    ok('送信ドメイン認証: Gmail（mx.google.com）が一番上に付けた Authentication-Results だけを信じます（一致するメールが無い回はサマリで知らせます）');
     info(
       'SES_GMAIL_SA_KEY_JSON のクライアントIDに、管理コンソールのドメイン全体の委任で gmail.readonly / gmail.compose / gmail.send を登録します。' +
         'この委任は SES のメールボックスだけでなくテナントの全員（役員を含む）のメールボックスに及びます。この鍵はメインの鍵と分け、' +

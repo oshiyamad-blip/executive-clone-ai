@@ -14,7 +14,7 @@ import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
 import { htmlToPlainText } from './htmlText.js';
 import { formatMailboxes, type MailboxValue } from './ownMail.js';
-import { dmarcPassDomain, authservIdOf, authservIdTrusted } from './authResults.js';
+import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -218,6 +218,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   // 実行の期限を過ぎたら残りは次回に回す。解析できないメールは同じ原文を何度解析しても失敗するため「解析不可」で処理済みにする
   let droppedAttachments = 0;
   let trustedAuthResults = 0;
+  let receivedByUsWithoutResult = 0;
   const unparsable: string[] = [];
   for (let i = 0; i < sources.length; i++) {
     const { meta, source } = sources[i];
@@ -230,6 +231,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
       const mail = await parseRawMail(source, meta.id, meta.receivedAt);
       droppedAttachments += mail.droppedAttachments;
       if (mail.trustedAuthResults) trustedAuthResults++;
+      if (mail.receivedByUsWithoutResult) receivedByUsWithoutResult++;
       mails.push(mail.mail);
     } catch (err) {
       unparsable.push(meta.id);
@@ -241,12 +243,9 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
     recordHealEvent('warn', `Xserver収集: 大きすぎる添付${droppedAttachments}件は読み込まずに抽出します`);
   }
   // 受信サーバーが自分の認証結果を付けているかを毎回確かめる（付けていなければ、一番上のヘッダは送り主の書いたものになりうる）
-  if (xserverAuthservIds().length > 0 && mails.length >= 3 && trustedAuthResults === 0) {
-    recordHealEvent(
-      'warn',
-      'Xserver収集: XSERVER_AUTHSERV_ID と一致し dmarc= の結果を含む Authentication-Results が一番上にあるメールがありませんでした' +
-        '（受信したメールのヘッダを確かめ、設定を直してください。一致しないメールの送り主は認証されていない扱いです）',
-    );
+  if (xserverAuthservIds().length > 0) {
+    const warning = authResultsWarning('Xserver収集', 'XSERVER_AUTHSERV_ID', { mails: mails.length, trusted: trustedAuthResults, receivedByUsWithoutResult });
+    if (warning) recordHealEvent('warn', warning);
   }
   if (unparsable.length > 0) {
     recordHealEvent('warn', `Xserver収集: 解析できないメール${unparsable.length}件は「解析不可」として処理済みにします（受信箱で直接確認してください）`);
@@ -325,10 +324,9 @@ function addrText(a: AddressObject | AddressObject[] | undefined): string {
   return formatMailboxes(list.flatMap((x) => (x.value ?? []) as MailboxValue[]));
 }
 
-// 受信サーバーが付けた一番上の Authentication-Results（下にあるものは送り主が書けるため読まない）
-function topAuthResults(p: ParsedMail): string {
-  const line = (p.headerLines ?? []).find((h) => h.key.toLowerCase() === 'authentication-results')?.line ?? '';
-  return line.replace(/^[^:]*:/, '').replace(/\r?\n[ \t]+/g, ' ').trim();
+// ヘッダの並び（上から順。折り返しを戻した値）。送信ドメイン認証の結果の判定に使う（authResults.ts checkAuthResults）
+function headerFields(p: ParsedMail): HeaderField[] {
+  return (p.headerLines ?? []).map((h) => ({ key: h.key, value: h.line.replace(/^[^:]*:/, '').replace(/\r?\n[ \t]+/g, ' ').trim() }));
 }
 
 // text/plain が無ければ HTML を切り詰めてからテキストにする。保持する本文にも上限を設ける
@@ -347,11 +345,18 @@ export async function parseRawMail(
   source: Buffer,
   id: string,
   receivedAt: Date,
-): Promise<{ mail: SesRawMail; droppedAttachments: number; trustedAuthResults: boolean }> {
+): Promise<ParsedRawMail> {
   return toSesRawMail(await simpleParser(source, SIMPLE_PARSER_OPTIONS), id, receivedAt);
 }
 
-function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesRawMail; droppedAttachments: number; trustedAuthResults: boolean } {
+export interface ParsedRawMail {
+  mail: SesRawMail;
+  droppedAttachments: number;
+  trustedAuthResults: boolean;
+  receivedByUsWithoutResult: boolean;
+}
+
+function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): ParsedRawMail {
   // Gmail経路と同じ許可リスト（xlsx/xls/pdf/spreadsheet）で絞り、署名画像やzip等をメモリに抱えない。
   // 抽出・解析で使えない大きさの添付は base64 にしない（attachmentLimits.ts）
   const supported = (p.attachments ?? [])
@@ -364,9 +369,8 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     data: a.content ? a.content.toString('base64') : '',
   }));
   const body = bodyText(p);
-  const topAr = topAuthResults(p);
-  const trusted = xserverAuthservIds();
-  const authDomain = dmarcPassDomain(topAr, trusted);
+  const auth = checkAuthResults(headerFields(p), xserverAuthservIds(), { requireReceivedBy: true });
+  const authDomain = auth.authDomain;
   const mail: SesRawMail = {
     id,
     from: addrText(p.from),
@@ -383,7 +387,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     sheetLinks: extractSheetLinks(body),
     ...(authDomain ? { authDomain } : {}),
   };
-  return { mail, droppedAttachments: dropped, trustedAuthResults: authservIdTrusted(authservIdOf(topAr), trusted) && /\bdmarc\s*=/i.test(topAr) };
+  return { mail, droppedAttachments: dropped, trustedAuthResults: auth.trusted, receivedByUsWithoutResult: auth.receivedByUsWithoutResult };
 }
 
 export function draftReady(): boolean {

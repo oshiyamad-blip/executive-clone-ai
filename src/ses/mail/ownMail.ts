@@ -10,7 +10,13 @@ import type { SesRawMail } from '../../types/index.js';
 // バッチが送るメールの件名（サマリ・修復レポート）。収集時の除外判定と送信側で同じ定数を使う
 export const SUMMARY_SUBJECT = 'SES案件・要員マッチング バッチ実行結果';
 export const REPAIR_REPORT_SUBJECT = 'SES自己修復: 修正パッチ案レポート';
-const OWN_SUBJECT_PREFIXES = ['SES案件・要員マッチング', 'SES自己修復'];
+// 件名だけでは除外しない（「SES案件・要員マッチング会のご案内」のような取引先のメールを落とさない）。
+// サマリ・修復レポートの件名そのもの（サマリは「（HH:MM）」付き）で、送り主が自社（自分の送信元・自社ドメイン）のときだけ除く
+const OWN_SUBJECTS = [SUMMARY_SUBJECT, REPAIR_REPORT_SUBJECT].map((x) => x.normalize('NFKC'));
+
+function isOwnReportSubject(base: string): boolean {
+  return OWN_SUBJECTS.some((x) => base === x || (base.startsWith(x) && /^\s*\(\d{1,2}:\d{2}\)$/.test(base.slice(x.length))));
+}
 
 export type OwnMailReason = 'self' | 'report' | 'ownDomain';
 
@@ -139,10 +145,11 @@ function baseSubject(subject: string): string {
 export function ownMailReason(from: string, subject: string, policy: OwnMailPolicy): OwnMailReason | null {
   const addr = addressOf(from);
   if (addr && policy.selfAddresses.includes(addr)) return 'self';
-  // 転送・返信された形でも、バッチの送ったサマリ・修復レポートは取り込まない
-  const base = baseSubject(subject);
-  if (OWN_SUBJECT_PREFIXES.some((p) => base.startsWith(p))) return 'report';
   const domain = addr.includes('@') ? addr.slice(addr.lastIndexOf('@') + 1) : '';
+  // 転送・返信された形でも、バッチの送ったサマリ・修復レポートは取り込まない（自社の人が転送したものだけ。
+  // 社外の送り主のメールは件名が似ていても取り込む）
+  const ownReportSenders = [...policy.ownDomains, ...policy.selfAddresses.map(domainOfAddress)];
+  if (isOwnReportSubject(baseSubject(subject)) && domain && ownReportSenders.includes(domain)) return 'report';
   if (!policy.collectOwnDomain && domain && policy.ownDomains.includes(domain)) return 'ownDomain';
   return null;
 }

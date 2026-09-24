@@ -150,6 +150,9 @@ async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promi
           error: 'この構成（DB_PROVIDER=sheets 以外）では確認UIから下書きを作りません（別の実行と二重に作らないため。単独の運用なら SES_ALLOW_UNLEASED=true）',
         });
       }
+      if (result.reason === 'revoked') {
+        return json(res, 409, { error: `この組からは下書きを作りません（${result.detail ?? '組・案件・要員の状態が変わりました'}）。内容を確かめてください` });
+      }
       return result.reason === 'already_created'
         ? json(res, 409, { error: 'この側の下書きは作成済み（または作成中）です' })
         : json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
@@ -401,7 +404,8 @@ function renderPage(): string {
         ? ('<a class="made" href="' + esc(ref.url) + '" target="_blank" rel="noopener">作成済みの下書きを開く</a>')
         : ('<span class="made empty">下書き作成済み（' + esc(ref.url) + '）</span>');
     }
-    var btn = '<button data-act="makedraft" data-id="' + esc(m.id) + '" data-side="' + side + '">自分のアドレスで下書き作成</button>';
+    // 見送り・成約の組には作成ボタンを出さない（作成時もサーバー側で確かめる）
+    var btn = (m.status === 'dropped' || m.status === 'closed_won') ? '' : '<button data-act="makedraft" data-id="' + esc(m.id) + '" data-side="' + side + '">自分のアドレスで下書き作成</button>';
     return '<div class="reply"><div class="reply-label">' + label + '</div>' + head + bodyd + '<div class="actions">' + btn + made + '</div></div>';
   }
 

@@ -29,6 +29,7 @@ import {
 import type { SuppressionIndex } from './suppress.js';
 import { createDrafts } from './draft.js';
 import { persistMatches } from './notify.js';
+import { revokeReviewDrafts } from './review.js';
 import { markItemsMatched, closeDeferredMatches, markItemsInjectionSuspected } from '../database/index.js';
 import { recordHealEvent, recordMailEvent, recordFatal } from './heal/events.js';
 import { pastRunDeadline, isLastChance } from './schedule.js';
@@ -135,6 +136,8 @@ function uniqueById<T extends { id: string }>(items: T[]): T[] {
 // 最終判定のAIが指示らしき記載を見つけた案件・要員に印を付ける（次回以降の実行でもAI判定・自動の下書きに回さない）
 export async function persistInjectionFlags(): Promise<void> {
   const flags = takeInjectionFlags();
+  // 確認UIの控えに残る、その案件・要員を含む組の未確定の下書きも取り消す（DBへの記録の成否によらず）
+  revokeReviewDrafts(flags.projects, flags.engineers);
   for (const [kind, ids] of [['project', flags.projects], ['engineer', flags.engineers]] as const) {
     if (ids.length === 0) continue;
     const label = kind === 'project' ? '案件' : '要員';

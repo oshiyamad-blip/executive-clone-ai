@@ -9,12 +9,14 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, copyFileSync } from 'fs';
 import { join } from 'path';
 import { reviewDataDir, demoDataDir, isDemo, matchLookbackDays, retentionDays } from './config.js';
-import { updateMatchStatus } from '../database/index.js';
-import { materializeReplyDraft, FROM_PLACEHOLDER } from './draft.js';
+import { updateMatchStatus, fetchCurrentPair } from '../database/index.js';
+import { materializeReplyDraft, buildReplyRef, FROM_PLACEHOLDER } from './draft.js';
+import { parseMatchId } from './match.js';
+import { looksLikeInjection } from './injection.js';
 import { draftRequestsEnabled } from './pendingDrafts.js';
 import { currentUnleasedLiveProblem } from './lease.js';
 import { safeErr, logId } from './redact.js';
-import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef } from '../types/index.js';
+import type { ReviewMatch, OwnMatch, MatchResult, MatchStatus, DraftRef, Project, Engineer } from '../types/index.js';
 
 // UIで送信元（本人の会社アドレス）を確定済みの下書きか。
 // 未確定の下書きも from にはプレースホルダー文字列が入っているため、単なる truthy 判定では誤る。
@@ -174,6 +176,38 @@ export async function setMatchStatus(
   return target;
 }
 
+// 指示混入疑いを付けた案件・要員を含む組の、まだ送信元を確定していない下書きを手元の控えから取り消す
+// （前の実行で作った控えは再判定されずに持ち越されるため）。取り消した側の数を返す
+export function revokeReviewDrafts(projectIds: readonly string[], engineerIds: readonly string[]): number {
+  if (projectIds.length === 0 && engineerIds.length === 0) return 0;
+  const read = readArray<ReviewMatch>('matches');
+  if (!read || read.length === 0) return 0;
+  const projects = new Set(projectIds);
+  const engineers = new Set(engineerIds);
+  let revoked = 0;
+  let changed = false;
+  for (const m of read) {
+    const ids = parseMatchId(m.id);
+    if (!ids || (!projects.has(ids.projectId) && !engineers.has(ids.engineerId))) continue;
+    changed = true;
+    if (m.draftProject && !isFinalizedDraft(m.draftProject)) {
+      m.draftProject = undefined;
+      m.draftToProjectUrl = null;
+      m.draftToProjectText = null;
+      revoked += 1;
+    }
+    if (m.draftEngineer && !isFinalizedDraft(m.draftEngineer)) {
+      m.draftEngineer = undefined;
+      m.draftToEngineerUrl = null;
+      m.draftToEngineerText = null;
+      revoked += 1;
+    }
+    m.needsReview = true;
+  }
+  if (changed) writeReviewMatches2(read);
+  return revoked;
+}
+
 // 既に ReviewMatch[] を持っている場合の書き出し（setMatchStatus用。変換不要）
 function writeReviewMatches2(matches: ReviewMatch[]): void {
   writeJson('matches', matches);
@@ -183,7 +217,32 @@ function writeReviewMatches2(matches: ReviewMatch[]): void {
 // demo=Fromを入れてローカル保存、prod=本人のGmail／共有の下書きフォルダにスレッド返信下書きを作成。
 // 同じ側の下書きが作成済みなら作らない（二重の紹介メール防止）。作成の待ち時間中に他の操作・バッチが
 // 書いた内容を古い写しで上書きしないよう、作成後に読み直してこのマッチのこの側だけを書き換える
-export type DraftCreateResult = { ok: true; ref: DraftRef } | { ok: false; reason: 'not_found' | 'already_created' | 'use_sheet' | 'unleased' };
+export type DraftCreateResult =
+  | { ok: true; ref: DraftRef }
+  | { ok: false; reason: 'not_found' | 'already_created' | 'use_sheet' | 'unleased' | 'revoked'; detail?: string };
+
+// 確認UIの控えの組から下書きを作ってよいか（作れない理由。よければ null）。
+// 控えは前の実行の判定のまま持ち越されるため、今の組の状態（見送り・成約・区分）と、DBの案件・要員の今の状態
+// （指示混入疑い・終了・決定済・返信先）を作る直前に確かめる
+export function draftRevocationReason(
+  entry: Pick<ReviewMatch, 'status' | 'category' | 'needsReview'>,
+  side: 'project' | 'engineer',
+  ref: DraftRef,
+  current: { project: Project | null; engineer: Engineer | null } | null,
+): string | null {
+  if (entry.status === 'dropped' || entry.status === 'closed_won') return '見送り・成約の組';
+  if (entry.needsReview || (entry.category !== 'confirmed' && entry.category !== 'negotiable')) return '成立候補・交渉提案でない組';
+  if (looksLikeInjection(`${ref.subject}\n${ref.body ?? ''}`)) return '文面にAIへの指示らしき記載';
+  if (!current) return null;
+  const { project, engineer } = current;
+  if (!project || !engineer) return '案件・要員が見つからない';
+  if (project.injectionSuspected || engineer.injectionSuspected) return '指示混入疑いの案件・要員';
+  if (project.status === 'closed' || engineer.status === 'assigned') return '終了した案件・決定済の要員';
+  const item = side === 'project' ? project : engineer;
+  const expected = buildReplyRef(item.replyTarget, item.agentEmail, ref.subject, '');
+  if (!expected.to || expected.to !== ref.to || (expected.inReplyTo ?? '') !== (ref.inReplyTo ?? '')) return '返信先が今の案件・要員と違う';
+  return null;
+}
 
 export async function createReplyDraftForSender(
   matchId: string,
@@ -200,6 +259,20 @@ export async function createReplyDraftForSender(
   const ref = target && (side === 'project' ? target.draftProject : target.draftEngineer);
   if (!target || !ref) return { ok: false, reason: 'not_found' };
   if (isFinalizedDraft(ref) || inFlight.has(`${matchId}:${side}`)) return { ok: false, reason: 'already_created' };
+  // demo のレビューデータは本番DBと無関係のため、DBの状態は読み直さない
+  let currentItems: { project: Project | null; engineer: Engineer | null } | null = null;
+  if (!isDemo()) {
+    const ids = parseMatchId(matchId);
+    if (!ids) return { ok: false, reason: 'revoked', detail: '組のIDを読めない' };
+    try {
+      currentItems = await fetchCurrentPair(ids.projectId, ids.engineerId);
+    } catch (err) {
+      console.warn(`SESレビュー: 案件・要員の今の状態を読めないため下書きを作りません (${logId(matchId)}): ${safeErr(err)}`);
+      return { ok: false, reason: 'revoked', detail: '案件・要員の今の状態を読めない' };
+    }
+  }
+  const revoked = draftRevocationReason(target, side, ref, currentItems);
+  if (revoked) return { ok: false, reason: 'revoked', detail: revoked };
 
   inFlight.add(`${matchId}:${side}`);
   let finalized: DraftRef;

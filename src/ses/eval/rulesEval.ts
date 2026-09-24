@@ -118,7 +118,7 @@ import { deflateRawSync } from 'zlib';
 import { utils as xlsxUtils, write as writeXlsx } from 'xlsx';
 import { redactIdsIn } from '../redact.js';
 import { planReplyAddresses } from '../draft.js';
-import { addressOf } from '../mail/ownMail.js';
+import { addressOf, ownMailReason, type OwnMailPolicy } from '../mail/ownMail.js';
 import {
   zipInflatesWithin,
   spreadsheetBufferToText,
@@ -156,10 +156,16 @@ import { unleasedLiveProblem } from '../lease.js';
 import { lastChanceBudgetJpy } from '../matchRun.js';
 import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
 import { SafeLogError } from '../redact.js';
-import { createReplyDraftForSender } from '../review.js';
+import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
+import { sourceBacked } from '../extract.js';
+import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
+import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
 import { parseRawMail } from '../mail/xserver.js';
-import { dmarcPassDomain } from '../mail/authResults.js';
+import { dmarcPassDomain, checkAuthResults, authResultsWarning } from '../mail/authResults.js';
+import { GMAIL_AUTHSERV_IDS } from '../../collectors/email.js';
 import { normalizeAddressHeader } from '../mail/ownMail.js';
 import { linkOrContactLike } from '../injection.js';
 import { schemaMismatch } from '../../llm/schemaCheck.js';
@@ -2733,9 +2739,10 @@ async function securityAuditRound3Checks(): Promise<void> {
     '一番上の Authentication-Results でも、受信サーバーの名前（authserv-id）が設定と一致しなければ（未設定なら）認証済みとみなさない',
     dmarcPassDomain('evil.example; dmarc=pass header.from=partner.jp', ['mx.example.jp']) === '' &&
       dmarcPassDomain('mx.example.jp; dmarc=pass header.from=partner.jp', []) === '' &&
-      dmarcPassDomain('sv1.xserver.jp; dmarc=pass header.from=partner.jp', ['*.xserver.jp']) === 'partner.jp' &&
       dmarcPassDomain('xserver.jp.evil.example; dmarc=pass header.from=partner.jp', ['*.xserver.jp']) === '',
   );
+  await authResultsOrderChecks();
+  ownReportSubjectChecks();
   const LIST = '【要員1】\n氏名：K.S.\nスキル：Java\n希望単金：65万\n';
   const rm = (id: string, over: Partial<SesRawMail>): SesRawMail => ({ ...rawMail(), id, subject: '【要員】', body: LIST, ...over });
   const since = new Date('2026-09-10T00:00:00Z');
@@ -3376,6 +3383,7 @@ async function main(): Promise<void> {
     await securityAuditRound4Checks();
     await securityAuditRound5Checks();
     securityAuditRound6Checks();
+    securityAuditRound8Checks();
   } finally {
     setDemoOverride(null);
   }
@@ -3387,3 +3395,140 @@ main().catch((err) => {
   console.error(err);
   process.exitCode = 1;
 });
+
+
+// ===== セキュリティ監査（第8回）: 受信サーバーの認証結果は完全一致の名前・Received の並びで確かめる =====
+
+async function authResultsOrderChecks(): Promise<void> {
+  section('セキュリティ（第8回）: 認証結果の authserv-id はワイルドカード不可・受信サーバーの Received より上に他のサーバーが無いものだけ');
+  check(
+    "'*.xserver.jp' のようなワイルドカードの設定では、同じドメインの別のサーバー名の結果を信じない",
+    dmarcPassDomain('sv9999.xserver.jp; dmarc=pass header.from=partner.co.jp', ['*.xserver.jp']) === '' &&
+      dmarcPassDomain('sv1234.xserver.jp; dmarc=pass header.from=partner.co.jp', ['sv1234.xserver.jp']) === 'partner.co.jp',
+  );
+  const prev = process.env.XSERVER_AUTHSERV_ID;
+  const mailOf = (headers: string) =>
+    Buffer.from(`${headers}From: Sales <sales@partner.co.jp>\r\nTo: sales@our.jp\r\nSubject: 【要員】\r\nMessage-ID: <x@partner.co.jp>\r\n\r\nbody\r\n`, 'utf-8');
+  const ours = 'Received: from mx.attacker.example (mx.attacker.example [192.0.2.1])\r\n\tby sv1234.xserver.jp (Postfix) with ESMTPS id ABC;\r\n\tWed, 23 Sep 2026 10:00:00 +0900\r\n';
+  const forged = (id: string) => `Authentication-Results: ${id}; dmarc=pass (p=reject) header.from=partner.co.jp\r\n`;
+  const foreign = 'Received: from a (a [192.0.2.2]) by relay.attacker.example with SMTP;\r\n\tWed, 23 Sep 2026 09:59:00 +0900\r\n';
+  try {
+    process.env.XSERVER_AUTHSERV_ID = '*.xserver.jp';
+    const wild = await parseRawMail(mailOf(ours + forged('sv9999.xserver.jp')), 'sesmail_ar1', RECEIVED);
+    check('ワイルドカードの設定で送り主の書いた別サーバー名の結果（sv9999）を認証済みにしない', !wild.mail.authDomain && !wild.trustedAuthResults, show(wild.mail.authDomain));
+    process.env.XSERVER_AUTHSERV_ID = 'sv1234.xserver.jp';
+    const top = await parseRawMail(mailOf(forged('sv1234.xserver.jp') + ours + foreign), 'sesmail_ar2', RECEIVED);
+    check('受信サーバーが一番上の Received の上に付けた結果は信じる', top.mail.authDomain === 'partner.co.jp' && top.trustedAuthResults);
+    const below = await parseRawMail(mailOf(ours + forged('sv1234.xserver.jp') + foreign), 'sesmail_ar3', RECEIVED);
+    check('受信サーバーの Received のすぐ下（他のサーバーの Received より上）の結果も信じる', below.mail.authDomain === 'partner.co.jp');
+    const underForeign = await parseRawMail(mailOf(ours + foreign + forged('sv1234.xserver.jp')), 'sesmail_ar4', RECEIVED);
+    check(
+      '他のサーバーの Received より下にある結果（送り主が書いたもの）は信じず、受信サーバーを通ったのに結果が無いメールとして数える',
+      !underForeign.mail.authDomain && !underForeign.trustedAuthResults && underForeign.receivedByUsWithoutResult,
+    );
+    const noReceived = await parseRawMail(mailOf(forged('sv1234.xserver.jp')), 'sesmail_ar5', RECEIVED);
+    check('受信サーバーの Received が無いメール（ローカル配送・APPEND）の結果は信じない', !noReceived.mail.authDomain);
+    const foreignTop = await parseRawMail(mailOf(foreign + forged('sv1234.xserver.jp') + ours), 'sesmail_ar6', RECEIVED);
+    check('一番上の Received が他のサーバーなら結果を信じない', !foreignTop.mail.authDomain);
+  } finally {
+    if (prev === undefined) delete process.env.XSERVER_AUTHSERV_ID;
+    else process.env.XSERVER_AUTHSERV_ID = prev;
+  }
+  const gmailHeaders = [
+    { key: 'Received', value: 'by 2002:a05:6a10:1234 with SMTP id x; Wed, 23 Sep 2026 01:00:00 -0700' },
+    { key: 'Authentication-Results', value: 'mx.google.com; dkim=pass header.i=@partner.co.jp; dmarc=pass (p=REJECT) header.from=partner.co.jp' },
+    { key: 'Received', value: 'from mail.partner.co.jp by mx.google.com with ESMTPS id y' },
+  ];
+  check(
+    'Gmail 経路は mx.google.com の結果だけを信じる（Received の並びは確かめない・別の名前は信じない）',
+    checkAuthResults(gmailHeaders, GMAIL_AUTHSERV_IDS, { requireReceivedBy: false }).authDomain === 'partner.co.jp' &&
+      checkAuthResults([{ key: 'Authentication-Results', value: 'sv1234.xserver.jp; dmarc=pass header.from=partner.co.jp' }], GMAIL_AUTHSERV_IDS, { requireReceivedBy: false }).authDomain === '',
+  );
+  check(
+    '認証結果の警告: 3通以上で1通も信じられない回・受信サーバーを通ったのに結果が無いメールがある回に出し、それ以外は出さない',
+    authResultsWarning('X', 'Y', { mails: 3, trusted: 0, receivedByUsWithoutResult: 0 }) !== null &&
+      authResultsWarning('X', 'Y', { mails: 5, trusted: 4, receivedByUsWithoutResult: 1 }) !== null &&
+      authResultsWarning('X', 'Y', { mails: 5, trusted: 5, receivedByUsWithoutResult: 0 }) === null &&
+      authResultsWarning('X', 'Y', { mails: 2, trusted: 0, receivedByUsWithoutResult: 0 }) === null,
+  );
+}
+
+function ownReportSubjectChecks(): void {
+  section('セキュリティ（第8回）: 件名が似ているだけの取引先のメールを自分たちのサマリとして除外しない');
+  const policy: OwnMailPolicy = { selfAddresses: ['sales@our.jp'], ownDomains: ['our.jp'], collectOwnDomain: true };
+  const partnerSubjects = [
+    'FW: SES案件・要員マッチング会のご案内',
+    'ＳＥＳ案件･要員マッチング情報',
+    'SES案件・要員マッチング バッチ実行結果（10:00）',
+    'SES自己修復の事例紹介',
+  ];
+  const dropped = partnerSubjects.filter((sub) => ownMailReason('Partner <p@partner.jp>', sub, policy) !== null);
+  check('社外の送り主のメールは件名がサマリに似ていても取り込む', dropped.length === 0, dropped.join(' / '));
+  check(
+    '自社の人が転送したサマリ・修復レポートは除外する（件名そのもののときだけ）',
+    ownMailReason('taro@our.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（14:00）', policy) === 'report' &&
+      ownMailReason('taro@our.jp', 'Re: SES自己修復: 修正パッチ案レポート', policy) === 'report' &&
+      ownMailReason('taro@our.jp', 'SES案件・要員マッチング会のご案内', policy) === null &&
+      ownMailReason('Sales <sales@our.jp>', '【案件】Java', policy) === 'self',
+  );
+}
+
+function securityAuditRound8Checks(): void {
+  section('セキュリティ（第8回）: 年齢・経験年数も原文に無い値は通さない');
+  const nums = sourceNumbers('要員: K.S. 32歳 経験7年 希望65万');
+  check(
+    '原文にある年齢・経験年数は通し、無い値（メール中の指示で変えた値）は null にする',
+    sourceBacked(32, nums) === 32 && sourceBacked(7, nums) === 7 && sourceBacked(45, nums) === null && sourceBacked(20, nums) === null &&
+      sourceBacked(45, null) === 45 && sourceBacked(null, nums) === null,
+  );
+
+  section('セキュリティ（第8回）: 確認UIの控えから下書きを作る前に、組・案件・要員の今の状態を確かめる');
+  const p = project({ id: 'p1', status: 'open' });
+  const e = engineer(['Java'], { id: 'e1' });
+  const ref = { ...buildReplyRef(p.replyTarget, p.agentEmail, 'ご紹介', 'お世話になっております。'), draftId: '' };
+  const entry = { status: 'unconfirmed' as const, category: 'confirmed' as const, needsReview: false };
+  const cur = { project: p, engineer: e };
+  check('今の状態に問題が無ければ作る', draftRevocationReason(entry, 'project', ref, cur) === null, show(draftRevocationReason(entry, 'project', ref, cur)));
+  check(
+    '見送り・成約の組、成立候補・交渉提案でない組からは作らない',
+    draftRevocationReason({ ...entry, status: 'dropped' }, 'project', ref, cur) !== null &&
+      draftRevocationReason({ ...entry, status: 'closed_won' }, 'project', ref, cur) !== null &&
+      draftRevocationReason({ ...entry, category: 'tentative' }, 'project', ref, cur) !== null &&
+      draftRevocationReason({ ...entry, needsReview: true }, 'project', ref, cur) !== null,
+  );
+  check(
+    '後から指示混入疑いが付いた要員・終了した案件・決定済の要員・見つからない組からは作らない',
+    draftRevocationReason(entry, 'project', ref, { project: p, engineer: { ...e, injectionSuspected: true } }) !== null &&
+      draftRevocationReason(entry, 'project', ref, { project: { ...p, status: 'closed' }, engineer: e }) !== null &&
+      draftRevocationReason(entry, 'project', ref, { project: p, engineer: { ...e, status: 'assigned' } }) !== null &&
+      draftRevocationReason(entry, 'project', ref, { project: null, engineer: e }) !== null,
+  );
+  check('控えの宛先が今の案件の返信先と違えば作らない', draftRevocationReason(entry, 'project', { ...ref, to: 'other@evil.example' }, cur) !== null);
+
+  const dir = mkdtempSync(join(tmpdir(), 'ses-review-eval-'));
+  const prevDir = process.env.SES_REVIEW_DATA_DIR;
+  try {
+    process.env.SES_REVIEW_DATA_DIR = relative(process.cwd(), dir);
+    const draft = { ...ref, from: FROM_PLACEHOLDER };
+    const rows = [
+      { id: 'match_proj_1_eng_1', title: 't', grossMarginJpy: 0, score: 90, reason: '', needsReview: false, band: 'strong', category: 'confirmed', status: 'unconfirmed',
+        draftToProjectUrl: 'x', draftToEngineerUrl: 'y', draftToProjectText: 'b', draftToEngineerText: 'b', draftProject: draft, draftEngineer: draft },
+      { id: 'match_proj_2_eng_2', title: 't', grossMarginJpy: 0, score: 90, reason: '', needsReview: false, band: 'strong', category: 'confirmed', status: 'unconfirmed',
+        draftToProjectUrl: 'x', draftToEngineerUrl: 'y', draftToProjectText: 'b', draftToEngineerText: 'b', draftProject: draft, draftEngineer: draft },
+    ];
+    writeFileSyncForEval(join(dir, 'matches.json'), JSON.stringify(rows), 'utf-8');
+    const n = revokeReviewDrafts([], ['eng_1']);
+    const after = readReviewMatches();
+    const hit = after.find((m) => m.id === 'match_proj_1_eng_1');
+    const other = after.find((m) => m.id === 'match_proj_2_eng_2');
+    check(
+      '指示混入疑いを付けた要員を含む組の未確定の下書きを手元の控えから取り消し、他の組は残す',
+      n === 2 && !hit?.draftProject && !hit?.draftEngineer && hit?.needsReview === true && Boolean(other?.draftProject),
+      show({ n, hit }),
+    );
+  } finally {
+    if (prevDir === undefined) delete process.env.SES_REVIEW_DATA_DIR;
+    else process.env.SES_REVIEW_DATA_DIR = prevDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}

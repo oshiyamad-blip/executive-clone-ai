@@ -563,9 +563,10 @@ async function reviewFindingChecks(project: Project): Promise<void> {
   // 17. 自己メール除外（自分の送信元・サマリ件名・自社ドメイン）
   const policy: OwnMailPolicy = { selfAddresses: ['sales@example.co.jp'], ownDomains: ['example.co.jp'], collectOwnDomain: false };
   check(
-    '自己メール除外: 自分の送信元・サマリ/修復レポート（転送含む）・自社ドメインを除外し、社外は通す',
+    '自己メール除外: 自分の送信元・自社からのサマリ/修復レポート（転送含む）・自社ドメインを除外し、社外は件名が似ていても通す',
     ownMailReason('"営業" <Sales@Example.co.jp>', '案件', policy) === 'self' &&
-      ownMailReason('x@partner.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', policy) === 'report' &&
+      ownMailReason('taro@example.co.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', { ...policy, collectOwnDomain: true }) === 'report' &&
+      ownMailReason('x@partner.jp', 'Fwd: SES案件・要員マッチング バッチ実行結果（10:00）', policy) === null &&
       ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', policy) === 'ownDomain' &&
       ownMailReason('taro@example.co.jp', 'Re: 【ご提案】', { ...policy, collectOwnDomain: true }) === null &&
       ownMailReason('partner@agent.jp', '【案件】Java', policy) === null,

@@ -761,6 +761,13 @@ export function sourceNumbers(text: string): Set<string> {
 
 const rateInRange = (man: number) => man >= RATE_MIN_MAN && man <= RATE_MAX_MAN;
 
+// 原文に現れる数値だけを通す（numbers=null は照合を省く）。単金と同じく、突合の点数に効く数値（年齢・経験年数）を
+// メール中の指示で原文に無い値にさせない（指示の言い回しの検知は言い換えで抜けうるため、言い回しによらない照合を重ねる）
+export function sourceBacked(v: number | null, numbers: Set<string> | null): number | null {
+  if (v === null || !Number.isFinite(v)) return null;
+  return numbers && !numbers.has(String(v)) ? null : v;
+}
+
 // 原文照合と範囲検証を通った単金（万円/月）。通らなければ null（=要確認として人が確認する）。
 // 指定の単位で範囲外のときは、取り違えの明らかな2通りだけを決定的に補正する:
 // 円の金額を万円と表示（600000 → 60万円）・万円の金額を円/月と表示（60 → 60万円）
@@ -855,9 +862,9 @@ export function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number,
     id: itemIdOf('eng', mail.id, index),
     // AIへの指示に反してフルネームが返っても、イニシャルだけを残す（決められなければ「（イニシャル不明）」）
     displayName: toInitials(raw.displayName),
-    age: numberInRange(raw.age, 18, 75, true),
+    age: numberInRange(sourceBacked(raw.age, numbers), 18, 75, true),
     skills,
-    experienceYears: numberInRange(raw.experienceYears, 0, 50),
+    experienceYears: numberInRange(sourceBacked(raw.experienceYears, numbers), 0, 50),
     desiredRate: verifiedRate(raw.desiredRate, raw.desiredRateUnit, numbers),
     residence,
     prefecture: normalizePrefecture(residence),

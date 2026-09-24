@@ -402,7 +402,7 @@ export function xserverSharedPass(): string {
   // パスワードは前後の空白も意味を持ち得るためトリムしない（空文字だけを未設定とみなす）
   return process.env.XSERVER_SHARED_PASS ?? '';
 }
-// 受信サーバー（Xserver）が付ける Authentication-Results の authserv-id（カンマ区切り。'*.xserver.jp' 形式も可）。
+// 受信サーバー（Xserver）が付ける Authentication-Results の authserv-id（1つだけ・完全一致。ワイルドカードは無効。preflight が確かめる）。
 // 受信したメールのヘッダで、サーバーが一番上に dmarc= を含む結果を付けることを確かめてから設定する。
 // 未設定なら送り主の DMARC の結果を使わない（再送の識別はアドレス＋返信先だけ・最終受信日は更新しない）
 export function xserverAuthservIds(): string[] {

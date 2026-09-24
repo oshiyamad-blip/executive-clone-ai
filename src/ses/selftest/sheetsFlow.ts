@@ -958,6 +958,22 @@ async function testProcessedIds(): Promise<void> {
   check('「解析不可」にしたメールは次の実行で対象にしない', (r5.unparsableMailIds ?? []).length === 0);
   mail.unparsable = [];
 
+  // 件名がサマリに似ているだけの取引先のメールは除外しない（自社の人が転送したサマリだけを除く）
+  mail.inbox.push(
+    rawMail('sesmail_flow_lookalike', '検証四郎 <shiro@delta.example.jp>', 'FW: SES案件・要員マッチング会のご案内', 1),
+    rawMail('sesmail_flow_fwd', `taro@${OWN_DOMAIN}`, 'Fwd: SES案件・要員マッチング バッチ実行結果（14:00）', 1),
+  );
+  newRun();
+  const r6 = await collectSesMail();
+  check(
+    '件名がサマリに似た社外のメールは取り込み、自社の人が転送したサマリは除外する',
+    r6.mails.some((m) => m.id === 'sesmail_flow_lookalike') && !r6.mails.some((m) => m.id === 'sesmail_flow_fwd') &&
+      r6.excludedMailIds.join(',') === 'sesmail_flow_fwd',
+    JSON.stringify({ mails: r6.mails.map((m) => m.id), excluded: r6.excludedMailIds }),
+  );
+  await markMailProcessed(r6.mails.map((m) => m.id), '抽出済');
+  await markMailProcessed(r6.excludedMailIds, '除外');
+
   newRun();
   sheets.failNext('values.get', 403, '処理済みメール');
   let threw = false;

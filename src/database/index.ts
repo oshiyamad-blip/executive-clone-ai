@@ -667,6 +667,28 @@ export async function fetchItemsByIds(
   return { projects: [], engineers: [] };
 }
 
+// 確認UIから下書きを作る直前に、組の案件・要員の今の状態（ステータス・指示混入疑い・返信先）を読み直す。
+// 見つからなければ null。読めなかった（接続・権限の失敗）ときは例外（呼び出し側は作らない）
+export async function fetchCurrentPair(
+  projectId: string,
+  engineerId: string,
+): Promise<{ project: Project | null; engineer: Engineer | null }> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.fetchItemsByIdsSheets(new Set([projectId]), new Set([engineerId]));
+    return { project: r.projects.find((x) => x.id === projectId) ?? null, engineer: r.engineers.find((x) => x.id === engineerId) ?? null };
+  }
+  const pageOf = async (dbId: string, property: string, id: string): Promise<unknown | null> => {
+    if (!dbId || !id) return null;
+    const dataSourceId = await resolveDataSourceId(dbId);
+    const res = await throttle(() =>
+      notion.dataSources.query({ data_source_id: dataSourceId, filter: { property, rich_text: { equals: id } }, page_size: 1 } as never),
+    );
+    return (res as { results: unknown[] }).results[0] ?? null;
+  };
+  const [projectPage, engineerPage] = [await pageOf(PROJECT_DB_ID, '案件ID', projectId), await pageOf(ENGINEER_DB_ID, '要員ID', engineerId)];
+  return { project: projectPage ? projectFromPage(projectPage) : null, engineer: engineerPage ? engineerFromPage(engineerPage) : null };
+}
+
 // 突合対象の案件（募集中のみ）を新しい順に取得する（通常バッチの突合プール・--match-only・プロパー候補探しで使用）。
 // receivedSince 指定時はその日時以降に受信した案件に絞る
 export async function fetchOpenProjects(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Project[]> {
