@@ -26,6 +26,7 @@ export interface BatchMetrics {
   mode: MetricsMode;
   mails: number;
   resendSkipped: number;
+  engineerMailsSkipped: number;
   projects: number;
   engineers: number;
   rateNullPct: number | null;
@@ -76,6 +77,7 @@ export function collectBatchMetrics(opts: { requestedDrafts?: number; now?: Date
     mode,
     mails: s.collected,
     resendSkipped: s.resendSkipped,
+    engineerMailsSkipped: s.engineerMailsSkipped,
     projects: s.extractedProjects,
     engineers: s.extractedEngineers,
     rateNullPct: pct(s.projectRateNull, s.extractedProjects),
@@ -162,7 +164,7 @@ export function formatMetricsLines(m: BatchMetrics): string[] {
     .join('・');
   const lines = [
     '【バッチのメトリクス（件数・比率のみ）】',
-    `メール ${m.mails}通（うち再送スキップ ${m.resendSkipped}通・抽出なし） → 抽出 案件${m.projects}件・要員${m.engineers}件`,
+    `メール ${m.mails}通（うち再送スキップ ${m.resendSkipped}通・要員メールのスキップ ${m.engineerMailsSkipped}通・抽出なし） → 抽出 案件${m.projects}件・要員${m.engineers}件`,
     `不明の割合: 単金 ${show(m.rateNullPct)} / 都道府県 ${show(m.prefectureNullPct)} / 開始日 ${show(m.startNullPct)} / 希望単金 ${show(m.desiredRateNullPct)}` +
       ` / 必須スキル空 ${show(m.requiredEmptyPct)} / 辞書にないスキル語 ${m.unknownSkillTokens}語（${show(m.unknownSkillPct)}）`,
     `一次選抜: 評価${m.pairsEvaluated}組 → 判定対象${m.pairsSelected}組 / 候補0件の案件 ${show(m.noCandidatePct)}（${m.projectsConsidered}件中） / 除外: ${exclusions || 'なし'}`,
@@ -207,6 +209,7 @@ export function metricsRowValues(m: BatchMetrics): Record<string, string | numbe
     担当者指定の下書き作成数: m.requestedDrafts,
     抽出モデル代替: m.extractModelFallback ? 1 : 0,
     再送スキップ数: m.resendSkipped,
+    要員メールスキップ数: m.engineerMailsSkipped,
   };
 }
 

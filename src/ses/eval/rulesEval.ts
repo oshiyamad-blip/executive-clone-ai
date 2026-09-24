@@ -113,6 +113,7 @@ import {
   type RawEngineer,
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
+import { classifyMailKind, splitByKind } from '../mailKind.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
 import { joinList, splitList } from '../../database/mapping.js';
 import { createHash, randomBytes } from 'crypto';
@@ -1493,7 +1494,7 @@ async function modelFallbackChecks(): Promise<void> {
 
 function metricsBase(over: Partial<BatchMetrics> = {}): BatchMetrics {
   return {
-    at: NOW.toISOString(), mode: '通常', mails: 0, resendSkipped: 0, projects: 0, engineers: 0, rateNullPct: null, prefectureNullPct: null,
+    at: NOW.toISOString(), mode: '通常', mails: 0, resendSkipped: 0, engineerMailsSkipped: 0, projects: 0, engineers: 0, rateNullPct: null, prefectureNullPct: null,
     startNullPct: null, desiredRateNullPct: null, requiredEmptyPct: null, skillTokens: 0, unknownSkillTokens: 0, unknownSkillPct: null,
     projectsConsidered: 0, noCandidatePct: null, exclusions: { skill: 0, location: 0, timing: 0, rate: 0, remote: 0, sameAgent: 0 },
     pairsEvaluated: 0, pairsSelected: 0, judged: 0, avgScore: null, demoted: 0, rejected: 0, suppressed: 0, deferred: 0,
@@ -3423,6 +3424,29 @@ function securityAuditRound6Checks(): void {
   );
 }
 
+// ===== 案件だけモード: 要員の紹介メールを抽出の前に見分ける（合成メールのみ） =====
+
+function mailKindChecks(): void {
+  section('案件だけモード: メールの種類の見分け');
+  const k = (body: string) => classifyMailKind({ body });
+  const ENG = '各位\nお世話になっております。弊社要員のご紹介です。\n\n【氏　名】K.S.\n【年齢】34歳\n【最寄駅】田町\n【希望単価】65万円\n【稼働開始日】即日\n【スキル】Java/Spring Boot\n';
+  const PROJ = '【案件名】在庫管理システム改修\n【必須スキル】Java 3年以上\n【尚可】AWS\n【単価】〜70万円（スキル見合い）\n【面談】1回\n【精算】140-180h\n【商流】元請直\n【年齢】40代まで\n【国籍】日本籍の方\n';
+  check('要員の紹介（氏名・最寄駅・希望単価の見出し）は engineer', k(ENG) === 'engineer');
+  check('案件の募集（案件名・必須・面談・精算）は project（年齢・国籍の条件行があっても）', k(PROJ) === 'project');
+  check('全角空白で字間を空けた見出し・行頭の飾りも読む', k('■氏　名：Y.T.\n◆最 寄 駅：横浜\n1) 希望単金：60万\n') === 'engineer');
+  check('案件と要員の見出しが両方ある（混在・一覧）は unknown（抽出する側）', k(ENG + '\n' + PROJ) === 'unknown');
+  check('見出しの無い短い本文は unknown', k('ご確認をお願いいたします。') === 'unknown');
+  check('引用部分の見出しは数えない', k('> 【氏名】A.B.\n> 【最寄駅】品川\n> 【希望単価】60万\nご提案ありがとうございます。') === 'unknown');
+  check('件名は使わない（件名が「要員募集」でも本文が案件なら project）', k(PROJ) === 'project');
+  const t0 = Date.now();
+  k(' '.repeat(50_000) + '\n' + '【'.repeat(50_000));
+  check('空白・飾りの長い行でも遅くならない', Date.now() - t0 < 500, `${Date.now() - t0}ms`);
+  const mk = (id: string, body: string): SesRawMail => ({ ...rawMail(), id, body });
+  const sp = splitByKind([mk('m_eng', ENG), mk('m_proj', PROJ), mk('m_mix', ENG + PROJ)], true);
+  check('案件だけモードでは要員メールだけ外し、案件・混在は抽出する', sp.skippedEngineerMailIds.join() === 'm_eng' && sp.extract.map((m) => m.id).join() === 'm_proj,m_mix');
+  check('全件モードでは何も外さない', splitByKind([mk('m_eng', ENG)], false).extract.length === 1);
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3454,6 +3478,7 @@ async function main(): Promise<void> {
     reviewRound3Checks();
     await reviewRound4Checks();
     resendChecks();
+    mailKindChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

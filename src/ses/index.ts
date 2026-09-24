@@ -50,6 +50,7 @@ import {
   repairEnabled,
   matchLookbackDays,
   resendWindowDays,
+  sesTarget,
   resendSimilarity,
   matchPoolLimit,
   dbProvider,
@@ -82,6 +83,7 @@ import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule
 import { redactable, safeErr, logId } from './redact.js';
 import { acquireRunLease, releaseRunLease } from './lease.js';
 import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
+import { splitByKind } from './mailKind.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
 
@@ -462,7 +464,9 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   const excludedMarked = await markMailProcessed(parsedMails.excludedMailIds, '除外');
   // 原文を解析できなかったメールも記録し、次回から取得・解析し直さない（解析に時間のかかるメールで毎回の収集を止めない）
   const unparsableMarked = await markMailProcessed(parsedMails.unparsableMailIds, '解析不可');
-  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked) {
+  // 案件だけモードで抽出しなかった要員メールも記録し、次回から本文を取得し直さない
+  const engineerSkipMarked = await markMailProcessed(parsedMails.skippedEngineerMailIds, '要員スキップ');
+  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked || !engineerSkipMarked) {
     recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
   }
   return stored;
@@ -485,7 +489,13 @@ async function withStableIds(projects: Project[], engineers: Engineer[]): Promis
   };
 }
 
-async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds: string[]; unparsableMailIds: string[]; resend: ResendSplit }> {
+async function collectAndParse(): Promise<{
+  mails: SesRawMail[];
+  excludedMailIds: string[];
+  unparsableMailIds: string[];
+  resend: ResendSplit;
+  skippedEngineerMailIds: string[];
+}> {
   let mails: SesRawMail[] = [];
   let excludedMailIds: string[] = [];
   let unparsableMailIds: string[] = [];
@@ -505,13 +515,19 @@ async function collectAndParse(): Promise<{ mails: SesRawMail[]; excludedMailIds
     console.log('SES収集: 未処理の新着メールはありません（続く場合はメーリスの配信・転送設定を確認してください）');
   }
   const resend = await splitResendMails(mails);
-  let parsedMails = resend.fresh;
+  // 案件だけモード: 要員の紹介メールは添付の展開も抽出もしない（要員は要員管理表の登録分だけを使う）
+  const kinds = splitByKind(resend.fresh, sesTarget() === 'projects');
+  if (kinds.skippedEngineerMailIds.length > 0) {
+    console.log(`SES収集: 案件だけモードのため要員の紹介メール${kinds.skippedEngineerMailIds.length}通を抽出しません`);
+  }
+  recordStat('engineerMailsSkipped', kinds.skippedEngineerMailIds.length);
+  let parsedMails = kinds.extract;
   try {
-    parsedMails = await parseAttachments(resend.fresh);
+    parsedMails = await parseAttachments(kinds.extract);
   } catch (err) {
     console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }
-  return { mails: parsedMails, excludedMailIds, unparsableMailIds, resend };
+  return { mails: parsedMails, excludedMailIds, unparsableMailIds, resend, skippedEngineerMailIds: kinds.skippedEngineerMailIds };
 }
 
 // 抽出の前に、直近に抽出した内容と同じ再送を分ける（Haikuの抽出を呼ばない。件数だけログに出す）

@@ -251,6 +251,8 @@ jobs:
           SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
           SES_MAX_MAIL_MB_PER_RUN: ${{ vars.SES_MAX_MAIL_MB_PER_RUN }}
           SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
+          # 案件だけモード（既定）。パートナーの要員メールも抽出して仲介まで行うときは Variable SES_TARGET=all
+          SES_TARGET: ${{ vars.SES_TARGET || 'projects' }}
           SES_RESEND_WINDOW_DAYS: ${{ vars.SES_RESEND_WINDOW_DAYS }}
           SES_RESEND_SIMILARITY: ${{ vars.SES_RESEND_SIMILARITY }}
           SES_MATCH_POOL_LIMIT: ${{ vars.SES_MATCH_POOL_LIMIT }}

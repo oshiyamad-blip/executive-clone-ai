@@ -350,6 +350,12 @@ export function maxNegotiationCutMan(): number {
 
 // 通常バッチの突合で、今回の新着と組み合わせる「前回以前に保存した募集中案件・提案可要員」の遡り日数
 // （収集の実行回をまたいで届いた案件と要員を見逃さないため。判定済みのペアはマッチIDで除外する）
+// 抽出の対象。projects = 案件だけ（要員の紹介メールは抽出せず、要員は要員管理表に登録した人だけを使う。費用を抑える）、
+// all = 案件と要員の両方（パートナーの要員をパートナーの案件に紹介する仲介も行う）
+export function sesTarget(): 'projects' | 'all' {
+  return env('SES_TARGET') === 'projects' ? 'projects' : 'all';
+}
+
 // 再送スキップ: 同じ送信元ドメインから何日前までに届いたメールと比べるか（0で無効）
 export function resendWindowDays(): number {
   return envNum('SES_RESEND_WINDOW_DAYS', 14, { min: 0, max: 60 });
