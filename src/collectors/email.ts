@@ -203,6 +203,8 @@ function sesMailId(gmailMessageId: string): string {
   return `sesmail_${gmailMessageId}`;
 }
 
+const GMAIL_AUTHSERV_IDS: readonly string[] = ['mx.google.com'];
+
 async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Message): Promise<SesRawMail> {
   const headers = msg.payload?.headers ?? [];
   const header = (name: string) =>
@@ -217,7 +219,8 @@ async function buildSesRawMail(gmail: gmail_v1.Gmail, msg: gmail_v1.Schema$Messa
   const dateMs = Number(msg.internalDate ?? Date.now());
   const attachments = await collectAttachments(gmail, msg.id ?? '', msg.payload);
   // 受信サーバー（Gmail）が付けた一番上の Authentication-Results だけを読む（下にあるものは送り主が書ける）
-  const authDomain = dmarcPassDomain(header('Authentication-Results'));
+  // authserv-id が mx.google.com のものだけを信じる（Gmail は受信時に必ず自分の結果を一番上に付ける）
+  const authDomain = dmarcPassDomain(header('Authentication-Results'), GMAIL_AUTHSERV_IDS);
 
   return {
     id: sesMailId(msg.id ?? ''),

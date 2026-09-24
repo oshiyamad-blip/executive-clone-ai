@@ -402,6 +402,15 @@ export function xserverSharedPass(): string {
   // パスワードは前後の空白も意味を持ち得るためトリムしない（空文字だけを未設定とみなす）
   return process.env.XSERVER_SHARED_PASS ?? '';
 }
+// 受信サーバー（Xserver）が付ける Authentication-Results の authserv-id（カンマ区切り。'*.xserver.jp' 形式も可）。
+// 受信したメールのヘッダで、サーバーが一番上に dmarc= を含む結果を付けることを確かめてから設定する。
+// 未設定なら送り主の DMARC の結果を使わない（再送の識別はアドレス＋返信先だけ・最終受信日は更新しない）
+export function xserverAuthservIds(): string[] {
+  return env('XSERVER_AUTHSERV_ID')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
 // 下書きフォルダ名（環境により 'Drafts' / 'INBOX.Drafts' / '下書き' 等）
 export function xserverDraftsMailbox(): string {
   return envStr('XSERVER_DRAFTS_MAILBOX', 'Drafts');
@@ -630,6 +639,11 @@ export function sheetsDbImpersonate(): string {
 }
 
 // ===== Google の資格情報（SES） =====
+// ドメイン全体の委任が鍵に付いていないかを確かめるときになりすます社内の実在するユーザー（グループ・配信リストは不可）
+export function sesDwdProbeSubject(): string {
+  return env('SES_DWD_PROBE_SUBJECT').toLowerCase();
+}
+
 // SES のメインのサービスアカウント鍵（スプレッドシート・リンク先のシートの読み取り・プロパーの既定）の環境変数の接頭辞（優先順）。
 // SES 専用の SES_GOOGLE_SA_* を優先し、無ければ GOOGLE_SA_*（経営者クローンの収集と同じ名前。そちらの鍵はDWDを持つため共用しない）
 export function sesServiceAccountEnvPrefixes(): readonly string[] {

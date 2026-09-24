@@ -14,7 +14,7 @@ import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
 import { htmlToPlainText } from './htmlText.js';
 import { formatMailboxes, type MailboxValue } from './ownMail.js';
-import { dmarcPassDomain } from './authResults.js';
+import { dmarcPassDomain, authservIdOf, authservIdTrusted } from './authResults.js';
 import {
   xserverImapHost,
   xserverImapPort,
@@ -23,6 +23,7 @@ import {
   xserverSharedUser,
   xserverSharedPass,
   xserverDraftsMailbox,
+  xserverAuthservIds,
   collectDays,
   maxMailMbPerRun,
 } from '../config.js';
@@ -216,6 +217,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   // 3) 解析は IMAP を閉じてから行う（解析に時間のかかるメールで接続が切れ、取得済みの分まで失わないように）。
   // 実行の期限を過ぎたら残りは次回に回す。解析できないメールは同じ原文を何度解析しても失敗するため「解析不可」で処理済みにする
   let droppedAttachments = 0;
+  let trustedAuthResults = 0;
   const unparsable: string[] = [];
   for (let i = 0; i < sources.length; i++) {
     const { meta, source } = sources[i];
@@ -227,6 +229,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
     try {
       const mail = await parseRawMail(source, meta.id, meta.receivedAt);
       droppedAttachments += mail.droppedAttachments;
+      if (mail.trustedAuthResults) trustedAuthResults++;
       mails.push(mail.mail);
     } catch (err) {
       unparsable.push(meta.id);
@@ -236,6 +239,14 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   }
   if (droppedAttachments > 0) {
     recordHealEvent('warn', `Xserver収集: 大きすぎる添付${droppedAttachments}件は読み込まずに抽出します`);
+  }
+  // 受信サーバーが自分の認証結果を付けているかを毎回確かめる（付けていなければ、一番上のヘッダは送り主の書いたものになりうる）
+  if (xserverAuthservIds().length > 0 && mails.length >= 3 && trustedAuthResults === 0) {
+    recordHealEvent(
+      'warn',
+      'Xserver収集: XSERVER_AUTHSERV_ID と一致し dmarc= の結果を含む Authentication-Results が一番上にあるメールがありませんでした' +
+        '（受信したメールのヘッダを確かめ、設定を直してください。一致しないメールの送り主は認証されていない扱いです）',
+    );
   }
   if (unparsable.length > 0) {
     recordHealEvent('warn', `Xserver収集: 解析できないメール${unparsable.length}件は「解析不可」として処理済みにします（受信箱で直接確認してください）`);
@@ -332,11 +343,15 @@ function refsText(r: string | string[] | undefined): string {
 }
 
 // 1通の原文（RFC822）→ SesRawMail。収集と回帰確認（ses:eval:rules）で同じ解析を使う
-export async function parseRawMail(source: Buffer, id: string, receivedAt: Date): Promise<{ mail: SesRawMail; droppedAttachments: number }> {
+export async function parseRawMail(
+  source: Buffer,
+  id: string,
+  receivedAt: Date,
+): Promise<{ mail: SesRawMail; droppedAttachments: number; trustedAuthResults: boolean }> {
   return toSesRawMail(await simpleParser(source, SIMPLE_PARSER_OPTIONS), id, receivedAt);
 }
 
-function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesRawMail; droppedAttachments: number } {
+function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesRawMail; droppedAttachments: number; trustedAuthResults: boolean } {
   // Gmail経路と同じ許可リスト（xlsx/xls/pdf/spreadsheet）で絞り、署名画像やzip等をメモリに抱えない。
   // 抽出・解析で使えない大きさの添付は base64 にしない（attachmentLimits.ts）
   const supported = (p.attachments ?? [])
@@ -349,7 +364,9 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     data: a.content ? a.content.toString('base64') : '',
   }));
   const body = bodyText(p);
-  const authDomain = dmarcPassDomain(topAuthResults(p));
+  const topAr = topAuthResults(p);
+  const trusted = xserverAuthservIds();
+  const authDomain = dmarcPassDomain(topAr, trusted);
   const mail: SesRawMail = {
     id,
     from: addrText(p.from),
@@ -366,7 +383,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): { mail: SesR
     sheetLinks: extractSheetLinks(body),
     ...(authDomain ? { authDomain } : {}),
   };
-  return { mail, droppedAttachments: dropped };
+  return { mail, droppedAttachments: dropped, trustedAuthResults: authservIdTrusted(authservIdOf(topAr), trusted) && /\bdmarc\s*=/i.test(topAr) };
 }
 
 export function draftReady(): boolean {

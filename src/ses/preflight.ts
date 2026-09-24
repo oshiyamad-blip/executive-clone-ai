@@ -25,6 +25,7 @@ import {
   xserverSharedUser,
   xserverSharedPass,
   xserverDraftsMailbox,
+  xserverAuthservIds,
   sesTargetGmail,
   sesNotifyTo,
   ownDomains,
@@ -88,7 +89,7 @@ import {
   environmentSentinel,
 } from './config.js';
 import { loadServiceAccountCredentials } from '../collectors/googleAuth.js';
-import { sesMainCredentials, sameServiceAccount, sheetsDbAuthProblem, gmailAuthProblem, dedicatedCredentials } from './googleCreds.js';
+import { sesMainCredentials, sameServiceAccount, sheetsDbAuthProblem, gmailAuthProblem, dedicatedCredentials, delegationProbeSubject } from './googleCreds.js';
 import {
   isPlainEmailAddress,
   looksLikeDomain,
@@ -238,7 +239,19 @@ function checkMainServiceAccount(label: string): boolean {
     );
     return false;
   }
-  if (!sesSet) info(`${legacyPrefix}KEY_JSON を SES のメインの鍵として使います（経営者クローンの鍵と分ける場合は SES_GOOGLE_SA_KEY_JSON）`);
+  if (!sesSet) {
+    // 経営者クローンの鍵の名前（DWD を持つ）を SES のメインの鍵に使わない（GOOGLE_TARGET_EMAIL の有無に関わらず。バッチも止める）
+    bad(
+      `${label}に ${legacyPrefix}KEY_JSON（経営者クローンの鍵の名前）を使っています。` +
+        '委任の無い別のサービスアカウントの鍵を SES_GOOGLE_SA_KEY_JSON に登録し、GOOGLE_SA_* は SES に渡さないでください',
+    );
+    return false;
+  }
+  // 委任の確認（バッチの開始時）に使うユーザー。無ければバッチが止まる
+  if (!delegationProbeSubject()) {
+    bad('SES_DWD_PROBE_SUBJECT（社内の実在するユーザーのアドレス）が未設定です — メインの鍵にドメイン全体の委任が付いていないかを確かめられないため、バッチは止まります');
+    return false;
+  }
   return true;
 }
 
@@ -445,6 +458,12 @@ function checkMail(): void {
     else if (pass !== pass.trim()) warn('XSERVER_SHARED_PASS の前後に空白・改行があります（貼り付け時に混入していないか確認）');
     else ok('XSERVER_SHARED_PASS: 設定済み');
     info(`下書きフォルダ: 「${xserverDraftsMailbox()}」（実在するかは「SESメール量の測定」ワークフローか npm run doctor で確認）`);
+    if (xserverAuthservIds().length === 0) {
+      warn(
+        'XSERVER_AUTHSERV_ID が未設定です — 受信サーバーが付けた送信ドメイン認証（DMARC）の結果を使いません（再送の識別はアドレス＋返信先だけ・' +
+          '再送で最終受信日を延ばしません）。受信したメールの一番上の Authentication-Results の最初の名前を確かめて設定してください',
+      );
+    } else ok('XSERVER_AUTHSERV_ID: 設定済み（一致する一番上の Authentication-Results だけを信じます）');
     return;
   }
   if (provider === 'gmail') {

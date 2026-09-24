@@ -26,6 +26,7 @@ import {
   allowedSenders,
   sesNotifyTo,
   properImpersonate,
+  sesDwdProbeSubject,
 } from './config.js';
 
 export type SesGoogleAuth = GoogleJwt | InstanceType<typeof google.auth.GoogleAuth>;
@@ -151,6 +152,37 @@ export const SCOPE = {
   spreadsheets: 'https://www.googleapis.com/auth/spreadsheets',
 } as const;
 
+// 委任の有無を確かめるスコープ。Google は要求したスコープごとに登録の一覧と文字どおり照合するため、
+// 使うスコープより広いもの（メール全体・ドライブ全体・カレンダー・管理者 API 等）も個別に確かめる
+export const DELEGATION_PROBE_SCOPES: readonly string[] = [
+  'https://mail.google.com/',
+  SCOPE.gmailReadonly,
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/drive',
+  SCOPE.driveReadonly,
+  SCOPE.spreadsheets,
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/meetings.space.readonly',
+  'https://www.googleapis.com/auth/admin.directory.user.readonly',
+  'https://www.googleapis.com/auth/cloud-platform',
+];
+
+// 各鍵が DWD で使ってよいスコープ（これ以外に委任があれば止める）。メインの鍵は DWD を使わない
+export const DELEGATION_ALLOWED: Readonly<Record<'main' | 'sheetsDb' | 'gmail' | 'proper', readonly string[]>> = {
+  main: [],
+  sheetsDb: [SCOPE.spreadsheets],
+  gmail: [SCOPE.gmailReadonly, 'https://www.googleapis.com/auth/gmail.compose', 'https://www.googleapis.com/auth/gmail.send'],
+  proper: [SCOPE.driveReadonly, SCOPE.spreadsheets],
+};
+
+export function unneededProbeScopes(kind: keyof typeof DELEGATION_ALLOWED): string[] {
+  const allowed = new Set(DELEGATION_ALLOWED[kind]);
+  return DELEGATION_PROBE_SCOPES.filter((s) => !allowed.has(s));
+}
+
 export type DelegationProbe = 'granted' | 'denied' | 'unknown';
 
 // トークン要求の結果の分類（純関数）。null = トークンが発行された（委任が登録されている）。
@@ -200,49 +232,77 @@ export async function probeDelegation(creds: ServiceAccountCredentials, subject:
   }
 }
 
-// なりすましの確認に使う社内のユーザー（委任の有無はユーザーが実在しないと確かめられない）
-function probeSubject(): string {
+// なりすましの確認に使う社内のユーザー（委任の有無はユーザーが実在しないと確かめられない）。
+// SES_DWD_PROBE_SUBJECT（社内の実在するユーザー。グループ・配信リストは不可）を優先する
+export function delegationProbeSubject(): string {
   const notify = sesNotifyTo()
     .split(',')
     .map((a) => a.trim().toLowerCase());
-  const candidates = [sheetsDbImpersonate(), mailProvider() === 'gmail' ? sesTargetGmail() : '', ...allowedSenders(), ...notify];
+  const candidates = [sesDwdProbeSubject(), sheetsDbImpersonate(), mailProvider() === 'gmail' ? sesTargetGmail() : '', ...allowedSenders(), ...notify];
   return candidates.find((a) => /^[^@\s]+@[^@\s]+$/.test(a)) ?? '';
+}
+
+function scopeLabel(scope: string): string {
+  return scope.replace('https://www.googleapis.com/auth/', '');
 }
 
 // 各鍵に、使わないスコープのDWDが登録されていないか（トークンが発行されたら問題）。
 // メインの鍵は社外から届いたリンクを読み、専用の鍵もバッチの実行環境にあるため、漏れたときにテナントの全員のメール・ドライブを
-// 読めるような委任が付いていたら止める。問題の説明（アドレスは含めない）の一覧を返す
+// 読めるような委任が付いていたら止める。確かめられないとき（確認に使うユーザーが無い・グループ・通信の失敗）も止める（fail closed）。
+// 問題の説明（アドレスは含めない）の一覧を返す
 export async function unneededDelegationProblems(): Promise<string[]> {
+  const problems: string[] = [];
   const checks: Array<{ label: string; creds: ServiceAccountCredentials; subject: string; scopes: string[] }> = [];
   const main = sesMainCredentials();
-  const subject = probeSubject();
-  if (main && subject) {
-    checks.push({ label: `メインのサービスアカウント鍵（${main.prefix}*）`, creds: main.creds, subject, scopes: [SCOPE.gmailReadonly, SCOPE.driveReadonly, SCOPE.spreadsheets] });
+  const subject = delegationProbeSubject();
+  if (main) {
+    const mainLabel = `メインのサービスアカウント鍵（${main.prefix}*）`;
+    if (main.prefix === executiveServiceAccountEnvPrefix()) {
+      problems.push(
+        `${mainLabel}: SES のメインの鍵に経営者クローンの鍵の名前 GOOGLE_SA_* を使っています（そちらの鍵はドメイン全体の委任を持つため）。` +
+          '委任の無い別のサービスアカウントの鍵を SES_GOOGLE_SA_KEY_JSON に登録し、GOOGLE_SA_* は SES に渡さないでください',
+      );
+    }
+    if (subject) checks.push({ label: mainLabel, creds: main.creds, subject, scopes: unneededProbeScopes('main') });
+    else {
+      problems.push(
+        `${mainLabel}のドメイン全体の委任を確かめるユーザーがいません。SES_DWD_PROBE_SUBJECT に社内の実在するユーザーのアドレス（グループ・配信リストは不可）を登録してください`,
+      );
+    }
   }
   const sheetsKey = usableDedicated(sheetsDbServiceAccountEnvPrefix());
   if (sheetsKey && sheetsDbImpersonate()) {
-    checks.push({ label: 'SHEETS_DB_SA_KEY_JSON', creds: sheetsKey, subject: sheetsDbImpersonate(), scopes: [SCOPE.gmailReadonly, SCOPE.driveReadonly] });
+    checks.push({ label: 'SHEETS_DB_SA_KEY_JSON', creds: sheetsKey, subject: sheetsDbImpersonate(), scopes: unneededProbeScopes('sheetsDb') });
   }
   const gmailKey = usableDedicated(gmailServiceAccountEnvPrefix());
   if (gmailKey && mailProvider() === 'gmail' && sesTargetGmail()) {
-    checks.push({ label: 'SES_GMAIL_SA_KEY_JSON', creds: gmailKey, subject: sesTargetGmail(), scopes: [SCOPE.driveReadonly, SCOPE.spreadsheets] });
+    checks.push({ label: 'SES_GMAIL_SA_KEY_JSON', creds: gmailKey, subject: sesTargetGmail(), scopes: unneededProbeScopes('gmail') });
   }
   const properKey = usableDedicated(properServiceAccountEnvPrefix());
   if (properKey && properImpersonate()) {
-    checks.push({ label: 'PROPER_GOOGLE_SA_KEY_JSON', creds: properKey, subject: properImpersonate(), scopes: [SCOPE.gmailReadonly] });
+    checks.push({ label: 'PROPER_GOOGLE_SA_KEY_JSON', creds: properKey, subject: properImpersonate(), scopes: unneededProbeScopes('proper') });
   }
-  const problems: string[] = [];
+  const unknown = new Set<string>();
   await Promise.all(
     checks.flatMap((c) =>
       c.scopes.map(async (scope) => {
-        if ((await probeDelegation(c.creds, c.subject, scope)) === 'granted') {
+        let result = await probeDelegation(c.creds, c.subject, scope);
+        // 一時的な失敗は1回だけ確かめ直す
+        if (result === 'unknown') result = await probeDelegation(c.creds, c.subject, scope);
+        if (result === 'granted') {
           problems.push(
-            `${c.label} に、使わないスコープ ${scope.replace('https://www.googleapis.com/auth/', '')} のドメイン全体の委任が登録されています` +
+            `${c.label} に、使わないスコープ ${scopeLabel(scope)} のドメイン全体の委任が登録されています` +
               '（テナントの全員に及ぶため、管理コンソールの「ドメイン全体の委任を管理」からこのクライアントIDの登録を外してください）',
           );
-        }
+        } else if (result === 'unknown') unknown.add(c.label);
       }),
     ),
   );
+  for (const label of unknown) {
+    problems.push(
+      `${label} のドメイン全体の委任を確かめられませんでした（確認に使ったユーザーが実在しない・グループ・通信の失敗）。` +
+        'SES_DWD_PROBE_SUBJECT に社内の実在するユーザーのアドレスを登録し、時間をおいて再実行してください',
+    );
+  }
   return problems.sort();
 }

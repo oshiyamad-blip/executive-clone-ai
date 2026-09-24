@@ -112,7 +112,10 @@
    **「鍵」タブ →「鍵を追加」→「新しい鍵を作成」→「JSON」→「作成」**
    - `.json` ファイルがダウンロードされます。**この中身がパスワードと同じ扱い**です（メール・チャットに貼らない）
    - JSON ファイルの**中身を丸ごと**（`{` から `}` まで）GitHub の Secret `SES_GOOGLE_SA_KEY_JSON` に登録します（5章。以前の名前
-     `GOOGLE_SA_KEY_JSON` も使えますが、経営者クローンの鍵と取り違えないよう新しい名前にしてください）
+     `GOOGLE_SA_KEY_JSON` はもう使えません。経営者クローンの鍵（DWD を持つ）と取り違えないよう、SES では使うとバッチが止まります）
+   - あわせて Secret `SES_DWD_PROBE_SUBJECT` に**社内の実在するユーザーのアドレス**（グループ・配信リストは不可）を登録します。
+     バッチは起動時にこのユーザーとして、メインの鍵で Gmail・ドライブ・カレンダー・管理者 API 等のトークンを要求し、
+     発行された（不要なドメイン全体の委任がある）・確かめられないときは止まります
    - パソコンに残ったファイルは削除するか、**リポジトリの外**の鍵のかかる場所に保管し、90日ごとなど定期的に作り直して古い鍵を削除します
    - 「サービス アカウント キーの作成が無効」と表示される場合は、組織のポリシーを例外にせず、上の 5（Workload Identity 連携）を使ってください
 
@@ -383,12 +386,14 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | **必須**（Workload Identity 連携なら不要） | 2-2 の JSON 鍵ファイルの中身を丸ごと（DWD の無い SES 専用のサービスアカウント）。以前の名前 `GOOGLE_SA_KEY_JSON` も使えます（こちらが無いときだけ） |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` / `GCP_SERVICE_ACCOUNT` | `projects/…/providers/…` / `ses-batch@…` | 推奨 | 2-2 の 5（鍵ファイルなしの認証）。両方あると JSON 鍵を渡しません |
 | `SES_GOOGLE_SA_EMAIL` | `ses-batch@<プロジェクト>.iam.gserviceaccount.com` | Workload Identity 連携なら**必須** | サービスアカウントのメール（「_指示混入」タブの保護に使う） |
+| `SES_DWD_PROBE_SUBJECT` | `taro@<自社ドメイン>` | 鍵ファイルを使うなら**必須** | 社内の実在するユーザー（グループ不可）。メインの鍵に不要な DWD が無いかをこのユーザーとして確かめます（無いとバッチが止まる） |
 | `SES_ENVIRONMENT_SENTINEL` | ランダムな文字列 | **必須** | Environment「production」にだけ登録する目印。渡っていない実行（Environment が効かない構成・リポジトリの Secrets への退避）を事前確認が止めます |
 | `SHEETS_DB_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | **必須** | 4-1 のスプレッドシート（URL か ID） |
 | `XSERVER_IMAP_HOST` | `svXXXX.xserver.jp` | **必須** | 2-3 |
 | `XSERVER_SMTP_HOST` | `svXXXX.xserver.jp` | **必須**（サマリを送る場合） | 2-3（通常 IMAP と同じ） |
 | `XSERVER_SHARED_USER` | `sales@<自社ドメイン>` | **必須** | 共有メールボックスのアドレス全体 |
 | `XSERVER_SHARED_PASS` | `********` | **必須** | 共有メールボックスのパスワード |
+| `XSERVER_AUTHSERV_ID` | `sv1234.xserver.jp` | 推奨 | 受信サーバーが付ける Authentication-Results の最初の名前（authserv-id）。受信したメールの原文（「メールのソース」）で、**一番上の** Authentication-Results が この名前で始まり `dmarc=` を含むことを確かめてから登録します。未設定・一致しないメールは送り主の認証結果を使いません（ヘッダは送り主も書けるため）。設定しても一致するメールが無い回はサマリで知らせます |
 | `SES_NOTIFY_TO` | `担当者@<自社ドメイン>` | **強く推奨** | サマリ・診断レポートの宛先（カンマ区切りで複数可）。ログは秘匿されるため、失敗の詳細はこのメールで確認します |
 | `SES_OWN_DOMAINS` | `<自社ドメイン>` | **強く推奨** | 自社のドメイン。自社から届いたメール（紹介メールの Cc 等）を取り込まない。下書きの送信元の既定の許可にも使う |
 | `SES_ALLOWED_SENDER_DOMAINS` | `<自社ドメイン>` | 任意 | 「担当者メール」に書ける送信元のドメイン。未登録なら `SES_OWN_DOMAINS` と共有メールボックスのドメインだけ（どちらも無ければ下書きを作りません） |
@@ -577,10 +582,14 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 - **Variables の値は公開ログに表示されます**。社員のアドレス・自社ドメイン・粗利や交渉の方針は Secrets に登録してください（5章）
 - 鍵・パスワードは本番のステップにだけ渡し、依存パッケージのインストールスクリプトは実行しません（`npm ci --ignore-scripts`）。
   使っている GitHub Actions はコミットのハッシュで固定しています（更新するときはハッシュごと書き換えます。Dependabot が PR を作ります）。
-  本番のステップはビルド済みの `dist/` を `node` で動かし、その前に開発用のパッケージ（tsx・esbuild・TypeScript）を取り除きます。
+  定時バッチは2つのジョブに分かれています。**ビルドと `npm audit` は鍵を持たないジョブ（`build`。`environment` も `id-token` も無し）**で行い、
+  鍵を持つジョブ（`batch`）は本番用の依存パッケージだけを入れて（`npm ci --omit=dev`）、受け取った `dist/` を `node` で動かします。
+  `id-token: write`（Workload Identity 連携）のジョブではすべてのステップに OIDC トークンを取る手段が渡るため、
+  開発用のパッケージ（tsx・esbuild・TypeScript）を鍵を持つジョブで動かさないためです。**鍵を持つジョブにビルドや開発用のパッケージを戻さないでください**。
   使わない機能の SDK（Gemini・Notion）は、その機能を選んだときだけ読み込みます
 - **鍵を持つジョブは Actions のキャッシュを使いません**（`setup-node` の `cache: npm` 等）。キャッシュは main の他のジョブも作れ、
   チェックアウトの後に展開されるためソースを書き換えられます。**鍵を持つワークフローにキャッシュ・成果物を足さないでください**
+  （例外は同じ実行の `build` ジョブが作る `ses-dist`＝ビルドした `dist/` だけ。保存1日。`data/` を含めてはいけません）
 - **依存パッケージの脆弱性**: 定時バッチは鍵を渡さないステップで `npm audit` を実行し、重大度 high 以上は警告、critical はバッチを止めて
   失敗の通知で知らせます。`.github/dependabot.yml` が npm と GitHub Actions の更新 PR を（公開から7日おいて）作ります。
   **【運用者の作業】** Settings → Code security で **Dependabot alerts / security updates** を有効にし、届いた PR はレビューして取り込みます。
@@ -588,8 +597,10 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
   月に1回 <https://cdn.sheetjs.com/xlsx-latest/package/package.json> の版と `package.json` の版（0.20.3）を比べ、新しければ更新してください
 - **Google の鍵は用途ごとに分けます**: メイン（`SES_GOOGLE_SA_KEY_JSON`・DWD なし）・4-4 B 用（`SHEETS_DB_SA_KEY_JSON`・`spreadsheets` だけ）・
   Gmail 運用用（`SES_GMAIL_SA_KEY_JSON`）・別テナント用（`PROPER_GOOGLE_SA_KEY_JSON`）。専用の鍵がメインの鍵と同じなら使わず、
-  バッチは起動時に各鍵で使わないスコープのトークンを要求し、**発行された（不要な DWD が登録されている）ら止めます**。
-  経営者クローンの収集用の `GOOGLE_SA_KEY_JSON`（経営者の Gmail・ドライブへの DWD）を SES に使わないでください
+  バッチは起動時に各鍵で使わないスコープ（`https://mail.google.com/`・`gmail.*`・`drive`・`calendar`・`admin.directory.*`・`cloud-platform` 等）の
+  トークンを要求し、**発行された（不要な DWD が登録されている）ら止めます**。確かめるユーザー（`SES_DWD_PROBE_SUBJECT`）が無い・
+  グループ等で確かめられないときも止めます。経営者クローンの収集用の `GOOGLE_SA_KEY_JSON`（経営者の Gmail・ドライブへの DWD）は
+  SES では使えません（使うとバッチが止まります）
 - **Gmail 運用（`MAIL_PROVIDER=gmail`）の DWD はテナントの全員に及びます**: `gmail.readonly`・`gmail.compose`・`gmail.send` の委任を受けた鍵を
   持つ者は、SES のメールボックスだけでなく**役員を含む全員のメールを読み・送信できます**（`SES_ALLOWED_SENDERS` の制限はコードの中だけのもの）。
   Xserver 運用なら漏れても共有メールボックスだけで済みます。Gmail にする場合は専用の鍵 `SES_GMAIL_SA_KEY_JSON` にし、可能なら SES 専用の
@@ -680,7 +691,9 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 - **リポジトリを非公開（Private）にする**のが最も効果的です（上の1つ目の項目。公開のままでは、以下の履歴・ブランチ・ログが誰でも読めます）
 - **【鍵】`SES_PRICING_POLICY_JSON` に移したら、`MIN_GROSS_MARGIN_JPY` `MIN_GROSS_MARGIN_MAN` `NEGOTIATION_MAX_PROJECT_RAISE_MAN`
   `NEGOTIATION_MAX_ENGINEER_CUT_MAN` の Secrets を削除**してください。以前の実行ログには伏せ字の位置から値が推測できる行が残っているため、
-  Actions タブで以前の実行（Run）のログを削除し、価格の方針そのものを見直すことも検討してください
+  Actions タブで以前の実行（Run）のログを削除し、価格の方針そのものを見直すことも検討してください。
+  コード・デモの既定値（粗利下限・交渉幅）と、以前の版の要件定義書に書かれていた値は**公開済み**です。本番では必ず
+  `SES_PRICING_POLICY_JSON` に値を登録し（未登録なら事前確認がバッチを止めます）、文書・コメントに実際の方針の数値を書かないでください
 - **【GitHub】main のルールセット・Actions の許可・Workflow permissions（2-4 の 2・5）を設定する**。あわせて:
   - **`CLAUDE.md` の Git ワークフロー**（現在は「`git push -u origin main` でプッシュ」）を、作業ブランチに push して PR を作る手順に書き換える
     （コーディングエージェントが main に直接 push しないように。ルールセットでも止まります）
@@ -695,14 +708,16 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
   `SES_WEB_TLS_CERT` / `SES_WEB_TLS_KEY` の証明書・秘密鍵も同様です
 - **【鍵】誤ってコミット・公開した鍵は、履歴から消しても漏れたものとして作り直します**（Anthropic の API キー・サービスアカウントの鍵・
   共有メールボックスのパスワード・`SES_DRAFT_SIGNING_KEY`。手順は上の「鍵が漏れた可能性があるとき」）
-- **【会社を特定できる情報】新卒採用ページ（`genestate-newgrad/`）を含むブランチ**（`claude/new-graduate-recruitment-page-ukb077`・
-  `claude/newgrad-design-tokens-7obgb5`）には、社員の顔写真（JPG と、HTML に埋め込んだ base64 の画像）・会社名・所在地が入っています。
+- **【会社を特定できる情報】新卒採用ページ（会社名の付いたフォルダ）を含むブランチ**（`claude/new-graduate-recruitment-page-ukb077`・
+  `claude/newgrad-design-tokens-7obgb5`）には、社員の顔写真（JPG と、プレビュー用の HTML 2つに埋め込んだ base64 の画像。JPG を消しても HTML から写真を取り出せます）・
+  写真と社員名（代表者を含む）の対応・会社名・所在地が入っています。
   このリポジトリの他の内容（SES の処理の仕組み・既定値・実行時刻）と結び付けて会社を特定できてしまうため、
   1. 採用ページは別の**非公開リポジトリ**へ移し、この2つのブランチを GitHub から削除する
   2. 履歴からも消す場合は、所有者の判断で `git filter-repo` で該当のファイルを除き force-push したうえで、GitHub サポートに
      キャッシュと参照されないオブジェクトの削除を依頼する（既にクローン・フォークされた分は取り戻せません）
   3. 写真は既に公開されたものとして扱い、写っている社員に説明し同意を確認する
   4. SES の運用は、会社名の入らない（できれば非公開の）リポジトリで行う
+  5. このブランチ（SES）の文書・コードに会社名・社員名・所在地を書かない（手順書でもフォルダ名を伏せています）
 - **【会社を特定できる情報】コミットのメールアドレス**: GitHub の Settings → Emails で「Keep my email addresses private」と
   「Block command line pushes that expose my email」を有効にし、`git config user.email` を GitHub の noreply アドレスにしてください
   （過去のコミットのメタデータには個人のアドレスが残ります）
@@ -799,6 +814,7 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | --- | --- | --- |
 | ☐ | `ANTHROPIC_API_KEY` | 必須 |
 | ☐ | `SES_GOOGLE_SA_KEY_JSON`（または `GCP_WORKLOAD_IDENTITY_PROVIDER`・`GCP_SERVICE_ACCOUNT`・`SES_GOOGLE_SA_EMAIL`） | 必須 |
+| ☐ | `SES_DWD_PROBE_SUBJECT`（鍵ファイルを使う場合） | 必須 |
 | ☐ | `SES_ENVIRONMENT_SENTINEL` | 必須（この Environment にだけ） |
 | ☐ | `SHEETS_DB_SPREADSHEET_ID` | 必須 |
 | ☐ | `XSERVER_IMAP_HOST` | 必須 |

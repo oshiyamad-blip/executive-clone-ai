@@ -86,6 +86,7 @@ import {
   gmailDelegatedAuth,
   sesMainCredentials,
   unneededDelegationProblems,
+  DELEGATION_PROBE_SCOPES,
   __setTokenFetcherForTest,
 } from '../googleCreds.js';
 import { properGoogleAuth, properMasterAuth, properUsesDedicatedAccount } from '../proper/auth.js';
@@ -2631,8 +2632,9 @@ async function testGoogleAccessRound6(): Promise<void> {
   });
 
   // 使わないスコープの DWD（トークンが発行される）を検出してバッチを止める
-  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, SES_ALLOWED_SENDERS: `taro@${OWN_DOMAIN}` }, async () => {
+  await withEnv({ SES_GOOGLE_SA_KEY_JSON: keyMain, SES_ALLOWED_SENDERS: `taro@${OWN_DOMAIN}` }, async () => {
     const denied = Object.assign(new Error('unauthorized_client'), { response: { data: { error: 'unauthorized_client' } } });
+    const invalidGrant = Object.assign(new Error('invalid_grant'), { response: { data: { error: 'invalid_grant' } } });
     try {
       __setTokenFetcherForTest(async (_c, _s, scope) => {
         if (!scope.endsWith('gmail.readonly')) throw denied;
@@ -2644,6 +2646,39 @@ async function testGoogleAccessRound6(): Promise<void> {
       });
       const none = await unneededDelegationProblems();
       check('委任が無ければ問題なし', none.length === 0, none.join(' / '));
+      // 第7回: 使うスコープより広い登録（メール全体・ドライブ全体・カレンダー等）も確かめる
+      for (const wide of ['https://mail.google.com/', 'https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/admin.directory.user.readonly']) {
+        __setTokenFetcherForTest(async (_c, _s, scope) => {
+          if (scope !== wide) throw denied;
+        });
+        const w = await unneededDelegationProblems();
+        check(`メインの鍵に広いスコープ（${wide}）の DWD があれば止める`, w.length === 1, w.join(' / '));
+      }
+      // 確かめられない（グループ等で invalid_grant）ときは止める
+      let calls = 0;
+      __setTokenFetcherForTest(async () => {
+        calls++;
+        throw invalidGrant;
+      });
+      const unk = await unneededDelegationProblems();
+      check('委任を確かめられない（確認のユーザーがグループ等）ときは止める（fail closed・1回は確かめ直す）', unk.length === 1 && unk[0].includes('確かめられません') && calls > DELEGATION_PROBE_SCOPES.length, `${calls} ${unk.join(' / ')}`);
+      // 確認に使うユーザーが無いときは止める
+      __setTokenFetcherForTest(async () => {
+        throw denied;
+      });
+      await withEnv({ SES_ALLOWED_SENDERS: undefined, SES_NOTIFY_TO: undefined }, async () => {
+        const noSubject = await unneededDelegationProblems();
+        check('委任を確かめるユーザーが無ければ止める（SES_DWD_PROBE_SUBJECT を案内）', noSubject.length === 1 && noSubject[0].includes('SES_DWD_PROBE_SUBJECT'), noSubject.join(' / '));
+        await withEnv({ SES_DWD_PROBE_SUBJECT: `probe@${OWN_DOMAIN}` }, async () => {
+          const withProbe = await unneededDelegationProblems();
+          check('SES_DWD_PROBE_SUBJECT があればそのユーザーで確かめる', withProbe.length === 0, withProbe.join(' / '));
+        });
+      });
+      // 経営者クローンの鍵の名前 GOOGLE_SA_* は SES のメインの鍵に使わない
+      await withEnv({ SES_GOOGLE_SA_KEY_JSON: undefined, GOOGLE_SA_KEY_JSON: keyMain }, async () => {
+        const legacy = await unneededDelegationProblems();
+        check('GOOGLE_SA_*（経営者クローンの鍵の名前）を SES のメインの鍵に使ったら止める（GOOGLE_TARGET_EMAIL の有無に関わらず）', legacy.some((p) => p.includes('GOOGLE_SA_*')), legacy.join(' / '));
+      });
     } finally {
       __setTokenFetcherForTest(null);
     }

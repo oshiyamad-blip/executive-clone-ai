@@ -86,11 +86,18 @@ const LINK_TLDS = new Set(
 // 後ろに '/' が続いても技術名・ファイル名とみなす末尾（「Node.js/React」「Vue.js/Nuxt.js」）
 const TECH_SUFFIXES = new Set(['js', 'ts', 'jsx', 'tsx', 'mjs', 'py', 'rb', 'php', 'java', 'cs', 'rs', 'vue', 'css', 'html', 'xml', 'json', 'yml', 'yaml', 'md', 'txt', 'exe', 'dll', 'jar', 'war', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'zip']);
 const TECH_HOSTS = new Set(['asp.net', 'vb.net', 'ado.net', 'c#.net', 'f#.net', 'socket.io', 'salesforce.com', 'force.com', 'dot.net', 'ml.net', 'entity.framework']);
-const HOST_LIKE = /(?<![\w@.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}([a-z]{2,24}|xn--[a-z0-9-]{1,59}))(?![\w-])(\/?)/gi;
+const HOST_LIKE = /(?<![A-Za-z0-9@])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}([a-z]{2,24}|xn--[a-z0-9-]{1,59}))(?![\w-])(\/?)/gi;
+// 日本語などを含むホスト名（「悪意.com」。国際化ドメイン名としてリンクになる）。技術名（「業務系.NET」）と区別するため、
+// 末尾は小文字で書かれたよく使われるトップレベルドメインだけを拾う
+const UNICODE_HOST_LIKE = /(?<![\p{L}\p{N}@])((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.){1,8})([a-z]{2,24})(?![\p{L}\p{N}-])/gu;
+// 電話番号の区切りに使われるダッシュ類（NFKC では「-」にならない長音符・マイナス記号・ハイフン等）
+const DASH_LIKE = /[\u2010-\u2015\u2212\u30FC\uFF70\uFE63\uFF0D\u2E3A\u2E3B]/g;
+// 区切りを挟んだ数字の並び（10〜11桁の電話番号を区切りを除いて確かめる。括弧・空白・ダッシュ）
+const SEPARATED_DIGITS = /(?<![\d.\/])\+?(?:\d[ \t\-()]{0,2}){8,11}\d(?![\d.\/])/g;
 const SHORTENERS = /\b(?:bit\.ly|t\.co|tinyurl\.com|goo\.gl|ow\.ly|is\.gd|buff\.ly|t\.ly|cutt\.ly|rebrand\.ly|lin\.ee|amzn\.to|x\.gd|urx\.nu)\b/i;
 const OBFUSCATED = /\[\s*(?:\.|dot|ドット|点)\s*\]|\(\s*(?:dot|ドット)\s*\)|\[\s*(?:at|@|アット)\s*\]|\(\s*(?:at|@|アット)\s*\)|\{\s*(?:at|dot)\s*\}|アットマーク|あっとまーく/i;
 // 日本の電話番号（固定・携帯・+81）。連絡先を文面に入れて相手を社外の窓口へ誘導させない
-const PHONE_LIKE = /(?<![\d.\/-])(?:\+81[ \t-]?\(?0?\)?|0)\d{1,4}[ \t-]?\(?\d{1,4}\)?[ \t-]?\d{3,4}(?![\d.\/-])|(?<!\d)0\d{9,10}(?!\d)/;
+const PHONE_LIKE = /(?<![\d.\/-])(?:\+81[ \t-]?\(?0?\)?|\(0\d{1,4}\)|0)\d{1,4}[ \t-]?\(?\d{1,4}\)?[ \t-]?\d{3,4}(?![\d.\/-])|(?<!\d)0\d{9,10}(?!\d)/;
 const MESSENGER = /\bLINE\s*(?:ID|@|アカウント|公式)|ライン\s*(?:ID|アイディー)|line\.me|\b(?:telegram|whatsapp|wechat|skype\s*id|discord|kakaotalk)\b|カカオトーク|テレグラム|ワッツアップ/i;
 
 function bareLinkLike(text: string): boolean {
@@ -100,6 +107,21 @@ function bareLinkLike(text: string): boolean {
     const path = m[3] === '/';
     if (TECH_HOSTS.has(host) || isKnownSkill(host)) continue;
     if (LINK_TLDS.has(tld) || tld.startsWith('xn--') || (path && !TECH_SUFFIXES.has(tld))) return true;
+  }
+  for (const m of text.matchAll(UNICODE_HOST_LIKE)) {
+    // ASCII だけのホスト名は上で確かめた
+    if (/[^\x00-\x7f]/.test(m[1]) && LINK_TLDS.has(m[2])) return true;
+  }
+  return false;
+}
+
+// 電話番号らしき記載（ダッシュ類を「-」にそろえ、括弧の市外局番・区切りを挟んだ10〜11桁も拾う）
+function phoneLike(text: string): boolean {
+  const t = text.replace(DASH_LIKE, '-');
+  if (PHONE_LIKE.test(t)) return true;
+  for (const m of t.matchAll(SEPARATED_DIGITS)) {
+    const digits = m[0].replace(/[^\d+]/g, '');
+    if (/^0\d{9,10}$/.test(digits) || /^\+810?\d{9,10}$/.test(digits)) return true;
   }
   return false;
 }
@@ -112,7 +134,7 @@ export function linkOrContactLike(raw: string): boolean {
     URL_LIKE.test(text) ||
     SHORTENERS.test(text) ||
     OBFUSCATED.test(text) ||
-    PHONE_LIKE.test(text) ||
+    phoneLike(text) ||
     MESSENGER.test(text) ||
     bareLinkLike(text)
   );

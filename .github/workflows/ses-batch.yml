@@ -8,8 +8,10 @@
 # - data/ をキャッシュや成果物（actions/cache・upload-artifact）として保存しないでください（個人情報が公開されます）。
 #   毎回まっさらな環境で動き、処理済みメール・隔離リスト等の状態はスプレッドシートに保存されます。
 # - 鍵・パスワードは本番のステップにだけ渡します（依存パッケージのインストールやビルドには渡さない）。
-#   依存パッケージのインストールスクリプトは実行しません（--ignore-scripts）。本番のステップは、ビルド済みの dist/ を node で動かし、
-#   開発用のパッケージ（tsx・esbuild・TypeScript 等）は本番のステップの前に取り除きます（npm prune --omit=dev）。
+#   依存パッケージのインストールスクリプトは実行しません（--ignore-scripts）。ビルド・npm audit は鍵を持たないジョブ（build。
+#   environment も id-token も無し）で行い、鍵を持つジョブ（batch）は本番用の依存パッケージだけを入れ（npm ci --omit=dev）、
+#   受け取った dist/ を node で動かします（id-token: write のジョブではすべてのステップに OIDC のトークンを取る手段が渡るため、
+#   開発用のパッケージ（tsx・esbuild・TypeScript 等）を鍵を持つジョブで動かしません）。
 # - 鍵を持つジョブは Actions のキャッシュ（actions/cache・setup-node の cache）を使いません（main の他のジョブが作れるキャッシュを
 #   チェックアウトの後に展開すると、ソースを書き換えられるため）。
 # - Google の鍵は用途ごとに分けます（SES_GOOGLE_SA_KEY_JSON: DWDなし / SHEETS_DB_SA_KEY_JSON・SES_GMAIL_SA_KEY_JSON: DWDはその用途だけ）。
@@ -48,24 +50,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  batch:
-    name: SESバッチ
+  # 1つ目のジョブ: 鍵を持たない（environment なし・id-token なし）。開発用のパッケージ（TypeScript 等）はここでだけ動かす。
+  # id-token: write のジョブでは、すべてのステップに OIDC トークンを取得する URL・トークンが渡るため、
+  # ビルドや依存パッケージの確認を鍵を持つジョブで動かさない（開発用のパッケージが Google の資格情報を得られないように）
+  build:
+    name: ビルド（鍵なし）
     runs-on: ubuntu-latest
-    # Secrets は main ブランチだけが使える Environment から受け取る（Deployment branches を main に制限しておく）
-    environment: production
-    # id-token: write は Workload Identity 連携（鍵ファイルなしで Google に認証）を使うときに必要
     permissions:
       contents: read
-      id-token: write
-    # バッチは開始から SES_RUN_DEADLINE_MINUTES（既定20分）を過ぎると新しい抽出・判定を始めず、済んだ分を保存して
-    # サマリを送る（残りは次回の実行で続きから）。実行中のLLM呼び出しの待ち時間と準備の時間を見込んで長めに取る
-    timeout-minutes: 40
-    env:
-      TZ: Asia/Tokyo
-      # 公開ログ対策（必ず true のまま）
-      SES_LOG_REDACT: 'true'
-      # Workload Identity 連携を使うか（値は true/false だけ）
-      SES_WIF_ENABLED: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+    timeout-minutes: 15
     steps:
       - name: リポジトリを取得
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -91,8 +84,64 @@ jobs:
       - name: ビルド
         run: npm run build
 
-      - name: 開発用のパッケージを取り除く（本番のステップで tsx・esbuild 等を動かさない）
-        run: npm prune --omit=dev --ignore-scripts
+      - name: デモ（外部に接続しません）
+        if: ${{ inputs.mode == 'デモ' }}
+        env:
+          DEMO_MODE: 'true'
+        run: node dist/ses/index.js
+
+      # dist/ はリポジトリのコードをビルドしたものだけ（鍵・個人データを含まない）。data/ は含めない
+      - name: ビルド結果を次のジョブへ渡す
+        if: ${{ inputs.mode != 'デモ' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ses-dist
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
+
+  # 2つ目のジョブ: 鍵を持つ。開発用のパッケージはインストールせず、1つ目のジョブの dist/ を node で動かす
+  batch:
+    name: SESバッチ
+    needs: build
+    if: ${{ inputs.mode != 'デモ' }}
+    runs-on: ubuntu-latest
+    # Secrets は main ブランチだけが使える Environment から受け取る（Deployment branches を main に制限しておく）
+    environment: production
+    # id-token: write は Workload Identity 連携（鍵ファイルなしで Google に認証）を使うときに必要。
+    # このジョブでは開発用のパッケージを動かさない（npm ci --omit=dev・ビルドは1つ目のジョブ）
+    permissions:
+      contents: read
+      id-token: write
+    # バッチは開始から SES_RUN_DEADLINE_MINUTES（既定20分）を過ぎると新しい抽出・判定を始めず、済んだ分を保存して
+    # サマリを送る（残りは次回の実行で続きから）。実行中のLLM呼び出しの待ち時間と準備の時間を見込んで長めに取る
+    timeout-minutes: 40
+    env:
+      TZ: Asia/Tokyo
+      # 公開ログ対策（必ず true のまま）
+      SES_LOG_REDACT: 'true'
+      # Workload Identity 連携を使うか（値は true/false だけ）
+      SES_WIF_ENABLED: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Node.js を用意
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: 本番用の依存パッケージだけをインストール（開発用のパッケージ・インストールスクリプトは動かさない）
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: ビルド結果を受け取る
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ses-dist
+          path: dist/
 
       - name: Google に鍵ファイルなしで認証（Workload Identity 連携。登録したときだけ）
         if: ${{ inputs.mode != 'デモ' && env.SES_WIF_ENABLED == 'true' }}
@@ -122,13 +171,16 @@ jobs:
           SES_GOOGLE_AUTH: ${{ env.SES_WIF_ENABLED == 'true' && 'adc' || '' }}
           SES_GOOGLE_SA_EMAIL: ${{ secrets.SES_GOOGLE_SA_EMAIL }}
           SES_GOOGLE_SA_KEY_JSON: ${{ env.SES_WIF_ENABLED != 'true' && secrets.SES_GOOGLE_SA_KEY_JSON || '' }}
-          # 以前の名前（SES_GOOGLE_SA_KEY_JSON が無いときだけ使われる）
-          GOOGLE_SA_KEY_JSON: ${{ env.SES_WIF_ENABLED != 'true' && secrets.GOOGLE_SA_KEY_JSON || '' }}
+          # 経営者クローンの鍵の名前 GOOGLE_SA_KEY_JSON（DWD を持つ）は SES に渡さない（使われていたらバッチが止まる）
+          # メインの鍵に不要なドメイン全体の委任が付いていないかを確かめるときのユーザー（社内の実在するユーザー。グループは不可）
+          SES_DWD_PROBE_SUBJECT: ${{ secrets.SES_DWD_PROBE_SUBJECT }}
           SHEETS_DB_SPREADSHEET_ID: ${{ secrets.SHEETS_DB_SPREADSHEET_ID }}
           XSERVER_IMAP_HOST: ${{ secrets.XSERVER_IMAP_HOST }}
           XSERVER_SMTP_HOST: ${{ secrets.XSERVER_SMTP_HOST }}
           XSERVER_SHARED_USER: ${{ secrets.XSERVER_SHARED_USER }}
           XSERVER_SHARED_PASS: ${{ secrets.XSERVER_SHARED_PASS }}
+          # 受信サーバーが付ける Authentication-Results の authserv-id（未設定なら送り主の DMARC の結果を使わない）
+          XSERVER_AUTHSERV_ID: ${{ secrets.XSERVER_AUTHSERV_ID }}
           # ---- Secrets（推奨・任意。会社・社員を特定できる値や、公開したくない方針）----
           SES_NOTIFY_TO: ${{ secrets.SES_NOTIFY_TO }}
           SES_OWN_DOMAINS: ${{ secrets.SES_OWN_DOMAINS }}
@@ -197,13 +249,7 @@ jobs:
           ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
           ANTHROPIC_MODEL_REPAIR: ${{ vars.ANTHROPIC_MODEL_REPAIR }}
           JPY_PER_USD: ${{ vars.JPY_PER_USD }}
-        # ビルド済みの dist/ を node で直接動かす（tsx・esbuild は取り除き済み）
+        # ビルド済みの dist/ を node で直接動かす（開発用のパッケージはこのジョブに入れていない）
         run: |
           node dist/ses/preflight.js
           node dist/ses/index.js
-
-      - name: デモ（外部に接続しません）
-        if: ${{ inputs.mode == 'デモ' }}
-        env:
-          DEMO_MODE: 'true'
-        run: node dist/ses/index.js

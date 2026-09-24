@@ -937,7 +937,8 @@ function breakdownChecks(): void {
   check('要確認の根拠にも内訳（単金 不明）', buildHeuristicResult(review).reason.includes('単金 不明'));
   const nego = primarySelect([p], [engineer(['Java', 'Spring Boot'], { desiredRate: 75, receivedAt: daysAgo(1) })], undefined, { now: NOW })[0];
   check('交渉提案の根拠に交渉後の粗利', buildHeuristicResult(nego).reason.includes('粗利5万円（交渉で10万円）'), buildHeuristicResult(nego).reason);
-  const prompt = buildMatchPrompt(strong);
+  // 経過日数は一次選抜と同じ基準時刻で数える（実行日によって結果が変わらないように）
+  const prompt = buildMatchPrompt(strong, NOW);
   check('最終判定の入力に内訳・尚可の一致・受信日と経過日数を渡す', prompt.includes('内訳: スキル100%') && prompt.includes('尚可スキル一致: 1/1') && prompt.includes('受信から1日'));
 }
 
@@ -2632,6 +2633,10 @@ function securityAuditRound2Checks(): void {
     getPersona(undefined).profile.name === getPersona('sample').profile.name && getPersona('Sample').profile.name === getPersona('sample').profile.name &&
       !/三木谷/.test(getPersona(undefined).profile.name),
   );
+  check(
+    '実在の人物のスタイルのペルソナも、回答に出る名前に本人の氏名を使わない（切り取られて本人の判断として広まらないように）',
+    !/三木谷|浩史|楽天/.test(getPersona('mikitani').profile.name) && getPersona('mikitani').profile.name !== getPersona('sample').profile.name,
+  );
 }
 
 
@@ -2721,8 +2726,15 @@ async function securityAuditRound3Checks(): Promise<void> {
   section('セキュリティ（第3回）: 再送スキップの送り主は認証済みのドメインかアドレス＋返信先で識別する');
   check(
     'Authentication-Results の DMARC 合格のドメインだけを読む',
-    dmarcPassDomain('mx.example.jp; spf=pass smtp.mailfrom=partner.jp; dkim=pass header.d=partner.jp; dmarc=pass (p=none dis=none) header.from=partner.jp') === 'partner.jp' &&
-      dmarcPassDomain('mx.example.jp; dmarc=fail (p=reject) header.from=partner.jp') === '' && dmarcPassDomain('') === '',
+    dmarcPassDomain('mx.example.jp; spf=pass smtp.mailfrom=partner.jp; dkim=pass header.d=partner.jp; dmarc=pass (p=none dis=none) header.from=partner.jp', ['mx.example.jp']) === 'partner.jp' &&
+      dmarcPassDomain('mx.example.jp; dmarc=fail (p=reject) header.from=partner.jp', ['mx.example.jp']) === '' && dmarcPassDomain('', ['mx.example.jp']) === '',
+  );
+  check(
+    '一番上の Authentication-Results でも、受信サーバーの名前（authserv-id）が設定と一致しなければ（未設定なら）認証済みとみなさない',
+    dmarcPassDomain('evil.example; dmarc=pass header.from=partner.jp', ['mx.example.jp']) === '' &&
+      dmarcPassDomain('mx.example.jp; dmarc=pass header.from=partner.jp', []) === '' &&
+      dmarcPassDomain('sv1.xserver.jp; dmarc=pass header.from=partner.jp', ['*.xserver.jp']) === 'partner.jp' &&
+      dmarcPassDomain('xserver.jp.evil.example; dmarc=pass header.from=partner.jp', ['*.xserver.jp']) === '',
   );
   const LIST = '【要員1】\n氏名：K.S.\nスキル：Java\n希望単金：65万\n';
   const rm = (id: string, over: Partial<SesRawMail>): SesRawMail => ({ ...rawMail(), id, subject: '【要員】', body: LIST, ...over });
@@ -3298,9 +3310,24 @@ function securityAuditRound6Checks(): void {
     check(`${f}: Actions のキャッシュを使わない（main の他のジョブが作れるキャッシュでソースを書き換えさせない）`, !/^\s*cache:/m.test(text) && !/actions\/cache@/.test(text), f);
     const uses = [...text.matchAll(/uses:\s*([^\s#]+)/g)].map((m) => m[1]);
     check(`${f}: 使う Action はすべてコミットのハッシュで固定`, uses.length > 0 && uses.every((u) => /@[0-9a-f]{40}$/.test(u)), uses.join(', '));
-    check(`${f}: 鍵を渡すステップは tsx を使わず dist/ を node で動かし、その前に開発用のパッケージを取り除く`, !/npm run ses/.test(text) && /node dist\/ses\//.test(text) && /npm prune --omit=dev/.test(text), f);
+    check(
+      `${f}: 鍵を渡すステップは tsx を使わず dist/ を node で動かし、開発用のパッケージを入れない・取り除く`,
+      !/npm run ses/.test(text) && /node dist\/ses\//.test(text) && (/npm prune --omit=dev/.test(text) || /npm ci --omit=dev/.test(text)),
+      f,
+    );
   }
   const batch = workflows[0].text;
+  {
+    // 鍵を持つジョブ（batch）はビルド・開発用のパッケージを動かさず、ビルドは environment・id-token の無いジョブで行う
+    const code = batch.replace(/^\s*#.*$/gm, '');
+    const batchJob = code.split(/^  batch:\s*$/m)[1] ?? '';
+    const buildJob = (code.split(/^  build:\s*$/m)[1] ?? '').split(/^  batch:\s*$/m)[0];
+    check(
+      'ses-batch.yml: 鍵を持つジョブは本番用の依存パッケージだけを入れ、ビルド・npm audit・tsx を動かさない（ビルドは鍵の無いジョブ）',
+      batchJob.length > 0 && /npm ci --omit=dev --ignore-scripts/.test(batchJob) && !/npm run build|npm audit|tsx|npm ci --ignore-scripts\s*$/m.test(batchJob) &&
+        buildJob.length > 0 && /npm run build/.test(buildJob) && !/environment:|id-token|secrets\./.test(buildJob),
+    );
+  }
   check('ses-batch.yml: 既知の脆弱性の確認（npm audit）が鍵を渡さないステップにある', /npm audit --omit=dev/.test(batch));
   check('ses-batch.yml: Gmail の鍵・宛先は MAIL_PROVIDER=gmail のときだけ渡す', /SES_TARGET_GMAIL: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch) && /SES_GMAIL_SA_KEY_JSON: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch));
   check('Dependabot（npm・github-actions）の設定がある', existsSync('.github/dependabot.yml') && /github-actions/.test(readFileSync('.github/dependabot.yml', 'utf-8')));
