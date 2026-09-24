@@ -3,13 +3,14 @@
 // スキル・勤務地・時期の判定は match.ts と同じヘルパーを流用する。
 // 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
 // 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
+import { flowConstraints, violatesHops } from './constraints.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown } from './pricing.js';
 import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
-import { isTimingWithinGrace } from './match.js';
+import { isTimingWithinGrace, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
 import { writeReviewOwnMatches } from './review.js';
 import { loadFixtureOwnEngineers } from './fixtures/ownEngineers.js';
@@ -72,6 +73,18 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   // リモート条件: 常駐のみの案件にフルリモート希望の社員は組まない（外部要員と同じ）
   if (project.remote === 'none' && own.remoteWish === 'full') return null;
 
+  // 商流の条件（貴社社員まで等）: パートナーの要員（区分=パートナー）は自社から1社先のため、「貴社社員まで」の案件には組まない。
+  // 外国籍・年齢の条件は要員管理表に項目が無いため、確認事項として根拠に載せる
+  const affiliation = (own as { affiliation?: 'proper' | 'partner' }).affiliation;
+  const flow = flowConstraints(`${project.businessFlow}\n${project.title}`);
+  if (violatesHops(flow, affiliation)) return null;
+  // 案件の約9割に書かれているため要確認にはせず、提案前に確かめる事項として根拠の先頭に載せる
+  const ageLimit = ageLimitOf(project.businessFlow);
+  const conditionNote =
+    (flow.foreigner === 'ng' ? '［条件］外国籍不可。' : flow.foreigner === 'conditional' ? '［条件］外国籍は条件つき（日本語力など）。' : '') +
+    (ageLimit !== null ? `［条件］年齢${ageLimit}歳まで。` : '') +
+    (flow.soleProprietor === 'ng' && affiliation === 'partner' ? '［条件］個人事業主不可（所属を確認）。' : '');
+
   // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
   const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
   const locationKnownOk = isAdjacentOrSame(project.prefecture, own.prefecture);
@@ -114,6 +127,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
 
   const pct = Math.round(skill.rate * 100);
   const notes =
+    conditionNote +
     (skillBand === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
     (skillBand === 'strong' && stale ? '【参考提案】' : '') +
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +

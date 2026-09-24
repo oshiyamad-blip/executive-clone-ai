@@ -116,6 +116,8 @@ import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt } from '../schedule.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { classifyMailKind, splitByKind, isClosedNotice, mentionsTitle } from '../mailKind.js';
+import { flowConstraints, violatesHops } from '../constraints.js';
+import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -3522,6 +3524,35 @@ function closedNoticeChecks(): void {
   check('別の案件名では閉じない', !mentionsTitle(notice, '販売管理システム改修'));
 }
 
+// ===== 参画条件（年齢・外国籍・所属）の読み取り（実メールの書き方を合成で再現） =====
+
+function participationChecks(): void {
+  section('参画条件: 年齢の上限');
+  const AGE: Array<[string, number | null]> = [
+    ['年齢：25歳～44歳希望', 44], ['～30代前半まで', 34], ['30代希望（40代前半検討可）', 44], ['年齢：～45歳', 45],
+    ['45歳位まで', 45], ['35歳くらいまでを希望', 35], ['年齢：～40代', 49], ['～40代後半', 49], ['50代半ばまで', 55],
+    ['年齢制限：45以下', 45], ['年齢：20代後半~30代前半', 34], ['30代～45歳前後', 45], ['50歳未満希望', 49], ['50代まで可', 59],
+    ['40歳以上の方', null], ['精算：180h以下', null], ['経験5年以上', null], ['募集2名', null], ['面談2回', null],
+  ];
+  for (const [text, want] of AGE) check(`「${text}」→ ${want ?? 'なし'}`, ageLimitOf(text) === want, `実際: ${ageLimitOf(text)}`);
+  section('参画条件: 外国籍・所属・個人事業主');
+  const FLOW: Array<[string, Partial<ReturnType<typeof flowConstraints>>]> = [
+    ['外国籍：不可', { foreigner: 'ng' }], ['【外国籍】　不可', { foreigner: 'ng' }], ['国籍：日本', { foreigner: 'ng' }],
+    ['外国籍：ネイティブレベルのみ可', { foreigner: 'conditional' }], ['外国籍可（N1以上）', { foreigner: 'conditional' }], ['外国籍：可', { foreigner: 'ok' }],
+    ['貴社社員まで（個人事業主不可）', { maxHops: 0, soleProprietor: 'ng' }], ['貴社1社先まで（個人事業主不可）', { maxHops: 1, soleProprietor: 'ng' }],
+    ['貴社の1社下社員まで', { maxHops: 1 }], ['再委託：可（貴社社員まで）', { maxHops: 0 }],
+    ['貴社所属まで（フリーランス可）', { maxHops: 0, soleProprietor: 'ok' }], ['商流不問', { maxHops: null }],
+    ['尚、並行営業のため募集終了となった場合はご容赦ください', { foreigner: 'unknown', maxHops: null, soleProprietor: 'unknown' }],
+  ];
+  for (const [text, want] of FLOW) {
+    const got = flowConstraints(text);
+    const ok = Object.entries(want).every(([k, v]) => (got as unknown as Record<string, unknown>)[k] === v);
+    check(`「${text}」`, ok, JSON.stringify(got));
+  }
+  check('「貴社社員まで」の案件にパートナーの要員は組まない（自社社員は組む）', violatesHops(flowConstraints('貴社社員まで'), 'partner') && !violatesHops(flowConstraints('貴社社員まで'), 'proper'));
+  check('「貴社1社先まで」ならパートナーの要員も組む', !violatesHops(flowConstraints('貴社1社先まで'), 'partner'));
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3558,6 +3589,7 @@ async function main(): Promise<void> {
     hourlyScheduleChecks();
     mailBodyChecks();
     closedNoticeChecks();
+    participationChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

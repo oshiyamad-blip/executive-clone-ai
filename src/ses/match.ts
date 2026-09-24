@@ -1172,15 +1172,30 @@ export function finishJudgement(pair: MatchPair, raw: LlmJudgment, t: GateThresh
 // 商流メモの年齢の上限（'35歳まで' '40歳以下' '40歳未満' '40代まで'）と要員の実年齢の照合。上限の記載が無ければ null
 export type AgeCondition = 'ok' | 'ng' | 'unknown';
 
+// 商流メモ・条件の文から年齢の上限を読む。範囲（25歳〜44歳・20代後半〜30代前半）は右端、但し書き（40代前半検討可）が
+// あれば緩い方（大きい方）を採る。「〜」の前・「以上」「から」の前の数は下限なので数えない。
+// 「歳」の無い「45以下」は「年齢」の見出しの近くだけ読む（精算時間・経験年数・人数を年齢と取り違えない）
+const AGE_DECADE_TAIL: Record<string, number> = { 前半: 4, 半ば: 5, 中盤: 5, 後半: 9 };
+
 export function ageLimitOf(businessFlow: string): number | null {
-  const flow = businessFlow.normalize('NFKC');
-  const under = flow.match(/(\d{2})\s*歳\s*未満/);
-  if (under) return Number(under[1]) - 1;
-  const upTo = flow.match(/(\d{2})\s*歳\s*(?:まで|以下|迄)/);
-  if (upTo) return Number(upTo[1]);
-  const decade = flow.match(/(\d)0\s*代\s*(?:まで|以下|迄)/);
-  if (decade) return Number(decade[1]) * 10 + 9;
-  return null;
+  const flow = businessFlow.normalize('NFKC').slice(0, 4000).replace(/[〜～~]/g, '〜');
+  const limits: number[] = [];
+  const isLowerBound = (rest: string) => /^\s*(?:以上|から|〜|の|で)/.test(rest);
+  for (const m of flow.matchAll(/(\d{2})\s*歳\s*(未満)?/g)) {
+    const rest = flow.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 4);
+    if (!m[2] && isLowerBound(rest)) continue;
+    limits.push(Number(m[1]) - (m[2] ? 1 : 0));
+  }
+  for (const m of flow.matchAll(/(\d)0\s*代\s*(前半|半ば|中盤|後半)?/g)) {
+    const rest = flow.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 4);
+    if (isLowerBound(rest)) continue;
+    limits.push(Number(m[1]) * 10 + (m[2] ? AGE_DECADE_TAIL[m[2]] : 9));
+  }
+  for (const m of flow.matchAll(/年齢[^\n\d]{0,10}?(\d{2})\s*(以下|まで|迄|未満)/g)) {
+    limits.push(Number(m[1]) - (m[2] === '未満' ? 1 : 0));
+  }
+  const valid = limits.filter((n) => n >= 18 && n <= 75);
+  return valid.length > 0 ? Math.max(...valid) : null;
 }
 
 export function ageCondition(businessFlow: string, age: number | null): AgeCondition | null {
