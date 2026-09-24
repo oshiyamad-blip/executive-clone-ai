@@ -400,6 +400,7 @@ export interface ProperEngineer extends OwnEngineer {
   fullName: string; // 氏名（社内シート・サマリメール用。ログにも提案文面にも出さない）
   proposalLabel: string; // 提案用表記（イニシャル）。社外向けの提案文面にはこれだけを使う
   skillSheetUrl: string;
+  affiliation?: 'proper' | 'partner'; // 区分（空欄はプロパー＝自社社員）
 }
 
 // プロパー × 案件の候補（案件スプレッドシートの「プロパー候補」タブ1行に対応）

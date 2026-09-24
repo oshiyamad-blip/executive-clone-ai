@@ -114,6 +114,8 @@ import {
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { classifyMailKind, splitByKind } from '../mailKind.js';
+import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
+import { buildProperProposalBody } from '../proper/proposal.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
 import { joinList, splitList } from '../../database/mapping.js';
 import { createHash, randomBytes } from 'crypto';
@@ -3447,6 +3449,25 @@ function mailKindChecks(): void {
   check('全件モードでは何も外さない', splitByKind([mk('m_eng', ENG)], false).extract.length === 1);
 }
 
+// ===== 要員管理表: 手で追加した要員（スキルシートなし）とパートナー区分 =====
+
+function manualEngineerChecks(): void {
+  section('要員管理表: 手で追加した要員・区分');
+  const row = (v: Record<string, string>) => PROPER_MASTER_COLUMNS.map((c) => v[c] ?? '');
+  const manual = rowToProperEngineer(row({ 提案用表記: 'Y.T.', 稼働状況: '稼働可', スキル: 'Java/Spring Boot', 必要案件単価: '65', 区分: 'パートナー', 手動ID: 'manual_abc123' }));
+  check('スキルシートの無い手動の行も、手動IDがあれば突合の対象', !!manual && manual.id.startsWith('proper_') && manual.fileId === '' && manual.requiredProjectRate === 65);
+  check('区分「パートナー」を読む（空欄はプロパー）', manual?.affiliation === 'partner' && rowToProperEngineer(row({ 提案用表記: 'A.B.', 稼働状況: '稼働可', スキル: 'PHP', 手動ID: 'manual_x' }))?.affiliation === 'proper');
+  check('手動IDもファイルIDも無い行はまだ使わない（次の同期でIDを振ってから）', rowToProperEngineer(row({ 提案用表記: 'Y.T.', 稼働状況: '稼働可', スキル: 'Java' })) === null);
+  check('稼働可でない手動の行は使わない', rowToProperEngineer(row({ 提案用表記: 'Y.T.', 稼働状況: 'アサイン済', スキル: 'Java', 手動ID: 'manual_abc123' })) === null);
+  const a = rowToProperEngineer(row({ 提案用表記: 'Y.T.', 稼働状況: '稼働可', スキル: 'Java', 手動ID: 'manual_abc123' }));
+  const b = rowToProperEngineer(row({ 提案用表記: 'Y.T.（改）', 稼働状況: '稼働可', スキル: 'Java/AWS', 手動ID: 'manual_abc123' }));
+  check('表記やスキルを書き換えても要員のIDは変わらない（手動IDから作る）', !!a && !!b && a.id === b.id);
+  const proj = project({ title: '在庫管理改修', agentContact: '担当' });
+  const partnerBody = buildProperProposalBody(manual!, proj);
+  const properBody = buildProperProposalBody({ ...manual!, affiliation: 'proper' }, proj);
+  check('パートナーの要員は「弊社社員」と書かない', !partnerBody.includes('弊社社員') && partnerBody.includes('パートナー所属') && properBody.includes('弊社社員'));
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3479,6 +3500,7 @@ async function main(): Promise<void> {
     await reviewRound4Checks();
     resendChecks();
     mailKindChecks();
+    manualEngineerChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

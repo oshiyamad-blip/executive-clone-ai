@@ -32,9 +32,11 @@ export function buildProperProposalBody(e: ProperEngineer, project: Project): st
     `${project.agentContact || 'ご担当者'}様`,
     '',
     'いつもお世話になっております。',
-    `ご案内いただいた案件「${project.title}」につきまして、弊社所属のエンジニアをご提案させていただきます。`,
+    e.affiliation === 'partner'
+      ? `ご案内いただいた案件「${project.title}」につきまして、弊社よりエンジニアをご提案させていただきます。`
+      : `ご案内いただいた案件「${project.title}」につきまして、弊社所属のエンジニアをご提案させていただきます。`,
     '',
-    '■ご提案要員（弊社社員）',
+    e.affiliation === 'partner' ? '■ご提案要員（弊社パートナー所属）' : '■ご提案要員（弊社社員）',
     `・イニシャル: ${label}`,
     `・主なスキル: ${e.skills.slice(0, 12).join('、')}`,
     `・経験年数: ${e.experienceYears !== null ? `${e.experienceYears}年` : 'スキルシートをご参照ください'}`,

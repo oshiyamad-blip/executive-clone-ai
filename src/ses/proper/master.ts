@@ -3,7 +3,7 @@
 // 機械が書く列（スキル〜抽出メモ）は、スキルシートが新規・更新されたときだけ抽出し直して更新する
 // （変更のないファイルはLLMを呼ばない。1回の実行で抽出する件数には上限があり、残りは次回以降）。
 // ログにはファイルIDと件数だけを出す（氏名・ファイル名・抽出内容は出さない）。
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { google } from 'googleapis';
 import { SheetBook, googleTransientKind, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from '../../database/sheetBook.js';
 import { properEngineerIdOf } from '../../database/sheets.js';
@@ -34,7 +34,12 @@ export const PROPER_MASTER_TAB = 'プロパー管理';
 export const PROPER_MASTER_COLUMNS = [
   '氏名', '提案用表記', '稼働状況', '必要案件単価', '稼働可能日',
   'スキル', '経験年数', '居住地', 'リモート希望', 'スキルシート', 'ファイルID', 'ファイル更新日時', '抽出日時', '抽出メモ',
+  // 区分: プロパー（自社社員。空欄も同じ）/ パートナー（協力会社の要員）。手動ID: スキルシートの無い、人が手で追加した行に
+  // バッチが振るID（候補の行を同じ要員に結び付け続けるため。消したり書き換えたりしない）
+  '区分', '手動ID',
 ];
+
+export const PARTNER_LABEL = 'パートナー';
 
 export const PROPER_STATUS = { available: '稼働可', assigned: 'アサイン済', excluded: '対象外' } as const;
 
@@ -309,6 +314,11 @@ async function reconcileMissing(rows: CachedRow[], present: Set<string>, touched
 export async function syncProperMaster(): Promise<ProperSyncResult> {
   const result = emptySyncResult();
   if (!book.configured()) return result;
+  try {
+    await assignManualIds();
+  } catch (err) {
+    console.warn(`プロパー: 手で追加された要員に手動IDを振れません（今回はその行を使いません）: ${safeErr(err)}`);
+  }
 
   let files: SkillSheetFile[];
   try {
@@ -393,7 +403,8 @@ export function properLabelOf(e: Pick<ProperEngineer, 'proposalLabel'>): string 
 export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   const c = (name: string) => cell(cells, name).trim();
   const fileId = c('ファイルID');
-  if (!fileId || c('稼働状況') !== PROPER_STATUS.available) return null;
+  const key = fileId || c('手動ID');
+  if (!key || c('稼働状況') !== PROPER_STATUS.available) return null;
   const skills = normalizeSkills(splitList(c('スキル')));
   if (skills.length === 0) return null;
   const residence = c('居住地');
@@ -402,7 +413,7 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   // 人が手で入れた値も含め、イニシャルの形でなければ使わない（社外に出る提案文面に氏名が載らないように）
   const proposalLabel = sanitizeInitials(c('提案用表記'), fullName);
   return {
-    id: properEngineerIdOf(fileId),
+    id: properEngineerIdOf(key),
     displayName: fullName || proposalLabel,
     fullName,
     proposalLabel,
@@ -417,7 +428,27 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
     availableFrom: parseAvailableFrom(available),
     remoteWish: labelToRemote(c('リモート希望')),
     status: 'available',
+    affiliation: c('区分') === PARTNER_LABEL ? 'partner' : 'proper',
   };
+}
+
+// 行の要員キー（スキルシートのファイルID、なければ手動ID）
+function rowKey(cells: string[]): string {
+  return cell(cells, 'ファイルID').trim() || cell(cells, '手動ID').trim();
+}
+
+// スキルシートの無い、人が手で追加した行（提案用表記かスキルが入っている）に手動IDを振る。振った行数を返す
+export async function assignManualIds(): Promise<number> {
+  if (!book.configured()) return 0;
+  let n = 0;
+  for (const r of await book.readRows(PROPER_MASTER_TAB)) {
+    if (rowKey(r.cells)) continue;
+    if (!cell(r.cells, '提案用表記').trim() && !cell(r.cells, 'スキル').trim()) continue;
+    await book.writeCells(PROPER_MASTER_TAB, r, [['手動ID', `manual_${randomBytes(6).toString('hex')}`]]);
+    n += 1;
+  }
+  if (n > 0) console.log(`プロパー: 手で追加された要員${n}行に手動IDを振りました`);
+  return n;
 }
 
 // 突合対象の自社社員。presentFileIds があれば、フォルダから消えたスキルシートの行は除く。
@@ -427,7 +458,7 @@ export async function loadProperEngineers(presentFileIds: Set<string> | null): P
   const rows = await book.readRows(PROPER_MASTER_TAB);
   const seen = new Set<string>();
   const firstRows = rows.filter((r) => {
-    const id = cell(r.cells, 'ファイルID').trim();
+    const id = rowKey(r.cells);
     if (!id) return true;
     if (seen.has(id)) return false;
     seen.add(id);
@@ -435,5 +466,5 @@ export async function loadProperEngineers(presentFileIds: Set<string> | null): P
   });
   return firstRows
     .map((r) => rowToProperEngineer(r.cells))
-    .filter((e): e is ProperEngineer => e !== null && (!presentFileIds || presentFileIds.has(e.fileId)));
+    .filter((e): e is ProperEngineer => e !== null && (!e.fileId || !presentFileIds || presentFileIds.has(e.fileId)));
 }
