@@ -2,8 +2,10 @@
 # Actions タブ →「SESメール量の測定」→ Run workflow で手動実行します（定時実行はしません）。
 # 受信箱を読み取り専用で開き、本文・添付は取得しません。ログに出すのは件数などの集計値だけです
 # （件名・アドレス・氏名・送信元のドメイン名は出しません）。手順書: docs/ses-deploy-github-actions.md
-# 鍵・パスワードは測定のステップにだけ渡します（依存パッケージのインストールには渡さず、インストールスクリプトも実行しない）。
-# 鍵を持つジョブは Actions のキャッシュを使わず、ビルド済みの dist/ を node で動かします（開発用のパッケージは取り除く）。
+# ses-batch.yml と同じく2つのジョブに分けます。開発用のパッケージ（TypeScript 等）を動かすビルドは鍵の無いジョブ（build）で行い、
+# 鍵を持つジョブ（stats）は別の環境で本番用の依存パッケージだけを入れ（npm ci --omit=dev・インストールスクリプトなし・キャッシュなし）、
+# 受け取った dist/ を node で動かします（同じ作業フォルダでビルドしてから鍵を渡すと、ビルド中に書き換えられた dist/ や
+# node_modules がそのまま鍵を受け取るため）。main のルールセットが足りないときは鍵を持つジョブを動かしません（手順書 2-4 の 5）。
 
 name: SESメール量の測定
 
@@ -18,16 +20,19 @@ on:
 permissions:
   contents: read
 
+# 同時に2つ動かさない（実行中の回は止めずに、終わってから次を始める）
+concurrency:
+  group: ses-mail-stats
+  cancel-in-progress: false
+
 jobs:
-  stats:
-    name: メール量の測定
+  # 1つ目のジョブ: 鍵を持たない（environment なし）。開発用のパッケージはここでだけ動かす
+  build:
+    name: ビルド（鍵なし）
     runs-on: ubuntu-latest
-    # Secrets は main ブランチだけが使える Environment「production」から受け取る（ses-batch.yml と同じ）
-    environment: production
-    timeout-minutes: 20
-    env:
-      TZ: Asia/Tokyo
-      SES_LOG_REDACT: 'true'
+    permissions:
+      contents: read
+    timeout-minutes: 15
     steps:
       - name: リポジトリを取得
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -45,8 +50,54 @@ jobs:
       - name: ビルド
         run: npm run build
 
-      - name: 開発用のパッケージを取り除く（鍵を渡すステップで tsx・esbuild 等を動かさない）
-        run: npm prune --omit=dev --ignore-scripts
+      # main にレビューなしで push できる状態なら、鍵を持つジョブを動かさない（手順書 2-4 の 5）
+      - name: main のルールセットを確認（鍵は渡しません）
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node dist/ses/checkMainRuleset.js
+
+      # dist/ はリポジトリのコードをビルドしたものだけ（鍵・個人データを含まない）
+      - name: ビルド結果を次のジョブへ渡す
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ses-mail-stats-dist
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
+
+  # 2つ目のジョブ: 鍵を持つ。開発用のパッケージはインストールせず、1つ目のジョブの dist/ を node で動かす
+  stats:
+    name: メール量の測定
+    needs: build
+    runs-on: ubuntu-latest
+    # Secrets は main ブランチだけが使える Environment「production」から受け取る（ses-batch.yml と同じ）
+    environment: production
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Tokyo
+      SES_LOG_REDACT: 'true'
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Node.js を用意
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: 本番用の依存パッケージだけをインストール（開発用のパッケージ・インストールスクリプトは動かさない）
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: ビルド結果を受け取る
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ses-mail-stats-dist
+          path: dist/
 
       - name: メール量を測定（読み取り専用・集計値のみ表示）
         env:

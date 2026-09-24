@@ -860,3 +860,16 @@ export function useBatchApi(): boolean {
 export function demoDataDir(): string {
   return envStr('SES_DEMO_DATA_DIR', 'data/ses-demo');
 }
+
+// ---- main のルールセットの確認（Actions の鍵を持たないビルドのジョブで使う。手順書 2-4 の 5） ----
+export function githubRepository(): string {
+  return env('GITHUB_REPOSITORY');
+}
+
+export function githubApiToken(): string {
+  return env('GITHUB_TOKEN');
+}
+
+export function githubApiUrl(): string {
+  return env('GITHUB_API_URL') || 'https://api.github.com';
+}

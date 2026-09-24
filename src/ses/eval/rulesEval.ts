@@ -149,6 +149,7 @@ import { withoutResentProjects, withoutResentEngineers, sameReplySender } from '
 import { refreshesLastSeen, lastSeenUpdates } from '../resend.js';
 import { parseReceivedAt, matchedColumnNeedsMigration, signProcessedFingerprint, verifiedProcessedFingerprint } from '../../database/sheets.js';
 import { isBatchProtection } from '../../database/sheetBook.js';
+import { mainRulesetProblems } from '../mainRuleset.js';
 import { duplicateRequestIds, isAmbiguousDraftFailure } from '../pendingDrafts.js';
 import { classifyDelegationProbe, sameServiceAccount } from '../googleCreds.js';
 import { shortcutTargetAllowed } from '../proper/drive.js';
@@ -3339,6 +3340,47 @@ function securityAuditRound6Checks(): void {
   }
   check('ses-batch.yml: 既知の脆弱性の確認（npm audit）が鍵を渡さないステップにある', /npm audit --omit=dev/.test(batch));
   check('ses-batch.yml: Gmail の鍵・宛先は MAIL_PROVIDER=gmail のときだけ渡す', /SES_TARGET_GMAIL: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch) && /SES_GMAIL_SA_KEY_JSON: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch));
+  {
+    // メール量の測定も鍵を持つジョブ（stats）でビルドしない（第10回 T4）。ビルド中に書き換えられた dist/・node_modules に鍵を渡さない
+    const code = workflows[1].text.replace(/^\s*#.*$/gm, '');
+    const statsJob = code.split(/^  stats:\s*$/m)[1] ?? '';
+    const buildJob = (code.split(/^  build:\s*$/m)[1] ?? '').split(/^  stats:\s*$/m)[0];
+    check(
+      'ses-mail-stats.yml: 鍵を持つジョブは別のジョブのビルド結果を使い、本番用の依存パッケージだけを入れる（ビルド・npm prune に頼らない）',
+      statsJob.length > 0 && /needs: build/.test(statsJob) && /environment: production/.test(statsJob) && /npm ci --omit=dev --ignore-scripts/.test(statsJob) &&
+        /actions\/download-artifact@/.test(statsJob) && !/npm run build|npm prune|tsx|npm ci --ignore-scripts\s*$/m.test(statsJob) &&
+        buildJob.length > 0 && /npm run build/.test(buildJob) && /actions\/upload-artifact@/.test(buildJob) && !/environment:|id-token|secrets\./.test(buildJob),
+    );
+    check('ses-mail-stats.yml: 同時に2つ動かさない（concurrency）', /^concurrency:\s*\n\s+group: ses-mail-stats/m.test(code));
+  }
+  for (const { f, text } of workflows) {
+    // main にレビューなしで push できる状態では鍵を持つジョブを動かさない（第10回 S23）
+    const code = text.replace(/^\s*#.*$/gm, '');
+    const buildJob = (code.split(/^  build:\s*$/m)[1] ?? '').split(/^  (?:batch|stats):\s*$/m)[0];
+    const checkAt = buildJob.indexOf('node dist/ses/checkMainRuleset.js');
+    check(`${f}: 鍵の無いビルドのジョブで main のルールセットを確かめてから鍵を持つジョブへ進む`, checkAt > buildJob.indexOf('npm run build') && checkAt < buildJob.indexOf('upload-artifact@'), f);
+  }
+  {
+    const full = [
+      { type: 'deletion' },
+      { type: 'non_fast_forward' },
+      { type: 'pull_request', parameters: { required_approving_review_count: 1, dismiss_stale_reviews_on_push: true, require_code_owner_review: true, require_last_push_approval: true } },
+    ];
+    check('main のルールセット: PR・承認・force-push と削除の禁止がそろえば通す', mainRulesetProblems(full).length === 0);
+    check('main のルールセット: ルールが無ければ止める（公開 API の [] = 保護なし）', mainRulesetProblems([]).length >= 3);
+    check('main のルールセット: 応答が一覧でなければ止める', mainRulesetProblems({ message: 'Not Found' }).length > 0);
+    check('main のルールセット: PR が無ければ止める', mainRulesetProblems(full.filter((r) => r.type !== 'pull_request')).length > 0);
+    check(
+      'main のルールセット: 承認 0 件の PR では止める',
+      mainRulesetProblems(full.map((r) => (r.type === 'pull_request' ? { ...r, parameters: { ...r.parameters, required_approving_review_count: 0 } } : r))).length > 0,
+    );
+    check(
+      'main のルールセット: 自分の push を自分で承認できる設定では止める',
+      mainRulesetProblems(full.map((r) => (r.type === 'pull_request' ? { ...r, parameters: { ...r.parameters, require_last_push_approval: false } } : r))).length > 0,
+    );
+    check('main のルールセット: force-push を禁止していなければ止める', mainRulesetProblems(full.filter((r) => r.type !== 'non_fast_forward')).length > 0);
+    check('main のルールセット: 削除を禁止していなければ止める', mainRulesetProblems(full.filter((r) => r.type !== 'deletion')).length > 0);
+  }
   check('Dependabot（npm・github-actions）の設定がある', existsSync('.github/dependabot.yml') && /github-actions/.test(readFileSync('.github/dependabot.yml', 'utf-8')));
   const llmIndex = readFileSync('src/llm/index.ts', 'utf-8');
   const dbIndex = readFileSync('src/database/index.ts', 'utf-8');

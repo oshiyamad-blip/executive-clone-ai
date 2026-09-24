@@ -14,6 +14,7 @@
 #   開発用のパッケージ（tsx・esbuild・TypeScript 等）を鍵を持つジョブで動かしません）。
 # - 鍵を持つジョブは Actions のキャッシュ（actions/cache・setup-node の cache）を使いません（main の他のジョブが作れるキャッシュを
 #   チェックアウトの後に展開すると、ソースを書き換えられるため）。
+# - main のルールセット（PR・承認・force-push と削除の禁止）が足りないときは、鍵の無いジョブで止めて鍵を持つジョブを動かしません（手順書 2-4 の 5）。
 # - Google の鍵は用途ごとに分けます（SES_GOOGLE_SA_KEY_JSON: DWDなし / SHEETS_DB_SA_KEY_JSON・SES_GMAIL_SA_KEY_JSON: DWDはその用途だけ）。
 #   Workload Identity 連携（鍵ファイルなし）を使う場合は、Secrets の GCP_WORKLOAD_IDENTITY_PROVIDER と GCP_SERVICE_ACCOUNT を登録します（手順書 2-2）。
 # - 値は Secrets を Environment「production」、Variables を Settings → Secrets and variables → Actions に登録します（このファイルに値を書かない）。
@@ -83,6 +84,13 @@ jobs:
 
       - name: ビルド
         run: npm run build
+
+      # main にレビューなしで push できる状態なら、鍵を持つジョブを動かさない（手順書 2-4 の 5）
+      - name: main のルールセットを確認（鍵は渡しません）
+        if: ${{ inputs.mode != 'デモ' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node dist/ses/checkMainRuleset.js
 
       - name: デモ（外部に接続しません）
         if: ${{ inputs.mode == 'デモ' }}
