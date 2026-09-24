@@ -51,6 +51,8 @@ import {
   matchLookbackDays,
   resendWindowDays,
   sesTarget,
+  maxMailsPerRun,
+  collectDays,
   resendSimilarity,
   matchPoolLimit,
   dbProvider,
@@ -79,7 +81,7 @@ import {
   recordHealEvent,
 } from './heal/events.js';
 import { runRepair } from './heal/repair.js';
-import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS } from './schedule.js';
+import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS, pickForExtraction, isLastChance } from './schedule.js';
 import { redactable, safeErr, logId } from './redact.js';
 import { acquireRunLease, releaseRunLease } from './lease.js';
 import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
@@ -521,9 +523,23 @@ async function collectAndParse(): Promise<{
     console.log(`SES収集: 案件だけモードのため要員の紹介メール${kinds.skippedEngineerMailIds.length}通を抽出しません`);
   }
   recordStat('engineerMailsSkipped', kinds.skippedEngineerMailIds.length);
-  let parsedMails = kinds.extract;
+  // LLM で抽出する件数の上限は、再送・要員メールを除いた後に掛ける（弾いたメールで枠を使わない）。
+  // 超えた分は処理済みにせず次回以降へ（次回には収集期間を外れる分は異常終了として知らせる）
+  const limit = maxMailsPerRun();
+  const pick = pickForExtraction(kinds.extract, limit, collectDays());
+  if (pick.deferred.length > 0) {
+    recordHealEvent('warn', `抽出の上限（SES_MAX_MAILS_PER_RUN=${limit}）を超えた${pick.deferred.length}通を次回以降に回しました`);
+    const lost = pick.deferred.filter((m) => isLastChance(m.receivedAt, collectDays())).length;
+    if (lost > 0) {
+      recordFatal(
+        `抽出の上限を超えて次回以降に回したメールのうち${lost}通は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れて処理されません` +
+          '（SES_MAX_MAILS_PER_RUN を上げてください）',
+      );
+    }
+  }
+  let parsedMails = pick.picked;
   try {
-    parsedMails = await parseAttachments(kinds.extract);
+    parsedMails = await parseAttachments(pick.picked);
   } catch (err) {
     console.error(`SES展開: 失敗: ${safeErr(err)}`);
   }

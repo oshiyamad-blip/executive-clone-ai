@@ -582,10 +582,10 @@ async function reviewFindingChecks(project: Project): Promise<void> {
     pii,
   );
   check('隔離リスト: 送信者はドメインのみ', senderDomainOnly('山田 太郎 <taro@Partner.co.jp>') === '@partner.co.jp');
-  // 水曜10:00 JST（次回は同日14:00）と金曜14:00 JST（次回は月曜10:00）
+  // 水曜10:00 JST（次回は同日11:00）と金曜19:00 JST（次回は月曜9:00）。平日9〜19時の毎時
   const now = new Date('2026-09-23T01:00:00Z');
-  const friday = new Date('2026-09-25T05:00:00Z');
-  check('次回の実行: 水曜10時の次は同日14時・金曜14時の次は月曜10時', followingRunAt(now) === Date.parse('2026-09-23T05:00:00Z') && followingRunAt(friday) === Date.parse('2026-09-28T01:00:00Z'));
+  const friday = new Date('2026-09-25T10:00:00Z');
+  check('次回の実行: 水曜10時の次は同日11時・金曜19時の次は月曜9時', followingRunAt(now) === Date.parse('2026-09-23T02:00:00Z') && followingRunAt(friday) === Date.parse('2026-09-28T00:00:00Z'));
   check(
     '隔離: 次回の実行時に収集期間を外れるメールだけを最後の機会と判定（半日前のメールは平日なら最後の機会ではない）',
     isLastChance(new Date('2026-09-19T01:00:00Z'), 4, now) &&
@@ -888,10 +888,10 @@ function matchingAndDraftChecks(base: Project): void {
       attachmentKind('a.doc', 'application/msword') === 'other',
   );
   const jst = (iso: string) => new Date(`${iso}+09:00`).getTime();
-  check('測定: 金曜15時の受信は月曜10時の回', nextRunAt(jst('2026-09-18T15:00:00')) === jst('2026-09-21T10:00:00'));
-  check('測定: 火曜12時の受信は同日14時の回', nextRunAt(jst('2026-09-22T12:00:00')) === jst('2026-09-22T14:00:00'));
+  check('測定: 金曜19時半の受信は月曜9時の回', nextRunAt(jst('2026-09-18T19:30:00')) === jst('2026-09-21T09:00:00'));
+  check('測定: 火曜12時半の受信は同日13時の回', nextRunAt(jst('2026-09-22T12:30:00')) === jst('2026-09-22T13:00:00'));
   check('測定: 実行時刻ちょうどの受信はその回', nextRunAt(jst('2026-09-22T10:00:00')) === jst('2026-09-22T10:00:00'));
-  check('測定: 土曜の受信は月曜10時の回', nextRunAt(jst('2026-09-19T09:00:00')) === jst('2026-09-21T10:00:00'));
+  check('測定: 土曜の受信は月曜9時の回', nextRunAt(jst('2026-09-19T09:00:00')) === jst('2026-09-21T09:00:00'));
   const metas = [
     { receivedAt: new Date(jst('2026-09-21T09:00:00')), subject: '【案件】Java 田中太郎', fromAddress: 'tanaka@partner-secret.example', sizeBytes: 2048, attachmentKinds: ['pdf' as const, 'pdf' as const] },
     { receivedAt: new Date(jst('2026-09-20T11:00:00')), subject: '要員のご紹介', fromAddress: 'suzuki@other-secret.example', sizeBytes: 1024, attachmentKinds: ['xlsx' as const] },

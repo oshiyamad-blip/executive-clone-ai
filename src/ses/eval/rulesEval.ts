@@ -113,6 +113,7 @@ import {
   type RawEngineer,
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
+import { pickForExtraction, nextRunAt } from '../schedule.js';
 import { classifyMailKind, splitByKind } from '../mailKind.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
@@ -3468,6 +3469,25 @@ function manualEngineerChecks(): void {
   check('パートナーの要員は「弊社社員」と書かない', !partnerBody.includes('弊社社員') && partnerBody.includes('パートナー所属') && properBody.includes('弊社社員'));
 }
 
+// ===== 毎時の実行と、抽出の枠の選び方 =====
+
+function hourlyScheduleChecks(): void {
+  section('毎時の実行・抽出の枠');
+  const jst = (s: string) => new Date(`${s}+09:00`);
+  check('平日の9:30の次の回は10:00', nextRunAt(jst('2026-09-24T09:30:00').getTime()) === jst('2026-09-24T10:00:00').getTime());
+  check('平日の19:10の次の回は翌平日の9:00', nextRunAt(jst('2026-09-24T19:10:00').getTime()) === jst('2026-09-25T09:00:00').getTime());
+  check('金曜19:10の次の回は月曜9:00', nextRunAt(jst('2026-09-25T19:10:00').getTime()) === jst('2026-09-28T09:00:00').getTime());
+  const now = jst('2026-09-24T10:00:00');
+  const at = (h: number) => ({ id: `m${h}`, receivedAt: new Date(now.getTime() - h * 3600_000) });
+  const items = [at(1), at(2), at(3), at(167), at(166), at(165), at(164), at(5)]; // 16x時間前 = 7日の窓の端
+  const pick = pickForExtraction(items, 5, 7, now);
+  const ids = pick.picked.map((x) => x.id);
+  check('新しい順を基本に、窓を外れる古いメールは枠の2割（5件中1件）まで先に入れる', ids.length === 5 && ids.filter((x) => Number(x.slice(1)) > 100).length === 1 && ['m1', 'm2', 'm3', 'm5'].every((x) => ids.includes(x)), ids.join());
+  check('枠を超えた分は次回へ回す', pick.deferred.length === 3);
+  const few = pickForExtraction([at(1), at(167), at(166)], 5, 7, now);
+  check('枠に余裕があれば古いメールも全部入れる', few.picked.length === 3 && few.deferred.length === 0);
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3501,6 +3521,7 @@ async function main(): Promise<void> {
     resendChecks();
     mailKindChecks();
     manualEngineerChecks();
+    hourlyScheduleChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

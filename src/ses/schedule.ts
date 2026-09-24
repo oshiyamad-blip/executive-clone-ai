@@ -1,5 +1,5 @@
 // 定時バッチの実行時刻と、1回の実行の持ち時間。
-// - 次の実行時刻（.github/workflows/ses-batch.yml の cron と同じ平日10:00/14:00 JST）から、メールが次回の実行時に
+// - 次の実行時刻（.github/workflows/ses-batch.yml の cron と同じ平日9:00〜19:00 JST の毎時）から、メールが次回の実行時に
 //   収集の窓（SES_COLLECT_DAYS）を外れるか（＝今回が最後の機会か）を決める
 // - 1回の実行で新しい処理を始めてよい期限（SES_RUN_DEADLINE_MINUTES）と、LLM呼び出し1回の待ち時間の上限を管理する
 import { runDeadlineMinutes } from './config.js';
@@ -9,7 +9,7 @@ export const DAY_MS = 24 * HOUR_MS;
 const JST_OFFSET_MS = 9 * HOUR_MS; // 日本時間は夏時間がないため固定オフセットで足りる
 
 // 定時バッチ（.github/workflows/ses-batch.yml）の平日の実行時刻（日本時間）
-export const RUN_HOURS_JST = [10, 14];
+export const RUN_HOURS_JST = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
 // GitHub Actions の定時実行は混雑で遅れることがあるため、次回の実行時刻にこの分の遅れを見込む
 export const RUN_DELAY_MARGIN_MS = 3 * HOUR_MS;
@@ -56,6 +56,26 @@ export function pickForRun<T extends { receivedAt: Date }>(
 ): { picked: T[]; deferred: T[] } {
   const ordered = orderForRun(items, collectDays, now);
   return { picked: ordered.slice(0, limit), deferred: ordered.slice(limit) };
+}
+
+// LLM で抽出する分を選ぶ。新しい順を基本にし、次回には収集期間を外れる古いメールは枠の2割まで先に入れる
+// （当日の案件ほど提案の価値が高い。古いメールだけで枠を使い切って、毎回新着に届かなくなるのを防ぐ）
+export const LAST_CHANCE_SHARE = 0.2;
+
+export function pickForExtraction<T extends { receivedAt: Date }>(
+  items: T[],
+  limit: number,
+  collectDays: number,
+  now = new Date(),
+): { picked: T[]; deferred: T[] } {
+  const newest = (a: T, b: T) => b.receivedAt.getTime() - a.receivedAt.getTime();
+  const last = items.filter((x) => isLastChance(x.receivedAt, collectDays, now)).sort(newest);
+  const rest = items.filter((x) => !isLastChance(x.receivedAt, collectDays, now)).sort(newest);
+  const lastSlots = Math.min(last.length, Math.ceil(limit * LAST_CHANCE_SHARE));
+  const picked = [...last.slice(0, lastSlots), ...rest].slice(0, limit);
+  if (picked.length < limit) picked.push(...last.slice(lastSlots, lastSlots + (limit - picked.length)));
+  const chosen = new Set(picked);
+  return { picked, deferred: items.filter((x) => !chosen.has(x)) };
 }
 
 // ===== 1回の実行の持ち時間 =====

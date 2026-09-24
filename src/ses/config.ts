@@ -438,10 +438,16 @@ export function statsDays(): number {
   return envNum('SES_STATS_DAYS', 30, { min: 1, max: 365, int: true });
 }
 
-// 1回の実行で抽出する未処理メールの上限（次回の実行までに収集期間を外れるものを優先し、残りは新しい順。
-// 超過分は次回以降に回す）。初回実行やバックログ時にLLMコストと実行時間が膨らまないようにする
+// 1回の実行で LLM で抽出するメールの上限（再送スキップ・要員スキップの後に数える。新しい順を基本に、
+// 次回には収集期間を外れる古いメールは枠の2割まで。超過分は次回以降に回す）。LLMコストと実行時間を抑える
 export function maxMailsPerRun(): number {
   return envNum('SES_MAX_MAILS_PER_RUN', 150, { min: 1, int: true });
+}
+
+// 1回の実行で本文を取得するメールの上限（取得は LLM の費用がかからないため抽出の上限より大きくし、
+// 再送・要員メールを先に弾いてから抽出の枠を使う。平日の受信は1時間に最大600通程度）
+export function maxFetchPerRun(): number {
+  return Math.max(envNum('SES_MAX_FETCH_PER_RUN', 1500, { min: 1, max: 5000, int: true }), maxMailsPerRun());
 }
 
 // 指示の検知に足す言い回し（正規表現。改行区切り。GitHub の Secret に置く）。公開リポジトリの一覧だけでは、

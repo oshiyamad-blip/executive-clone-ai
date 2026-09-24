@@ -1696,8 +1696,9 @@ async function testResumeAndDurability(): Promise<void> {
       all.map((p) => p.id).join(','),
     );
 
-    // 1回の上限を超える未処理メール: 本文は上限まで選んだものだけ取得し、次回の実行で窓を外れる分は異常終了で知らせる
+    // 1回の取得の上限を超える未処理メール: 本文は上限まで選んだものだけ取得し、次回の実行で窓を外れる分は異常終了で知らせる
     process.env.SES_MAX_MAILS_PER_RUN = '1';
+    process.env.SES_MAX_FETCH_PER_RUN = '1';
     process.env.SES_COLLECT_DAYS = '4';
     const day = 24 * 60 * 60 * 1000;
     transport.inbox = [
@@ -1714,6 +1715,7 @@ async function testResumeAndDurability(): Promise<void> {
     );
   } finally {
     delete process.env.SES_MAX_MAILS_PER_RUN;
+    delete process.env.SES_MAX_FETCH_PER_RUN;
     delete process.env.SES_COLLECT_DAYS;
     __setMailTransportForTest(mail);
     process.env.SHEETS_DB_SPREADSHEET_ID = SES_BOOK;

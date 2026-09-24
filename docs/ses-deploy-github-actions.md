@@ -1,4 +1,4 @@
-# SESマッチング 本番導入手順書（GitHub Actions で平日10:00／14:00に自動実行）
+# SESマッチング 本番導入手順書（GitHub Actions で平日9:00〜19:00に毎時自動実行）
 
 この手順書は、SESマッチングを **サーバーを用意せずに GitHub Actions で定時実行する** ための手順を、
 開発者ではない方（オーナー・営業責任者）向けにまとめたものです。上から順に進めれば本番稼働できます。
@@ -29,7 +29,7 @@
 ## 1. 全体像
 
 ```
- GitHub Actions（平日 10:00 / 14:00 に自動で起動。毎回まっさらな環境で動いて終わる）
+ GitHub Actions（平日 9:00〜19:00 に毎時自動で起動。毎回まっさらな環境で動いて終わる）
    │
    ├─①「担当者メール」が入った行の下書きを作成 ──→ Xserver 共有メールボックスの「下書き」フォルダ
    │
@@ -459,7 +459,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_ALLOW_GEMINI_API` | `paid` | `gemini` を使う場合は**必須** | `LLM_PROVIDER=gemini` では、メール本文・添付・社員のスキルシートを Google AI Studio に送ります。無料枠は送った内容が品質改善や人による確認に使われ得るため、**課金を有効にしたプロジェクトで利用条件を確認したうえで** `paid` を登録します（未登録なら事前確認が ❌ で止め、バッチも始めません） |
 | `SES_NOTIFY_ALLOW_EXTERNAL` | `false` | 任意 | `true` のときだけ、`SES_NOTIFY_TO` の自社ドメイン以外の宛先にもサマリを送ります（既定では送らず、事前確認が ❌ で知らせます） |
 | `SES_RETENTION_DAYS` | `180` | 任意 | 個人データの保存期間（日。既定 180、30〜3650）。4-2 の「保存期間」を参照 |
-| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
+| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_MAX_FETCH_PER_RUN`（既定1500） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
 
 **Secrets に移した設定**: 以前の手順で `SES_OWN_DOMAINS` `SES_ALLOWED_SENDER_DOMAINS` `SHEETS_DB_IMPERSONATE` `PROPER_GOOGLE_IMPERSONATE`
 `MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、Secrets に登録し直し（価格の方針は `SES_PRICING_POLICY_JSON` にまとめる）、Variables から削除してください
@@ -483,7 +483,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 
 ### 6-2. 準備が終わるまで定時バッチを止めておく
 
-main に入った時点から平日 10:00／14:00 に動き始めます。Secrets の登録が終わるまでは、
+main に入った時点から平日 9:00〜19:00 の毎時に動き始めます。Secrets の登録が終わるまでは、
 **Actions タブ → 左の「SESマッチング定時バッチ」→ 右上の「…」→「Disable workflow」** で止めておきます
 （止めていないと、登録が終わるまで毎回「失敗」になり通知メールが届きます）。
 3章の測定はこの状態で実行できます。
@@ -509,7 +509,7 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 4. スプレッドシートに **タブと見出しが自動で作られ**、案件・要員・マッチの行が入っている
 5. プロパー機能を使う場合は「プロパー管理」タブができ、スキルシートの行が入っている
 
-以後は平日の 10:00／14:00 に自動で動きます（GitHub の混雑で数分〜数十分遅れることがあります。祝日も動きます）。
+以後は平日の 9:00〜19:00 に毎時自動で動きます（GitHub の混雑で数分〜数十分遅れることがあります。祝日も動きます）。
 次の回の実行が Actions の一覧に「schedule」として出ていれば定時実行も確認できたことになります。
 
 > 手動実行と定時実行が重なった場合は、先の回が終わってから次の回が始まります（同時には動きません）。
@@ -518,13 +518,13 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 
 ## 7. 毎日の使い方（営業チーム向け）
 
-1. **サマリメールを見る**（10:00／14:00 の回の後に届きます）。成立候補・交渉提案・参考提案・要確認の件数と一覧が載っています
+1. **サマリメールを見る**（毎時の回の後に届きます。新しい候補が無い回は件数だけです）。成立候補・交渉提案・参考提案・要確認の件数と一覧が載っています
 2. **スプレッドシートの「マッチ」タブ**で、成立候補・交渉提案の行の **「案件側文面」「要員側文面」** を読みます
    （宛先 To・Cc・件名つき。ここを書き換えても下書きには反映されません）
 3. 送りたい行の **「担当者メール」** に、**自分の会社のメールアドレス**（`sales@` ではなく個人のアドレス）を1件だけ入れます
    - 片側だけ送る場合は、送らない側の「下書き状態」を `不要` にします
    - 参考提案・要確認の行は文面を作らないため `不要` になっています（送る場合は、内容を確かめて自分で返信を作成します）
-4. **次の回（10:00 または 14:00）の最初に下書きが作られ**、状態が `作成済 日時` になります
+4. **次の回（毎時0分）の最初に下書きが作られ**、状態が `作成済 日時` になります
    - 下書きは**共有メールボックスの下書きフォルダ**に入ります（送信元はあなたのアドレス・元のメールへの「全員に返信」）
    - 共有メールボックスをメールソフトや Xserver の Web メールで開き、**宛先・内容を確認してから送信**してください
    - 状態が `エラー: 理由` のときは理由を直すと次の回に作り直します。止めたい場合は `不要` にします

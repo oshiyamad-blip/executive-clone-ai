@@ -1,12 +1,12 @@
 // SES専用の収集ラッパー。本番=メールプロバイダ(MAIL_PROVIDER: xserver|gmail)で共有メーリスを取得、
 // demo=fixture読込。処理済みID除外で未処理のみ返す（二重処理防止）。
 // 自分たちが出したメール（サマリ・自社ドメインからの紹介メール等）は取り込まない（自己ループ防止）。
-// 1回に抽出する件数には上限を設ける。次回の実行までに収集の窓を外れるメールを先に、残りは新しい順に選び、
-// 本文は選んだメールだけ取得する（超過分は次回以降。窓を外れて処理できなくなる分は異常終了として知らせる）。
+// 1回に本文を取得する件数には上限（SES_MAX_FETCH_PER_RUN）を設ける。LLM で抽出する件数の上限は、再送・要員メールを
+// 除いた後に index.ts で掛ける（超過分は次回以降。窓を外れて処理できなくなる分は異常終了として知らせる）。
 import { collectMail, collectMailReady } from './mail/index.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from './mail/ownMail.js';
 import { loadFixtureMails } from './fixtures/mails.js';
-import { isDemo, requireLive, maxMailsPerRun, collectDays } from './config.js';
+import { isDemo, requireLive, maxFetchPerRun, collectDays } from './config.js';
 import { loadProcessedMailIds } from './store.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
 import { orderForRun, isLastChance } from './schedule.js';
@@ -34,7 +34,7 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
 
   // 処理済みIDの読み込み失敗は例外のまま（空集合で続行すると収集期間の全メールを再抽出してしまうため）
   const processed = await loadProcessedMailIds();
-  const limit = maxMailsPerRun();
+  const limit = maxFetchPerRun();
   const fetched = await collectMail((id) => processed.has(id), { limit, now });
   const unprocessed = fetched.mails.filter((m) => !processed.has(m.id));
 
@@ -54,13 +54,13 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
   if (deferred > 0) {
     recordHealEvent(
       'warn',
-      `未処理メールが1回の上限（SES_MAX_MAILS_PER_RUN=${limit}）を超えたため、${deferred}件を次回以降に回しました`,
+      `未処理メールが1回の取得の上限（SES_MAX_FETCH_PER_RUN=${limit}）を超えたため、${deferred}件を次回以降に回しました`,
     );
     const lost = fetched.deferred.filter((receivedAt) => isLastChance(receivedAt, collectDays(), now)).length;
     if (lost > 0) {
       recordFatal(
         `上限を超えて次回以降に回したメールのうち${lost}件は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れて処理されません` +
-          '（SES_MAX_MAILS_PER_RUN を上げるか、SES_COLLECT_DAYS をそのメールが収まる日数まで広げて手動で再実行してください）',
+          '（SES_MAX_FETCH_PER_RUN を上げるか、SES_COLLECT_DAYS をそのメールが収まる日数まで広げて手動で再実行してください）',
       );
     }
   }
