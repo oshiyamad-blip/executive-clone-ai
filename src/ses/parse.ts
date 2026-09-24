@@ -4,10 +4,10 @@
 // 添付は社外の誰からでも届くため、表計算の解析前に形式（先頭バイト）とサイズを確かめ、
 // 解析は数式・スタイル・マクロ等を読まない設定で行い、行数と文字数に上限を設ける。
 import { google, sheets_v4, drive_v3 } from 'googleapis';
-import { getServiceAccountAuth } from '../collectors/googleAuth.js';
-import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains, logRedact } from './config.js';
+import { sesMainAuth } from './googleCreds.js';
+import { isDemo, sheetsDbSpreadsheetId, properMasterSpreadsheetId, properFolderId, ownDomains, internalFileDomains, logRedact } from './config.js';
 import { redactable, safeErr, logId } from './redact.js';
-import { GOOGLE_REQUEST_TIMEOUT_MS } from '../database/sheetBook.js';
+import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry } from '../database/sheetBook.js';
 import { pastExtractDeadline } from './schedule.js';
 import { spreadsheetBufferToTextIsolated } from './spreadsheetIsolated.js';
 import type { SesRawMail, SesAttachment } from '../types/index.js';
@@ -147,28 +147,41 @@ function reasonOf(err: unknown): string {
 // このシステムのDB・プロパー管理表の所有者と、サービスアカウントに共有した人（社内の人のアドレス）。
 // 個人のGoogleアカウント（@gmail.com 等）で社内のシートを持つ運用では、自社ドメインだけでは社内のファイルと分からないため、
 // これらの人が所有する・共有したファイルも社内とみなす（1回の実行で1回だけ読む。読めなければ加えない）
-let internalPeopleCache: Promise<Set<string>> | null = null;
+// complete=false は、DB・管理表の所有者を確かめられなかった（404 以外の失敗）こと。そのときは自社ドメイン以外の人のファイルを
+// 社内の人のものかどうか見分けられないため、社外とみなさない（読まない側に倒す）。失敗した結果は次のリンクで確かめ直す
+export interface InternalPeople {
+  people: Set<string>;
+  complete: boolean;
+}
 
-function internalPeople(drive: drive_v3.Drive): Promise<Set<string>> {
-  internalPeopleCache ??= (async () => {
-    const out = new Set<string>();
-    for (const fileId of [sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean)) {
-      try {
-        const f = (await drive.files.get({ fileId, fields: 'owners(emailAddress), sharingUser(emailAddress)', supportsAllDrives: true })).data;
-        for (const a of [...(f.owners ?? []).map((o) => o.emailAddress), f.sharingUser?.emailAddress]) {
-          if (a) out.add(a.toLowerCase());
-        }
-      } catch {
-        // 読めない（Drive APIが無効等）。自社ドメイン・フォルダでの判定だけになる
+let internalPeopleCache: InternalPeople | null = null;
+
+async function internalPeople(drive: drive_v3.Drive): Promise<InternalPeople> {
+  if (internalPeopleCache) return internalPeopleCache;
+  const people = new Set<string>();
+  let complete = true;
+  for (const fileId of [sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean)) {
+    try {
+      const f = (
+        await withGoogleRetry(() =>
+          drive.files.get({ fileId, fields: 'owners(emailAddress), sharingUser(emailAddress)', supportsAllDrives: true }),
+        )
+      ).data;
+      for (const a of [...(f.owners ?? []).map((o) => o.emailAddress), f.sharingUser?.emailAddress]) {
+        if (a) people.add(a.toLowerCase());
       }
+    } catch (err) {
+      // 404 はそのファイルがサービスアカウントに共有されていないだけ（別テナントの管理表等）。それ以外は確かめられなかった
+      if (statusOf(err) !== 404) complete = false;
     }
-    return out;
-  })();
-  return internalPeopleCache;
+  }
+  const result = { people, complete };
+  if (complete) internalPeopleCache = result;
+  return result;
 }
 
 async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOrigin> {
-  const own = ownDomains();
+  const own = internalFileDomains();
   const folder = properFolderId();
   let f: drive_v3.Schema$File;
   try {
@@ -190,7 +203,8 @@ async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOr
   if (ownerDomains.some((d) => own.includes(d))) return 'internal';
   const internal = await internalPeople(drive);
   const people = [...(f.owners ?? []).map((o) => o.emailAddress), f.sharingUser?.emailAddress].map((a) => (a ?? '').toLowerCase());
-  if (people.some((a) => a !== '' && internal.has(a))) return 'internal';
+  if (people.some((a) => a !== '' && internal.people.has(a))) return 'internal';
+  if (!internal.complete) return 'internal';
   const sharer = domainOf(f.sharingUser?.emailAddress);
   const sharedByOutsider = sharer !== '' && own.length > 0 && !own.includes(sharer);
   if (f.driveId) return sharedByOutsider ? 'external' : 'internal';
@@ -212,6 +226,14 @@ async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOr
   return Boolean(folder) && parents.includes(folder) ? 'internal' : 'external';
 }
 
+// オフライン自己検証（npm run ses:flow:check）用の差し替え口（本番コードからは呼ばない）
+let testLinkApis: { drive: drive_v3.Drive; sheets: sheets_v4.Sheets } | null = null;
+
+export function __setLinkApisForTest(apis: { drive: drive_v3.Drive; sheets: sheets_v4.Sheets } | null): void {
+  testLinkApis = apis;
+  internalPeopleCache = null;
+}
+
 // 本文中のGoogleスプレッドシートリンクをSheets APIで読み取り、疑似的な添付として返す。
 // 社外から届いたリンクは、サービスアカウント自身（DWDで社員になりすまさない）で読む。
 // つまり送り主がサービスアカウントに明示的に共有したシート（または一般公開のシート）だけが読める。
@@ -219,23 +241,24 @@ async function fileOrigin(drive: drive_v3.Drive, fileId: string): Promise<FileOr
 // 読めない場合は件数だけ数えて静かにスキップする（大半のリンクは共有されていないのが普通のため）
 async function parseSheetLinks(mail: SesRawMail, stats: SheetLinkStats): Promise<SesAttachment[]> {
   if (mail.sheetLinks.length === 0) return [];
-  const auth = getServiceAccountAuth(SHEETS_READONLY_SCOPES);
+  const auth = sesMainAuth(SHEETS_READONLY_SCOPES);
   if (!auth) {
     stats.skipped += mail.sheetLinks.length;
     return [];
   }
 
   const ownSheets = new Set([sheetsDbSpreadsheetId(), properMasterSpreadsheetId()].filter(Boolean));
-  const sheetsApi = google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
-  // 自社ドメイン・プロパーのフォルダが分からなければ社内のファイルかを判定できないため、リンクは読まない
-  // （サービスアカウントに共有した社内のシートを、URLを知る社外の人に読み出させないため。確かめられないときは読まない側に倒す）
-  const driveAuth = ownDomains().length > 0 || properFolderId() ? getServiceAccountAuth(DRIVE_METADATA_SCOPES) : null;
+  const sheetsApi = testLinkApis?.sheets ?? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
+  // 自社ドメインが分からなければ社内のファイルかを判定できないため、リンクは読まない（プロパーのフォルダだけでは、
+  // フォルダの外にある社員のシートを社内と見分けられない。サービスアカウントに共有した社内のシートを、URLを知る社外の人に
+  // 読み出させないため。確かめられないときは読まない側に倒す）
+  const driveAuth = ownDomains().length > 0 ? sesMainAuth(DRIVE_METADATA_SCOPES) : null;
   if (!driveAuth) {
     stats.skipped += mail.sheetLinks.length;
     stats.unchecked += mail.sheetLinks.length;
     return [];
   }
-  const driveApi = google.drive({ version: 'v3', auth: driveAuth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
+  const driveApi = testLinkApis?.drive ?? google.drive({ version: 'v3', auth: driveAuth, timeout: GOOGLE_REQUEST_TIMEOUT_MS });
   const results: SesAttachment[] = [];
   // 同じファイルへの別の書き方のURL（/edit・/htmlview・#gid 等）は1件として扱う
   const spreadsheetIds = [...new Set(mail.sheetLinks.map((link) => extractSpreadsheetId(link) ?? ''))];

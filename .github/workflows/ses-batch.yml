@@ -8,7 +8,12 @@
 # - data/ をキャッシュや成果物（actions/cache・upload-artifact）として保存しないでください（個人情報が公開されます）。
 #   毎回まっさらな環境で動き、処理済みメール・隔離リスト等の状態はスプレッドシートに保存されます。
 # - 鍵・パスワードは本番のステップにだけ渡します（依存パッケージのインストールやビルドには渡さない）。
-#   依存パッケージのインストールスクリプトは実行しません（--ignore-scripts）。
+#   依存パッケージのインストールスクリプトは実行しません（--ignore-scripts）。本番のステップは、ビルド済みの dist/ を node で動かし、
+#   開発用のパッケージ（tsx・esbuild・TypeScript 等）は本番のステップの前に取り除きます（npm prune --omit=dev）。
+# - 鍵を持つジョブは Actions のキャッシュ（actions/cache・setup-node の cache）を使いません（main の他のジョブが作れるキャッシュを
+#   チェックアウトの後に展開すると、ソースを書き換えられるため）。
+# - Google の鍵は用途ごとに分けます（SES_GOOGLE_SA_KEY_JSON: DWDなし / SHEETS_DB_SA_KEY_JSON・SES_GMAIL_SA_KEY_JSON: DWDはその用途だけ）。
+#   Workload Identity 連携（鍵ファイルなし）を使う場合は、Secrets の GCP_WORKLOAD_IDENTITY_PROVIDER と GCP_SERVICE_ACCOUNT を登録します（手順書 2-2）。
 # - 値は Secrets を Environment「production」、Variables を Settings → Secrets and variables → Actions に登録します（このファイルに値を書かない）。
 # - Secrets は Environment「production」（Settings → Environments。Deployment branches を main だけに制限）に登録し、
 #   リポジトリの Secrets には置きません。main 以外のブランチで書き換えたワークフロー・コードを手動実行されても、
@@ -48,6 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     # Secrets は main ブランチだけが使える Environment から受け取る（Deployment branches を main に制限しておく）
     environment: production
+    # id-token: write は Workload Identity 連携（鍵ファイルなしで Google に認証）を使うときに必要
+    permissions:
+      contents: read
+      id-token: write
     # バッチは開始から SES_RUN_DEADLINE_MINUTES（既定20分）を過ぎると新しい抽出・判定を始めず、済んだ分を保存して
     # サマリを送る（残りは次回の実行で続きから）。実行中のLLM呼び出しの待ち時間と準備の時間を見込んで長めに取る
     timeout-minutes: 40
@@ -55,6 +64,8 @@ jobs:
       TZ: Asia/Tokyo
       # 公開ログ対策（必ず true のまま）
       SES_LOG_REDACT: 'true'
+      # Workload Identity 連携を使うか（値は true/false だけ）
+      SES_WIF_ENABLED: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
     steps:
       - name: リポジトリを取得
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -65,13 +76,30 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: npm
 
       - name: 依存パッケージをインストール（インストールスクリプトは実行しない）
         run: npm ci --ignore-scripts
 
-      - name: ビルド確認
+      - name: 依存パッケージの既知の脆弱性を確認（鍵は渡しません）
+        # high 以上は警告（Dependabot の PR で更新）。critical はバッチを止め、失敗の通知で知らせる
+        run: |
+          if ! npm audit --omit=dev --audit-level=high; then
+            echo "::warning::依存パッケージに重大度 high 以上の既知の脆弱性があります（npm audit）。Dependabot の PR を確認し、手順書 9章に従って更新してください"
+            npm audit --omit=dev --audit-level=critical > /dev/null
+          fi
+
+      - name: ビルド
         run: npm run build
+
+      - name: 開発用のパッケージを取り除く（本番のステップで tsx・esbuild 等を動かさない）
+        run: npm prune --omit=dev --ignore-scripts
+
+      - name: Google に鍵ファイルなしで認証（Workload Identity 連携。登録したときだけ）
+        if: ${{ inputs.mode != 'デモ' && env.SES_WIF_ENABLED == 'true' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: 設定の事前確認（接続なし・値は表示しません）と本番バッチ
         if: ${{ inputs.mode != 'デモ' }}
@@ -84,11 +112,18 @@ jobs:
           SES_COLLECT_DAYS: ${{ vars.SES_COLLECT_DAYS || '7' }}
           SES_RUN_DEADLINE_MINUTES: ${{ vars.SES_RUN_DEADLINE_MINUTES || '20' }}
           # 以前は Variables だった値が Variables に残っていないか（値は出さず true/false だけ。事前確認で Secrets への移動を促す）
-          SES_SENSITIVE_VARS_PRESENT: ${{ vars.SES_OWN_DOMAINS != '' || vars.SES_ALLOWED_SENDER_DOMAINS != '' || vars.SHEETS_DB_IMPERSONATE != '' || vars.PROPER_GOOGLE_IMPERSONATE != '' || vars.MIN_GROSS_MARGIN_JPY != '' || vars.MIN_GROSS_MARGIN_MAN != '' || vars.NEGOTIATION_MAX_PROJECT_RAISE_MAN != '' || vars.NEGOTIATION_MAX_ENGINEER_CUT_MAN != '' || vars.SES_PRICING_POLICY_JSON != '' }}
+          SES_SENSITIVE_VARS_PRESENT: ${{ vars.SES_OWN_DOMAINS != '' || vars.SES_ALLOWED_SENDER_DOMAINS != '' || vars.SHEETS_DB_IMPERSONATE != '' || vars.PROPER_GOOGLE_IMPERSONATE != '' || vars.MIN_GROSS_MARGIN_JPY != '' || vars.MIN_GROSS_MARGIN_MAN != '' || vars.NEGOTIATION_MAX_PROJECT_RAISE_MAN != '' || vars.NEGOTIATION_MAX_ENGINEER_CUT_MAN != '' || vars.SES_PRICING_POLICY_JSON != '' || vars.SES_INTERNAL_FILE_DOMAINS != '' || vars.SES_GOOGLE_SA_EMAIL != '' }}
+          # Environment「production」にだけ登録する目印（リポジトリの Secrets へ退避した・Environment が効かない構成を事前確認で止める）
+          SES_ENVIRONMENT_SENTINEL: ${{ secrets.SES_ENVIRONMENT_SENTINEL }}
 
           # ---- Secrets（必須）----
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY_JSON }}
+          # SES のメインの Google の鍵（DWDを登録しないサービスアカウント）。Workload Identity 連携のときは鍵を渡さない
+          SES_GOOGLE_AUTH: ${{ env.SES_WIF_ENABLED == 'true' && 'adc' || '' }}
+          SES_GOOGLE_SA_EMAIL: ${{ secrets.SES_GOOGLE_SA_EMAIL }}
+          SES_GOOGLE_SA_KEY_JSON: ${{ env.SES_WIF_ENABLED != 'true' && secrets.SES_GOOGLE_SA_KEY_JSON || '' }}
+          # 以前の名前（SES_GOOGLE_SA_KEY_JSON が無いときだけ使われる）
+          GOOGLE_SA_KEY_JSON: ${{ env.SES_WIF_ENABLED != 'true' && secrets.GOOGLE_SA_KEY_JSON || '' }}
           SHEETS_DB_SPREADSHEET_ID: ${{ secrets.SHEETS_DB_SPREADSHEET_ID }}
           XSERVER_IMAP_HOST: ${{ secrets.XSERVER_IMAP_HOST }}
           XSERVER_SMTP_HOST: ${{ secrets.XSERVER_SMTP_HOST }}
@@ -103,6 +138,9 @@ jobs:
           # 指示の検知に足す言い回し（正規表現・改行区切り）。公開リポジトリの一覧だけで検知の有無を確かめられないよう Secret に置く
           SES_INJECTION_EXTRA_PATTERNS: ${{ secrets.SES_INJECTION_EXTRA_PATTERNS }}
           SHEETS_DB_IMPERSONATE: ${{ secrets.SHEETS_DB_IMPERSONATE }}
+          # SHEETS_DB_IMPERSONATE（DWD）のときだけ使う専用の鍵（spreadsheets だけを委任したサービスアカウント）
+          SHEETS_DB_SA_KEY_JSON: ${{ secrets.SHEETS_DB_IMPERSONATE != '' && secrets.SHEETS_DB_SA_KEY_JSON || '' }}
+          SES_INTERNAL_FILE_DOMAINS: ${{ secrets.SES_INTERNAL_FILE_DOMAINS }}
           # 価格の方針（粗利下限・交渉幅）は1つの JSON（推測できない乱数 n を含む）で渡す。「10」「5」のような短い数値を
           # 個別の Secret にすると、Actions がログ全体のその数字を伏せ字にするため、伏せ字の位置から値が分かってしまう。
           # 以前の個別の Secrets（MIN_GROSS_MARGIN_* / NEGOTIATION_MAX_*）はここで参照しない（参照するだけで伏せ字の対象になる）
@@ -112,8 +150,9 @@ jobs:
           PROPER_MASTER_SPREADSHEET_ID: ${{ secrets.PROPER_MASTER_SPREADSHEET_ID }}
           PROPER_GOOGLE_SA_KEY_JSON: ${{ secrets.PROPER_SKILLSHEET_FOLDER_ID != '' && secrets.PROPER_MASTER_SPREADSHEET_ID != '' && secrets.PROPER_GOOGLE_SA_KEY_JSON || '' }}
           PROPER_GOOGLE_IMPERSONATE: ${{ secrets.PROPER_SKILLSHEET_FOLDER_ID != '' && secrets.PROPER_MASTER_SPREADSHEET_ID != '' && secrets.PROPER_GOOGLE_IMPERSONATE || '' }}
-          # MAIL_PROVIDER=gmail のときだけ使う
-          SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
+          # MAIL_PROVIDER=gmail のときだけ渡す（Gmail の DWD は専用の鍵で。テナントの全員のメールボックスに及ぶため）
+          SES_TARGET_GMAIL: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.SES_TARGET_GMAIL || '' }}
+          SES_GMAIL_SA_KEY_JSON: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.SES_GMAIL_SA_KEY_JSON || '' }}
           # LLM_PROVIDER=gemini のときだけ渡す（Vertex AI はこのワークフローでは使えません。
           # Google AI Studio の無料枠では使わない: 課金を有効にしてデータの利用条件を確認し、Variables に SES_ALLOW_GEMINI_API=paid）
           GEMINI_API_KEY: ${{ vars.LLM_PROVIDER == 'gemini' && secrets.GEMINI_API_KEY || '' }}
@@ -131,6 +170,7 @@ jobs:
           PROPER_MAX_EXTRACT_PER_RUN: ${{ vars.PROPER_MAX_EXTRACT_PER_RUN }}
           PROPER_PROJECT_LOOKBACK_DAYS: ${{ vars.PROPER_PROJECT_LOOKBACK_DAYS }}
           PROPER_FOLLOW_SHORTCUTS: ${{ vars.PROPER_FOLLOW_SHORTCUTS }}
+          PROPER_MASTER_IN_MAIN_TENANT: ${{ vars.PROPER_MASTER_IN_MAIN_TENANT }}
           SKILL_MATCH_THRESHOLD: ${{ vars.SKILL_MATCH_THRESHOLD }}
           SKILL_MATCH_STRONG_THRESHOLD: ${{ vars.SKILL_MATCH_STRONG_THRESHOLD }}
           MAX_CANDIDATES_PER_ITEM: ${{ vars.MAX_CANDIDATES_PER_ITEM }}
@@ -157,10 +197,13 @@ jobs:
           ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
           ANTHROPIC_MODEL_REPAIR: ${{ vars.ANTHROPIC_MODEL_REPAIR }}
           JPY_PER_USD: ${{ vars.JPY_PER_USD }}
+        # ビルド済みの dist/ を node で直接動かす（tsx・esbuild は取り除き済み）
         run: |
-          npm run ses:preflight
-          npm run ses
+          node dist/ses/preflight.js
+          node dist/ses/index.js
 
       - name: デモ（外部に接続しません）
         if: ${{ inputs.mode == 'デモ' }}
-        run: npm run ses:demo
+        env:
+          DEMO_MODE: 'true'
+        run: node dist/ses/index.js

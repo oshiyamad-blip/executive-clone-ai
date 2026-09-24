@@ -43,3 +43,5 @@ leads-import/
 
 # 検証の作業用フォルダ
 tmp/
+# google-github-actions/auth が作業フォルダに書く一時的な資格情報
+gha-creds-*.json

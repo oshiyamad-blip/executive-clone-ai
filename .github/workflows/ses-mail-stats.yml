@@ -3,6 +3,7 @@
 # 受信箱を読み取り専用で開き、本文・添付は取得しません。ログに出すのは件数などの集計値だけです
 # （件名・アドレス・氏名・送信元のドメイン名は出しません）。手順書: docs/ses-deploy-github-actions.md
 # 鍵・パスワードは測定のステップにだけ渡します（依存パッケージのインストールには渡さず、インストールスクリプトも実行しない）。
+# 鍵を持つジョブは Actions のキャッシュを使わず、ビルド済みの dist/ を node で動かします（開発用のパッケージは取り除く）。
 
 name: SESメール量の測定
 
@@ -37,10 +38,15 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: npm
 
       - name: 依存パッケージをインストール（インストールスクリプトは実行しない）
         run: npm ci --ignore-scripts
+
+      - name: ビルド
+        run: npm run build
+
+      - name: 開発用のパッケージを取り除く（鍵を渡すステップで tsx・esbuild 等を動かさない）
+        run: npm prune --omit=dev --ignore-scripts
 
       - name: メール量を測定（読み取り専用・集計値のみ表示）
         env:
@@ -52,9 +58,9 @@ jobs:
           XSERVER_SHARED_PASS: ${{ secrets.XSERVER_SHARED_PASS }}
           XSERVER_IMAP_PORT: ${{ vars.XSERVER_IMAP_PORT }}
           XSERVER_DRAFTS_MAILBOX: ${{ vars.XSERVER_DRAFTS_MAILBOX }}
-          # gmail（MAIL_PROVIDER=gmail のときだけ使う）
-          SES_TARGET_GMAIL: ${{ secrets.SES_TARGET_GMAIL }}
-          GOOGLE_SA_KEY_JSON: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.GOOGLE_SA_KEY_JSON || '' }}
+          # gmail（MAIL_PROVIDER=gmail のときだけ渡す。Gmail の DWD は専用の鍵）
+          SES_TARGET_GMAIL: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.SES_TARGET_GMAIL || '' }}
+          SES_GMAIL_SA_KEY_JSON: ${{ vars.MAIL_PROVIDER == 'gmail' && secrets.SES_GMAIL_SA_KEY_JSON || '' }}
           # 集計・費用の概算に使う設定（未設定なら既定値）
           SES_OWN_DOMAINS: ${{ secrets.SES_OWN_DOMAINS }}
           SES_COLLECT_OWN_DOMAIN: ${{ vars.SES_COLLECT_OWN_DOMAIN }}
@@ -63,4 +69,4 @@ jobs:
           ANTHROPIC_MODEL_EXTRACT: ${{ vars.ANTHROPIC_MODEL_EXTRACT }}
           ANTHROPIC_MODEL_MATCH: ${{ vars.ANTHROPIC_MODEL_MATCH }}
           JPY_PER_USD: ${{ vars.JPY_PER_USD }}
-        run: npm run ses:mail-stats
+        run: node dist/ses/mailStats.js

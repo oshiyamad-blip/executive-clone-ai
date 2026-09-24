@@ -76,7 +76,19 @@ import {
   internalMailDomains,
   notifyAllowExternal,
   sesAllowUnleased,
+  sesServiceAccountEnvPrefixes,
+  executiveServiceAccountEnvPrefix,
+  sheetsDbServiceAccountEnvPrefix,
+  gmailServiceAccountEnvPrefix,
+  sesGoogleUsesAdc,
+  sesGoogleAdcAccountEmail,
+  googleTargetEmail,
+  properMasterInMainTenant,
+  githubRef,
+  environmentSentinel,
 } from './config.js';
+import { loadServiceAccountCredentials } from '../collectors/googleAuth.js';
+import { sesMainCredentials, sameServiceAccount, sheetsDbAuthProblem, gmailAuthProblem, dedicatedCredentials } from './googleCreds.js';
 import {
   isPlainEmailAddress,
   looksLikeDomain,
@@ -200,6 +212,51 @@ function checkServiceAccount(prefix: string, label: string, required: boolean): 
   return false;
 }
 
+// SES のメインの資格情報（SES_GOOGLE_SA_* → GOOGLE_SA_*、または SES_GOOGLE_AUTH=adc）。使えるなら true
+function checkMainServiceAccount(label: string): boolean {
+  if (sesGoogleUsesAdc()) {
+    ok(`${label}: SES_GOOGLE_AUTH=adc（鍵ファイルを使わず、Workload Identity 連携等の ADC で認証します）`);
+    const leftover = sesServiceAccountEnvPrefixes().filter((p) => settingValue(`${p}KEY_JSON`) || settingValue(`${p}PRIVATE_KEY`));
+    if (leftover.length > 0) {
+      warn(`SES_GOOGLE_AUTH=adc のため ${leftover.map((p) => `${p}*`).join('・')} の鍵は使いません（不要になった鍵は Secrets から削除し、Google Cloud でも鍵を削除してください）`);
+    }
+    if (!sesGoogleAdcAccountEmail()) warn('SES_GOOGLE_SA_EMAIL（ADC のサービスアカウントのメール）が未設定です — 「_指示混入」タブの保護の編集者を設定できません');
+    return true;
+  }
+  const [sesPrefix, legacyPrefix] = sesServiceAccountEnvPrefixes();
+  const sesSet = Boolean(settingValue(`${sesPrefix}KEY_JSON`) || (settingValue(`${sesPrefix}CLIENT_EMAIL`) && settingValue(`${sesPrefix}PRIVATE_KEY`)));
+  const legacySet = Boolean(settingValue(`${legacyPrefix}KEY_JSON`) || (settingValue(`${legacyPrefix}CLIENT_EMAIL`) && settingValue(`${legacyPrefix}PRIVATE_KEY`)));
+  const usable = checkServiceAccount(sesSet || !legacySet ? sesPrefix : legacyPrefix, label, true);
+  if (!usable) return false;
+  // 経営者クローンの収集用の鍵（GOOGLE_TARGET_EMAIL になりすますため、Gmail・ドライブの DWD を持つ）を SES に使わない
+  const main = sesMainCredentials();
+  const exec = loadServiceAccountCredentials(executiveServiceAccountEnvPrefix());
+  if (googleTargetEmail() && main && sameServiceAccount(main.creds, exec)) {
+    bad(
+      `${label}が経営者クローンの収集用の鍵（GOOGLE_SA_*。GOOGLE_TARGET_EMAIL へのドメイン全体の委任を持つ）と同じです。` +
+        'SES には委任の無い別のサービスアカウントを作り、SES_GOOGLE_SA_KEY_JSON に登録してください',
+    );
+    return false;
+  }
+  if (!sesSet) info(`${legacyPrefix}KEY_JSON を SES のメインの鍵として使います（経営者クローンの鍵と分ける場合は SES_GOOGLE_SA_KEY_JSON）`);
+  return true;
+}
+
+// 専用の鍵がメイン（または経営者クローン）の鍵と同じでないか
+function checkDedicatedKey(prefix: string, label: string): boolean {
+  if (!checkServiceAccount(prefix, label, false)) return false;
+  if (dedicatedCredentials(prefix).sharesMain) {
+    bad(`${prefix}KEY_JSON がメインのサービスアカウント鍵と同じです（${label}はメインとは別のサービスアカウントにしてください）`);
+    return false;
+  }
+  return true;
+}
+
+function domainOfAddress(address: string): string {
+  const a = address.trim().toLowerCase();
+  return a.includes('@') ? a.slice(a.lastIndexOf('@') + 1) : '';
+}
+
 function checkEmailSetting(name: string, value: string, required: boolean, purpose: string): void {
   if (!value) {
     if (required) bad(`${name} が未設定です（${purpose}）`);
@@ -241,6 +298,21 @@ function checkRuntime(): void {
     if (!logRedact()) bad('SES_LOG_REDACT=false です — 公開リポジトリのActionsログに氏名・アドレスが出るため true にしてください');
     else ok('ログ秘匿: 有効（氏名・メールアドレス・件名・本文はログに出ません）');
     if (!requireLive()) warn('SES_REQUIRE_LIVE=false です — LLMの鍵の渡し忘れがあると fixture のデモ結果で「成功」してしまいます');
+    if (settingValue('GITHUB_ACTIONS') === 'true') {
+      // Environment の Deployment branches（main だけ）が効いていれば、main 以外の実行には Secrets が渡らない。
+      // 渡っているなら、Environment が効かない構成（GitHub Free の非公開リポジトリ等）か、リポジトリの Secrets に置いている
+      if (githubRef() !== 'refs/heads/main') {
+        bad('main ブランチ以外の実行です — 本番は main のワークフローだけで動かします（Secrets が main 以外に渡る設定になっていないか、手順書 9章を確認）');
+      }
+      if (!environmentSentinel()) {
+        bad(
+          'SES_ENVIRONMENT_SENTINEL が渡っていません — Environment「production」の Secrets が使えない（GitHub Free の非公開リポジトリでは Environment が無効）か、' +
+            '登録していません。Environment「production」にだけ登録してください（リポジトリの Secrets への退避は不可。手順書 2-4・9章）',
+        );
+      } else {
+        ok('Environment「production」の Secrets を受け取っています（main ブランチの実行）');
+      }
+    }
     if (settingValue('SES_SENSITIVE_VARS_PRESENT') === 'true') {
       bad(
         '公開ログに表示される Variables に、Secrets へ移した設定（SES_OWN_DOMAINS・SES_ALLOWED_SENDER_DOMAINS・SHEETS_DB_IMPERSONATE・' +
@@ -302,11 +374,24 @@ function checkDatabase(): void {
     else if (!looksLikeGoogleId(sheetsDbSpreadsheetId())) {
       bad('SHEETS_DB_SPREADSHEET_ID の形式が正しくありません（スプレッドシートのURL、またはURLの /d/ と /edit の間の文字列）');
     } else ok('SHEETS_DB_SPREADSHEET_ID: 設定済み（IDの形式OK）');
-    checkServiceAccount('GOOGLE_SA_', 'サービスアカウント鍵', true);
+    checkMainServiceAccount('サービスアカウント鍵');
     const impersonate = sheetsDbImpersonate();
     if (impersonate) {
       checkEmailSetting('SHEETS_DB_IMPERSONATE', impersonate, false, '');
-      info('スプレッドシートはDWD（ドメイン全体の委任）でこのユーザーとして読み書きします（spreadsheets スコープの登録が必要）');
+      const own = ownDomains();
+      if (!own.includes(domainOfAddress(impersonate))) {
+        bad('SHEETS_DB_IMPERSONATE のドメインが SES_OWN_DOMAINS にありません（なりすますのは自社の運用担当のアカウントだけにしてください）');
+      }
+      const prefix = sheetsDbServiceAccountEnvPrefix();
+      checkDedicatedKey(prefix, 'DWD用のサービスアカウント鍵');
+      const problem = sheetsDbAuthProblem();
+      if (problem) bad(problem);
+      else {
+        info(
+          'スプレッドシートはDWD（ドメイン全体の委任）でこのユーザーとして読み書きします。委任は SHEETS_DB_SA_KEY_JSON のクライアントIDに spreadsheets だけを登録します' +
+            '（drive.readonly 等は不要。登録されているとバッチが止めます）',
+        );
+      }
     } else {
       info('スプレッドシートはサービスアカウント自身で読み書きします（上のメールに「編集者」で共有しておく）');
     }
@@ -364,8 +449,15 @@ function checkMail(): void {
   }
   if (provider === 'gmail') {
     checkEmailSetting('SES_TARGET_GMAIL', sesTargetGmail(), true, 'SES専用メールボックスの実ユーザーのアドレス');
-    checkServiceAccount('GOOGLE_SA_', 'サービスアカウント鍵・DWD用', true);
-    info('Workspace管理コンソールのドメイン全体の委任に gmail.readonly / gmail.compose / gmail.send の登録が必要です');
+    const prefix = gmailServiceAccountEnvPrefix();
+    checkDedicatedKey(prefix, 'Gmail用のサービスアカウント鍵（DWD）');
+    const problem = gmailAuthProblem();
+    if (problem) bad(problem);
+    info(
+      'SES_GMAIL_SA_KEY_JSON のクライアントIDに、管理コンソールのドメイン全体の委任で gmail.readonly / gmail.compose / gmail.send を登録します。' +
+        'この委任は SES のメールボックスだけでなくテナントの全員（役員を含む）のメールボックスに及びます。この鍵はメインの鍵と分け、' +
+        '可能なら SES 専用の組織（テナント）で運用してください',
+    );
     return;
   }
   bad('MAIL_PROVIDER の値が正しくありません（xserver または gmail）');
@@ -390,7 +482,11 @@ function checkNotifyAndDomains(): void {
       warn(`SES_NOTIFY_TO の${external}件は社外のドメインです（SES_NOTIFY_ALLOW_EXTERNAL=true のため送ります）`);
     }
   }
-  checkDomainList('SES_OWN_DOMAINS', ownDomains(), '自社から共有メールボックスに届いたメール（紹介メールのCc等）も案件・要員として取り込みます');
+  checkDomainList(
+    'SES_OWN_DOMAINS',
+    ownDomains(),
+    '自社から共有メールボックスに届いたメール（紹介メールのCc等）も案件・要員として取り込みます。メール本文のスプレッドシートのリンクも読みません（社内のファイルか確かめられないため）',
+  );
   if (dbProvider() === 'sheets') {
     checkSenders();
     checkDraftSigning();
@@ -459,7 +555,7 @@ function checkProper(): void {
   }
 
   const prefix = properServiceAccountEnvPrefix();
-  const dedicated = checkServiceAccount(prefix, 'プロパー用サービスアカウント鍵', false);
+  const dedicated = checkDedicatedKey(prefix, 'プロパー用サービスアカウント鍵');
   if (!dedicated && !settingValue(`${prefix}KEY_JSON`)) {
     info('メインのサービスアカウントで接続します（フォルダを「閲覧者」、管理表を「編集者」で同じメールに共有）');
   }
@@ -471,14 +567,25 @@ function checkProper(): void {
         'PROPER_GOOGLE_IMPERSONATE はプロパー専用のサービスアカウント（PROPER_GOOGLE_SA_KEY_JSON。そのテナントが発行したもの）と組み合わせてください' +
           '（メインの鍵で別テナントをなりすますと、その鍵で別テナントの全ユーザーのDriveを読めてしまうため使いません）',
       );
+    } else if (properMasterInMainTenant()) {
+      info('フォルダはDWDでこのユーザーとして読みます（そのテナントの委任は drive.readonly だけ）。管理表はメインのサービスアカウントで書きます');
     } else {
-      info('フォルダ・管理表はDWDでこのユーザーとして読みます（そのテナントで drive.readonly と spreadsheets の委任が必要）');
+      warn(
+        '管理表もなりすましで書くため、そのテナントに spreadsheets（全スプレッドシートの読み書き）の委任が必要です。管理表をメインのテナントに置き' +
+          '（メインのサービスアカウントに「編集者」で共有）、PROPER_MASTER_IN_MAIN_TENANT=true にすると委任は drive.readonly だけで済みます',
+      );
+    }
+    if (properFollowShortcuts()) {
+      bad(
+        'PROPER_FOLLOW_SHORTCUTS=true と PROPER_GOOGLE_IMPERSONATE は組み合わせられません（フォルダにショートカットを置くだけで、' +
+          'なりすまし先のユーザーが読める任意のファイルを読み取らせられるため）。原本をフォルダに置き、PROPER_FOLLOW_SHORTCUTS を外してください',
+      );
     }
   }
   if (properFollowShortcuts()) {
     warn(
-      'PROPER_FOLLOW_SHORTCUTS=true: フォルダにファイルを追加できる人は、ショートカットを置くだけでプロパーの認証が読める任意のファイルを' +
-        '読み取らせられます（フォルダへの追加の権限を最小限にしてください。フォルダへのショートカットはたどりません）',
+      'PROPER_FOLLOW_SHORTCUTS=true: フォルダの外のファイルを指すショートカットは、所有者が全員社内のドメインで、ショートカットを置いた人が' +
+        '所有者でもあるときだけ読みます（フォルダへの追加の権限を最小限にしてください。フォルダへのショートカットはたどりません）',
     );
   }
   if (dbProvider() !== 'sheets') warn('候補の保存先「プロパー候補」タブは DB_PROVIDER=sheets の案件スプレッドシートです（notion では保存されません）');

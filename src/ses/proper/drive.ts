@@ -3,7 +3,7 @@
 // Googleドキュメント（テキストで書き出し）/ Googleスプレッドシート（xlsxで書き出して全タブを読む）。
 // ファイル名・本文は個人情報を含むためログに出さない（ファイルIDと件数のみ）。
 import { google, type drive_v3 } from 'googleapis';
-import { properFolderId, properFollowShortcuts } from '../config.js';
+import { properFolderId, properFollowShortcuts, properImpersonate, internalFileDomains } from '../config.js';
 import { spreadsheetBufferToTextIsolated, docxBufferToTextIsolated } from '../spreadsheetIsolated.js';
 import { SafeLogError } from '../redact.js';
 import { withGoogleRetry } from '../../database/sheetBook.js';
@@ -66,7 +66,7 @@ function driveApi(): drive_v3.Drive {
   if (client) return client;
   const auth = properGoogleAuth(DRIVE_SCOPES);
   if (!auth) {
-    throw new SafeLogError('プロパー: Google認証（GOOGLE_SA_KEY_JSON 等）が未設定のためスキルシートを読めません');
+    throw new SafeLogError(`プロパー: Google認証が未設定か使えない組み合わせのためスキルシートを読めません（${properAccessHint()}）`);
   }
   // スキルシートのダウンロード・書き出し（最大10MB）に足りる待ち時間。応答の無い接続で実行全体を止めない
   client = google.drive({ version: 'v3', auth, timeout: 120_000 });
@@ -77,7 +77,11 @@ function driveApi(): drive_v3.Drive {
 async function shortcutTarget(drive: drive_v3.Drive, targetId: string): Promise<drive_v3.Schema$File | null> {
   try {
     const res = await withGoogleRetry(() =>
-      drive.files.get({ fileId: targetId, fields: 'id, name, mimeType, modifiedTime, webViewLink, size, trashed', supportsAllDrives: true }),
+      drive.files.get({
+        fileId: targetId,
+        fields: 'id, name, mimeType, modifiedTime, webViewLink, size, trashed, owners(emailAddress), parents, driveId',
+        supportsAllDrives: true,
+      }),
     );
     return res.data.trashed ? null : res.data;
   } catch {
@@ -85,21 +89,75 @@ async function shortcutTarget(drive: drive_v3.Drive, targetId: string): Promise<
   }
 }
 
+// 参照先を読んでよいか（純関数）。フォルダの外のファイル（人事の資料等）を、フォルダにショートカットを置くだけで
+// プロパーの認証（なりすまし先のユーザーの権限）で読ませないため、次のどれかに当たるものだけを読む:
+// - 参照先がスキルシートのフォルダ配下にある（inTree）
+// - 参照先がフォルダと同じ共有ドライブにある
+// - 参照先の所有者が全員社内のドメインで、ショートカットを置いた人（ショートカットの所有者）が参照先の所有者でもある
+export function shortcutTargetAllowed(input: {
+  inTree: boolean;
+  rootDriveId: string;
+  targetDriveId: string;
+  targetOwners: string[];
+  shortcutOwners: string[];
+  internalDomains: string[];
+}): boolean {
+  if (input.inTree) return true;
+  if (input.rootDriveId && input.targetDriveId === input.rootDriveId) return true;
+  const owners = input.targetOwners.map((a) => a.toLowerCase()).filter(Boolean);
+  if (owners.length === 0 || input.internalDomains.length === 0) return false;
+  const internal = owners.every((a) => input.internalDomains.includes(a.slice(a.lastIndexOf('@') + 1)));
+  const placedByOwner = input.shortcutOwners.some((a) => owners.includes(a.toLowerCase()));
+  return internal && placedByOwner;
+}
+
+// 参照先がフォルダ（root）の配下か（親を最大 MAX_FOLDER_DEPTH+1 階層たどる。見られない親は配下でないとみなす）
+async function underFolder(drive: drive_v3.Drive, parents: string[], root: string, known: Set<string>): Promise<boolean> {
+  let level = parents;
+  for (let depth = 0; depth <= MAX_FOLDER_DEPTH && level.length > 0; depth++) {
+    if (level.some((p) => p === root || known.has(p))) return true;
+    const next: string[] = [];
+    for (const parent of level) {
+      try {
+        const r = await withGoogleRetry(() => drive.files.get({ fileId: parent, fields: 'parents', supportsAllDrives: true }));
+        next.push(...(r.data.parents ?? []));
+      } catch {
+        // 見られない親フォルダ
+      }
+    }
+    level = next;
+  }
+  return false;
+}
+
+async function folderDriveId(drive: drive_v3.Drive, folderId: string): Promise<string> {
+  try {
+    const r = await withGoogleRetry(() => drive.files.get({ fileId: folderId, fields: 'driveId', supportsAllDrives: true }));
+    return r.data.driveId ?? '';
+  } catch {
+    return '';
+  }
+}
+
 // フォルダ配下のファイル（フォルダ以外。ゴミ箱は除く）を列挙する。共有ドライブ上のフォルダにも対応。
 // ショートカットは既定ではたどらない（フォルダにファイルを追加できる人が、プロパーの認証で読める任意のファイル・フォルダ
 // （人事の資料等）へのショートカットを置くと、それを読み取って管理表・案件スプレッドシート・サマリへ書き出してしまうため）。
-// PROPER_FOLLOW_SHORTCUTS=true のときだけ、ファイルへのショートカットの参照先を読む（フォルダへのショートカットはたどらない）
+// PROPER_FOLLOW_SHORTCUTS=true のときだけ、ファイルへのショートカットの参照先を読む（フォルダへのショートカットはたどらない。
+// 参照先がフォルダの外なら、所有者とショートカットを置いた人を確かめる: shortcutTargetAllowed）
 export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
   const root = properFolderId();
   if (!/^[A-Za-z0-9_-]+$/.test(root)) {
     throw new SafeLogError('プロパー: PROPER_SKILLSHEET_FOLDER_ID の形式が正しくありません（フォルダのURLまたはID）');
   }
   const drive = driveApi();
-  const followShortcuts = properFollowShortcuts();
+  // なりすまし（PROPER_GOOGLE_IMPERSONATE）中は、そのユーザーの権限で読める範囲が広いためショートカットをたどらない
+  const followShortcuts = properFollowShortcuts() && !properImpersonate();
   const files: SkillSheetFile[] = [];
   const seenFolders = new Set<string>([root]);
   const seenFiles = new Set<string>();
   let skippedShortcuts = 0;
+  let rejectedShortcuts = 0;
+  let rootDriveId: string | null = null;
   let level = [root];
   for (let depth = 0; depth <= MAX_FOLDER_DEPTH && level.length > 0; depth++) {
     const next: string[] = [];
@@ -111,7 +169,8 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
           res = await withGoogleRetry(() =>
             drive.files.list({
               q: `'${folderId}' in parents and trashed = false`,
-              fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size, shortcutDetails(targetId, targetMimeType))',
+              fields:
+                'nextPageToken, files(id, name, mimeType, modifiedTime, webViewLink, size, owners(emailAddress), shortcutDetails(targetId, targetMimeType))',
               pageSize: 1000,
               pageToken,
               supportsAllDrives: true,
@@ -136,6 +195,19 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
             }
             const target = await shortcutTarget(drive, targetId);
             if (!target?.id || target.mimeType === MIME.folder) continue;
+            rootDriveId ??= await folderDriveId(drive, root);
+            const allowed = shortcutTargetAllowed({
+              inTree: await underFolder(drive, target.parents ?? [], root, seenFolders),
+              rootDriveId,
+              targetDriveId: target.driveId ?? '',
+              targetOwners: (target.owners ?? []).map((o) => o.emailAddress ?? ''),
+              shortcutOwners: (listed.owners ?? []).map((o) => o.emailAddress ?? ''),
+              internalDomains: internalFileDomains(),
+            });
+            if (!allowed) {
+              rejectedShortcuts += 1;
+              continue;
+            }
             f = target;
             viaShortcut = true;
           }
@@ -166,6 +238,12 @@ export async function listSkillSheetFiles(): Promise<SkillSheetFile[]> {
     console.log(
       `プロパー: スキルシートのフォルダ内のショートカット${skippedShortcuts}件は読みません（` +
         `${followShortcuts ? 'フォルダへのショートカットはたどりません' : '原本をフォルダに置くか、PROPER_FOLLOW_SHORTCUTS=true でファイルへのショートカットを読みます'}）`,
+    );
+  }
+  if (rejectedShortcuts > 0) {
+    console.log(
+      `プロパー: フォルダの外のファイルを指すショートカット${rejectedShortcuts}件は読みません（所有者が社外、またはショートカットを置いた人が所有者でないため。` +
+        '原本をフォルダに置いてください）',
     );
   }
   return files;

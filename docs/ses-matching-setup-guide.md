@@ -159,10 +159,14 @@ Notionのかわりに、**1つのスプレッドシート**をデータ保存先
 ```
 DB_PROVIDER=sheets
 SHEETS_DB_SPREADSHEET_ID=<手順1のID>
-GOOGLE_SA_KEY_JSON={"type":"service_account",...}   # JSON鍵の中身を丸ごと（または GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY）
+SES_GOOGLE_SA_KEY_JSON={"type":"service_account",...}   # JSON鍵の中身を丸ごと（または SES_GOOGLE_SA_CLIENT_EMAIL / SES_GOOGLE_SA_PRIVATE_KEY）
 ```
 
-- 特定ユーザーとして読み書きしたい場合のみ `SHEETS_DB_IMPERSONATE=<ユーザーのメール>`（要DWD＋`spreadsheets` スコープ）
+- SES の鍵は、経営者クローンの収集用の `GOOGLE_SA_KEY_JSON`（経営者の Gmail・ドライブへの DWD を持つ）とは**別のサービスアカウント**にし、
+  **DWD を登録しないでください**（`SES_GOOGLE_SA_KEY_JSON` が無いときだけ `GOOGLE_SA_KEY_JSON` を使いますが、`GOOGLE_TARGET_EMAIL` と同じ鍵なら
+  事前確認が ❌ にします。使わないスコープの DWD が登録された鍵では、バッチが起動時に止まります）
+- 特定ユーザーとして読み書きしたい場合のみ `SHEETS_DB_IMPERSONATE=<自社ドメインのユーザーのメール>` と、そのためだけの別のサービスアカウントの鍵
+  `SHEETS_DB_SA_KEY_JSON`（DWD は `spreadsheets` スコープだけ）を設定します（メインの鍵ではなりすましません）
 - **処理済みメールID（「処理済みメール」タブ）と隔離リスト（「_状態」タブ）もこのシートに保存**されるため、
   毎回クリーンな環境で動く GitHub Actions 等でも二重処理・無限再試行を防げます
 - 列は1行目の**見出しの名前**で探して読み書きします。列の移動・途中へのメモ列の挿入はできます。既存シートの見出しが古い
@@ -248,7 +252,7 @@ Notion運用ではタブに記録せず、診断レポートにだけ載せま�
 PROPER_SKILLSHEET_FOLDER_ID=<フォルダのID>
 PROPER_MASTER_SPREADSHEET_ID=<管理表のID>
 ```
-認証はメインの `GOOGLE_SA_KEY_JSON` をそのまま使います（追加の鍵・DWDは不要）。
+認証はメインの `SES_GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_KEY_JSON`）をそのまま使います（追加の鍵・DWDは不要）。
 管理表は**案件スプレッドシート（`SHEETS_DB_SPREADSHEET_ID`）とは別のファイル**にし、編集者を人事・運用担当とサービスアカウントに限ってください
 （氏名・必要案件単価・居住地・スキルシートのリンクが入るため。同じファイルを指定すると事前確認が ❌ で止めます）。
 
@@ -267,8 +271,11 @@ PROPER_MASTER_SPREADSHEET_ID=<管理表のID>
 
 **別のGoogle Workspaceにフォルダ・管理表がある場合（任意）**: そのテナントで作ったサービスアカウントの鍵を
 `PROPER_GOOGLE_SA_KEY_JSON`（または `PROPER_GOOGLE_SA_CLIENT_EMAIL` / `PROPER_GOOGLE_SA_PRIVATE_KEY`）に設定します。
-外部アカウント（サービスアカウント）への共有が禁止されている場合は、そのテナントでDWDを設定し
-（`drive.readonly` と `spreadsheets` スコープ）、`PROPER_GOOGLE_IMPERSONATE=<閲覧・編集できるユーザー>` を設定します。
+この鍵はメインの鍵と別のサービスアカウントにしてください（同じ鍵ならなりすましを行いません）。
+外部アカウント（サービスアカウント）への共有が禁止されている場合は、そのテナントでDWDを設定し（`drive.readonly` スコープだけ）、
+`PROPER_GOOGLE_IMPERSONATE=<閲覧できるユーザー>` を設定します。管理表はメインのテナントに置いてメインのサービスアカウントに共有し、
+`PROPER_MASTER_IN_MAIN_TENANT=true` にします（管理表も別テナントに置くと、そのテナントに `spreadsheets`＝全スプレッドシートの読み書きの委任が必要になります）。
+なりすまし中はフォルダのショートカットをたどりません（`PROPER_FOLLOW_SHORTCUTS=true` と組み合わせると事前確認が ❌）。
 
 ---
 
@@ -310,15 +317,18 @@ SES_OWN_DOMAINS=yourcompany.co.jp  # 自社ドメイン（ここからのメー�
 ```
 MAIL_PROVIDER=gmail
 SES_TARGET_GMAIL=ses-inbox@yourcompany.co.jp   # SES専用メールボックス（グループではなく実ユーザー）
-# ドメイン全体委任(DWD)用のサービスアカウント認証
-GOOGLE_SA_KEY_JSON={...}                         # または GOOGLE_SA_CLIENT_EMAIL / GOOGLE_SA_PRIVATE_KEY
+# ドメイン全体委任(DWD)用の、Gmail だけに使う専用のサービスアカウント（メインの SES_GOOGLE_SA_KEY_JSON とは別の鍵）
+SES_GMAIL_SA_KEY_JSON={...}                      # または SES_GMAIL_SA_CLIENT_EMAIL / SES_GMAIL_SA_PRIVATE_KEY
 ```
 
 - **SES専用メールボックス（`SES_TARGET_GMAIL`）としてDWDで収集・サマリ送信**します（経営者の `GOOGLE_TARGET_EMAIL` にはなりすましません）。
   共有メーリス（グループ）を受け取るSES専用ユーザーを用意し、そのアドレスを設定してください。宛先(to:)で絞らないため、BCC・転送で届いたメールも拾います。
 - 下書きは**担当営業本人を impersonate** して本人のGmailにスレッド返信として作成します。
 - Workspace管理コンソールのDWD登録に必要なスコープは `gmail.readonly`・`gmail.compose`・`gmail.send` の3つだけです
-  （呼び出しごとに必要な1つだけを要求します）。
+  （呼び出しごとに必要な1つだけを要求します）。**ただし DWD は利用者を限定できず、この鍵を持つ者はテナントの全員（役員を含む）の
+  メールを読み・下書きを作り・送信できます**。そのため Gmail の委任は `SES_GMAIL_SA_KEY_JSON` の専用の鍵だけに登録し
+  （メインの鍵と同じなら使いません。メインの鍵に Gmail 等の委任が登録されているとバッチが起動時に止まります）、
+  可能なら SES 専用の組織（テナント）で運用してください。`SES_ALLOWED_SENDERS` の制限はコードの中だけのもので、鍵が漏れたときには効きません。
 - メール本文のスプレッドシートリンクは**サービスアカウント自身**で読みます（なりすましなし）。
   送り主がサービスアカウントに共有したシート・一般公開のシートだけが読め、読めないリンクは件数だけ記録して無視します。
 
@@ -650,9 +660,9 @@ UIでできること:
 - 突合の範囲: `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT`
 - 再送スキップ（API節約）: `SES_RESEND_WINDOW_DAYS`（既定14日・0で無効） `SES_RESEND_SIMILARITY`（既定0.9）
 - メール（Xserver）: `XSERVER_IMAP_HOST/PORT` `XSERVER_SMTP_HOST/PORT` `XSERVER_SHARED_USER/PASS` `XSERVER_DRAFTS_MAILBOX`
-- メール（Gmail）: `SES_TARGET_GMAIL` `GOOGLE_SA_*`
-- スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `GOOGLE_SA_KEY_JSON`（または `GOOGLE_SA_CLIENT_EMAIL/PRIVATE_KEY`） `SHEETS_DB_IMPERSONATE`
-- プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE`）
+- メール（Gmail）: `SES_TARGET_GMAIL` `SES_GMAIL_SA_*`
+- スプレッドシート保存: `DB_PROVIDER` `SHEETS_DB_SPREADSHEET_ID` `SES_GOOGLE_SA_KEY_JSON`（無ければ `GOOGLE_SA_KEY_JSON`。鍵ファイルなしなら `SES_GOOGLE_AUTH=adc` と `SES_GOOGLE_SA_EMAIL`） `SHEETS_DB_IMPERSONATE`＋`SHEETS_DB_SA_KEY_JSON` `SES_INTERNAL_FILE_DOMAINS`
+- プロパー候補: `PROPER_SKILLSHEET_FOLDER_ID` `PROPER_MASTER_SPREADSHEET_ID` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS`（別テナント時のみ `PROPER_GOOGLE_SA_*` `PROPER_GOOGLE_IMPERSONATE` `PROPER_MASTER_IN_MAIN_TENANT`）
 - 公開ログ対策: `SES_LOG_REDACT`（未設定時は CI/GitHub Actions 上で自動有効）
 - メール量の測定: `SES_STATS_DAYS`（`npm run ses:mail-stats` の遡り日数。既定30）
 - 事業ルール: `MIN_GROSS_MARGIN_JPY`（または `MIN_GROSS_MARGIN_MAN`） `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `HOURLY_TO_MONTHLY_HOURS` `MATCH_TIMING_GRACE_DAYS`

@@ -629,6 +629,63 @@ export function sheetsDbImpersonate(): string {
   return env('SHEETS_DB_IMPERSONATE');
 }
 
+// ===== Google の資格情報（SES） =====
+// SES のメインのサービスアカウント鍵（スプレッドシート・リンク先のシートの読み取り・プロパーの既定）の環境変数の接頭辞（優先順）。
+// SES 専用の SES_GOOGLE_SA_* を優先し、無ければ GOOGLE_SA_*（経営者クローンの収集と同じ名前。そちらの鍵はDWDを持つため共用しない）
+export function sesServiceAccountEnvPrefixes(): readonly string[] {
+  return ['SES_GOOGLE_SA_', 'GOOGLE_SA_'];
+}
+
+// 経営者クローンの収集が使う鍵の接頭辞（DWDでGmail・ドライブ等を読む。SESの専用の鍵と同じものでないかの比較に使う）
+export function executiveServiceAccountEnvPrefix(): string {
+  return 'GOOGLE_SA_';
+}
+
+// SHEETS_DB_IMPERSONATE（DWD）で案件スプレッドシートを読み書きするときだけ使う専用の鍵の接頭辞。
+// メインの鍵（社外から届いたリンクを読む）にはDWDを持たせない
+export function sheetsDbServiceAccountEnvPrefix(): string {
+  return 'SHEETS_DB_SA_';
+}
+
+// MAIL_PROVIDER=gmail の DWD（gmail.readonly / compose / send）に使う専用の鍵の接頭辞。
+// Gmail の委任はテナントの全員のメールボックスに及ぶため、スプレッドシート・リンクの読み取りに使うメインの鍵とは分ける
+export function gmailServiceAccountEnvPrefix(): string {
+  return 'SES_GMAIL_SA_';
+}
+
+// メインの資格情報を鍵ファイルではなく ADC（Application Default Credentials。GitHub Actions では Workload Identity 連携）で得るか。
+// SES_GOOGLE_AUTH=adc のときだけ（手元の ADC が個人のアカウントのことがあるため、自動では切り替えない）
+export function sesGoogleUsesAdc(): boolean {
+  return env('SES_GOOGLE_AUTH').toLowerCase() === 'adc';
+}
+
+// ADC のときのサービスアカウントのメール（シートの保護の編集者・共有先の案内に使う。鍵が無いため設定で渡す）
+export function sesGoogleAdcAccountEmail(): string {
+  return env('SES_GOOGLE_SA_EMAIL');
+}
+
+// 社内のファイルとみなす所有者のドメイン（メールのリンク先のシートを読まない判定）。
+// 自社ドメイン・SES_INTERNAL_FILE_DOMAINS（別テナントのグループ会社等）・プロパーのなりすまし先のドメイン
+export function internalFileDomains(): string[] {
+  const extra = env('SES_INTERNAL_FILE_DOMAINS')
+    .split(',')
+    .map((d) => d.trim().replace(/^@/, '').toLowerCase())
+    .filter(Boolean);
+  const proper = properImpersonate();
+  const properDomain = proper.includes('@') ? proper.slice(proper.lastIndexOf('@') + 1).toLowerCase() : '';
+  return [...new Set([...ownDomains(), ...extra, properDomain].filter(Boolean))];
+}
+
+// GitHub Actions の実行のブランチ（refs/heads/main 等）。Environment の Deployment branches が効かない構成の検出に使う
+export function githubRef(): string {
+  return env('GITHUB_REF');
+}
+
+// Environment「production」にだけ登録する目印の Secret（リポジトリの Secrets への退避・Environment が効かない構成の検出）
+export function environmentSentinel(): string {
+  return env('SES_ENVIRONMENT_SENTINEL');
+}
+
 // 処理済みメールID・隔離リスト等のバッチ横断の状態をスプレッドシートに置くか。
 // 毎回クリーンな環境で動くスケジュール実行（GitHub Actions等）ではローカル data/ が残らないため
 export function durableStateInSheets(): boolean {
@@ -661,7 +718,7 @@ export function properEnabled(): boolean {
 }
 
 // プロパー専用サービスアカウント鍵の環境変数の接頭辞（PROPER_GOOGLE_SA_KEY_JSON 等。別テナント運用時のみ）。
-// 未設定ならメインのサービスアカウント（GOOGLE_SA_*）で接続する
+// 未設定ならメインのサービスアカウント（SES_GOOGLE_SA_* / GOOGLE_SA_*）で接続する
 export function properServiceAccountEnvPrefix(): string {
   return 'PROPER_GOOGLE_SA_';
 }
@@ -681,6 +738,12 @@ export function properMaxExtractPerRun(): number {
 // ファイルを追加できる人は、プロパーの認証で読める任意のファイルを読み取らせられる（フォルダへのショートカットは常にたどらない）
 export function properFollowShortcuts(): boolean {
   return envBool('PROPER_FOLLOW_SHORTCUTS', false);
+}
+
+// 管理表「プロパー管理」がメインのテナントにあり、メインのサービスアカウントで書くか（既定 false）。
+// 別テナントのフォルダをなりすましで読む場合に、そのテナントへ spreadsheets（全スプレッドシートの読み書き）の委任を与えずに済む
+export function properMasterInMainTenant(): boolean {
+  return envBool('PROPER_MASTER_IN_MAIN_TENANT', false);
 }
 
 // プロパー候補の突合対象にする案件の受信日の遡り日数

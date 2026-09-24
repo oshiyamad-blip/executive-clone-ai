@@ -79,7 +79,16 @@ import { INJECTION_REVIEW_REASON } from '../injection.js';
 import { recordFeedback } from '../feedback.js';
 import { recordLlmUsage } from '../../llm/usage.js';
 import { SafeLogError } from '../redact.js';
-import { parseAttachments } from '../parse.js';
+import { parseAttachments, __setLinkApisForTest } from '../parse.js';
+import {
+  sheetsDbAuth,
+  sheetsDbAuthProblem,
+  gmailDelegatedAuth,
+  sesMainCredentials,
+  unneededDelegationProblems,
+  __setTokenFetcherForTest,
+} from '../googleCreds.js';
+import { properGoogleAuth, properMasterAuth, properUsesDedicatedAccount } from '../proper/auth.js';
 import { FakeSheets, FakeDrive, FakeMailTransport, type FakeDriveFile } from './fakeGoogle.js';
 import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail } from '../../types/index.js';
 
@@ -1264,28 +1273,65 @@ async function testProperMaster(): Promise<void> {
 // ===== 7b. ショートカットでまとめたスキルシート =====
 
 async function testDriveShortcuts(): Promise<void> {
-  section('スキルシートのフォルダのショートカット（既定はたどらない・有効にしてもファイルへのショートカットだけ）');
+  section('スキルシートのフォルダのショートカット（既定はたどらない・有効にしてもフォルダの外は所有者を確かめる）');
+  const owner = `tanaka@${OWN_DOMAIN}`;
   drive.put({ id: 'scRoot', name: 'root', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: [] });
   drive.put({ id: 'scOrigDir', name: '原本', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: ['elsewhere'] });
+  drive.put({ id: 'scSubDir', name: 'サブ', mimeType: 'application/vnd.google-apps.folder', modifiedTime: FILE_TIME(1), parents: ['scRoot'] });
+  // フォルダの外・所有者が分からない（人事の資料等を想定）
   drive.put(driveFile('scOrigFile', { name: '原本.pdf', parents: ['elsewhere'], modifiedTime: FILE_TIME(5), content: 'x' }));
+  // フォルダの外・社外の所有者
+  drive.put(driveFile('scHrFile', { name: '給与.xlsx', parents: ['hrPrivate'], modifiedTime: FILE_TIME(5), content: 'x', owners: ['hr@other.example'] }));
+  // フォルダの外・社内の所有者が自分でショートカットを置いたもの
+  drive.put(driveFile('scOwnedFile', { name: '本人.pdf', parents: ['myDrive'], modifiedTime: FILE_TIME(7), content: 'x', owners: [owner] }));
+  // フォルダの外・社内の所有者だが、ショートカットを置いたのは別の人
+  drive.put(driveFile('scOthersFile', { name: '他人.pdf', parents: ['myDrive2'], modifiedTime: FILE_TIME(7), content: 'x', owners: [`suzuki@${OWN_DOMAIN}`] }));
+  // フォルダの中（サブフォルダ）
+  drive.put(driveFile('scTreeFile', { name: '配下.pdf', parents: ['scSubDir'], modifiedTime: FILE_TIME(8), content: 'x' }));
   drive.put(driveFile('scInDir', { name: 'サブ.pdf', parents: ['scOrigDir'], modifiedTime: FILE_TIME(6), content: 'y' }));
-  drive.put({ id: 'scToFile', name: '原本へのショートカット', mimeType: 'application/vnd.google-apps.shortcut', modifiedTime: FILE_TIME(1), parents: ['scRoot'], shortcutTarget: 'scOrigFile' });
-  drive.put({ id: 'scToDir', name: 'フォルダへのショートカット', mimeType: 'application/vnd.google-apps.shortcut', modifiedTime: FILE_TIME(1), parents: ['scRoot'], shortcutTarget: 'scOrigDir' });
+  const shortcut = (id: string, target: string, owners: string[] = [owner]): FakeDriveFile => ({
+    id, name: `${target}へのショートカット`, mimeType: 'application/vnd.google-apps.shortcut', modifiedTime: FILE_TIME(1), parents: ['scRoot'], shortcutTarget: target, owners,
+  });
+  drive.put(shortcut('scToFile', 'scOrigFile'));
+  drive.put(shortcut('scToDir', 'scOrigDir'));
+  drive.put(shortcut('scToHr', 'scHrFile'));
+  drive.put(shortcut('scToOwned', 'scOwnedFile'));
+  drive.put(shortcut('scToOthers', 'scOthersFile'));
+  drive.put(shortcut('scToTree', 'scTreeFile', ['someone@other.example']));
   process.env.PROPER_SKILLSHEET_FOLDER_ID = 'scRoot';
   try {
     const off = await listSkillSheetFiles();
-    check('既定ではショートカットをたどらない（フォルダに置いたショートカットで、フォルダの外のファイルを読ませない）', off.length === 0, off.map((f) => f.id).join(','));
-    process.env.PROPER_FOLLOW_SHORTCUTS = 'true';
-    const files = await listSkillSheetFiles();
-    const ids = files.map((f) => f.id).sort().join(',');
-    const orig = files.find((f) => f.id === 'scOrigFile');
     check(
-      '有効にするとファイルへのショートカットだけ参照先を読み（更新日時も参照先）、フォルダへのショートカットはたどらない',
-      ids === 'scOrigFile' && orig?.modifiedTime === FILE_TIME(5) && orig.mimeType === 'application/pdf' && orig.viaShortcut === true,
+      '既定ではショートカットをたどらない（フォルダに置いたショートカットで、フォルダの外のファイルを読ませない）',
+      off.map((f) => f.id).join(',') === 'scTreeFile',
+      off.map((f) => f.id).join(','),
+    );
+    process.env.PROPER_FOLLOW_SHORTCUTS = 'true';
+    const cap = captureConsole();
+    let files: Awaited<ReturnType<typeof listSkillSheetFiles>> = [];
+    try {
+      files = await listSkillSheetFiles();
+    } finally {
+      cap.restore();
+    }
+    const ids = files.map((f) => f.id).sort().join(',');
+    const owned = files.find((f) => f.id === 'scOwnedFile');
+    check(
+      '有効にしても、フォルダの外のファイルは所有者が社内で、ショートカットを置いた人が所有者のものだけ読む（所有者不明・社外・他人のファイルは読まない）',
+      ids === 'scOwnedFile,scTreeFile' && owned?.modifiedTime === FILE_TIME(7) && owned.viaShortcut === true,
       ids,
+    );
+    check('読まなかったショートカットの件数を知らせる', cap.lines.some((l) => l.includes('フォルダの外のファイルを指すショートカット3件')), cap.lines.join(' / '));
+    process.env.PROPER_GOOGLE_IMPERSONATE = `ops@${OWN_DOMAIN}`;
+    const impersonating = await listSkillSheetFiles();
+    check(
+      'なりすまし（PROPER_GOOGLE_IMPERSONATE）中はショートカットをたどらない',
+      impersonating.map((f) => f.id).join(',') === 'scTreeFile',
+      impersonating.map((f) => f.id).join(','),
     );
   } finally {
     delete process.env.PROPER_FOLLOW_SHORTCUTS;
+    delete process.env.PROPER_GOOGLE_IMPERSONATE;
     process.env.PROPER_SKILLSHEET_FOLDER_ID = 'folderRoot';
   }
 }
@@ -2497,6 +2543,151 @@ async function round5MemoColumnSteps(): Promise<void> {
   );
 }
 
+// ===== 14. セキュリティ監査（第6回）: Google の鍵の分離・なりすまし・リンク先の社内判定 =====
+
+function fakeKeyJson(clientEmail: string, tag: string): string {
+  return JSON.stringify({ client_email: clientEmail, private_key: `-----BEGIN PRIVATE KEY-----\n${tag}\n-----END PRIVATE KEY-----\n` });
+}
+
+function jwtInfo(auth: unknown): string {
+  if (!auth) return 'null';
+  const a = auth as { email?: string; subject?: string };
+  return `${a.email ?? ''}|${a.subject ?? ''}`;
+}
+
+async function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> {
+  const saved: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(overrides)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+async function testGoogleAccessRound6(): Promise<void> {
+  section('Google の鍵の分離・なりすまし・リンク先の社内判定（セキュリティ監査 第6回）');
+  const MAIN = 'ses-batch@main-proj.iam.gserviceaccount.com';
+  const OTHER = 'ses-dwd@other-proj.iam.gserviceaccount.com';
+  const keyMain = fakeKeyJson(MAIN, 'MAIN');
+  const keyOther = fakeKeyJson(OTHER, 'OTHER');
+  const ops = `ops@${OWN_DOMAIN}`;
+
+  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, SHEETS_DB_IMPERSONATE: ops }, async () => {
+    check(
+      'SHEETS_DB_IMPERSONATE はメインの鍵ではなりすまさない（専用の鍵 SHEETS_DB_SA_KEY_JSON が無ければ接続しない）',
+      sheetsDbAuth(['s']) === null && sheetsDbAuthProblem() !== null,
+      jwtInfo(sheetsDbAuth(['s'])),
+    );
+    await withEnv({ SHEETS_DB_SA_KEY_JSON: keyMain }, () => {
+      check('専用の鍵がメインの鍵と同じなら、なりすまさない', sheetsDbAuth(['s']) === null, jwtInfo(sheetsDbAuth(['s'])));
+    });
+    await withEnv({ SHEETS_DB_SA_KEY_JSON: keyOther }, () => {
+      check('メインと別の専用の鍵なら、その鍵でなりすます', jwtInfo(sheetsDbAuth(['s'])) === `${OTHER}|${ops}`, jwtInfo(sheetsDbAuth(['s'])));
+    });
+  });
+
+  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, MAIL_PROVIDER: 'gmail', SES_TARGET_GMAIL: `ses@${OWN_DOMAIN}` }, async () => {
+    check('Gmail の DWD はメインの鍵では行わない', gmailDelegatedAuth(`ses@${OWN_DOMAIN}`, ['g']) === null);
+    await withEnv({ SES_GMAIL_SA_KEY_JSON: keyMain }, () => {
+      check('Gmail 用の鍵がメインの鍵と同じなら使わない', gmailDelegatedAuth(`ses@${OWN_DOMAIN}`, ['g']) === null);
+    });
+    await withEnv({ SES_GMAIL_SA_KEY_JSON: keyOther }, () => {
+      const info = jwtInfo(gmailDelegatedAuth(`ses@${OWN_DOMAIN}`, ['g']));
+      check('Gmail 用の別の鍵なら、その鍵で SES のメールボックスとして認証する', info === `${OTHER}|ses@${OWN_DOMAIN}`, info);
+    });
+  });
+
+  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, PROPER_GOOGLE_IMPERSONATE: 'ops@group.example.jp' }, async () => {
+    await withEnv({ PROPER_GOOGLE_SA_KEY_JSON: keyMain }, () => {
+      check(
+        'プロパー用の鍵がメインの鍵と同じなら専用とみなさず、別テナントへのなりすましを行わない',
+        !properUsesDedicatedAccount() && properGoogleAuth(['d']) === null,
+        jwtInfo(properGoogleAuth(['d'])),
+      );
+    });
+    await withEnv({ PROPER_GOOGLE_SA_KEY_JSON: keyOther }, async () => {
+      check('メインと別のプロパー用の鍵なら、なりすましてフォルダを読む', jwtInfo(properGoogleAuth(['d'])) === `${OTHER}|ops@group.example.jp`);
+      await withEnv({ PROPER_MASTER_IN_MAIN_TENANT: 'true' }, () => {
+        check(
+          '管理表をメインのテナントに置く設定では、管理表はメインの鍵（なりすましなし）で書く（別テナントに spreadsheets の委任が要らない）',
+          jwtInfo(properMasterAuth(['s'])) === `${MAIN}|` && jwtInfo(properGoogleAuth(['d'])) === `${OTHER}|ops@group.example.jp`,
+          jwtInfo(properMasterAuth(['s'])),
+        );
+      });
+    });
+  });
+
+  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, SES_GOOGLE_SA_KEY_JSON: keyOther }, () => {
+    const main = sesMainCredentials();
+    check('SES の鍵は SES_GOOGLE_SA_KEY_JSON を優先する（経営者クローンの GOOGLE_SA_KEY_JSON と分けられる）', main?.prefix === 'SES_GOOGLE_SA_' && main.creds.clientEmail === OTHER);
+  });
+
+  // 使わないスコープの DWD（トークンが発行される）を検出してバッチを止める
+  await withEnv({ GOOGLE_SA_KEY_JSON: keyMain, SES_ALLOWED_SENDERS: `taro@${OWN_DOMAIN}` }, async () => {
+    const denied = Object.assign(new Error('unauthorized_client'), { response: { data: { error: 'unauthorized_client' } } });
+    try {
+      __setTokenFetcherForTest(async (_c, _s, scope) => {
+        if (!scope.endsWith('gmail.readonly')) throw denied;
+      });
+      const found = await unneededDelegationProblems();
+      check('メインの鍵に Gmail の DWD が登録されていたら問題として返す（アドレスを含めない）', found.length === 1 && found[0].includes('gmail.readonly') && !found[0].includes('@'), found.join(' / '));
+      __setTokenFetcherForTest(async () => {
+        throw denied;
+      });
+      const none = await unneededDelegationProblems();
+      check('委任が無ければ問題なし', none.length === 0, none.join(' / '));
+    } finally {
+      __setTokenFetcherForTest(null);
+    }
+  });
+
+  // メール本文のリンク先: DB の所有者が分からない（一時的な失敗）ときも、社外のファイルとして読まない
+  const personal = 'ops.company@gmail.com';
+  const linkOf = (id: string) => `https://docs.google.com/spreadsheets/d/${id}/edit`;
+  drive.put(driveFile(SES_BOOK, { name: 'DB', mimeType: 'application/vnd.google-apps.spreadsheet', parents: ['myDrive'], owners: [personal] }));
+  drive.put(driveFile('Backup0123456789', { name: '控え', mimeType: 'application/vnd.google-apps.spreadsheet', parents: ['myDrive'], owners: [personal] }));
+  drive.put(driveFile('Partner0123456789', { name: '取引先', mimeType: 'application/vnd.google-apps.spreadsheet', parents: ['theirDrive'], owners: ['eigyo@partner.example'] }));
+  __setLinkApisForTest({ drive: drive.asApi(), sheets: sheets.asApi() });
+  const linkRun = async (id: string): Promise<string> => {
+    const cap = captureConsole();
+    try {
+      await parseAttachments([{ ...rawMail(`sesmail_r6_${id}`, '検証 <a@x.example.jp>', 's', 1), body: linkOf(id), sheetLinks: [linkOf(id)] }]);
+    } finally {
+      cap.restore();
+    }
+    return cap.lines.join('\n');
+  };
+  try {
+    await withEnv({ GOOGLE_SA_KEY_JSON: keyMain }, async () => {
+      __setLinkApisForTest({ drive: drive.asApi(), sheets: sheets.asApi() });
+      const ok = await linkRun('Backup0123456789');
+      check('DB の所有者（個人のアカウント）が持つシートは社内として読まない', ok.includes('社内のファイルのため読まなかった1件'), ok);
+      drive.files.get(SES_BOOK)!.metaError = 403;
+      __setLinkApisForTest({ drive: drive.asApi(), sheets: sheets.asApi() });
+      const failed = await linkRun('Backup0123456789');
+      check('DB の所有者を確かめられないとき（404 以外の失敗）も、自社ドメイン以外の人のシートを読まない（読まない側に倒す）', failed.includes('社内のファイルのため読まなかった1件'), failed);
+      drive.files.get(SES_BOOK)!.metaError = undefined;
+      __setLinkApisForTest({ drive: drive.asApi(), sheets: sheets.asApi() });
+      const partner = await linkRun('Partner0123456789');
+      check('社外の人が所有・共有したシートは従来どおり読みに行く', partner.includes('スプレッドシートのリンク') && !partner.includes('社内のファイルのため'), partner);
+      await withEnv({ SES_OWN_DOMAINS: undefined }, async () => {
+        const folderOnly = await linkRun('Partner0123456789');
+        check('プロパーのフォルダだけ設定され SES_OWN_DOMAINS が無いときはリンク先を読まない', folderOnly.includes('確かめられないため'), folderOnly);
+      });
+    });
+  } finally {
+    __setLinkApisForTest(null);
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== SESスプレッドシート運用 結合自己検証（オフライン・偽のGoogle API） ===');
   isolateEnv();
@@ -2527,6 +2718,7 @@ async function main(): Promise<void> {
     await testAttachmentIsolation();
     await testRetentionAndNotify();
     await testSecurityRound5();
+    await testGoogleAccessRound6();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

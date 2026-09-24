@@ -25,11 +25,11 @@ import {
   DRAFT_SIGNING_KEY_MIN_CHARS,
 } from '../ses/config.js';
 import { retirementNotice } from '../llm/modelLifecycle.js';
-import { getServiceAccountAuth } from '../collectors/googleAuth.js';
+import { sesMainConfigured, sesMainAccountEmail, sheetsDbAuth, sheetsDbAuthProblem, gmailAuthProblem, unneededDelegationProblems } from '../ses/googleCreds.js';
 import { inspectServiceAccountJson } from '../ses/settingsFormat.js';
 import { SafeLogError } from '../ses/redact.js';
 import { listSkillSheetFiles } from '../ses/proper/drive.js';
-import { properGoogleAuth, properAccessHint } from '../ses/proper/auth.js';
+import { properMasterAuth, properAccessHint, properUsesDedicatedAccount } from '../ses/proper/auth.js';
 import { probeImap, probeSmtp } from '../ses/mail/xserver.js';
 import { probeGmail } from '../ses/mail/gmail.js';
 import { WEB_TOKEN_MIN_CHARS } from '../web/httpSecurity.js';
@@ -52,15 +52,14 @@ function envSet(...names: string[]): boolean {
   return names.every((n) => Boolean(process.env[n]?.trim()));
 }
 
-// サービスアカウント鍵は JSON丸ごと（GOOGLE_SA_KEY_JSON）か、client_email/private_key の個別指定のどちらでもよい
+// サービスアカウント鍵は JSON丸ごと（GOOGLE_SA_KEY_JSON）か、client_email/private_key の個別指定のどちらでもよい（経営者クローンの収集用）
 function serviceAccountSet(): boolean {
   return envSet('GOOGLE_SA_KEY_JSON') || envSet('GOOGLE_SA_CLIENT_EMAIL', 'GOOGLE_SA_PRIVATE_KEY');
 }
 
-// スプレッドシート・スキルシートのフォルダを共有する相手（サービスアカウントのメール）。公開ログでは表示しない
+// SES のスプレッドシート・スキルシートのフォルダを共有する相手（メインのサービスアカウントのメール）。公開ログでは表示しない
 function serviceAccountEmail(): string {
-  const json = process.env.GOOGLE_SA_KEY_JSON?.trim();
-  const email = json ? inspectServiceAccountJson(json).clientEmail : process.env.GOOGLE_SA_CLIENT_EMAIL?.trim() ?? '';
+  const email = sesMainAccountEmail();
   if (!email) return '';
   return logRedact() ? 'ログ秘匿のため非表示（JSON鍵の client_email）' : email;
 }
@@ -138,10 +137,11 @@ async function main(): Promise<void> {
   );
   const need = (msg: string) => (sesInUse ? bad(msg) : warn(msg));
   console.log('  ・接続なしで設定の渡し漏れ・書式だけを確かめる場合は npm run ses:preflight（GitHub Actions では本番の直前に自動実行）');
-  const saJson = process.env.GOOGLE_SA_KEY_JSON?.trim();
-  if (saJson) {
-    const problems = inspectServiceAccountJson(saJson).problems;
-    if (problems.length > 0) bad(`GOOGLE_SA_KEY_JSON: ${problems.join(' / ')}`);
+  for (const name of ['SES_GOOGLE_SA_KEY_JSON', 'GOOGLE_SA_KEY_JSON', 'SHEETS_DB_SA_KEY_JSON', 'SES_GMAIL_SA_KEY_JSON', 'PROPER_GOOGLE_SA_KEY_JSON']) {
+    const json = process.env[name]?.trim();
+    if (!json) continue;
+    const problems = inspectServiceAccountJson(json).problems;
+    if (problems.length > 0) bad(`${name}: ${problems.join(' / ')}`);
   }
   const saEmail = serviceAccountEmail();
   if (saEmail && sesInUse) console.log(`  ・サービスアカウント: ${saEmail} — 案件スプレッドシート・「プロパー管理」・スキルシートのフォルダをこのアドレスに共有します`);
@@ -167,8 +167,8 @@ async function main(): Promise<void> {
   const mailProvider = sesMailProvider();
   console.log(`  ・メールプロバイダ: ${mailProvider}（収集期間 ${collectDays()}日）`);
   if (mailProvider === 'gmail') {
-    if (!(serviceAccountSet() && envSet('SES_TARGET_GMAIL'))) {
-      need('Gmail設定が不足（GOOGLE_SA_KEY_JSON 等 / SES_TARGET_GMAIL=SES専用メールボックスの実ユーザー）');
+    if (!envSet('SES_TARGET_GMAIL') || gmailAuthProblem()) {
+      need(`Gmail設定が不足（SES_TARGET_GMAIL=SES専用メールボックスの実ユーザー / ${gmailAuthProblem() ?? 'SES_GMAIL_SA_KEY_JSON'}）`);
     } else {
       const problem = await probeGmail();
       if (problem) bad(`Gmail: ${problem}`);
@@ -195,11 +195,13 @@ async function main(): Promise<void> {
   }
   const dbProvider = sesDbProvider();
   if (dbProvider === 'sheets') {
-    if (!envSet('SHEETS_DB_SPREADSHEET_ID') || !serviceAccountSet()) {
-      need('SheetsDB設定が不足（SHEETS_DB_SPREADSHEET_ID / GOOGLE_SA_KEY_JSON 等）');
+    if (!envSet('SHEETS_DB_SPREADSHEET_ID') || !sesMainConfigured()) {
+      need('SheetsDB設定が不足（SHEETS_DB_SPREADSHEET_ID / SES_GOOGLE_SA_KEY_JSON（または GOOGLE_SA_KEY_JSON）等）');
+    } else if (sheetsDbAuthProblem()) {
+      bad(`データ保存先: sheets — ${sheetsDbAuthProblem()}`);
     } else {
       try {
-        const auth = getServiceAccountAuth(['https://www.googleapis.com/auth/spreadsheets'], sheetsDbImpersonate() || undefined);
+        const auth = sheetsDbAuth(['https://www.googleapis.com/auth/spreadsheets']);
         await google.sheets({ version: 'v4', auth: auth! }).spreadsheets.get({
           spreadsheetId: sheetsDbSpreadsheetId(),
           fields: 'properties.title',
@@ -208,7 +210,7 @@ async function main(): Promise<void> {
       } catch {
         bad(
           sheetsDbImpersonate()
-            ? 'データ保存先: sheets — スプレッドシートを開けません（ID、SHEETS_DB_IMPERSONATE のユーザーの編集権限、DWDの spreadsheets スコープ登録を確認）'
+            ? 'データ保存先: sheets — スプレッドシートを開けません（ID、SHEETS_DB_IMPERSONATE のユーザーの編集権限、SHEETS_DB_SA_KEY_JSON のクライアントIDへの spreadsheets の委任を確認）'
             : 'データ保存先: sheets — スプレッドシートを開けません（IDと、サービスアカウントのメールへの「編集者」共有を確認。' +
                 '組織外への共有が禁止されている場合は、管理コンソールで許可するか SHEETS_DB_IMPERSONATE を使います）',
         );
@@ -225,14 +227,20 @@ async function main(): Promise<void> {
     if (dbs) console.log('  ・データ保存先:    notion（案件/要員/マッチDB 設定済み）');
     else need('データ保存先: notion のDB設定が不足（NOTION_TOKEN / NOTION_PROJECT_DB_ID / NOTION_ENGINEER_DB_ID / NOTION_MATCH_DB_ID）');
   }
+  // 鍵に使わないスコープのドメイン全体の委任が付いていないか（トークンを要求して確かめる。バッチも同じ確認で止める）
+  if (sesInUse) {
+    const delegation = await unneededDelegationProblems();
+    if (delegation.length === 0) ok('ドメイン全体の委任: 使わないスコープ（Gmail・ドライブ等）のトークンは発行されませんでした（確かめられた範囲）');
+    for (const p of delegation) bad(p);
+  }
   // プロパー（自社社員のスキルシート）連携。既定はメインのサービスアカウントで読む（同じWorkspace内で共有）
   if (envSet('PROPER_SKILLSHEET_FOLDER_ID', 'PROPER_MASTER_SPREADSHEET_ID')) {
-    const dedicated = envSet('PROPER_GOOGLE_SA_KEY_JSON') || envSet('PROPER_GOOGLE_SA_CLIENT_EMAIL', 'PROPER_GOOGLE_SA_PRIVATE_KEY');
+    const dedicated = properUsesDedicatedAccount();
     const account = dedicated ? 'プロパー用SA（PROPER_GOOGLE_SA_*）' : 'メインのSA';
     console.log(
       `  ・プロパー候補:    有効（${account}${envSet('PROPER_GOOGLE_IMPERSONATE') ? '・なりすましあり' : ''}。フォルダと「プロパー管理」をそのアカウントに共有してください）`,
     );
-    if (!dedicated && !serviceAccountSet()) warn('プロパー候補: Google認証（GOOGLE_SA_KEY_JSON 等）が未設定のためスキップされます');
+    if (!dedicated && !sesMainConfigured()) warn('プロパー候補: Google認証（SES_GOOGLE_SA_KEY_JSON / GOOGLE_SA_KEY_JSON 等）が未設定のためスキップされます');
     else {
       // 読み取りだけの疎通確認（ファイル名・氏名は表示しない）
       try {
@@ -242,7 +250,7 @@ async function main(): Promise<void> {
         bad(err instanceof SafeLogError ? err.message : `プロパー: スキルシートのフォルダを読めません（${properAccessHint()}）`);
       }
       try {
-        const auth = properGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
+        const auth = properMasterAuth(['https://www.googleapis.com/auth/spreadsheets']);
         await google.sheets({ version: 'v4', auth: auth! }).spreadsheets.get({
           spreadsheetId: properMasterSpreadsheetId(),
           fields: 'properties.title',

@@ -17,6 +17,7 @@ import { google } from 'googleapis';
 // - SES_GMAIL_*_SCOPES: SESマッチングのGmail運用（MAIL_PROVIDER=gmail）用。呼び出しごとに必要な1スコープだけを
 //   要求する（収集=gmail.readonly / 下書き作成=gmail.compose / サマリ送信=gmail.send）。DWDに登録するのもこの3つだけでよい。
 //   登録していないスコープを1つでも要求するとトークン取得自体が失敗するため、余分なスコープを混ぜない
+//   SES では Gmail の委任は専用の鍵（SES_GMAIL_SA_KEY_JSON）で行い、この収集用の鍵（GOOGLE_SA_*）とは共用しない（src/ses/googleCreds.ts）
 const BASE_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/calendar.readonly',

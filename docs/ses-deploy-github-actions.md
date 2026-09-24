@@ -68,7 +68,7 @@
 | **Google Cloud** プロジェクト＋**サービスアカウント** | スプレッドシート・ドライブを読み書きする「ロボット用のGoogleアカウント」 | オーナー（または情シス） | 無料 |
 | **Google Workspace**（既存） | スプレッドシート・スキルシートのフォルダを置く | 既存。共有設定の変更が要る場合のみ Workspace 管理者 | 既存のまま |
 | **Xserver**（既存） | 共有メールボックス `sales@<自社ドメイン>` の受信・下書き・サマリ送信 | Xserver の管理者 | 既存のまま |
-| **GitHub**（このリポジトリ） | 定時実行（Actions）と、鍵・パスワードの保管（Secrets） | オーナー | 非公開でも無料枠内（10章） |
+| **GitHub**（このリポジトリ） | 定時実行（Actions）と、鍵・パスワードの保管（Secrets） | オーナー | 公開なら無料。非公開にするなら GitHub Pro／Team 以上が必要（2-4） |
 
 ### 2-1. Anthropic API キー
 
@@ -83,6 +83,8 @@
 サービスアカウントは「ロボット用のGoogleアカウント」です。**スプレッドシートやフォルダをこのアカウントのメールアドレスに共有するだけ**で
 読み書きできるようになります（Workspace 管理コンソールでの設定は不要です）。
 案件スプレッドシート・「プロパー管理」スプレッドシート・スキルシートのフォルダの**3つとも、同じ1つのサービスアカウント**を使います。
+**このサービスアカウントは SES 専用にし、ドメイン全体の委任（DWD）を登録しないでください**（経営者クローンの収集に使う、DWD を持つ
+サービスアカウントとは別に作ります。使わないスコープの委任が登録されていると、バッチは起動時に止まります）。
 
 1. <https://console.cloud.google.com> で**プロジェクトを作成**（名前の例: `ses-matching`）
 2. 左メニュー **「APIとサービス」→「ライブラリ」** で次の2つを検索し、それぞれ **「有効にする」**
@@ -90,15 +92,29 @@
    - **Google Drive API**
 3. **「IAMと管理」→「サービス アカウント」→「サービス アカウントを作成」**
    - 名前の例: `ses-batch`。「ロールを付与」は**何も選ばずにスキップ**して完了
-4. 作成したサービスアカウントを開き、**「鍵」タブ →「鍵を追加」→「新しい鍵を作成」→「JSON」→「作成」**
+4. サービスアカウントのメール `ses-batch@<プロジェクト>.iam.gserviceaccount.com` を控えます。これが**共有先のメールアドレス**です（4章で使います）
+5. **推奨: 鍵ファイルを作らない（Workload Identity 連携）**。JSON 鍵は漏れると削除するまでどこからでも使えるため、GitHub Actions では
+   鍵ファイルなしで認証します（組織のポリシーで鍵の作成が禁止されていても、この方法ならポリシーの例外は不要です）。
+   1. **「IAMと管理」→「Workload Identity 連携」→「プールを作成」**（名前の例: `github`）→ プロバイダに **OpenID Connect（OIDC）** を選び、
+      発行元（URL）に `https://token.actions.githubusercontent.com` を入力
+   2. **属性のマッピング**: `google.subject` = `assertion.sub`、`attribute.repository` = `assertion.repository`、
+      `attribute.environment` = `assertion.environment`、`attribute.ref` = `assertion.ref`
+   3. **属性の条件**（このリポジトリの本番の実行だけに限る）:
+      `assertion.repository == '<オーナー>/<リポジトリ>' && assertion.environment == 'production' && assertion.ref == 'refs/heads/main'`
+   4. サービスアカウント `ses-batch` の **「権限」→「アクセスを許可」** で、プールの主体
+      （`principalSet://iam.googleapis.com/projects/<番号>/locations/global/workloadIdentityPools/github/attribute.repository/<オーナー>/<リポジトリ>`）に
+      **「Workload Identity ユーザー」** と **「サービス アカウント トークン作成者」** を付与
+   5. **「IAMと管理」→「APIとサービス」** で **IAM Service Account Credentials API** と **Security Token Service API** を有効にする
+   6. プロバイダのリソース名（`projects/<番号>/locations/global/workloadIdentityPools/github/providers/<名前>`）を Secret
+      `GCP_WORKLOAD_IDENTITY_PROVIDER`、サービスアカウントのメールを Secret `GCP_SERVICE_ACCOUNT` と `SES_GOOGLE_SA_EMAIL` に登録します（5章）。
+      この2つがあると、ワークフローは鍵ファイルを使わずに認証します（`SES_GOOGLE_SA_KEY_JSON` は登録不要・登録済みなら削除）
+6. **鍵ファイルを使う場合（手元のパソコンでの実行、または上の連携を使わない場合）**: サービスアカウントを開き、
+   **「鍵」タブ →「鍵を追加」→「新しい鍵を作成」→「JSON」→「作成」**
    - `.json` ファイルがダウンロードされます。**この中身がパスワードと同じ扱い**です（メール・チャットに貼らない）
-   - 「サービス アカウント キーの作成が無効」と表示される場合は、組織のポリシー
-     （**「IAMと管理」→「組織のポリシー」→「サービス アカウント キーの作成を無効にする」**）で作成が止められています。
-     組織のポリシー管理者に、**このプロジェクトだけ例外（ポリシーをオーバーライドして適用しない）** にしてもらってください
-5. ダウンロードした JSON をメモ帳で開き、`"client_email": "ses-batch@<プロジェクト>.iam.gserviceaccount.com"` の値を控えます。
-   これが**共有先のメールアドレス**です（4章で使います）
-6. JSON ファイルの**中身を丸ごと**（`{` から `}` まで）GitHub の Secret `GOOGLE_SA_KEY_JSON` に登録します（5章）。
-   登録後、パソコンに残ったファイルは削除するか、鍵のかかる場所に保管してください
+   - JSON ファイルの**中身を丸ごと**（`{` から `}` まで）GitHub の Secret `SES_GOOGLE_SA_KEY_JSON` に登録します（5章。以前の名前
+     `GOOGLE_SA_KEY_JSON` も使えますが、経営者クローンの鍵と取り違えないよう新しい名前にしてください）
+   - パソコンに残ったファイルは削除するか、**リポジトリの外**の鍵のかかる場所に保管し、90日ごとなど定期的に作り直して古い鍵を削除します
+   - 「サービス アカウント キーの作成が無効」と表示される場合は、組織のポリシーを例外にせず、上の 5（Workload Identity 連携）を使ってください
 
 ### 2-3. Xserver のメール情報（共有メールボックス）
 
@@ -121,21 +137,43 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
 - `https://` やポート番号は付けず、`svXXXX.xserver.jp` だけを登録します
 - パスワードを変更（再設定）すると、同じメールボックスを使っている社員のメールソフトの設定変更も必要になります
 - GitHub Actions は**海外（米国）のサーバー**から接続します。サーバーパネルで**国外からのメール接続を制限する設定**をしている場合は、
-  接続できません（3章の測定で「ログインできません」になったら確認してください）
+  接続できません（3章の測定で「ログインできません」になったら確認してください）。
+  **この制限を外すと、そのメールサーバーのすべてのメールボックス（sales@ を含む）が海外からのログインを受け付けるようになり、**
+  共有のパスワードを海外から総当たり・使い回しで試せるようになります。外す前に 9章「共有メールボックスのパスワードと国外からの接続」を読み、
+  できれば**国内の固定 IP の実行環境（自前の self-hosted runner・国内の VM や cron）で動かして制限を外さない**でください
 - 下書きフォルダの名前（`Drafts` / `INBOX.Drafts` など）はサーバーによって違います。**3章の測定ワークフローが正しい名前を表示**します
 
 ### 2-4. GitHub の準備
 
-1. **リポジトリを非公開にする（強く推奨）**: リポジトリの **Settings → General → 一番下の「Danger Zone」→ Change repository visibility → Private**
-2. **Actions を使えるようにする**: **Settings → Actions → General** で「Allow all actions and reusable workflows」
-   （または「Allow actions created by GitHub」。使うのは GitHub 公式の `actions/checkout` と `actions/setup-node` だけです）
+1. **公開・非公開と GitHub のプラン（先に確認）**: このシステムの鍵を守る仕組み（5 の Environment「production」と、main だけに限る
+   Deployment branches）は、**GitHub Free の個人アカウントの非公開リポジトリでは使えません**（GitHub の仕様。非公開にすると Environment の
+   Secrets と制限が無効になります）。次のどちらかにしてください:
+   - **非公開にする場合**: GitHub Pro（個人）または Team（組織）以上にしてから **Settings → General →「Danger Zone」→ Change repository visibility → Private**
+   - **Free のまま使う場合**: 公開のまま、この SES 専用の新しいリポジトリ（他のプロジェクト・GitHub Pages・作業ブランチの push が無いもの）に移し、
+     共同作業者を最小限にします
+   - **どちらの場合も、リポジトリの Secrets（New repository secret）に鍵を置く回避策は使わないでください**（main 以外のブランチの
+     ワークフローにも鍵が渡ります）。事前確認は、main 以外の実行と、Environment にだけ登録する目印 `SES_ENVIRONMENT_SENTINEL` が無い実行を ❌ で止めます
+2. **Actions の許可を最小限に**: **Settings → Actions → General** で
+   - 「Allow <オーナー>, and select non-<オーナー>, actions and reusable workflows」を選び、「Allow actions created by GitHub」にチェックし、
+     許可する Action に `google-github-actions/auth@*`（Workload Identity 連携を使う場合だけ）を入れる
+   - 「**Require actions to be pinned to a full-length commit SHA**」を有効にする（ワークフローはハッシュで固定済み）
+   - **Workflow permissions** を「**Read repository contents and packages permissions**」（読み取りのみ）にし、
+     「Allow GitHub Actions to create and approve pull requests」のチェックを外す
 3. **失敗時のメール通知**: 右上のアイコン → **Settings（個人の設定）→ Notifications → 「Actions」** で
    「Email」をオンにし、「Only notify for failed workflows（失敗時のみ）」にチェック
 4. **書き込み権限を持つ人を最小限に**: 書き込み権限があるとワークフローを書き換えて Secrets を取り出せます（9章）
-5. **Environment「production」を作る**: **Settings → Environments → New environment** で名前を `production` にして作成し、
-   **Deployment branches and tags** を **「Selected branches and tags」→ `main`** だけにします
-   （任意で **Required reviewers** に運用責任者を入れると、実行のたびに承認が必要になります）。
-   5章の Secrets はこの Environment に登録します（main 以外のブランチでワークフローを書き換えて手動実行しても、鍵が渡りません）
+5. **main を保護する（必須）**: **Settings → Rules → Rulesets → New branch ruleset** で、対象を既定のブランチ（main）にし、
+   - 「Restrict deletions」「Block force pushes」
+   - 「Require a pull request before merging」: 承認 1 以上・「Dismiss stale pull request approvals when new commits are pushed」・
+     「Require approval of the most recent reviewable push」（最後に push した人以外の承認）・「Require review from Code Owners」
+   - **Bypass list は空**（アプリ・Claude 等の自動化に抜け道を与えない）
+   を有効にします。Environment は main の実行にだけ鍵を渡すため、**main に直接 push できる人・トークンがあると、次の定時実行で
+   すべての鍵が渡ります**。main への変更は必ず PR とレビューを通してください（`.github/CODEOWNERS` で所有者のレビューを必須にしています）
+6. **Environment「production」を作る**: **Settings → Environments → New environment** で名前を `production` にして作成し、
+   **Deployment branches and tags** を **「Selected branches and tags」→ `main`** だけにします。
+   手動実行（Run workflow）も承認制にする場合は **Required reviewers** に運用責任者を入れ、「Prevent self-review」を有効にします。
+   5章の Secrets はこの Environment に登録します（main 以外のブランチでワークフローを書き換えて手動実行しても、鍵が渡りません）。
+   目印の Secret `SES_ENVIRONMENT_SENTINEL`（任意のランダムな文字列）を**この Environment にだけ**登録してください
 
 ---
 
@@ -152,7 +190,7 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
 
 1. このリポジトリの main ブランチに `.github/workflows/ses-mail-stats.yml` が入っていることを確認します
    （入っていなければ 6-1 の取り込みを先に行い、6-2 のとおり定時バッチは一旦「無効」にしておきます）
-2. 2-4 の 5 で作った **Environment「production」の Environment secrets**（Settings → Environments → production）に、次を登録します（5章の表も参照）
+2. 2-4 の 6 で作った **Environment「production」の Environment secrets**（Settings → Environments → production）に、次を登録します（5章の表も参照）
    - Secrets: `XSERVER_IMAP_HOST` / `XSERVER_SHARED_USER` / `XSERVER_SHARED_PASS`
    - Secrets（推奨）: `SES_OWN_DOMAINS` = `<自社ドメイン>`（自社から届いたメールを集計から除くため。会社を特定できる値のため Variables には登録しません）
 3. **Actions タブ → 左の「SESメール量の測定」→ 右の「Run workflow」** → 日数（既定 30）を確認して **Run workflow**
@@ -290,16 +328,23 @@ Workspace の設定で組織外への共有が禁止されていると、4-1・4
    **組織外のユーザーによる共有ドライブ内ファイルへのアクセス**を許可します
 5. 反映まで数分〜最大24時間かかることがあります。その後 4-1・4-3 の共有を行います
 
-**B. ドメイン全体の委任（DWD）で社内ユーザーとして読み書きする（同じテナントの中だけ）**
+**B. ドメイン全体の委任（DWD）で社内ユーザーとして読み書きする（同じテナントの中だけ・案件スプレッドシートだけ）**
 
-1. Google Cloud のサービスアカウントの詳細画面で **「一意の ID」（数字）** を控える（JSON の `client_id` と同じ）
-2. 管理コンソール → **「セキュリティ」→「アクセスとデータ管理」→「API の制御」→「ドメイン全体の委任を管理」→「新しく追加」**
-3. クライアント ID に 1 の数字、OAuth スコープに次の2つをカンマ区切りで入力して **「承認」**
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive.readonly`
-4. スプレッドシートを編集できる**社内ユーザー**（例: 運用担当 `ops@<自社ドメイン>`）のアドレスを **Secret** `SHEETS_DB_IMPERSONATE` に登録
-   （社員のアドレスのため Variables には登録しないでください。Variables の値は公開ログに表示されます）
-5. この場合、4-1 のサービスアカウントへの共有は不要です（そのユーザーが閲覧・編集できれば読み書きできます）
+DWD は利用者を限定できず、**委任を受けた鍵を持つ者はテナントの全員として**そのスコープを使えます。そのため B では、2-2 のメインの
+サービスアカウントとは**別の、この用途だけのサービスアカウント**を作り、委任は `spreadsheets` だけにします（メインの鍵には委任を付けません。
+メインの鍵は社外から届いたリンクを読むため、漏れたときの被害を抑えるためです）。可能なら A を使ってください。
+
+1. 2-2 の手順でもう1つサービスアカウント（例: `ses-db-dwd`）を作り、JSON 鍵を Secret `SHEETS_DB_SA_KEY_JSON` に登録する
+   （メインの鍵と同じものを入れると、バッチはなりすましを行いません）
+2. そのサービスアカウントの詳細画面で **「一意の ID」（数字）** を控える（JSON の `client_id` と同じ）
+3. 管理コンソール → **「セキュリティ」→「アクセスとデータ管理」→「API の制御」→「ドメイン全体の委任を管理」→「新しく追加」**
+4. クライアント ID に 2 の数字、OAuth スコープに **`https://www.googleapis.com/auth/spreadsheets` だけ**を入力して **「承認」**
+   （`drive.readonly` などは不要です。使わないスコープが委任されていると、バッチは起動時に止まります）
+5. スプレッドシートを編集できる**自社ドメインの運用担当のユーザー**（例: `ops@<自社ドメイン>`。`SES_OWN_DOMAINS` のドメイン）のアドレスを
+   **Secret** `SHEETS_DB_IMPERSONATE` に登録（社員のアドレスのため Variables には登録しないでください。Variables の値は公開ログに表示されます）
+6. この場合、4-1 のサービスアカウントへの共有は不要です（そのユーザーが閲覧・編集できれば読み書きできます）
+7. 以前の手順でメインのサービスアカウントのクライアント ID に `spreadsheets`・`drive.readonly` の委任を登録していた場合は、
+   **その登録を削除**してください（残っているとバッチが止まります）
 
 **スキルシートが別の会社（別の Google Workspace）にある場合**: 次のどちらかで対応します。
 メインのサービスアカウントに別テナントのドメイン全体の委任（DWD）を与える方法は**使えません**
@@ -307,16 +352,21 @@ Workspace の設定で組織外への共有が禁止されていると、4-1・4
 
 - **A（推奨）**: そのテナントのフォルダ（閲覧者）と管理表（編集者）を、メインのサービスアカウントのメールに共有する
   （そのテナントで組織外への共有が禁止されている場合は、そのテナントの管理者が上の A の許可リストを設定します）
-- **C**: そのテナントの管理者が**そのテナントの Google Cloud でサービスアカウントを作り**、JSON 鍵を Secret `PROPER_GOOGLE_SA_KEY_JSON` に登録する。
-  共有できない場合に限り、そのテナントの管理者がそのサービスアカウントに DWD（`drive.readonly` と `spreadsheets`）を与え、
-  なりすます社内ユーザーのアドレスを **Secret** `PROPER_GOOGLE_IMPERSONATE` に登録します（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます）
+- **C**: そのテナントの管理者が**そのテナントの Google Cloud でサービスアカウントを作り**、JSON 鍵を Secret `PROPER_GOOGLE_SA_KEY_JSON` に登録する
+  （メインの鍵と同じものは使えません。同じ鍵ならなりすましを行いません）。
+  共有できない場合に限り、そのテナントの管理者がそのサービスアカウントに DWD を **`drive.readonly` だけ**与え、
+  なりすます社内ユーザーのアドレスを **Secret** `PROPER_GOOGLE_IMPERSONATE` に登録します（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます）。
+  管理表「プロパー管理」は**メインのテナントに置いてメインのサービスアカウントに「編集者」で共有**し、Variable `PROPER_MASTER_IN_MAIN_TENANT=true` にします
+  （管理表も別テナントに置くと、そのテナントの全スプレッドシートを読み書きできる `spreadsheets` の委任が必要になります）。
+  なりすまし中はフォルダのショートカットをたどりません（`PROPER_FOLLOW_SHORTCUTS=true` と組み合わせると事前確認が ❌）。
+  そのテナントのドメインは、メールに貼られたリンク先を社内のファイルとして読まない判定に自動で加わります（ほかのグループ会社のドメインは Secret `SES_INTERNAL_FILE_DOMAINS`）
 
 ---
 
 ## 5. GitHub Secrets / Variables の登録
 
 Secrets は **Settings → Environments → production → Environment secrets →「Add environment secret」** に、
-Variables は **Settings → Secrets and variables → Actions → Variables** タブに登録します（2-4 の 5 で作った Environment）。
+Variables は **Settings → Secrets and variables → Actions → Variables** タブに登録します（2-4 の 6 で作った Environment）。
 
 - **Secrets**（Environment「production」）: 鍵・パスワード・ID・アドレス・自社ドメイン・社外に知られたくない方針（登録後は値を見られず、ログでも伏せ字になります）。
   **リポジトリの Secrets（New repository secret）には登録しないでください**（main 以外のブランチの実行にも渡るため。以前に登録していたら削除します）
@@ -330,7 +380,10 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | 名前 | 例 | 必須 | 内容 |
 | --- | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | `sk-ant-api03-…` | **必須** | 2-1 の API キー |
-| `GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | **必須** | 2-2 の JSON 鍵ファイルの中身を丸ごと |
+| `SES_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | **必須**（Workload Identity 連携なら不要） | 2-2 の JSON 鍵ファイルの中身を丸ごと（DWD の無い SES 専用のサービスアカウント）。以前の名前 `GOOGLE_SA_KEY_JSON` も使えます（こちらが無いときだけ） |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` / `GCP_SERVICE_ACCOUNT` | `projects/…/providers/…` / `ses-batch@…` | 推奨 | 2-2 の 5（鍵ファイルなしの認証）。両方あると JSON 鍵を渡しません |
+| `SES_GOOGLE_SA_EMAIL` | `ses-batch@<プロジェクト>.iam.gserviceaccount.com` | Workload Identity 連携なら**必須** | サービスアカウントのメール（「_指示混入」タブの保護に使う） |
+| `SES_ENVIRONMENT_SENTINEL` | ランダムな文字列 | **必須** | Environment「production」にだけ登録する目印。渡っていない実行（Environment が効かない構成・リポジトリの Secrets への退避）を事前確認が止めます |
 | `SHEETS_DB_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | **必須** | 4-1 のスプレッドシート（URL か ID） |
 | `XSERVER_IMAP_HOST` | `svXXXX.xserver.jp` | **必須** | 2-3 |
 | `XSERVER_SMTP_HOST` | `svXXXX.xserver.jp` | **必須**（サマリを送る場合） | 2-3（通常 IMAP と同じ） |
@@ -342,12 +395,14 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_ALLOWED_SENDERS` | `taro@<自社ドメイン>,hanako@<自社ドメイン>` | 任意（Gmail運用は**必須**） | 送信元にしてよいアドレスの一覧。登録するとこのアドレスだけを送信元にします |
 | `SES_DRAFT_SIGNING_KEY` | ランダムな32文字以上 | **必須**（下書きを作る場合） | 「下書きデータ」列と、案件・要員の「返信メタ」「営業元メール」（宛先の元）の署名の鍵。シート上で宛先・本文を書き換えた行・別の行から写した値からは下書きを作りません。**未登録・32文字未満の間は、担当者メールの依頼はすべて「エラー」にして下書きを作りません**（最初の実行の前に登録してください。後から登録すると、それまでに保存した案件・要員の行は宛先に使わず、未作成の下書きは作り直しが必要です） |
 | `SES_PRICING_POLICY_JSON` | `{"minGrossMarginMan":<粗利下限>,"projectRaiseMaxMan":<上げ幅>,"engineerCutMaxMan":<下げ幅>,"n":"<ランダムな20文字以上>"}` | **必須** | 価格の方針（粗利の下限・交渉提案で案件単金を上げる／要員単金を下げる上限。いずれも万円/月）。**1行の JSON 1つ**にまとめ、推測できない乱数 `n` を必ず含めます（下の注意）。粗利下限を円で書く場合は `minGrossMarginJpy`。`ENABLE_NEGOTIATION=false` なら交渉幅は不要。未登録・読めない値のときは事前確認が ❌ で止めます（公開されている既定値のまま動かさないため） |
-| `SHEETS_DB_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ |
+| `SHEETS_DB_IMPERSONATE` | `ops@<自社ドメイン>` | 任意 | 4-4 B（DWD）を使う場合だけ（`SES_OWN_DOMAINS` のドメインのユーザーだけ） |
+| `SHEETS_DB_SA_KEY_JSON` | `{"type":"service_account",…}` | 4-4 B の場合は**必須** | 4-4 B 用の別のサービスアカウントの鍵（委任は `spreadsheets` だけ） |
+| `SES_INTERNAL_FILE_DOMAINS` | `<グループ会社のドメイン>` | 任意 | メールに貼られたリンク先を「社内のファイル」として読まない、自社以外のドメイン（カンマ区切り） |
 | `PROPER_SKILLSHEET_FOLDER_ID` | `https://drive.google.com/drive/folders/xxxx` | 任意 | 4-3（プロパー機能） |
 | `PROPER_MASTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（プロパー機能） |
 | `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントにあり、そのテナントのサービスアカウントを使う場合だけ（4-4 C） |
 | `PROPER_GOOGLE_IMPERSONATE` | `ops@<別テナント>` | 任意 | 4-4 C で共有できない場合だけ（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます） |
-| `SES_TARGET_GMAIL` | — | 不要 | メールを Gmail で運用する場合だけ（`MAIL_PROVIDER=gmail`） |
+| `SES_TARGET_GMAIL` / `SES_GMAIL_SA_KEY_JSON` | — | 不要 | メールを Gmail で運用する場合だけ（`MAIL_PROVIDER=gmail`。Gmail の DWD は専用の鍵 `SES_GMAIL_SA_KEY_JSON` で。9章） |
 | `SES_INJECTION_EXTRA_PATTERNS` | （正規表現を改行区切りで） | 推奨 | AIへの指示の検知に足す言い回し。コードの一覧は公開されているため、送り主が手元で検知の有無を確かめきれないよう運用者だけが知る言い回しを足します（9-1） |
 | `GEMINI_API_KEY` | — | 不要 | `LLM_PROVIDER=gemini` の場合だけ渡されます（Vertex AI はこのワークフローでは使えません。Google AI Studio の**無料枠では使わない**でください: Variable `SES_ALLOW_GEMINI_API=paid` の説明を参照） |
 
@@ -359,7 +414,8 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 値は、この手順書・要件定義書などに書かれた例や既定値とは違うものにしてください（公開リポジトリの文書は誰でも読めます）。
 
 鍵・パスワードは本番のステップにだけ渡され、依存パッケージのインストールやビルドには渡りません
-（プロパー用の鍵は `PROPER_SKILLSHEET_FOLDER_ID` と `PROPER_MASTER_SPREADSHEET_ID` の両方があるときだけ渡します）。
+（プロパー用の鍵は `PROPER_SKILLSHEET_FOLDER_ID` と `PROPER_MASTER_SPREADSHEET_ID` の両方があるときだけ、`SHEETS_DB_SA_KEY_JSON` は
+`SHEETS_DB_IMPERSONATE` があるときだけ、Gmail の鍵と `SES_TARGET_GMAIL` は `MAIL_PROVIDER=gmail` のときだけ渡します）。
 ワークフローは `environment: production` を指定しているため、Deployment branches を main に制限しておけば main 以外のブランチからは鍵を受け取れません。
 
 ### Variables
@@ -373,6 +429,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_MAX_MAIL_MB_PER_RUN` | `400` | 任意 | 1回に本文・添付を取得するメールの合計の大きさ（MB）。超えた分は次の回へ（大きなメールを大量に送られても収集中に止まらないように） |
 | `SES_RUN_DEADLINE_MINUTES` | `20` | 任意 | 1回の実行で新しい抽出・判定を始める期限（開始からの分）。抽出はこの約半分までで区切り、残りの時間で必ず突合・通知を行います。過ぎたら済んだ分を保存してサマリを送り、残りは次の回に続きから（ワークフローの制限時間 40分より短く） |
 | `PROPER_FOLLOW_SHORTCUTS` | `false` | 任意 | スキルシートのフォルダ内の「ファイルへのショートカット」の参照先も読むか（既定 false。4-3） |
+| `PROPER_MASTER_IN_MAIN_TENANT` | `true` | 4-4 C でなりすます場合は推奨 | 管理表「プロパー管理」をメインのテナントに置き、メインのサービスアカウントで書く |
 | `XSERVER_IMAP_PORT` / `XSERVER_SMTP_PORT` | `993` / `465` | 任意 | 通常は登録不要 |
 | `LLM_PROVIDER` / `GEMINI_MODEL` | `anthropic` | 任意 | 生成AIの切り替え（既定 anthropic） |
 | `SES_ALLOW_GEMINI_API` | `paid` | `gemini` を使う場合は**必須** | `LLM_PROVIDER=gemini` では、メール本文・添付・社員のスキルシートを Google AI Studio に送ります。無料枠は送った内容が品質改善や人による確認に使われ得るため、**課金を有効にしたプロジェクトで利用条件を確認したうえで** `paid` を登録します（未登録なら事前確認が ❌ で止め、バッチも始めません） |
@@ -503,18 +560,44 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 
 ## 9. セキュリティの注意
 
-- **リポジトリは非公開（Private）にすることを強く推奨します**（2-4 の手順）。
+- **公開・非公開と GitHub のプラン**（2-4 の 1）: 鍵を守る Environment「production」と main だけの制限は、**GitHub Free の非公開リポジトリでは
+  無効**です。非公開にするなら GitHub Pro／Team 以上にしてください（Actions の無料枠は月2,000〜3,000分で、平日約22日 × 1日2回 × 約5〜20分 ≒ 月220〜880分）。
+  Free のまま公開で使う場合は、SES 専用のリポジトリに分けてください。**どちらでも、リポジトリの Secrets に鍵を置く回避策は使いません**
+  （事前確認が、main 以外の実行と `SES_ENVIRONMENT_SENTINEL` の無い実行を止めます）
   - 公開のままだと、実行ログ・実行時刻・失敗の有無を誰でも見られます（個人情報は出しませんが、運用状況が外から分かります）
-  - 非公開でも GitHub Free の **Actions 無料枠（月2,000分）で足ります**（平日約22日 × 1日2回 × 約5〜20分 ≒ 月220〜880分）
   - 公開リポジトリでは、**60日間リポジトリに更新が無いと定時実行が自動で止まります**（GitHub の仕様。Actions タブで再度有効化が必要）。非公開では止まりません
+- **main への変更はレビュー必須（2-4 の 5 のルールセット）**: 鍵は main の実行に渡るため、main に直接 push できる人・トークン・自動化があると、
+  次の定時実行（または手動実行）ですべての鍵（API キー・Google の鍵・共有メールボックスのパスワード・署名鍵）を持ち出せます。
+  「任意」ではなく**本番を始める前に必ず**設定してください
 - **鍵・パスワードは Secrets にだけ登録**し、ファイル（`.env.local` など）をコミットしないでください（`.env.local` はコミット対象外に設定済み）。
   JSON 鍵ファイルをリポジトリのフォルダに置かないでください
 - **書き込み権限のある人は Secrets を取り出せます**（ワークフローを書き換えられるため）。共同作業者は最小限にしてください。
   Secrets は Environment「production」（Deployment branches を main だけに制限）に登録し、リポジトリの Secrets には置かないでください
-  （main 以外のブランチで書き換えたワークフロー・コードを手動実行されても鍵が渡らないようにするため。main への取り込みはレビューを必須にすると、さらに安全です）
+  （main 以外のブランチで書き換えたワークフロー・コードを手動実行されても鍵が渡らないようにするため。main への取り込みはレビューを必須にします）
 - **Variables の値は公開ログに表示されます**。社員のアドレス・自社ドメイン・粗利や交渉の方針は Secrets に登録してください（5章）
 - 鍵・パスワードは本番のステップにだけ渡し、依存パッケージのインストールスクリプトは実行しません（`npm ci --ignore-scripts`）。
-  使っている GitHub Actions はコミットのハッシュで固定しています（更新するときはハッシュごと書き換えます）
+  使っている GitHub Actions はコミットのハッシュで固定しています（更新するときはハッシュごと書き換えます。Dependabot が PR を作ります）。
+  本番のステップはビルド済みの `dist/` を `node` で動かし、その前に開発用のパッケージ（tsx・esbuild・TypeScript）を取り除きます。
+  使わない機能の SDK（Gemini・Notion）は、その機能を選んだときだけ読み込みます
+- **鍵を持つジョブは Actions のキャッシュを使いません**（`setup-node` の `cache: npm` 等）。キャッシュは main の他のジョブも作れ、
+  チェックアウトの後に展開されるためソースを書き換えられます。**鍵を持つワークフローにキャッシュ・成果物を足さないでください**
+- **依存パッケージの脆弱性**: 定時バッチは鍵を渡さないステップで `npm audit` を実行し、重大度 high 以上は警告、critical はバッチを止めて
+  失敗の通知で知らせます。`.github/dependabot.yml` が npm と GitHub Actions の更新 PR を（公開から7日おいて）作ります。
+  **【運用者の作業】** Settings → Code security で **Dependabot alerts / security updates** を有効にし、届いた PR はレビューして取り込みます。
+  表計算の解析に使う SheetJS（`xlsx`）は `cdn.sheetjs.com` の URL で固定しているため Dependabot では更新されません。
+  月に1回 <https://cdn.sheetjs.com/xlsx-latest/package/package.json> の版と `package.json` の版（0.20.3）を比べ、新しければ更新してください
+- **Google の鍵は用途ごとに分けます**: メイン（`SES_GOOGLE_SA_KEY_JSON`・DWD なし）・4-4 B 用（`SHEETS_DB_SA_KEY_JSON`・`spreadsheets` だけ）・
+  Gmail 運用用（`SES_GMAIL_SA_KEY_JSON`）・別テナント用（`PROPER_GOOGLE_SA_KEY_JSON`）。専用の鍵がメインの鍵と同じなら使わず、
+  バッチは起動時に各鍵で使わないスコープのトークンを要求し、**発行された（不要な DWD が登録されている）ら止めます**。
+  経営者クローンの収集用の `GOOGLE_SA_KEY_JSON`（経営者の Gmail・ドライブへの DWD）を SES に使わないでください
+- **Gmail 運用（`MAIL_PROVIDER=gmail`）の DWD はテナントの全員に及びます**: `gmail.readonly`・`gmail.compose`・`gmail.send` の委任を受けた鍵を
+  持つ者は、SES のメールボックスだけでなく**役員を含む全員のメールを読み・送信できます**（`SES_ALLOWED_SENDERS` の制限はコードの中だけのもの）。
+  Xserver 運用なら漏れても共有メールボックスだけで済みます。Gmail にする場合は専用の鍵 `SES_GMAIL_SA_KEY_JSON` にし、可能なら SES 専用の
+  組織（テナント）で運用してください
+- **共有メールボックスのパスワードと国外からの接続（2-3）**: GitHub Actions は海外の IP から接続するため、Xserver の国外からの接続制限を外すと、
+  そのサーバーの全メールボックスが海外からのログインを受け付けます。できれば国内の固定 IP の実行環境（self-hosted runner・国内の VM）で動かし、
+  制限を外さないでください。GitHub のサーバーで動かす場合は、**【運用者の作業】** sales@ のパスワードを長いランダムな文字列にし、
+  使っている営業が退職・異動したら変更し、バッチを別の環境に移したら国外からの接続制限を戻してください
 - スプレッドシートの編集者は誰でも「担当者メール」を書けます。下書きの送信元は許可したドメイン・アドレスに限られます（未登録なら作りません）。
   `SES_DRAFT_SIGNING_KEY` が必須です（未登録の間は下書きを作りません）。「下書きデータ」列や案件・要員の「返信メタ」「営業元メール」を
   書き換えた行・別の行から写した行からは下書きを作りません
@@ -582,8 +665,11 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 - メール本文・添付は処理のために Anthropic の API に送られます。**ZDR（ゼロデータリテンション）** の利用を推奨します
 - 鍵が漏れた可能性があるときは、すぐに作り直して Secrets を更新します
   （Anthropic: API Keys で旧キーを削除／Google Cloud: サービスアカウントの「鍵」で旧鍵を削除／Xserver: パスワード変更）
-- 4-4 B（DWD）を使うと、サービスアカウントの鍵で社内ユーザーとしてスプレッドシート・ドライブを操作できるようになります。
-  可能な限り A（共有）を使ってください。別テナントへのDWDはメインの鍵では行いません（4-4 C）
+- 4-4 B（DWD）を使うと、その鍵でテナントの全員としてスプレッドシートを操作できるようになります。可能な限り A（共有）を使ってください。
+  B でも委任は別の鍵（`SHEETS_DB_SA_KEY_JSON`）に `spreadsheets` だけ、なりすますのは自社ドメインの運用担当だけにします。
+  別テナントへのDWDはメインの鍵では行いません（4-4 C。委任は `drive.readonly` だけ）
+- **鍵ファイルは長く使うほど危険です**: できれば Workload Identity 連携（2-2 の 5）で鍵ファイルを無くし、手元の確認に使う鍵は
+  定期的に作り直して古い鍵を削除してください。`.env.local` に置いた鍵も同じ扱いです
 
 
 ### 9-1. 公開リポジトリで運用者が行う作業（コードでは直せないもの）
@@ -595,6 +681,14 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 - **【鍵】`SES_PRICING_POLICY_JSON` に移したら、`MIN_GROSS_MARGIN_JPY` `MIN_GROSS_MARGIN_MAN` `NEGOTIATION_MAX_PROJECT_RAISE_MAN`
   `NEGOTIATION_MAX_ENGINEER_CUT_MAN` の Secrets を削除**してください。以前の実行ログには伏せ字の位置から値が推測できる行が残っているため、
   Actions タブで以前の実行（Run）のログを削除し、価格の方針そのものを見直すことも検討してください
+- **【GitHub】main のルールセット・Actions の許可・Workflow permissions（2-4 の 2・5）を設定する**。あわせて:
+  - **`CLAUDE.md` の Git ワークフロー**（現在は「`git push -u origin main` でプッシュ」）を、作業ブランチに push して PR を作る手順に書き換える
+    （コーディングエージェントが main に直接 push しないように。ルールセットでも止まります）
+  - main にある他のワークフロー（`detox-typecheck.yml`・`detox-pages.yml` 等）に `permissions: contents: read` を付け、使っている Action を
+    コミットのハッシュで固定し、`npm install` を `npm ci --ignore-scripts` にする。`daily-report` 等のワークフローを main に取り込む前にも同じ対策をする
+    （同じ main のキャッシュ・トークンを使うジョブが乗っ取られると、SES の実行に影響するため）
+  - 以前の実行で setup-node のキャッシュ（`node-cache-…-npm-…`）が作られていたら、Actions → Caches で削除する
+  - Workload Identity 連携に移ったら、Secret `SES_GOOGLE_SA_KEY_JSON`（`GOOGLE_SA_KEY_JSON`）を削除し、Google Cloud でもその鍵を削除する
 - **【鍵】Secret scanning と Push protection を有効にする**（Settings → Code security）。鍵・パスワードを誤ってコミットしたときに
   push を止めます。`.gitignore` で鍵・証明書（`*.pem` `*.key` `*.crt` `*.p12` `*.pfx`）・サービスアカウントの JSON 鍵・`.env.*`・`secrets/` を
   除外していますが、**鍵ファイルはリポジトリのフォルダの外**（例: `~/.config/ses/`）に置いてください。確認画面を HTTPS で動かすときの
@@ -642,7 +736,7 @@ main に入った時点から平日 10:00／14:00 に動き始めます。Secret
 
 | 項目 | 費用の目安 |
 | --- | --- |
-| GitHub Actions | 非公開: 無料枠（月2,000分）内。1回約5〜20分 × 月約44回 ≒ 220〜880分。公開: 無料 |
+| GitHub Actions | 公開: 無料。非公開: GitHub Pro／Team 以上が必要（Environment の制限のため。2-4）で、無料枠内。1回約5〜20分 × 月約44回 ≒ 220〜880分 |
 | Google Cloud（サービスアカウント・Sheets API・Drive API） | 無料 |
 | Google Workspace・Xserver | 既存の契約のまま（追加費用なし） |
 | **Anthropic（AI）** | 下表。**3章の測定結果に実際の見込み額が出ます** |
@@ -685,10 +779,12 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | --- | --- | --- | --- |
 | ☐ | Anthropic の組織・支払い設定・利用上限・API キー | オーナー | 2-1 |
 | ☐ | Google Cloud プロジェクト、Sheets API・Drive API の有効化 | オーナー（または情シス） | 2-2 |
-| ☐ | サービスアカウントと JSON 鍵（キー作成が禁止なら組織ポリシーの例外） | オーナー（組織ポリシー管理者） | 2-2 |
-| ☐ | Xserver のサーバー名 `svXXXX.xserver.jp`・共有メールボックスのアドレスとパスワード | Xserver 管理者 | 2-3 |
-| ☐ | GitHub リポジトリを非公開に、Actions を有効に、失敗通知をオン | オーナー | 2-4 |
-| ☐ | Environment「production」を作り、Deployment branches を main に制限 | オーナー | 2-4 |
+| ☐ | SES 専用のサービスアカウント（DWD なし）と Workload Identity 連携（または JSON 鍵） | オーナー | 2-2 |
+| ☐ | Xserver のサーバー名 `svXXXX.xserver.jp`・共有メールボックスのアドレスとパスワード（長いランダムな文字列・国外接続の扱い） | Xserver 管理者 | 2-3・9 |
+| ☐ | GitHub のプランと公開・非公開の決定（非公開は Pro／Team 以上）、Actions の許可・ハッシュ固定・Workflow permissions 読み取りのみ、失敗通知をオン | オーナー | 2-4 |
+| ☐ | **main のルールセット（PR・承認・force-push と削除の禁止・Bypass なし）**、`CLAUDE.md` の push 先の変更 | オーナー | 2-4・9-1 |
+| ☐ | Environment「production」を作り、Deployment branches を main に制限、`SES_ENVIRONMENT_SENTINEL` を登録 | オーナー | 2-4 |
+| ☐ | Dependabot alerts / security updates を有効に | オーナー | 9 |
 | ☐ | メインのスプレッドシートを作成し、サービスアカウントに「編集者」で共有 | オーナー | 4-1 |
 | ☐ | （プロパー）スキルシートのフォルダ「閲覧者」・管理表「編集者」で共有 | オーナー | 4-3 |
 | ☐ | （共有が禁止されている場合）許可リスト または DWD の設定 | Workspace 特権管理者 | 4-4 |
@@ -702,7 +798,8 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | ✔ | 名前 | 必須／任意 |
 | --- | --- | --- |
 | ☐ | `ANTHROPIC_API_KEY` | 必須 |
-| ☐ | `GOOGLE_SA_KEY_JSON` | 必須 |
+| ☐ | `SES_GOOGLE_SA_KEY_JSON`（または `GCP_WORKLOAD_IDENTITY_PROVIDER`・`GCP_SERVICE_ACCOUNT`・`SES_GOOGLE_SA_EMAIL`） | 必須 |
+| ☐ | `SES_ENVIRONMENT_SENTINEL` | 必須（この Environment にだけ） |
 | ☐ | `SHEETS_DB_SPREADSHEET_ID` | 必須 |
 | ☐ | `XSERVER_IMAP_HOST` | 必須 |
 | ☐ | `XSERVER_SMTP_HOST` | 必須（サマリを送る場合） |
@@ -713,13 +810,14 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 | ☐ | `SES_DRAFT_SIGNING_KEY` | 必須（下書きを作る場合。最初の実行の前に） |
 | ☐ | `SES_ALLOWED_SENDER_DOMAINS` / `SES_ALLOWED_SENDERS` | 任意（Gmail 運用は `SES_ALLOWED_SENDERS` 必須） |
 | ☐ | `SES_PRICING_POLICY_JSON` | 必須（粗利下限・交渉幅と乱数 `n` の1行の JSON。以前の `MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` の Secrets は削除） |
-| ☐ | `SHEETS_DB_IMPERSONATE` | 任意（DWD の場合のみ） |
+| ☐ | `SHEETS_DB_IMPERSONATE` / `SHEETS_DB_SA_KEY_JSON` | 任意（4-4 B の DWD の場合のみ。両方） |
+| ☐ | `SES_INTERNAL_FILE_DOMAINS` | 任意（グループ会社の別テナント） |
 | ☐ | `PROPER_SKILLSHEET_FOLDER_ID` | 任意（プロパー） |
 | ☐ | `PROPER_MASTER_SPREADSHEET_ID` | 任意（プロパー） |
 | ☐ | `PROPER_GOOGLE_SA_KEY_JSON` | 任意（別テナント・別サービスアカウントの場合のみ） |
 | ☐ | `PROPER_GOOGLE_IMPERSONATE` | 任意（4-4 C で共有できない場合のみ） |
 | ☐ | `SES_INJECTION_EXTRA_PATTERNS` | 推奨（指示の検知に足す言い回し） |
-| ☐ | `SES_TARGET_GMAIL` | 不要（Gmail 運用の場合のみ） |
+| ☐ | `SES_TARGET_GMAIL` / `SES_GMAIL_SA_KEY_JSON` | 不要（Gmail 運用の場合のみ） |
 
 ### GitHub Variables
 

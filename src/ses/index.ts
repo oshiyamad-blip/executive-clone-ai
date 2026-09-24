@@ -63,6 +63,7 @@ import {
   retentionDays,
 } from './config.js';
 import { geminiDataUseProblem } from './settingsFormat.js';
+import { unneededDelegationProblems } from './googleCreds.js';
 import { setMetricsMode, recordBatchMetrics, collectBatchMetrics } from './batchMetrics.js';
 import { startHealBatch } from './heal/budget.js';
 import { persistUnknownSkillTokens, resetSkillTokenTally } from './skillStats.js';
@@ -116,6 +117,14 @@ export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
     // 価格の方針を解釈できないまま既定値（公開されている値）・誤った単位で動かさない（値はログに出さない）
     if (pricingSettingsInvalid()) {
       console.error('SESバッチ: 🚨 価格の方針（SES_PRICING_POLICY_JSON・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*）に解釈できない値があるため停止します（npm run ses:preflight で確認）');
+      process.exitCode = 1;
+      return;
+    }
+    // 鍵に使わないスコープのドメイン全体の委任（テナントの全員のメール・ドライブに及ぶ）が付いていたら動かさない
+    // （鍵はバッチの実行環境・手元の .env.local にあり、社外から届いたリンク・添付も扱うため）
+    const delegation = await unneededDelegationProblems();
+    if (delegation.length > 0) {
+      for (const p of delegation) console.error(`SESバッチ: 🚨 ${p}`);
       process.exitCode = 1;
       return;
     }

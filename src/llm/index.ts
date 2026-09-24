@@ -1,5 +1,9 @@
 import { anthropicText, anthropicJson, anthropicJsonWithDocuments, type PdfDocument } from './anthropic.js';
-import { geminiText, geminiJson } from './gemini.js';
+
+// Gemini の SDK は LLM_PROVIDER=gemini のときだけ読み込む（使わない SDK のコードを、鍵を持つバッチの中で動かさない）
+async function gemini(): Promise<typeof import('./gemini.js')> {
+  return import('./gemini.js');
+}
 
 export { LlmOutputError, isTruncationError } from './errors.js';
 export type { PdfDocument };
@@ -40,7 +44,7 @@ export async function generateText(
 ): Promise<string> {
   const maxTokens = opts.maxTokens ?? 8192;
   return provider() === 'gemini'
-    ? geminiText(system, messages, maxTokens, opts)
+    ? (await gemini()).geminiText(system, messages, maxTokens, opts)
     : anthropicText(system, messages, maxTokens, opts);
 }
 
@@ -54,7 +58,7 @@ export async function generateJson<T = unknown>(
 ): Promise<T> {
   const maxTokens = opts.maxTokens ?? 16000;
   return provider() === 'gemini'
-    ? (geminiJson(system, user, schema, maxTokens, opts) as Promise<T>)
+    ? ((await gemini()).geminiJson(system, user, schema, maxTokens, opts) as Promise<T>)
     : (anthropicJson(system, user, schema, maxTokens, opts) as Promise<T>);
 }
 
@@ -69,6 +73,6 @@ export async function generateJsonWithDocuments<T = unknown>(
   const maxTokens = opts.maxTokens ?? 16000;
   if (documents.length === 0) return generateJson<T>(system, user, schema, opts);
   return provider() === 'gemini'
-    ? (geminiJson(system, user, schema, maxTokens, opts, documents) as Promise<T>)
+    ? ((await gemini()).geminiJson(system, user, schema, maxTokens, opts, documents) as Promise<T>)
     : (anthropicJsonWithDocuments(system, user, schema, documents, maxTokens, opts) as Promise<T>);
 }

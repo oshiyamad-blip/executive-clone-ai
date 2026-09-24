@@ -544,6 +544,10 @@ export interface FakeDriveFile {
   data?: Buffer; // バイナリの中身（docx・xlsx 等。あれば content より優先してダウンロードで返す）
   trashed?: boolean;
   shortcutTarget?: string; // ショートカット（application/vnd.google-apps.shortcut）の参照先ID
+  owners?: string[]; // 所有者のアドレス（共有ドライブのファイルは空）
+  sharingUser?: string; // サービスアカウントに共有した人
+  driveId?: string; // 共有ドライブのID
+  metaError?: number; // メタデータの取得をこの status で失敗させる（Drive の一時的な失敗・権限の再現）
 }
 
 const GOOGLE_TYPES = 'application/vnd.google-apps.';
@@ -584,6 +588,7 @@ export class FakeDrive {
                 modifiedTime: f.modifiedTime,
                 webViewLink: `https://drive.example.invalid/file/${f.id}`,
                 ...(f.mimeType.startsWith(GOOGLE_TYPES) ? {} : { size: String(f.data ? f.data.length : Buffer.byteLength(f.content ?? '')) }),
+                ...(f.owners ? { owners: f.owners.map((emailAddress) => ({ emailAddress })) } : {}),
                 ...(f.shortcutTarget
                   ? { shortcutDetails: { targetId: f.shortcutTarget, targetMimeType: this.files.get(f.shortcutTarget)?.mimeType ?? '' } }
                   : {}),
@@ -597,8 +602,12 @@ export class FakeDrive {
           if (!p.alt && p.fields) {
             // メタデータの取得（ショートカットの参照先の確認等）
             if (!f) throw new FakeApiError(404, 'File not found');
+            if (f.metaError) throw new FakeApiError(f.metaError, 'fake: metadata failure');
             return {
               data: {
+                ...(f.owners ? { owners: f.owners.map((emailAddress) => ({ emailAddress })) } : {}),
+                ...(f.sharingUser ? { sharingUser: { emailAddress: f.sharingUser } } : {}),
+                ...(f.driveId ? { driveId: f.driveId } : {}),
                 id: f.id,
                 name: f.name,
                 mimeType: f.mimeType,

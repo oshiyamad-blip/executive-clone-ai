@@ -2,16 +2,16 @@
 // SES専用メールボックス（SES_TARGET_GMAIL。グループではなく実ユーザー）としてDWDで収集・サマリ送信し、
 // 下書きは担当営業本人（担当者メール列・確認UIで指定）として作成する。
 // DWDに登録するスコープは gmail.readonly / gmail.compose / gmail.send の3つ。呼び出しごとに必要な1つだけを要求する。
+// DWD はテナントの全員のメールボックスに及ぶため、専用の鍵（SES_GMAIL_SA_KEY_JSON）だけで行う（メインの鍵ではなりすまさない）。
 import { collectSesRawMail } from '../../collectors/email.js';
 import {
-  getGoogleAuthAs,
-  loadServiceAccountCredentials,
   SES_GMAIL_COLLECT_SCOPES,
   SES_GMAIL_DRAFT_SCOPES,
   SES_GMAIL_SEND_SCOPES,
 } from '../../collectors/googleAuth.js';
 import { google } from 'googleapis';
 import { SafeLogError } from '../redact.js';
+import { gmailDelegatedAuth, gmailCredentialsReady, gmailAuthProblem } from '../googleCreds.js';
 import { sesTargetGmail, collectDays } from '../config.js';
 import { pickForRun } from '../schedule.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
@@ -20,7 +20,7 @@ import type { DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index
 import type { CollectOptions, CollectOutcome } from './index.js';
 
 function mailboxReady(): boolean {
-  return Boolean(sesTargetGmail()) && loadServiceAccountCredentials() !== null;
+  return Boolean(sesTargetGmail()) && gmailCredentialsReady();
 }
 
 export function collectReady(): boolean {
@@ -30,8 +30,8 @@ export function collectReady(): boolean {
 // SES専用メールボックスの受信メール（送信済み・下書き・迷惑メール・ゴミ箱を除く）を収集期間ぶん取得する。
 // 宛先(to:)で絞らない（BCC・転送で届いたメールも拾うため。メールボックス自体がSES専用である前提）
 export async function collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
-  const auth = getGoogleAuthAs(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
-  if (!auth) throw new SafeLogError('Gmail収集: SES_TARGET_GMAIL または Google認証（サービスアカウント）が未設定です');
+  const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
+  if (!auth) throw new SafeLogError('Gmail収集: SES_TARGET_GMAIL または Gmail用のサービスアカウント鍵（SES_GMAIL_SA_KEY_JSON）が未設定です');
   const afterEpoch = Math.floor((Date.now() - collectDays() * 24 * 60 * 60 * 1000) / 1000);
   const query = `after:${afterEpoch} -in:sent -in:drafts -in:spam -in:trash`;
   return collectSesRawMail(auth, query, isProcessed, {
@@ -41,16 +41,16 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
 }
 
 export function draftReady(): boolean {
-  return loadServiceAccountCredentials() !== null;
+  return gmailCredentialsReady();
 }
 
 // 担当営業本人(fromEmail)を impersonate して、全員に返信のスレッド下書きを本人のGmailに作成する。
 // 失敗は例外で返す（呼び出し側が「作成済」と誤記録しないため）
 export async function createReplyDraft(ref: DraftRef, fromEmail: string): Promise<DraftRef> {
   const finalized: DraftRef = { ...ref, from: fromEmail };
-  const auth = getGoogleAuthAs(fromEmail, SES_GMAIL_DRAFT_SCOPES);
+  const auth = gmailDelegatedAuth(fromEmail, SES_GMAIL_DRAFT_SCOPES);
   if (!auth) {
-    throw new SafeLogError('Gmail下書き: Google認証（サービスアカウント）が未設定のため下書きを作成できません');
+    throw new SafeLogError('Gmail下書き: Gmail用のサービスアカウント鍵（SES_GMAIL_SA_KEY_JSON）が未設定のため下書きを作成できません');
   }
   const gmail = google.gmail({ version: 'v1', auth });
   // 手組みヘッダではなく共通MIMEビルダーを使う（日本語表示名のRFC2047エンコード等をXserver側と統一）
@@ -76,7 +76,7 @@ export function sendReady(): boolean {
 }
 
 export async function sendPlainMail(to: string, subject: string, body: string): Promise<void> {
-  const auth = getGoogleAuthAs(sesTargetGmail(), SES_GMAIL_SEND_SCOPES);
+  const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_SEND_SCOPES);
   if (!auth) throw new SafeLogError('Gmail送信: SES_TARGET_GMAIL または Google認証（サービスアカウント）が未設定です');
   const gmail = google.gmail({ version: 'v1', auth });
   const raw = (await buildPlainMime(to, subject, body)).toString('base64url');
@@ -86,7 +86,7 @@ export async function sendPlainMail(to: string, subject: string, body: string): 
 // メール量の測定（npm run ses:mail-stats）用。本文・添付を取得せず、一覧（ID）と件名・送信元ヘッダ・受信日時・サイズだけを読む。
 // 添付の種類はメール単位で検索クエリ（filename:pdf 等）の該当有無から求める（添付ごとの個数は数えない）
 export async function scanMeta(since: Date): Promise<SesMailMeta[]> {
-  const auth = getGoogleAuthAs(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
+  const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
   if (!auth) throw new SafeLogError('Gmail測定: SES_TARGET_GMAIL または Google認証（サービスアカウント）が未設定です');
   const gmail = google.gmail({ version: 'v1', auth });
   const base = `after:${Math.floor(since.getTime() / 1000)} -in:sent -in:drafts -in:spam -in:trash`;
@@ -159,13 +159,13 @@ export async function scanMeta(since: Date): Promise<SesMailMeta[]> {
 // 診断（npm run doctor）用: SES専用メールボックスとして収集・送信のトークンが取れるか（DWDのスコープ登録の確認）。
 // 問題があれば理由を返し、問題なければ null
 export async function probeGmail(): Promise<string | null> {
-  if (!mailboxReady()) return 'SES_TARGET_GMAIL または Google認証（GOOGLE_SA_KEY_JSON 等）が未設定です';
+  if (!mailboxReady()) return sesTargetGmail() ? gmailAuthProblem() ?? 'Google認証が未設定です' : 'SES_TARGET_GMAIL が未設定です';
   for (const [label, scopes] of [
     ['gmail.readonly', SES_GMAIL_COLLECT_SCOPES],
     ['gmail.send', SES_GMAIL_SEND_SCOPES],
   ] as const) {
     try {
-      await getGoogleAuthAs(sesTargetGmail(), [...scopes])!.authorize();
+      await gmailDelegatedAuth(sesTargetGmail(), [...scopes])!.authorize();
     } catch {
       return `SES_TARGET_GMAIL として ${label} のトークンを取得できません（管理コンソールのドメイン全体の委任にスコープを登録したか確認）`;
     }

@@ -148,6 +148,9 @@ import { withoutResentProjects, withoutResentEngineers, sameReplySender } from '
 import { refreshesLastSeen, lastSeenUpdates } from '../resend.js';
 import { parseReceivedAt, matchedColumnNeedsMigration } from '../../database/sheets.js';
 import { duplicateRequestIds, isAmbiguousDraftFailure } from '../pendingDrafts.js';
+import { classifyDelegationProbe, sameServiceAccount } from '../googleCreds.js';
+import { shortcutTargetAllowed } from '../proper/drive.js';
+import { readFileSync, existsSync } from 'fs';
 import { isDraftStateLocked } from '../../database/mapping.js';
 import { unleasedLiveProblem } from '../lease.js';
 import { lastChanceBudgetJpy } from '../matchRun.js';
@@ -3263,6 +3266,52 @@ async function securityAuditRound5Checks(): Promise<void> {
   );
 }
 
+function securityAuditRound6Checks(): void {
+  section('セキュリティ（第6回）: ドメイン全体の委任の検出・鍵の同一判定');
+  check('トークンが発行された = 委任が登録されている', classifyDelegationProbe(null) === 'granted');
+  check(
+    'unauthorized_client = 委任が無い（応答の error・メッセージのどちらでも）',
+    classifyDelegationProbe({ response: { data: { error: 'unauthorized_client' } } }) === 'denied' &&
+      classifyDelegationProbe(new Error('unauthorized_client: Client is unauthorized')) === 'denied',
+  );
+  check('ユーザーが無い・通信の失敗は分からない扱い（止めない）', classifyDelegationProbe(new Error('invalid_grant')) === 'unknown' && classifyDelegationProbe(new Error('timeout')) === 'unknown');
+  const a = { clientEmail: 'Ses-Batch@main.iam.gserviceaccount.com', privateKey: 'KEY-A' };
+  check('同じ client_email（大文字小文字を問わない）は同じ鍵', sameServiceAccount(a, { clientEmail: 'ses-batch@main.iam.gserviceaccount.com', privateKey: 'KEY-X' }));
+  check('同じ秘密鍵は client_email が違っても同じ鍵', sameServiceAccount(a, { clientEmail: 'other@x.iam.gserviceaccount.com', privateKey: 'KEY-A' }));
+  check('別の鍵・未設定は別', !sameServiceAccount(a, { clientEmail: 'b@x.iam.gserviceaccount.com', privateKey: 'KEY-B' }) && !sameServiceAccount(a, null));
+
+  section('セキュリティ（第6回）: スキルシートのフォルダのショートカットの参照先');
+  const base = { inTree: false, rootDriveId: '', targetDriveId: '', targetOwners: [] as string[], shortcutOwners: [] as string[], internalDomains: ['our.jp'] };
+  check('フォルダの配下なら読む', shortcutTargetAllowed({ ...base, inTree: true }));
+  check('フォルダと同じ共有ドライブなら読む', shortcutTargetAllowed({ ...base, rootDriveId: 'd1', targetDriveId: 'd1' }));
+  check('共有ドライブが違えば読まない', !shortcutTargetAllowed({ ...base, rootDriveId: 'd1', targetDriveId: 'd2' }));
+  check('所有者が分からないフォルダの外のファイルは読まない', !shortcutTargetAllowed({ ...base, shortcutOwners: ['a@our.jp'] }));
+  check('社外の所有者のファイルは読まない', !shortcutTargetAllowed({ ...base, targetOwners: ['hr@other.jp'], shortcutOwners: ['hr@other.jp'] }));
+  check('社内の所有者でも、ショートカットを置いた人が所有者でなければ読まない', !shortcutTargetAllowed({ ...base, targetOwners: ['b@our.jp'], shortcutOwners: ['a@our.jp'] }));
+  check('社内の所有者が自分で置いたショートカットは読む', shortcutTargetAllowed({ ...base, targetOwners: ['A@our.jp'], shortcutOwners: ['a@our.jp'] }));
+  check('社内のドメインが未設定なら所有者では判断しない', !shortcutTargetAllowed({ ...base, targetOwners: ['a@our.jp'], shortcutOwners: ['a@our.jp'], internalDomains: [] }));
+
+  section('セキュリティ（第6回）: 鍵を持つワークフローの実行環境');
+  const workflows = ['.github/workflows/ses-batch.yml', '.github/workflows/ses-mail-stats.yml'].map((f) => ({ f, text: existsSync(f) ? readFileSync(f, 'utf-8') : '' }));
+  for (const { f, text } of workflows) {
+    check(`${f}: 読める`, text.length > 0);
+    check(`${f}: Actions のキャッシュを使わない（main の他のジョブが作れるキャッシュでソースを書き換えさせない）`, !/^\s*cache:/m.test(text) && !/actions\/cache@/.test(text), f);
+    const uses = [...text.matchAll(/uses:\s*([^\s#]+)/g)].map((m) => m[1]);
+    check(`${f}: 使う Action はすべてコミットのハッシュで固定`, uses.length > 0 && uses.every((u) => /@[0-9a-f]{40}$/.test(u)), uses.join(', '));
+    check(`${f}: 鍵を渡すステップは tsx を使わず dist/ を node で動かし、その前に開発用のパッケージを取り除く`, !/npm run ses/.test(text) && /node dist\/ses\//.test(text) && /npm prune --omit=dev/.test(text), f);
+  }
+  const batch = workflows[0].text;
+  check('ses-batch.yml: 既知の脆弱性の確認（npm audit）が鍵を渡さないステップにある', /npm audit --omit=dev/.test(batch));
+  check('ses-batch.yml: Gmail の鍵・宛先は MAIL_PROVIDER=gmail のときだけ渡す', /SES_TARGET_GMAIL: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch) && /SES_GMAIL_SA_KEY_JSON: \$\{\{ vars\.MAIL_PROVIDER == 'gmail'/.test(batch));
+  check('Dependabot（npm・github-actions）の設定がある', existsSync('.github/dependabot.yml') && /github-actions/.test(readFileSync('.github/dependabot.yml', 'utf-8')));
+  const llmIndex = readFileSync('src/llm/index.ts', 'utf-8');
+  const dbIndex = readFileSync('src/database/index.ts', 'utf-8');
+  check(
+    '使わないプロバイダの SDK（Gemini・Notion）を静的に読み込まない（鍵を持つバッチで動かさない）',
+    !/^import [^;]*from '\.\/gemini\.js'/m.test(llmIndex) && !/^import (?!type )[^;]*from '@notionhq\/client'/m.test(dbIndex),
+  );
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3299,6 +3348,7 @@ async function main(): Promise<void> {
     await securityAuditRound3Checks();
     await securityAuditRound4Checks();
     await securityAuditRound5Checks();
+    securityAuditRound6Checks();
   } finally {
     setDemoOverride(null);
   }

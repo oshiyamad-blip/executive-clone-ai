@@ -8,8 +8,8 @@
 // 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
 import { createHash, randomUUID } from 'crypto';
 import { google } from 'googleapis';
-import { getServiceAccountAuth, loadServiceAccountCredentials } from '../collectors/googleAuth.js';
-import { sheetsDbSpreadsheetId, sheetsDbImpersonate, draftSigningKey } from '../ses/config.js';
+import { sheetsDbAuth, sheetsDbEditorAccount } from '../ses/googleCreds.js';
+import { sheetsDbSpreadsheetId, draftSigningKey } from '../ses/config.js';
 import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { normalizePrefecture, coarseResidence } from '../ses/prefecture.js';
 import { toInitials } from '../ses/pii.js';
@@ -123,15 +123,16 @@ const book = new SheetBook({
   tabs: TABS,
   spreadsheetId: sheetsDbSpreadsheetId,
   createApi: () => {
-    const auth = getServiceAccountAuth(SHEETS_RW_SCOPES, sheetsDbImpersonate() || undefined);
+    const auth = sheetsDbAuth(SHEETS_RW_SCOPES);
     return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
   },
   missingIdMessage: 'SHEETS_DB_SPREADSHEET_ID が未設定',
-  missingAuthMessage: 'Google認証（GOOGLE_SA_KEY_JSON または GOOGLE_SA_CLIENT_EMAIL/GOOGLE_SA_PRIVATE_KEY）が未設定',
+  missingAuthMessage:
+    'Google認証（SES_GOOGLE_SA_KEY_JSON / GOOGLE_SA_KEY_JSON 等）が未設定、または SHEETS_DB_IMPERSONATE に対応する専用の鍵 SHEETS_DB_SA_KEY_JSON が未設定・メインの鍵と同じ',
   accessHint: 'IDが正しいか、サービスアカウントのメールアドレスに編集者として共有済みかを確認してください',
   dropdowns: { [PROPER_CANDIDATE_TAB]: { ステータス: Object.values(MATCH_STATUS_LABEL) } },
   protectedTabs: { [INJECTION_FLAGS_TAB]: 'SESバッチ専用（指示混入疑いの印の控え）。編集しないでください' },
-  protectionEditor: () => sheetsDbImpersonate() || loadServiceAccountCredentials()?.clientEmail || '',
+  protectionEditor: () => sheetsDbEditorAccount(),
 });
 
 function configured(): boolean {

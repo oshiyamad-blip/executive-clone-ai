@@ -16,7 +16,7 @@ import { healLlmCall, isRetryableLlmError, type HealAttempt } from '../heal/retr
 import { estimateCallJpy } from '../../llm/pricing.js';
 import { recordHealEvent } from '../heal/events.js';
 import { errKind, safeErr, SafeLogError } from '../redact.js';
-import { properGoogleAuth } from './auth.js';
+import { properMasterAuth } from './auth.js';
 import {
   listSkillSheetFiles,
   loadSkillSheetContent,
@@ -50,14 +50,14 @@ const book = new SheetBook({
   tabs: { [PROPER_MASTER_TAB]: PROPER_MASTER_COLUMNS },
   spreadsheetId: properMasterSpreadsheetId,
   createApi: () => {
-    const auth = properGoogleAuth(SHEETS_SCOPES);
+    const auth = properMasterAuth(SHEETS_SCOPES);
     return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
   },
   missingIdMessage: 'PROPER_MASTER_SPREADSHEET_ID が未設定',
   missingAuthMessage:
-    'Google認証（GOOGLE_SA_KEY_JSON 等）が未設定、または PROPER_GOOGLE_IMPERSONATE に対応する PROPER_GOOGLE_SA_KEY_JSON が未設定',
+    'Google認証（SES_GOOGLE_SA_KEY_JSON / GOOGLE_SA_KEY_JSON 等）が未設定、または PROPER_GOOGLE_IMPERSONATE に対応する PROPER_GOOGLE_SA_KEY_JSON が未設定・メインの鍵と同じ',
   accessHint:
-    'IDが正しいか、サービスアカウント（PROPER_GOOGLE_SA_* 未設定ならメインのSA）のメールアドレスに編集者として共有済みか' +
+    'IDが正しいか、サービスアカウント（PROPER_MASTER_IN_MAIN_TENANT=true か PROPER_GOOGLE_SA_* 未設定ならメインのSA）のメールアドレスに編集者として共有済みか' +
     '（PROPER_GOOGLE_IMPERSONATE 指定時はそのユーザーが編集できるか）を確認してください',
   dropdowns: { [PROPER_MASTER_TAB]: { 稼働状況: Object.values(PROPER_STATUS) } },
 });

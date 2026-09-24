@@ -1,4 +1,4 @@
-import { Client } from '@notionhq/client';
+import type { Client } from '@notionhq/client';
 import { normalizePrefecture } from '../ses/prefecture.js';
 import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
 import { toInitials } from '../ses/pii.js';
@@ -45,7 +45,28 @@ import type {
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
 // ページ作成・クエリは data_source_id ベースで行う（database_id は不可）。
 // @notionhq/client v5 は既定で 2025-09-03 を使う。
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
+// SDK は最初の呼び出しのときに読み込む（DB_PROVIDER=sheets の SES バッチでは、使わない SDK のコードを鍵を持つプロセスで動かさない）。
+// notion.<名前>.<名前>(...) の呼び出しを、読み込み後のクライアントの同じメソッドへ渡す
+let notionClient: Promise<Client> | null = null;
+
+function loadNotion(): Promise<Client> {
+  notionClient ??= import('@notionhq/client').then(({ Client: NotionClient }) => new NotionClient({ auth: process.env.NOTION_TOKEN }));
+  return notionClient;
+}
+
+function lazyNotion(path: string[]): unknown {
+  return new Proxy(function () {}, {
+    get: (_t, prop) => (typeof prop === 'string' && prop !== 'then' ? lazyNotion([...path, prop]) : undefined),
+    apply: async (_t, _this, args: unknown[]) => {
+      let owner: unknown = await loadNotion();
+      for (const key of path.slice(0, -1)) owner = (owner as Record<string, unknown>)[key];
+      const method = (owner as Record<string, (...a: unknown[]) => unknown>)[path[path.length - 1]];
+      return method.apply(owner, args);
+    },
+  });
+}
+
+const notion = lazyNotion([]) as Client;
 
 const SIGNAL_DB_ID = process.env.NOTION_SIGNAL_DB_ID ?? '';
 const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';

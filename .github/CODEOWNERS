@@ -1,0 +1,7 @@
+# 本番の鍵を受け取るワークフロー・依存パッケージ・コードの変更は、所有者のレビューを必須にする
+# （main のルールセットで「Require review from Code Owners」を有効にしたときに効く。手順書 9-1）
+/.github/ @oshiyamad-blip
+/package.json @oshiyamad-blip
+/package-lock.json @oshiyamad-blip
+/src/ @oshiyamad-blip
+/scripts/ @oshiyamad-blip
