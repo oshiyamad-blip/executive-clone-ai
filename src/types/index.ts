@@ -481,6 +481,7 @@ export interface ProperJudgment {
   pitch: string; // 相手先に伝える推しどころ
   concerns: string[];
   reviewNotes: string[]; // 人が確かめる事項（根拠が経歴に見当たらない・必須の記載が途中で切れている等）
+  workPrefecture?: string; // AIが案件メールから読んだ出社先の都道府県（ルールで勤務地を読めなかった案件の地方の判定に使う）
 }
 
 // ===== 人間フィードバックによる精度向上 =====

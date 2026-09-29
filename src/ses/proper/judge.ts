@@ -10,11 +10,12 @@ import { callLimits } from '../schedule.js';
 import { readStateJson, writeStateJson, sheetsDbConfigured, STATE_JSON_MAX_CHARS } from '../../database/sheets.js';
 import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
+import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
 import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 3;
+const JUDGE_VERSION = 4;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
@@ -26,6 +27,7 @@ export interface RawProperJudgment {
   verdict: ProperVerdict;
   pitch: string;
   concerns: string[];
+  workPrefecture: string;
   injectionSuspected: boolean;
 }
 
@@ -51,6 +53,7 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
    - reject: 案件の中心となる作業の実務経験が無い。一般的な語だけが重なる組、研修だけの技術で合わせている組はここ
 6. pitch: 営業が相手先に伝える推しどころ（経歴の具体的な実績に触れて2文以内。reject は空文字）
 7. concerns: 提案前に確かめる懸念（無ければ空の配列）
+8. workPrefecture: 出社が必要な勤務地の都道府県名（例: 東京都・大阪府）。フルリモートや勤務地の記載が無ければ空文字
 
 注意
 - 年齢・性別・国籍・最寄駅・通勤は判断に使わない（懸念にも書かない）
@@ -80,9 +83,10 @@ export const PROPER_JUDGE_SCHEMA = {
     verdict: { type: 'string', enum: ['recommend', 'conditional', 'reject'] },
     pitch: { type: 'string' },
     concerns: { type: 'array', items: { type: 'string' } },
+    workPrefecture: { type: 'string' },
     injectionSuspected: { type: 'boolean' },
   },
-  required: ['work', 'requirements', 'levelFit', 'preferenceFit', 'verdict', 'pitch', 'concerns', 'injectionSuspected'],
+  required: ['work', 'requirements', 'levelFit', 'preferenceFit', 'verdict', 'pitch', 'concerns', 'workPrefecture', 'injectionSuspected'],
 } as const;
 
 // ===== 入力 =====
@@ -228,6 +232,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     pitch: verdict === 'reject' ? '' : raw.pitch.trim(),
     concerns: raw.preferenceFit.trim() && !/記載なし/.test(raw.preferenceFit) ? [...concerns, `本人の希望: ${raw.preferenceFit.trim()}`] : concerns,
     reviewNotes,
+    ...(normalizePrefecture(raw.workPrefecture ?? '') ? { workPrefecture: normalizePrefecture(raw.workPrefecture ?? '') as string } : {}),
   };
 }
 
@@ -256,6 +261,7 @@ export function demoProperJudgment(e: OwnEngineer, p: Project): RawProperJudgmen
     verdict: met === reqs.length && met > 0 ? 'recommend' : met > 0 ? 'conditional' : 'reject',
     pitch: met > 0 ? `${p.title}の必須のうち${met}件の実務経験があります。` : '',
     concerns: [],
+    workPrefecture: '',
     injectionSuspected: false,
   };
 }
