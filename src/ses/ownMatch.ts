@@ -58,13 +58,15 @@ interface OwnRankInfo {
   receivedMs: number;
 }
 
-// 案件の中心の技術を持っているか。技術（辞書の技術名）の必須があればそのどれかを満たし、案件名に技術名があれば
+// 案件の中心の技術を持っているか。技術（辞書の技術名）の必須があればその過半数を満たし、案件名に技術名があれば
 // そのどれかを持っていること（「PowerBI研修」に基本設計・PLの経験だけの社員を付けない）
 export function coversCoreTech(project: Pick<Project, 'title' | 'requiredSkills'>, have: string[], b: SkillBreakdown | null): boolean {
   const isTech = (label: string) => parseRequirements(label).some((r) => r.members.some((m) => skillCategory(m) === 'skill'));
   if (b) {
     const techReqs = [...b.exact, ...b.equiv, ...b.implied, ...b.missing].filter(isTech);
-    if (techReqs.length > 0 && techReqs.every((l) => b.missing.includes(l))) return false;
+    // 技術の必須の過半数を満たすこと（Java開発の案件に Linux だけ合う社員を付けない）
+    const techMet = techReqs.filter((l) => !b.missing.includes(l)).length;
+    if (techReqs.length > 0 && techMet * 2 <= techReqs.length) return false;
   }
   const titleTech = techNamesIn(project.title);
   if (titleTech.length === 0) return true;
