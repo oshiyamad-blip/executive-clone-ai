@@ -147,7 +147,7 @@ import {
 } from '../parse.js';
 import { spawnSync } from 'child_process';
 import { splitNotifyRecipients, pricingPolicyProblems, geminiDataUseProblem, type PricingPolicyCheckInput } from '../settingsFormat.js';
-import { coarseResidence, normalizePrefecture } from '../prefecture.js';
+import { coarseResidence, normalizePrefecture, commuteFit } from '../prefecture.js';
 import { reducedSubject, maskFailureText, dropStaleEntries, QUARANTINE_TTL_MS, type QuarantineEntry } from '../heal/quarantine.js';
 import { recordMailEvent, hasFatal } from '../heal/events.js';
 import { availabilityText } from '../proper/proposal.js';
@@ -3715,6 +3715,15 @@ function levelChecks(): void {
   check('スキルシートの値を優先し、無い軸はサマリで補う', merged.skillYears[0].years === 2 && topPhaseOf(merged) === '詳細設計' && merged.role === 'PG');
 }
 
+function commuteChecks(): void {
+  section('通勤圏（プロパーの勤務地の判定）');
+  check('隣接・1都3県どうし・関西どうしは通勤圏',
+    commuteFit('東京都', '埼玉県') === 'ok' && commuteFit('神奈川県', '埼玉県') === 'ok' && commuteFit('神奈川県', '千葉県') === 'ok' && commuteFit('兵庫県', '奈良県') === 'ok');
+  check('北関東から1都3県は通勤時間の確認つき・遠方は対象外',
+    commuteFit('東京都', '群馬県') === 'check' && commuteFit('神奈川県', '茨城県') === 'check' && commuteFit('大阪府', '群馬県') === 'no' && commuteFit('東京都', '大阪府') === 'no');
+  check('通勤時間の確認は営業リストの確認事項に出る', salesNotesOf('［確認］通勤時間（群馬県から東京都）。必要案件単価65万円').confirm === '通勤時間（群馬県から東京都）');
+}
+
 function salesListChecks(): void {
   section('営業リスト（プロパー提案候補）: 優先度・交渉ポイント・人の入力の引き継ぎ');
   const base = {
@@ -3841,6 +3850,7 @@ async function main(): Promise<void> {
     marketRateChecks();
     summarySendChecks();
     levelChecks();
+    commuteChecks();
     salesListChecks();
     await userOAuthChecks();
     await securityAuditChecks();
