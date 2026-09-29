@@ -99,7 +99,7 @@ import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
 import { verifyJudgment, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects } from '../proper/index.js';
+import { buildProperCandidates, dedupeProjects, applyJudgment } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3772,7 +3772,21 @@ async function properJudgeChecks(): Promise<void> {
     { requirement: 'Excel(VLOOKUPなど簡単な関数)', status: 'met', evidence: '顧客管理DBの運用保守業務', note: '' },
   ] }), profile, { requiredSkills: ['運用保守', 'Excel(VLOOKUPなど簡単な関数)'] });
   check('「運用保守」「Excel」など一般的な語だけの一致は見送り', generic.verdict === 'reject' && generic.pitch === '', JSON.stringify(generic));
-  check('一般的な語の判定', isGenericRequirement('Excel(EXACT/VLOOKUPなど簡単な関数)') && isGenericRequirement('コミュニケーション能力') && !isGenericRequirement('Oracle'));
+  check('一般的な語の判定（言い回しの違い・Office系・作業姿勢も含む）',
+    isGenericRequirement('Excel(EXACT/VLOOKUPなど簡単な関数)') && isGenericRequirement('コミュニケーション能力') && isGenericRequirement('運用保守業務経験') &&
+      isGenericRequirement('Excelの簡単な関数（EXACT/VLOOKUP等）の業務経験') && isGenericRequirement('資料準備・設定作業をミスなく実施できる作業精度') &&
+      !isGenericRequirement('Oracle') && !isGenericRequirement('SQL経験') && !isGenericRequirement('インフラ構築'));
+  const weakClose = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+    { requirement: 'PHP', status: 'close', evidence: '顧客管理DBの運用保守業務', note: '' },
+  ] }), profile, { requiredSkills: ['Oracle', 'PHP'] });
+  check('技術の要件に技術の記載が無い根拠の「近い経験」は満たさない扱い', weakClose.gaps.includes('PHP') && weakClose.met.length === 1, JSON.stringify(weakClose));
+  check('案件名の中心の技術（PHP）を満たさない組は、ほかの要件が合っても見送り',
+    verifyJudgment(raw({ requirements: [
+      { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+      { requirement: 'PHP', status: 'unmet', evidence: '', note: '' },
+    ] }), profile, { requiredSkills: ['Oracle', 'PHP'], title: '通信キャリア向け業務委託対応（PHP）' }).verdict === 'reject' &&
+      verifyJudgment(raw(), profile, { requiredSkills: ['Oracle', 'JP1'], title: 'Oracle保守' }).verdict === 'recommend');
   const close = verifyJudgment(raw({ requirements: [{ requirement: 'PostgreSQL', status: 'close', evidence: 'orderby・groupbyなどのSQL対応', note: '' }] }), profile, { requiredSkills: ['PostgreSQL'] });
   check('近い経験は合っている点（近い経験）と足りない点の両方に出す',
     close.met[0].startsWith('PostgreSQL（近い経験） ← ') && close.gaps.includes('PostgreSQL（近い経験のみ）'), JSON.stringify(close));
@@ -3787,6 +3801,12 @@ async function properJudgeChecks(): Promise<void> {
   const dupB = project({ id: 'd2', title: '基幹系システム運用保守', agentCompany: 'B社', rateMax: 50, receivedAt: daysAgo(1) });
   const roleSe = project({ id: 'd3', title: 'Sales Cloud展開（SE枠）', rateMax: null, rateMin: null, receivedAt: daysAgo(1) });
   const rolePg = project({ id: 'd4', title: 'Sales Cloud展開（PG枠）', rateMax: null, rateMin: null, receivedAt: daysAgo(1) });
+  const cheap = project({ id: 'd5', title: '音声マイニング開発支援', agentCompany: 'C社', rateMax: 70, receivedAt: daysAgo(1) });
+  const dear = project({ id: 'd6', title: '音声マイニング開発支援', agentCompany: 'D社', rateMax: 74, receivedAt: daysAgo(2) });
+  const lead = project({ id: 'd7', title: '音声マイニング開発支援', agentCompany: 'E社', rateMax: 90, receivedAt: daysAgo(1) });
+  const dr = dedupeProjects([cheap, dear, lead]);
+  check('単価の差が10万円以内なら同じ案件として単価の高い方を残し、それを超える差は別の案件（役割違い）',
+    dr.kept.map((p) => p.id).sort().join(',') === 'd6,d7' && dr.others.get('d6')?.join() === 'C社');
   const dd = dedupeProjects([dupA, dupB, roleSe, rolePg]);
   check('別のメールで届いた同じ案件（括弧の補足を除いた名前と単価が同じ）は新しい受信の1件にまとめ、他の営業元を控える・単価の無い案件はまとめない',
     dd.kept.map((p) => p.id).sort().join(',') === 'd2,d3,d4' && dd.others.get('d2')?.join() === 'A社', JSON.stringify([...dd.others]));
@@ -3823,6 +3843,11 @@ async function properJudgeChecks(): Promise<void> {
     check('AIの推奨は強マッチ・優先度A・合っている点は根拠つき・提案文面に推しどころ・勤務地（群馬）では落とさない',
       ok1?.band === 'strong' && salesPriorityOf(ok1).startsWith('A') && ok1.matchedSkills?.[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応' &&
         (ok1.draftToProject?.body ?? '').includes('■ご提案のポイント\nOracle DB の運用保守を2年担当。'), JSON.stringify(ok1));
+    const cond = { ...(ok1 as ProperCandidate) };
+    const j2 = { ...(ok1?.judgment as NonNullable<ProperCandidate['judgment']>), verdict: 'conditional' as const };
+    check('案件単価が希望より30万円以上高い組は、AIが推奨しない限り候補にしない',
+      applyJudgment({ ...cond, rateGapMan: 40 }, j2) === null && applyJudgment({ ...cond, rateGapMan: 40 }, { ...j2, verdict: 'recommend' }) !== null &&
+        applyJudgment({ ...cond, rateGapMan: 15 }, j2) !== null);
     check('AIが見送った組は候補にしない', !candidates.some((c) => c.ownEngineerId === 'E_rej') && stats.rejected === 1);
     check('AI判定に失敗した組は、ルールの基準も満たすときだけ要確認で残す（Oracleだけ＝一致率50%は残さない）',
       !candidates.some((c) => c.ownEngineerId === 'E_fail') && stats.failed === 1, JSON.stringify(stats));

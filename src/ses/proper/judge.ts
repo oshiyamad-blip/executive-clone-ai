@@ -14,7 +14,7 @@ import { skillMatch } from '../pricing.js';
 import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 2;
+const JUDGE_VERSION = 3;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
@@ -138,9 +138,13 @@ const GENERIC = new Set(
     'ドキュメント作成', '資料作成', '報連相', '主体性', '協調性', 'pc操作', '事務', 'エクセル'].map(norm),
 );
 
+// Office系の道具・人柄や作業姿勢の条件（どの社員にも当てはまりやすく、案件に合う根拠にならない）
+const OFFICE_OR_SOFT = /excel|エクセル|word|powerpoint|パワーポイント|office|365|スプレッドシート|コミュニケーション|報連相|ミスなく|正確|丁寧|作業精度|スケジュール通り|主体的|積極的|協調|責任感|前向き|マナー/i;
+
 export function isGenericRequirement(label: string): boolean {
-  const n = norm(label.replace(/[（(].*?[)）]/g, ''));
-  return n.length === 0 || GENERIC.has(n) || /^(コミュニケーション|主体的|積極的|前向き|責任感)/.test(n);
+  if (OFFICE_OR_SOFT.test(label.normalize('NFKC'))) return true;
+  const n = norm(label.replace(/[（(].*?[)）]/g, '')).replace(/業務|実務|経験|スキル|能力|の|等|など/g, '');
+  return n.length === 0 || GENERIC.has(n);
 }
 
 // 抽出で途中が切れた必須（「開発プロセスの改善提案のご」）。原文を人が確かめる
@@ -161,19 +165,24 @@ export function evidenceMentionsTech(requirement: string, evidence: string): boo
 
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
-export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'>): ProperJudgment {
+export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string }): ProperJudgment {
   const hay = norm(profile);
   const met: string[] = [];
   const gaps: string[] = [];
   const reviewNotes: string[] = [];
   const concerns = raw.concerns.map((c) => c.trim()).filter(Boolean);
   let substantive = 0;
+  const heldTech = new Set<string>(); // 満たす・近い経験とした要件の技術名
+  const askedTech = new Set<string>(); // 要件に出てくる技術名
   let unverified = 0;
+  let weak = 0;
   let metCount = 0;
   let unmetCount = 0;
   for (const r of raw.requirements) {
     const label = r.requirement.trim();
     if (!label) continue;
+    const labelTech = techNamesIn(label);
+    labelTech.forEach((t) => askedTech.add(t.toLowerCase()));
     const ev = r.evidence.trim();
     const found = ev.length > 0 && norm(ev).length >= 4 && hay.includes(norm(ev));
     let status = r.status;
@@ -182,23 +191,33 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
       unverified += 1;
     }
     if (status === 'met' && !evidenceMentionsTech(label, ev)) status = 'close';
+    // 技術の要件に、技術の記載が1つも無い記載を「近い経験」の根拠にしない（「マニュアルの校正」で PHP を近いとしない）
+    if (status === 'close' && techNamesIn(label).length > 0 && techNamesIn(ev).length === 0) {
+      status = 'unmet';
+      weak += 1;
+    }
     if (status === 'unmet') {
       unmetCount += 1;
       gaps.push(r.note.trim() ? `${label}（${r.note.trim()}）` : label);
       continue;
     }
     if (status === 'met') metCount += 1;
+    labelTech.forEach((t) => heldTech.add(t.toLowerCase()));
     if (!isGenericRequirement(label)) substantive += 1;
     met.push(`${label}${status === 'close' ? '（近い経験）' : ''} ← ${ev}`);
     if (status === 'close') gaps.push(`${label}（近い経験のみ）`);
   }
+  if (weak > 0) concerns.push(`近い経験とされた${weak}件は根拠に技術の記載が無いため、満たさない扱いにしました`);
   if (unverified > 0) reviewNotes.push(`AIが根拠に挙げた記載のうち${unverified}件が経歴に見当たらないため、満たさない扱いにしました`);
   const truncated = project.requiredSkills.filter(isTruncatedRequirement);
   if (truncated.length > 0) reviewNotes.push(`必須スキルの記載が途中で切れています（${truncated.join('、')}）。メール本文で確認してください`);
   if (raw.injectionSuspected) reviewNotes.push('案件メールにAIへの指示らしき記載があります');
 
+  // 案件名に出てくる中心の技術（要件にも挙がっているもの）を1つも満たさない組は見送り（PHP案件にリーダー経験だけで合わせない）
+  const titleTech = techNamesIn(project.title ?? '').map((t) => t.toLowerCase()).filter((t) => askedTech.has(t));
+  const missesCore = titleTech.length > 0 && !titleTech.some((t) => heldTech.has(t));
   let verdict = raw.verdict;
-  if (substantive === 0) verdict = 'reject'; // 一般的な語だけ（または根拠の無い一致だけ）
+  if (substantive === 0 || missesCore) verdict = 'reject'; // 一般的な語だけ・根拠の無い一致だけ・中心の技術が無い
   else if (verdict === 'recommend' && (unmetCount > metCount || unverified > 0)) verdict = 'conditional';
   return {
     verdict,

@@ -49,9 +49,13 @@ export interface JudgeStats {
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
 }
 
+// 案件単価が希望単価をこの額（万円）以上上回る案件は、求められる水準が大きく上とみなし、AIが推奨しない限り候補にしない
+export const LEVEL_GAP_MAN = 30;
+
 // AIの判定を候補に反映する。見送りは null（候補にしない）
 export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
   if (j.verdict === 'reject') return null;
+  if (j.verdict !== 'recommend' && (m.rateGapMan ?? 0) >= LEVEL_GAP_MAN) return null;
   const notes = [
     ...j.reviewNotes.map((n) => `［確認］${n}。`),
     ...j.concerns.map((c) => `［確認］${c.replace(/。$/, '')}。`),
@@ -67,28 +71,36 @@ export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
   };
 }
 
-// 同じ案件が別のメール（別の会社経由・再送）で届いたものを1件にまとめる。案件名（括弧の補足を除く）と単価が同じなら同じ案件とみなし、
-// 新しい受信を残す。単価の無い案件はまとめない（同じ名前でSE枠・PG枠のように役割が違うことがある）。
+// 同じ案件が別のメール（別の会社経由・再送）で届いたものを1件にまとめる。案件名（括弧の補足を除く）が同じで単価の差が
+// DEDUPE_RATE_GAP_MAN 以内なら同じ案件とみなし、単価の高い方（同じなら新しい受信）を残す（商流で単価が数万円違うことがある）。
+// 単価の無い案件はまとめない（同じ名前でSE枠・PG枠のように役割が違うことがある）。
 // 残した案件のIDに、まとめた他のメールの営業元会社を返す（営業リストの確認事項に出す）
+const DEDUPE_RATE_GAP_MAN = 10;
+
 export function dedupeProjects(projects: Project[]): { kept: Project[]; others: Map<string, string[]> } {
   const core = (t: string) => t.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').replace(/\s+/g, '').toLowerCase();
-  const byKey = new Map<string, Project[]>();
+  const rateOf = (p: Project) => p.rateMax ?? p.rateMin;
+  const byTitle = new Map<string, Project[]>();
   const kept: Project[] = [];
   for (const p of projects) {
-    const rate = p.rateMax ?? p.rateMin;
-    if (rate === null || !core(p.title)) {
-      kept.push(p);
-      continue;
-    }
-    const k = `${core(p.title)}|${rate}`;
-    byKey.set(k, [...(byKey.get(k) ?? []), p]);
+    if (rateOf(p) === null || !core(p.title)) kept.push(p);
+    else byTitle.set(core(p.title), [...(byTitle.get(core(p.title)) ?? []), p]);
   }
   const others = new Map<string, string[]>();
-  for (const group of byKey.values()) {
-    const sorted = [...group].sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime());
-    kept.push(sorted[0]);
-    const rest = [...new Set(sorted.slice(1).map((p) => p.agentCompany).filter(Boolean))];
-    if (sorted.length > 1) others.set(sorted[0].id, rest);
+  for (const group of byTitle.values()) {
+    const sorted = [...group].sort(
+      (a, b) => (rateOf(b) as number) - (rateOf(a) as number) || new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime(),
+    );
+    const clusters: Project[][] = [];
+    for (const p of sorted) {
+      const c = clusters.find((cl) => Math.abs((rateOf(cl[0]) as number) - (rateOf(p) as number)) <= DEDUPE_RATE_GAP_MAN);
+      if (c) c.push(p);
+      else clusters.push([p]);
+    }
+    for (const cl of clusters) {
+      kept.push(cl[0]);
+      if (cl.length > 1) others.set(cl[0].id, [...new Set(cl.slice(1).map((p) => p.agentCompany).filter(Boolean))]);
+    }
   }
   return { kept, others };
 }
@@ -128,9 +140,12 @@ export async function buildProperCandidates(
     if (m) judged.push(m);
     else stats.rejected += 1;
   });
-  // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はルールの並び（pairs の順）。社員ごと・案件ごとの上限を掛ける
+  // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はAIの見立ての合い方（満たす要件の数 − 足りない要件の数）→ ルールの並び。
+  // 社員ごと・案件ごとの上限を掛ける（上限の中にAIが良いと見た組から入るように）
   const cat = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
-  const order = judged.map((m, i) => ({ m, i })).sort((a, b) => cat(a.m) - cat(b.m) || a.i - b.i);
+  const order = judged
+    .map((m, i) => ({ m, i, fit: judgmentFit(m.judgment) }))
+    .sort((a, b) => cat(a.m) - cat(b.m) || b.fit - a.fit || a.i - b.i);
   const limit = maxCandidatesPerItem();
   const perEngineer = new Map<string, number>();
   const perProject = new Map<string, number>();
@@ -153,6 +168,12 @@ export async function buildProperCandidates(
     candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}) });
   }
   return { candidates, stats };
+}
+
+// AIの見立ての合い方: 満たす要件（近い経験を除く）の数 − 足りない要件（近い経験のみを含む）の数
+export function judgmentFit(j: ProperJudgment | undefined): number {
+  if (!j) return -Infinity;
+  return j.met.filter((l) => !/（近い経験） ← /.test(l)).length - j.gaps.length;
 }
 
 function logJudge(s: JudgeStats): void {
