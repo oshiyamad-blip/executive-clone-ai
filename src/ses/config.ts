@@ -777,6 +777,12 @@ export function properMasterInMainTenant(): boolean {
   return envBool('PROPER_MASTER_IN_MAIN_TENANT', false);
 }
 
+// 社員（要員管理表の要員）は、案件単価が必要案件単価をこの額（万円/月）下回るまでは候補に残す（本人との単価交渉が前提）。
+// 0 にすると必要案件単価以上の案件だけにする
+export function properRateToleranceMan(): number {
+  return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
+}
+
 // プロパー候補の突合対象にする案件の受信日の遡り日数
 export function properProjectLookbackDays(): number {
   return envNum('PROPER_PROJECT_LOOKBACK_DAYS', 14, { min: 1 });

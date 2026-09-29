@@ -459,7 +459,7 @@ function renderPage(): string {
     own.forEach(function(m){ (byEng[m.ownEngineerName] = byEng[m.ownEngineerName] || []).push(m); });
     root.innerHTML = Object.keys(byEng).map(function(name){
       var items = byEng[name].map(function(m){
-        var tag = (m.band === 'tentative' ? '[参考提案] ' : '') + (m.needsReview ? '[要確認] ' : (m.meetsRate ? '[単価充足] ' : ''));
+        var tag = (m.band === 'tentative' ? '[参考提案] ' : '') + (m.needsReview ? '[要確認] ' : (m.meetsRate ? '[単価充足] ' : '[単価交渉] '));
         return '<div class="own-proj">' + tag + esc(m.projectTitle) + ' — 案件単価' + esc(m.projectRate==null?'不明':m.projectRate) + '万円/月, スコア' + esc(m.score) + '点<br><span class="empty">' + esc(m.reason) + '</span></div>';
       }).join('');
       return '<div class="own-eng">' + esc(name) + '</div>' + items;

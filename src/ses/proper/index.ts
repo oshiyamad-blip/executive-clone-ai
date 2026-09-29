@@ -4,7 +4,7 @@
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
 import { isDemo, properEnabled, properProjectLookbackDays } from '../config.js';
-import { matchOwnEngineersToProjects } from '../ownMatch.js';
+import { matchOwnEngineersToProjects, signedMan } from '../ownMatch.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
 import { recordHealEvent } from '../heal/events.js';
@@ -130,8 +130,8 @@ function candidateLine(c: ProperCandidate): string {
   const rate = c.projectRate !== null ? `${c.projectRate}万円/月` : '単価不明';
   // 社員ごとの必要案件単価（社内の原価に近い値）はメールに載せず、案件単価との差だけにする
   const need =
-    c.requiredProjectRate !== null ? (c.rateGapMan !== null ? `必要案件単価との差+${c.rateGapMan}万円` : '必要案件単価あり') : '必要案件単価未入力';
-  const tags = `${c.band === 'tentative' ? '[参考提案]' : ''}${c.needsReview ? '[要確認]' : ''}`;
+    c.requiredProjectRate !== null ? (c.rateGapMan !== null ? `必要案件単価との差${signedMan(c.rateGapMan)}万円` : '必要案件単価あり') : '必要案件単価未入力';
+  const tags = `${c.band === 'tentative' ? '[参考提案]' : ''}${c.needsReview ? '[要確認]' : !c.meetsRate && c.rateGapMan !== null ? '[単価交渉]' : ''}`;
   return `・${tags}${c.properLabel} × ${c.projectTitle} — 案件${rate}（${need}）・スキル一致率${Math.round(c.skillMatchRate * 100)}%`;
 }
 

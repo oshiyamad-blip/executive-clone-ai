@@ -984,6 +984,13 @@ function ownMatchChecks(): void {
   check('常駐のみの案件 × フルリモート希望の社員は除外', evaluateOwnMatch(own('o1', { remoteWish: 'full' }), project({ remote: 'none', receivedAt: daysAgo(1) }), NOW) === null);
   const stale = evaluateOwnMatch(own('o1'), project({ requiredSkills: ['Java'], rateMax: 70, receivedAt: daysAgo(50) }), NOW);
   check('受信から45日超の案件は参考提案・要再確認', stale?.band === 'tentative' && stale.reason.includes('要再確認'), stale?.reason);
+  // 必要案件単価を少し下回る案件（既定5万円まで）は単価交渉として残す
+  const under = (rateMax: number) => evaluateOwnMatch(own('o1', { requiredProjectRate: 70 }), project({ requiredSkills: ['Java'], rateMax, receivedAt: daysAgo(1) }), NOW);
+  const nego = under(65);
+  check('必要案件単価の5万円下までは単価交渉として候補に残す', nego !== null && !nego.meetsRate && !nego.needsReview && nego.rateGapMan === -5 && nego.reason.includes('【単価交渉】') && nego.reason.includes('差 -5万円'), nego?.reason);
+  check('5万円を超えて下回る案件は除外', under(64.5) === null);
+  check('必要案件単価以上は単価充足（交渉の注記なし）', under(72)?.meetsRate === true && !under(72)!.reason.includes('単価交渉'));
+  check('PROPER_RATE_TOLERANCE_MAN=0 なら必要案件単価未満は除外', withEnv({ PROPER_RATE_TOLERANCE_MAN: '0' }, () => under(69.5)) === null);
 }
 
 // ===== 14. AI最終判定の関門（区分の決め方・値の整え方・入力） =====

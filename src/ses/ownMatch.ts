@@ -1,5 +1,6 @@
 // 自社社員(候補要員)→ 合いそうな案件を探す機能。
 // 外部要員との突合(match.ts)と異なり、金額条件は「案件単価 ≥ 社員の必要案件単価」の閾値方式。
+// 必要案件単価を少し下回る案件（既定5万円まで。PROPER_RATE_TOLERANCE_MAN）は「単価交渉」として候補に残す。
 // スキル・勤務地・時期の判定は match.ts と同じヘルパーを流用する。
 // 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
 // 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
@@ -22,6 +23,7 @@ import {
   skillMatchStrongThreshold,
   maxCandidatesPerItem,
   logRedact,
+  properRateToleranceMan,
 } from './config.js';
 import { safeErr } from './redact.js';
 import {
@@ -39,6 +41,11 @@ import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand, PairBrea
 // 案件単価は上限(rateMax)を優先し、無ければ下限(rateMin)。両方無ければ null。
 export function projectRateMan(project: Project): number | null {
   return project.rateMax ?? project.rateMin ?? null;
+}
+
+// 単価差の表示（+5 / -2.5）
+export function signedMan(gap: number): string {
+  return gap >= 0 ? `+${fmtMan(gap)}` : `-${fmtMan(-gap)}`;
 }
 
 // 並びに使う内部の値（OwnMatch には載せない）
@@ -100,11 +107,11 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     : isTimingWithinGrace(project.startDate as string, own.availableFrom as string, now);
   if (!timingUnknown && !timingOk) return null;
 
-  // 金額: 案件単価 ≥ 必要案件単価。どちらか不明なら要確認、満たさなければ除外
+  // 金額: 案件単価 ≥ 必要案件単価。どちらか不明なら要確認。許容幅までの不足は単価交渉として残し、それを超える不足は除外
   const rate = projectRateMan(project);
   const required = own.requiredProjectRate;
   const rateUnknown = rate === null || required === null;
-  if (!rateUnknown && (rate as number) < (required as number)) return null; // 単価不足は除外
+  if (!rateUnknown && (rate as number) < (required as number) - properRateToleranceMan()) return null;
   if (rateUnknown) reviewReasons.push('単価不明');
   // 元のメールにAIへの指示らしき記載がある案件は、人が確かめる（提案文面も作らない。proper/index.ts）
   if (project.injectionSuspected) reviewReasons.push(INJECTION_REVIEW_REASON);
@@ -112,6 +119,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const meetsRate = !rateUnknown && (rate as number) >= (required as number);
   // 表示用に0.5万円刻みへ切り下げる（「+5.200000000000003万円」を出さない。多めには見せない）
   const rateGapMan = rateUnknown ? null : roundManDown((rate as number) - (required as number));
+  const rateNegotiation = !rateUnknown && !meetsRate;
 
   // 鮮度: 受信から SES_STALE_DAYS 超の案件は募集が終わっている恐れがあるため強マッチにせず要再確認を付ける
   const freshness = freshnessOf(project.receivedAt, now);
@@ -133,12 +141,13 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
     (implied ? `${implied}。` : '') +
     (stale ? `${staleCaution('案件')}。` : '') +
-    (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '');
+    (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '') +
+    (rateNegotiation ? `【単価交渉】必要案件単価まで${fmtMan(-(rateGapMan as number))}万円不足（本人の了承が前提）。` : '');
   const skillText =
     skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
   const reason = needsReview
     ? `${notes}${reviewReasons.join('・')}のため要確認です（${skillText}）。`
-    : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 +${fmtMan(rateGapMan as number)}万円）・${skillText}・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
+    : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 ${signedMan(rateGapMan as number)}万円）・${skillText}・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
 
   const b = skill.breakdown;
   return {
@@ -281,7 +290,7 @@ function printSummary(own: OwnEngineer[], matches: OwnMatch[]): void {
     }
     for (const m of forEngineer) {
       const tentative = m.band === 'tentative' ? '[参考提案]' : '';
-      const tag = tentative + (m.needsReview ? '[要確認]' : m.meetsRate ? '[単価充足]' : '');
+      const tag = tentative + (m.needsReview ? '[要確認]' : m.meetsRate ? '[単価充足]' : '[単価交渉]');
       console.log(`  ${tag} ${m.projectTitle} — 案件単価${m.projectRate ?? '不明'}万円/月, 適合スコア${m.score}点`);
       console.log(`      ${m.reason}`);
     }
