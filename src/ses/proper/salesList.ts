@@ -1,7 +1,7 @@
 // 営業に渡す「プロパー提案候補リスト」（営業専用の別スプレッドシート。PROPER_SALES_SPREADSHEET_ID）。
 // 案件スプレッドシート（DB）は生データ・内部IDを含むため営業に共有せず、判断に要る列だけを見やすい形で書き出す。
 // - 「全体」タブ: 優先度 → 要員 → 受信の新しい順。左に判断に要る列、右に詳細（本文・文面）。ID列は隠す
-// - 要員ごとのタブ: 「全体」を FILTER で映す閲覧用（入力は「全体」で行う）。要員の増減に合わせてバッチが足し引きする
+// - 要員ごとのタブ: 「全体」を FILTER で映す閲覧用（入力は「全体」で行う）。候補が0件の営業中の要員にも作り、要員の増減に合わせてバッチが足し引きする
 // - 色: 優先度（A=緑/B=黄/C=灰）と対応状況（提案済=青/面談調整=紫/面談済=橙/成約=緑/見送り=灰）を条件付き書式で
 // - 人が入力する列（対応状況・担当営業・メモ・精度チェック・精度メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
 // - 要員一覧: いま営業している要員（稼働可）を、候補が0件の要員も含めて1行ずつ（稼働開始・希望単価・スキル・本人の希望・候補数）
@@ -483,7 +483,10 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   const rows = mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy);
 
   // 要員のタブ: 行のある要員の分を揃え、いなくなった要員のタブ（バッチが作ったものだけ）を消す
-  const labels = [...new Set(rows.map((r) => String(r[COL['要員']])))].filter(Boolean).sort();
+  // 候補が0件の要員（いま営業している要員）にもタブを作る
+  const labels = [...new Set([...rows.map((r) => String(r[COL['要員']])), ...engineers.map((e) => e.proposalLabel || e.displayName)])]
+    .filter(Boolean)
+    .sort();
   const wanted = new Map(labels.map((l) => [staffTabName(l), l]));
   const tabChanges: sheets_v4.Schema$Request[] = [];
   for (const t of tabs) if (t.staff && !wanted.has(t.title)) tabChanges.push({ deleteSheet: { sheetId: t.sheetId } });

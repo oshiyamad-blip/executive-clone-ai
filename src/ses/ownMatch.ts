@@ -1,7 +1,7 @@
 // 自社社員(候補要員)→ 合いそうな案件を探す機能。
 // 外部要員との突合(match.ts)と異なり、金額条件は「案件単価 ≥ 社員の必要案件単価」の閾値方式。
 // 必要案件単価を少し下回る案件（既定5万円まで。PROPER_RATE_TOLERANCE_MAN）は「単価交渉」として候補に残す。
-// スキル・時期の判定は match.ts と同じヘルパーを流用する。勤務地・通勤は見ない。
+// スキル・時期の判定は match.ts と同じヘルパーを流用する。勤務地は本人と同じ地方（関東なら関東1都6県）まで、通勤時間は見ない。
 // プロパー候補（proper/index.ts）はここを緩い足切り（ownPairsForJudge）として使い、合うかどうかはAI判定（proper/judge.ts）で決める。
 // 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
 // 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
@@ -11,6 +11,7 @@ import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
 import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
+import { isFullRemoteLocation, wideRegionOf } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
@@ -132,7 +133,12 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date,
     (ageLimit !== null ? `［条件］年齢${ageLimit}歳まで。` : '') +
     (flow.soleProprietor === 'ng' && affiliation === 'partner' ? '［条件］個人事業主不可（所属を確認）。' : '');
 
-  // 勤務地・通勤は判定に使わない（自社社員は通える範囲を本人と相談して決めるため。営業リストに勤務地を出して人が見る）
+  // 勤務地: 通勤時間は見ないが、本人と違う地方（関東の社員に名古屋・兵庫など）の出社がある案件は候補にしない。
+  // フルリモートは地方を問わない。どちらかの都道府県が分からなければ通す（営業リストの勤務地を人が見る）
+  const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
+  const projectRegion = wideRegionOf(project.prefecture);
+  const ownRegion = wideRegionOf(own.prefecture);
+  if (!fullRemote && projectRegion && ownRegion && projectRegion !== ownRegion) return null;
   const locationOk = true;
 
   // 時期: どちらか不明なら通過(緩め)

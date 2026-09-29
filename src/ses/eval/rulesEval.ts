@@ -150,7 +150,7 @@ import {
 } from '../parse.js';
 import { spawnSync } from 'child_process';
 import { splitNotifyRecipients, pricingPolicyProblems, geminiDataUseProblem, type PricingPolicyCheckInput } from '../settingsFormat.js';
-import { coarseResidence, normalizePrefecture } from '../prefecture.js';
+import { coarseResidence, normalizePrefecture, wideRegionOf } from '../prefecture.js';
 import { reducedSubject, maskFailureText, dropStaleEntries, QUARANTINE_TTL_MS, type QuarantineEntry } from '../heal/quarantine.js';
 import { recordMailEvent, hasFatal } from '../heal/events.js';
 import { availabilityText } from '../proper/proposal.js';
@@ -3832,6 +3832,14 @@ async function properJudgeChecks(): Promise<void> {
       !sharesTech({ title: '音声基盤の年末年始対応', requiredSkills: [] }, ['Excel'], { exact: ['運用保守'], equiv: [], implied: [], missing: [], via: {} }));
   check('AIへの入力: 案件は <untrusted_mail> で囲み、社員の経歴と希望単価は指示文の側',
     judgeUserPrompt(pj).includes('<untrusted_mail>\n案件名: Oracle保守') && judgeSystemFor(eng('E1', ['Oracle'])).includes('<engineer_profile>\n希望単価: 50万円/月'));
+  const kanto = { id: 'o_k', displayName: 'K', skills: ['Oracle', 'JP1'], experienceYears: 3, requiredProjectRate: 50, residence: '', prefecture: '埼玉県',
+    availableDate: '', availableFrom: null, remoteWish: 'unknown' as const, status: 'available' as const };
+  const nagoya = project({ id: 'p_ngy', title: 'Oracle保守', requiredSkills: ['Oracle', 'JP1'], rateMax: 60, prefecture: '愛知県', location: '名古屋', remote: 'none', receivedAt: daysAgo(1) });
+  check('勤務地は本人と同じ地方まで（埼玉の社員に名古屋常駐は出さない・フルリモートは地方を問わない・群馬の社員に都内は出す）',
+    wideRegionOf('群馬県') === '関東' && wideRegionOf('愛知県') === '中部' &&
+      evaluateOwnMatch(kanto, nagoya, NOW) === null &&
+      evaluateOwnMatch(kanto, { ...nagoya, remote: 'full' }, NOW) !== null &&
+      evaluateOwnMatch({ ...kanto, prefecture: '群馬県' }, { ...nagoya, prefecture: '東京都', location: '品川' }, NOW) !== null);
   __setProperJudgeForTest(async (e) => {
     if (e.id === 'E_fail') throw new Error('overloaded');
     if (e.id === 'E_rej') return raw({ verdict: 'reject' });
