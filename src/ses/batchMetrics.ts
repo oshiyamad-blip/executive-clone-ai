@@ -6,7 +6,7 @@
 import { getStats, recordHealEvent } from './heal/events.js';
 import { batchCostJpy, batchUsage } from './heal/budget.js';
 import { primarySelectTally, judgeTallySnapshot, type ExclusionReason } from './match.js';
-import { cacheReadShare } from '../llm/pricing.js';
+import { cacheReadShare, uncachedModels } from '../llm/pricing.js';
 import { isDemo, dbProvider, extractModelFallbackActive, extractModel, configuredExtractModel } from './config.js';
 import { sheetsDbConfigured, appendMetricsRowSheets, METRICS_TAB } from '../database/sheets.js';
 import { safeErr } from './redact.js';
@@ -51,6 +51,7 @@ export interface BatchMetrics {
   heuristicFallback: number;
   fallbackPct: number | null;
   cacheReadPct: number | null;
+  uncachedModels?: string[]; // 何度も呼んだのにキャッシュが一度も効かなかったモデル
   costJpy: number;
   drafts: number;
   requestedDrafts: number;
@@ -102,6 +103,7 @@ export function collectBatchMetrics(opts: { requestedDrafts?: number; now?: Date
     heuristicFallback: j.failed,
     fallbackPct: pct(j.failed, attempted),
     cacheReadPct: cache === null ? null : round1(cache * 100),
+    uncachedModels: uncachedModels(batchUsage()),
     costJpy: round1(batchCostJpy()),
     drafts: s.draftsCreated,
     requestedDrafts: opts.requestedDrafts ?? 0,
@@ -141,6 +143,12 @@ export function metricWarnings(m: BatchMetrics): string[] {
   if (over(m.noCandidatePct, m.projectsConsidered, t.noCandidatePct)) {
     out.push(
       `メトリクス: 候補が1件も無い案件が${m.noCandidatePct}%です（基準${t.noCandidatePct.max}%。スキル辞書・しきい値・要員の在庫を確認してください）`,
+    );
+  }
+  if (m.uncachedModels && m.uncachedModels.length > 0) {
+    out.push(
+      `メトリクス: ${m.uncachedModels.join('・')} の呼び出しでプロンプトのキャッシュが一度も効いていません` +
+        '（固定の指示がモデルの最小長に届いていない可能性。費用は増えませんが、キャッシュでの削減もありません）',
     );
   }
   return out;

@@ -65,6 +65,19 @@ export function totalLlmCostJpy(): number {
   return getLlmUsageLog().reduce((sum, u) => sum + usageCostJpy(u), 0);
 }
 
+// minCalls 回以上呼んだのに、キャッシュの書き込みも読み込みも一度も無かったモデル（system がモデルの最小長に届かず
+// キャッシュされていない疑い）。少ない回数では判断しない
+export function uncachedModels(usages: readonly LlmUsage[], minCalls = 5): string[] {
+  const byModel = new Map<string, { calls: number; cached: number }>();
+  for (const u of usages) {
+    const m = byModel.get(u.model) ?? { calls: 0, cached: 0 };
+    m.calls += 1;
+    m.cached += (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0);
+    byModel.set(u.model, m);
+  }
+  return [...byModel].filter(([, m]) => m.calls >= minCalls && m.cached === 0).map(([model]) => model).sort();
+}
+
 // 入力のうちキャッシュから読んだ割合（0〜1）。入力が無い・どの呼び出しもキャッシュを使っていない（書き込みも読み込みも0）
 // ときは null（プロンプトキャッシュを使っていない構成で「0%」と表示して、キャッシュの劣化と読み違えないように）
 export function cacheReadShare(usages: readonly LlmUsage[]): number | null {
