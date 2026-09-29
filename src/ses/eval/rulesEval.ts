@@ -98,8 +98,8 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
-import { verifyJudgment, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates } from '../proper/index.js';
+import { verifyJudgment, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { buildProperCandidates, dedupeProjects } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3776,6 +3776,20 @@ async function properJudgeChecks(): Promise<void> {
   const close = verifyJudgment(raw({ requirements: [{ requirement: 'PostgreSQL', status: 'close', evidence: 'orderby・groupbyなどのSQL対応', note: '' }] }), profile, { requiredSkills: ['PostgreSQL'] });
   check('近い経験は合っている点（近い経験）と足りない点の両方に出す',
     close.met[0].startsWith('PostgreSQL（近い経験） ← ') && close.gaps.includes('PostgreSQL（近い経験のみ）'), JSON.stringify(close));
+  const offTopic = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+    { requirement: 'JavaScript', status: 'met', evidence: 'JP1を用いたジョブ監視およびエラーログ検証', note: '' },
+  ] }), profile, { requiredSkills: ['Oracle', 'JavaScript'] });
+  check('要件の技術名が根拠に無い「満たす」は近い経験に下げる',
+    offTopic.met[1].startsWith('JavaScript（近い経験）') && offTopic.gaps.includes('JavaScript（近い経験のみ）') &&
+      evidenceMentionsTech('OracleまたはPostgreSQL', 'PostgreSQLへのデータ登録') && evidenceMentionsTech('運用保守経験', '顧客管理DBの運用保守'), JSON.stringify(offTopic));
+  const dupA = project({ id: 'd1', title: '基幹系システム運用保守（自治体）', agentCompany: 'A社', rateMax: 50, receivedAt: daysAgo(2) });
+  const dupB = project({ id: 'd2', title: '基幹系システム運用保守', agentCompany: 'B社', rateMax: 50, receivedAt: daysAgo(1) });
+  const roleSe = project({ id: 'd3', title: 'Sales Cloud展開（SE枠）', rateMax: null, rateMin: null, receivedAt: daysAgo(1) });
+  const rolePg = project({ id: 'd4', title: 'Sales Cloud展開（PG枠）', rateMax: null, rateMin: null, receivedAt: daysAgo(1) });
+  const dd = dedupeProjects([dupA, dupB, roleSe, rolePg]);
+  check('別のメールで届いた同じ案件（括弧の補足を除いた名前と単価が同じ）は新しい受信の1件にまとめ、他の営業元を控える・単価の無い案件はまとめない',
+    dd.kept.map((p) => p.id).sort().join(',') === 'd2,d3,d4' && dd.others.get('d2')?.join() === 'A社', JSON.stringify([...dd.others]));
   check('途中で切れた必須を見分ける', isTruncatedRequirement('開発プロセスの改善提案のご') && isTruncatedRequirement('Linux(RHEL') && !isTruncatedRequirement('Java(3年以上)'));
   const trunc = verifyJudgment(raw(), profile, { requiredSkills: ['Oracle', '開発プロセスの改善提案のご'] });
   check('途中で切れた必須がある案件は人の確認に回す', trunc.reviewNotes.some((n) => n.includes('途中で切れています')));

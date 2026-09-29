@@ -67,6 +67,32 @@ export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
   };
 }
 
+// 同じ案件が別のメール（別の会社経由・再送）で届いたものを1件にまとめる。案件名（括弧の補足を除く）と単価が同じなら同じ案件とみなし、
+// 新しい受信を残す。単価の無い案件はまとめない（同じ名前でSE枠・PG枠のように役割が違うことがある）。
+// 残した案件のIDに、まとめた他のメールの営業元会社を返す（営業リストの確認事項に出す）
+export function dedupeProjects(projects: Project[]): { kept: Project[]; others: Map<string, string[]> } {
+  const core = (t: string) => t.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').replace(/\s+/g, '').toLowerCase();
+  const byKey = new Map<string, Project[]>();
+  const kept: Project[] = [];
+  for (const p of projects) {
+    const rate = p.rateMax ?? p.rateMin;
+    if (rate === null || !core(p.title)) {
+      kept.push(p);
+      continue;
+    }
+    const k = `${core(p.title)}|${rate}`;
+    byKey.set(k, [...(byKey.get(k) ?? []), p]);
+  }
+  const others = new Map<string, string[]>();
+  for (const group of byKey.values()) {
+    const sorted = [...group].sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime());
+    kept.push(sorted[0]);
+    const rest = [...new Set(sorted.slice(1).map((p) => p.agentCompany).filter(Boolean))];
+    if (sorted.length > 1) others.set(sorted[0].id, rest);
+  }
+  return { kept, others };
+}
+
 // 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
 export async function buildProperCandidates(
   engineers: ProperEngineer[],
@@ -74,6 +100,8 @@ export async function buildProperCandidates(
   now = new Date(),
 ): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats }> {
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
+  const deduped = dedupeProjects(projects);
+  projects = deduped.kept;
   const projectById = new Map(projects.map((p) => [p.id, p]));
   const perItem = properJudgePerEngineer();
   const all = ownPairsForJudge(engineers, projects, Number.MAX_SAFE_INTEGER, now);
@@ -95,6 +123,8 @@ export async function buildProperCandidates(
     stats.judged += 1;
     if (o.cached) stats.cached += 1;
     const m = applyJudgment(p.match, o.judgment);
+    const dup = deduped.others.get(p.match.projectId);
+    if (m && dup) m.reason = `［確認］同じ案件が別のメールでも届いています${dup.length > 0 ? `（${dup.join('、')}）` : ''}。${m.reason}`;
     if (m) judged.push(m);
     else stats.rejected += 1;
   });
