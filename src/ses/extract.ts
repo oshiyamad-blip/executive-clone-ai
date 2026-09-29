@@ -779,7 +779,10 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
   // PDFの中身はここでは読めないため、PDFを渡したときは単金の原文照合を省く（範囲の検証は常に行う）
   const numbers = usedDocuments ? null : sourceNumbers(text);
   const items: ExtractedItem[] = [
-    ...parsed.projects.map((p, i) => ({ kind: 'project' as const, project: buildProject(p, mail, i, numbers) })),
+    ...parsed.projects.map((p, i) => ({
+      kind: 'project' as const,
+      project: withDetail(buildProject(p, mail, i, numbers), projectExcerpt(mail.body, parsed.projects.map((x) => x.title), i)),
+    })),
     ...parsed.engineers.map((e, i) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, i, numbers) })),
   ];
   // 添付PDFの中身はコードで読めないため、抽出した値（PDF由来の文言も入る）にも指示の言い回しが無いかを確かめる
@@ -920,6 +923,46 @@ export function buildProject(raw: RawProject, mail: SesRawMail, index: number, n
     status: 'open',
     ...levelOf(raw, numbers),
   };
+}
+
+function withDetail(project: Project, detail: string): Project {
+  return detail ? { ...project, detail } : project;
+}
+
+const EXCERPT_MAX = 1500;
+
+// 元メール本文のうち、この案件の部分（営業リストの「案件詳細」用。LLMを使わない）。
+// 1通に複数の案件があれば、この案件名の行から次の案件名の行の手前まで。案件名が本文に見つからなければ本文の先頭から。
+// 引用行（>）は除き、署名の区切り線で打ち切り、長すぎれば EXCERPT_MAX 文字で切る
+export function projectExcerpt(body: string, titles: string[], index: number): string {
+  const lines = body.replace(/\r\n?/g, '\n').split('\n').filter((l) => !/^\s*>/.test(l));
+  const lineOf = (title: string, from: number): number => {
+    const t = title.replace(/\s+/g, '');
+    if (t.length < 4) return -1;
+    for (let i = from; i < lines.length; i++) if (lines[i].replace(/\s+/g, '').includes(t)) return i;
+    return -1;
+  };
+  let start = lineOf(titles[index] ?? '', 0);
+  // 「■案件名」だけの見出し行の次に案件名が来る書き方では、見出し行から含める
+  if (start > 0 && lines[start - 1].trim().length > 0 && lines[start - 1].trim().length <= 12) start -= 1;
+  let end = lines.length;
+  if (start >= 0) {
+    for (let j = 0; j < titles.length; j++) {
+      if (j === index) continue;
+      const at = lineOf(titles[j], start + 1);
+      if (at > start && at < end) end = at;
+    }
+    if (end < lines.length && end - 1 > start && lines[end - 1].trim().length > 0 && lines[end - 1].trim().length <= 12) end -= 1;
+  } else if (titles.length > 1) {
+    return '';
+  }
+  const picked: string[] = [];
+  for (const line of lines.slice(Math.max(start, 0), end)) {
+    if (picked.some((l) => l.trim()) && /^\s*[-=＝─━_*＊~〜]{8,}\s*$/.test(line)) break;
+    picked.push(line.trimEnd());
+  }
+  const text = picked.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return text.length > EXCERPT_MAX ? `${text.slice(0, EXCERPT_MAX)}…（以下略）` : text;
 }
 
 // 案件のレベルの条件。年数は本文に現れる数値だけを通す（単金・年齢と同じく、照合の結果を左右する数値のため）

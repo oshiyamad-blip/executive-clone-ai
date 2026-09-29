@@ -522,7 +522,7 @@ async function main(): Promise<void> {
   check('プロパー提案文面: 元メールへの全員に返信', proposal?.to === 'sato@partner.jp' && proposal.subject === 'Re: 案件のご紹介' && proposal.inReplyTo === '<a@b>');
 
   const candidate = { properLabel: '山田太郎（T.Y.）', projectTitle: 'Java案件' } as ProperCandidate;
-  const run: ProperRunResult = { demo: false, sync: null, engineers: 1, projects: 1, candidates: [candidate], saved: 1, added: 1, retired: 0 };
+  const run: ProperRunResult = { demo: false, sync: null, engineers: 1, projects: 1, candidates: [candidate], saved: 1, added: 1, retired: 0, salesRows: null };
   const consoleLines = properSummaryLines(run, false).join('\n');
   check('プロパー: コンソール用のサマリは件数のみ（氏名・案件名なし）', consoleLines.includes('1件') && !consoleLines.includes('山田') && !consoleLines.includes('Java案件'));
 

@@ -152,6 +152,8 @@ export interface Project {
   injectionSuspected?: boolean;
   // 経験年数・工程・立場の条件（level.ts）。記載が無い案件・古い保存データは未定義
   level?: ProjectLevel;
+  // 元メールの本文のうちこの案件の部分（営業リストの「案件詳細」用。extract.ts の projectExcerpt）。古い保存データは未定義
+  detail?: string;
 }
 
 // SES要員（エンジニア）。氏名・年齢等はPII（CLAUDE.md §非機能要件）

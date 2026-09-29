@@ -749,6 +749,11 @@ export function properRosterSpreadsheetId(): string {
   return driveIdFrom(process.env.PROPER_ROSTER_SPREADSHEET_ID);
 }
 
+// 営業に渡すプロパー提案候補リスト（営業専用のスプレッドシート）。メインのサービスアカウントに編集者で共有する
+export function properSalesSpreadsheetId(): string {
+  return driveIdFrom(process.env.PROPER_SALES_SPREADSHEET_ID);
+}
+
 export function properRosterTab(): string {
   return envStr('PROPER_ROSTER_TAB', '要員');
 }

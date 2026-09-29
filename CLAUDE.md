@@ -49,6 +49,7 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 - `src/database/` — Notion API(v5, 2025-09-03)。database_id→data_source_id を解決し、
   レート制限(3req/s)・rich_text≤2000文字分割・children≤100分割をラップ
 - `src/ses/level.ts` — 案件と要員のレベル照合（技術ごとの経験年数・工程・立場を別の軸として比べ、最も弱い軸で除外/経験交渉を決める）
+- `src/ses/proper/salesList.ts` — 営業に渡すプロパー提案候補リスト（別スプレッドシート。「全体」＋要員別タブ、優先度・対応状況の色分け、人の入力列はIDで引き継ぐ）
 - `src/ses/proper/roster.ts` — 営業用の要員リスト（「要員」タブのサマリ＋「スキルシート_<名前>」タブ）から社員を読む
 - `src/data/executiveProfile.ts` — 経営者プロファイル（価値観・15の意思決定ルール・
   成功/失敗パターン）の単一の真実の源。要件3.3初期設定 / 3.4経営理念プロンプトに対応

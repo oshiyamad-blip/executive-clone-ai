@@ -103,6 +103,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -177,7 +178,7 @@ import { lastChanceBudgetJpy } from '../matchRun.js';
 import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
 import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
-import { sourceBacked, profileSourceNumbers } from '../extract.js';
+import { sourceBacked, profileSourceNumbers, projectExcerpt } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -3708,6 +3709,56 @@ function levelChecks(): void {
   check('スキルシートの値を優先し、無い軸はサマリで補う', merged.skillYears[0].years === 2 && topPhaseOf(merged) === '詳細設計' && merged.role === 'PG');
 }
 
+function salesListChecks(): void {
+  section('営業リスト（プロパー提案候補）: 優先度・交渉ポイント・人の入力の引き継ぎ');
+  const base = {
+    id: 'ownmatch_a_p1', ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: 'p1', projectTitle: 'Java開発', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '［条件］外国籍不可。必要案件単価55万円に対し案件単価55万円（差 ±0万円）。', agentEmail: 'x@example.com',
+    detectedAt: new Date(), properLabel: 'A.A',
+  };
+  const nego = { ...base, id: 'ownmatch_a_p2', projectId: 'p2', meetsRate: false, rateGapMan: -5, band: 'tentative' as const,
+    reason: '【単価交渉】必要案件単価まで5万円不足（本人の了承が前提）。【経験交渉】工程が1段不足。［確認］立場の記載なし。' };
+  const review = { ...base, id: 'ownmatch_b_p3', properLabel: 'B.B', projectId: 'p3', needsReview: true, reason: '勤務地不明のため要確認です（スキル一致率100%）。' };
+  check('優先度: 交渉の注記なしの強マッチはA・交渉ありはB・要確認はC',
+    salesPriorityOf(base).startsWith('A') && salesPriorityOf(nego).startsWith('B') && salesPriorityOf(review).startsWith('C'));
+  const notes = salesNotesOf(nego.reason);
+  check('交渉ポイントと確認事項を根拠から分けて取り出す',
+    notes.negotiation === '単価: 必要案件単価まで5万円不足（本人の了承が前提）\n経験: 工程が1段不足' && notes.confirm === '立場の記載なし', JSON.stringify(notes));
+  check('要確認の理由と条件を確認事項に', salesNotesOf(review.reason).confirm === '要確認: 勤務地不明' && salesNotesOf(base.reason).confirm === '外国籍不可');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const fresh = [salesRowOf(review, undefined), salesRowOf(nego, undefined), salesRowOf(base, undefined)];
+  const prevEdited = header.map(() => '');
+  prevEdited[col('ID')] = 'ownmatch_a_p1'; prevEdited[col('対応状況')] = '提案済'; prevEdited[col('メモ')] = '面談希望';
+  const prevGone = header.map(() => '');
+  prevGone[col('ID')] = 'ownmatch_old'; prevGone[col('優先度')] = 'B 条件交渉'; prevGone[col('要員')] = 'A.A'; prevGone[col('担当営業')] = '佐藤'; prevGone[col('案件単価(万)')] = '60';
+  const prevUntouched = header.map(() => '');
+  prevUntouched[col('ID')] = 'ownmatch_stale'; prevUntouched[col('対応状況')] = '未着手';
+  const merged = mergeSalesRows(fresh, [header, prevEdited, prevGone, prevUntouched]);
+  const byId = new Map(merged.map((r) => [String(r[col('ID')]), r]));
+  check('人の入力（対応状況・メモ）をIDで引き継ぐ', byId.get('ownmatch_a_p1')?.[col('対応状況')] === '提案済' && byId.get('ownmatch_a_p1')?.[col('メモ')] === '面談希望');
+  check('新しい行の対応状況は未着手', byId.get('ownmatch_a_p2')?.[col('対応状況')] === '未着手');
+  check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
+  check('並びは優先度→要員の順・Noを振り直す',
+    merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:X,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  const fmt = formatRequests(7, 2, true);
+  const rules = fmt.filter((r) => r.addConditionalFormatRule);
+  check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色を付け、対応状況はプルダウン・ID列は隠す',
+    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 8 &&
+      rules.every((r) => [col('優先度'), col('対応状況')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
+      fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
+      fmt.some((r) => r.updateDimensionProperties?.range?.startIndex === col('ID') && r.updateDimensionProperties?.properties?.hiddenByUser === true));
+  const body = 'お世話になっております。\n\n■案件名\nJava開発A\n単価：55万\n\n■案件名\nPython開発B\n単価：60万\n--------------------\n株式会社サンプル\n> 引用';
+  const ex0 = projectExcerpt(body, ['Java開発A', 'Python開発B'], 0);
+  const ex1 = projectExcerpt(body, ['Java開発A', 'Python開発B'], 1);
+  check('本文抜粋: 1通に複数案件なら案件ごとに切り分け、署名・引用は含めない',
+    ex0 === '■案件名\nJava開発A\n単価：55万' && ex1 === '■案件名\nPython開発B\n単価：60万', JSON.stringify([ex0, ex1]));
+  check('本文抜粋: 案件名が見つからない1件だけのメールは先頭から・長文は切る',
+    projectExcerpt('本文です\n単価50万', ['見つからない案件名'], 0) === '本文です\n単価50万' && projectExcerpt('あ'.repeat(3000), ['x'], 0).endsWith('（以下略）'));
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3749,6 +3800,7 @@ async function main(): Promise<void> {
     marketRateChecks();
     summarySendChecks();
     levelChecks();
+    salesListChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

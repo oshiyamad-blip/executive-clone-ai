@@ -319,6 +319,7 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
    案件スプレッドシートの「プロパー候補」タブには、社員を提案用表記（イニシャル）でだけ書きます）
 3. フォルダの URL を Secret `PROPER_SKILLSHEET_FOLDER_ID`、管理表の URL を Secret `PROPER_MASTER_SPREADSHEET_ID` に登録
    - **営業用の要員リストがある場合**は、そのスプレッドシートを**サービスアカウントに「閲覧者」**で共有し、URL を Secret `PROPER_ROSTER_SPREADSHEET_ID` に登録するだけで使えます
+   - **営業に渡すリスト**が要る場合は、空のスプレッドシートを作って**サービスアカウントに「編集者」**で共有し、URL を Secret `PROPER_SALES_SPREADSHEET_ID` に登録します。毎回のバッチが「全体」タブ（優先度A/B/Cと対応状況の色分け・対応状況のプルダウン・ID列は非表示）と要員ごとのタブ（全体を映す閲覧用）を書き直します。対応状況・担当営業・メモは「全体」タブで入力し、次回以降も引き継がれます
      （「要員」タブの状況が「営業中」の行を毎回読み、■単価を必要案件単価、■経験年数・「スキルシート_<名前>」タブから技術・工程ごとの経験年数と立場を読みます。
      スキルシートのタブは内容が変わったときだけ抽出します。フォルダ・管理表と併用も可）
 4. 実行後、「プロパー管理」タブで各社員の **「必要案件単価」（万円/月）** と **「稼働状況」（稼働可／アサイン済／対象外）** だけを入力します
@@ -428,6 +429,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_INTERNAL_FILE_DOMAINS` | `<グループ会社のドメイン>` | 任意 | メールに貼られたリンク先を「社内のファイル」として読まない、自社以外のドメイン（カンマ区切り） |
 | `PROPER_SKILLSHEET_FOLDER_ID` | `https://drive.google.com/drive/folders/xxxx` | 任意 | 4-3（プロパー機能） |
 | `PROPER_MASTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（プロパー機能） |
+| `PROPER_SALES_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/yyyy/edit` | 任意 | 4-3（営業に渡すプロパー提案候補リスト。空のスプレッドシートを作り、サービスアカウントに「編集者」で共有。「全体」＋要員ごとのタブを毎回書き直す） |
 | `PROPER_ROSTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（営業用の要員リスト。サービスアカウントに「閲覧者」で共有。「営業中」の要員を毎回読む） |
 | `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントにあり、そのテナントのサービスアカウントを使う場合だけ（4-4 C） |
 | `PROPER_GOOGLE_IMPERSONATE` | `ops@<別テナント>` | 任意 | 4-4 C で共有できない場合だけ（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます） |

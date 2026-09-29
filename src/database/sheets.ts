@@ -85,6 +85,7 @@ export const MARKET_COLUMN = '相場';
 
 // 案件の経験年数・工程・立場の条件（level.ts の JSON。抽出のたびに機械が書き直す）
 export const LEVEL_COLUMN = 'レベル条件';
+export const DETAIL_COLUMN = '本文抜粋'; // 営業リストの「案件詳細」の元（元メール本文のこの案件の部分）
 
 export const METRICS_COLUMNS = [
   '実行日時', 'モード', 'メール数', '抽出件数(案件)', '抽出件数(要員)',
@@ -100,7 +101,7 @@ const TABS: Record<string, string[]> = {
     'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
     '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
     '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN,
-    LEVEL_COLUMN,
+    LEVEL_COLUMN, DETAIL_COLUMN,
   ],
   要員: [
     'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
@@ -478,7 +479,7 @@ function projectToRow(p: Project): Cell[] {
     p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId,
     replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail), { injection: p.injectionSuspected }),
     p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '', p.injectionSuspected ? INJECTION_MARK : '',
-    '', '', projectLevelJson(p.level),
+    '', '', projectLevelJson(p.level), p.detail ?? '',
   ];
 }
 
@@ -523,6 +524,7 @@ function rowToProject(cells: string[]): Project {
     notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
     matched: c(MATCHED_COLUMN) !== '',
     ...levelField(c(LEVEL_COLUMN)),
+    ...(c(DETAIL_COLUMN) ? { detail: c(DETAIL_COLUMN) } : {}),
     ...(c(INJECTION_COLUMN) !== '' || reply.injection || injectionFlagKeys.has(injectionFlagKey('案件', c('ID'))) ? { injectionSuspected: true } : {}),
   };
 }

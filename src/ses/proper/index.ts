@@ -21,6 +21,7 @@ import {
 } from '../../database/sheets.js';
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
+import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows } from './salesList.js';
 import type { Project, ProperEngineer, ProperCandidate } from '../../types/index.js';
 
 export interface ProperRunResult {
@@ -32,6 +33,7 @@ export interface ProperRunResult {
   saved: number; // 「プロパー候補」タブに追加・更新した行数
   added: number; // 今回初めて見つかった候補（サマリを送るかの判断に使う）
   retired: number; // 稼働可でなくなった社員の候補として退役させた行数
+  salesRows: number | null; // 営業リストに書き出した行数（未設定・失敗は null）
 }
 
 // Sheetsの案件タブは全行を読むため、直近の遡り期間に絞った上での上限は大きめでよい（Notionは100件で頭打ち）
@@ -66,8 +68,11 @@ function runProperDemo(projects: Project[]): ProperRunResult {
   const engineers = loadFixtureProperEngineers();
   const candidates = buildProperCandidates(engineers, projects);
   writeDemoArtifact('proper-candidates', candidates);
+  // 営業リストの行（本番で営業用スプレッドシートの「全体」タブに書く内容）
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  writeDemoArtifact('proper-sales-list', mergeSalesRows(candidates.map((c) => salesRowOf(c, projectById.get(c.projectId))), []));
   const result: ProperRunResult = {
-    demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0, added: candidates.length, retired: 0,
+    demo: true, sync: null, engineers: engineers.length, projects: projects.length, candidates, saved: 0, added: candidates.length, retired: 0, salesRows: null,
   };
   logCounts('プロパー候補(DEMO・fixture社員)', result);
   return result;
@@ -93,6 +98,20 @@ async function loadRosterSafely(): Promise<ProperEngineer[]> {
     console.error(`要員リスト: 読み込みに失敗しました（今回は要員リストの社員を使いません）: ${safeErr(err)}`);
     recordHealEvent('warn', '要員リストを読めませんでした（サービスアカウントへの共有とシートIDを確認してください）');
     return [];
+  }
+}
+
+// 営業リストの失敗は候補の保存（案件スプレッドシート）を止めない
+async function writeSalesListSafely(candidates: ProperCandidate[], projects: Project[]): Promise<number | null> {
+  if (!salesListConfigured()) return null;
+  try {
+    const n = await writeSalesList(candidates, projects);
+    console.log(`営業リスト: ${n ?? 0}行を書き出しました`);
+    return n;
+  } catch (err) {
+    console.error(`営業リスト: 書き出しに失敗しました: ${safeErr(err)}`);
+    recordHealEvent('warn', '営業リストのスプレッドシートに書き出せませんでした（サービスアカウントへの編集者での共有とシートIDを確認してください）');
+    return null;
   }
 }
 
@@ -128,7 +147,8 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
-  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired };
+  const salesRows = await writeSalesListSafely(candidates, projects);
+  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows };
   logCounts('プロパー候補', result);
   return result;
 }
