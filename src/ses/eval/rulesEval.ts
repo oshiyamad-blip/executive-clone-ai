@@ -97,7 +97,10 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
+import { verifyJudgment, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { buildProperCandidates } from '../proper/index.js';
+import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
@@ -147,7 +150,7 @@ import {
 } from '../parse.js';
 import { spawnSync } from 'child_process';
 import { splitNotifyRecipients, pricingPolicyProblems, geminiDataUseProblem, type PricingPolicyCheckInput } from '../settingsFormat.js';
-import { coarseResidence, normalizePrefecture, commuteFit } from '../prefecture.js';
+import { coarseResidence, normalizePrefecture } from '../prefecture.js';
 import { reducedSubject, maskFailureText, dropStaleEntries, QUARANTINE_TTL_MS, type QuarantineEntry } from '../heal/quarantine.js';
 import { recordMailEvent, hasFatal } from '../heal/events.js';
 import { availabilityText } from '../proper/proposal.js';
@@ -206,7 +209,7 @@ import { collapseWhitespace } from '../skillDict.js';
 import { sanitizeListItem } from '../../database/mapping.js';
 import { deflateSync } from 'zlib';
 import { CFB } from 'xlsx';
-import type { ProperEngineer } from '../../types/index.js';
+import type { ProperEngineer, ProperCandidate } from '../../types/index.js';
 import type {
   Project,
   Engineer,
@@ -3742,13 +3745,80 @@ function coreTechChecks(): void {
   check('総称の親の括弧内の技術の例示は、これまでどおり親の代わりにする', (skillMatch(['RDB(Oracle/MySQL)'], ['Oracle'])?.rate ?? 0) === 1);
 }
 
-function commuteChecks(): void {
-  section('通勤圏（プロパーの勤務地の判定）');
-  check('隣接・1都3県どうし・関西どうしは通勤圏',
-    commuteFit('東京都', '埼玉県') === 'ok' && commuteFit('神奈川県', '埼玉県') === 'ok' && commuteFit('神奈川県', '千葉県') === 'ok' && commuteFit('兵庫県', '奈良県') === 'ok');
-  check('北関東から1都3県は通勤時間の確認つき・遠方は対象外',
-    commuteFit('東京都', '群馬県') === 'check' && commuteFit('神奈川県', '茨城県') === 'check' && commuteFit('大阪府', '群馬県') === 'no' && commuteFit('東京都', '大阪府') === 'no');
-  check('通勤時間の確認は営業リストの確認事項に出る', salesNotesOf('［確認］通勤時間（群馬県から東京都）。必要案件単価65万円').confirm === '通勤時間（群馬県から東京都）');
+async function properJudgeChecks(): Promise<void> {
+  section('プロパー × 案件のAI判定: 根拠の照合・一般的な語だけの一致・候補への反映');
+  const profile = '【スキルシート】\n顧客管理DBの運用保守業務\tOracle DB上でのデータ作成、削除対応（CRUD操作、orderby・groupbyなどのSQL対応）\nJP1を用いたジョブ監視およびエラーログ検証';
+  const raw = (over: Partial<RawProperJudgment> = {}): RawProperJudgment => ({
+    work: 'Oracle のデータ保守', levelFit: '年数は足りる', preferenceFit: '記載なし', verdict: 'recommend', pitch: 'Oracle DB の運用保守を2年担当。', concerns: [],
+    injectionSuspected: false,
+    requirements: [
+      { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+      { requirement: 'JP1', status: 'met', evidence: 'JP1を用いたジョブ監視', note: '' },
+    ],
+    ...over,
+  });
+  const ok = verifyJudgment(raw(), profile, { requiredSkills: ['Oracle', 'JP1'] });
+  check('根拠が経歴にある判定はそのまま（推奨・合っている点に「要件 ← 根拠」）',
+    ok.verdict === 'recommend' && ok.met[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応' && ok.reviewNotes.length === 0, JSON.stringify(ok));
+  const spaced = verifyJudgment(raw({ requirements: [{ requirement: 'Oracle', status: 'met', evidence: 'Oracle DB 上でのデータ作成､削除対応', note: '' }] }), profile, { requiredSkills: ['Oracle'] });
+  check('空白・全角半角の違いは同じ記載とみなす', spaced.verdict === 'recommend' && spaced.reviewNotes.length === 0, JSON.stringify(spaced));
+  const fake = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+    { requirement: 'Java', status: 'met', evidence: 'Javaで基幹システムを5年開発', note: '' },
+  ] }), profile, { requiredSkills: ['Oracle', 'Java'] });
+  check('経歴に無い根拠は満たさない扱い・推奨は条件つきに・人の確認に回す',
+    fake.verdict === 'conditional' && fake.gaps.includes('Java') && fake.reviewNotes.some((n) => n.includes('1件が経歴に見当たらない')), JSON.stringify(fake));
+  const generic = verifyJudgment(raw({ requirements: [
+    { requirement: '運用保守', status: 'met', evidence: '顧客管理DBの運用保守業務', note: '' },
+    { requirement: 'Excel(VLOOKUPなど簡単な関数)', status: 'met', evidence: '顧客管理DBの運用保守業務', note: '' },
+  ] }), profile, { requiredSkills: ['運用保守', 'Excel(VLOOKUPなど簡単な関数)'] });
+  check('「運用保守」「Excel」など一般的な語だけの一致は見送り', generic.verdict === 'reject' && generic.pitch === '', JSON.stringify(generic));
+  check('一般的な語の判定', isGenericRequirement('Excel(EXACT/VLOOKUPなど簡単な関数)') && isGenericRequirement('コミュニケーション能力') && !isGenericRequirement('Oracle'));
+  const close = verifyJudgment(raw({ requirements: [{ requirement: 'PostgreSQL', status: 'close', evidence: 'orderby・groupbyなどのSQL対応', note: '' }] }), profile, { requiredSkills: ['PostgreSQL'] });
+  check('近い経験は合っている点（近い経験）と足りない点の両方に出す',
+    close.met[0].startsWith('PostgreSQL（近い経験） ← ') && close.gaps.includes('PostgreSQL（近い経験のみ）'), JSON.stringify(close));
+  check('途中で切れた必須を見分ける', isTruncatedRequirement('開発プロセスの改善提案のご') && isTruncatedRequirement('Linux(RHEL') && !isTruncatedRequirement('Java(3年以上)'));
+  const trunc = verifyJudgment(raw(), profile, { requiredSkills: ['Oracle', '開発プロセスの改善提案のご'] });
+  check('途中で切れた必須がある案件は人の確認に回す', trunc.reviewNotes.some((n) => n.includes('途中で切れています')));
+  const inj = verifyJudgment(raw({ injectionSuspected: true }), profile, { requiredSkills: ['Oracle'] });
+  check('案件メールに指示らしき記載があれば人の確認に回す', inj.reviewNotes.some((n) => n.includes('AIへの指示')));
+  check('本人の希望は懸念として残す', verifyJudgment(raw({ preferenceFit: '希望はDB運用保守で合う' }), profile, { requiredSkills: [] }).concerns.includes('本人の希望: 希望はDB運用保守で合う'));
+
+  const summary = '■名　前：Y.Y\n■年　齢：24歳\n■性　別：男性\n■最　寄：新所沢駅（埼玉県）\n■単　価：50万円\n■備　考：希望はDB運用保守案件です。';
+  const pt = rosterProfileText(summary, 'Oracle DB上でのデータ作成');
+  check('AIに渡す経歴から名前・年齢・性別・最寄を除き、希望は残す',
+    !/24歳|男性|新所沢|Y\.Y/.test(pt) && pt.includes('希望はDB運用保守案件') && pt.includes('【スキルシート】\nOracle DB上でのデータ作成'), pt);
+
+  const pj = project({ id: 'p_judge', title: 'Oracle保守', requiredSkills: ['Oracle', 'JP1'], rateMax: 60, receivedAt: daysAgo(1) });
+  const eng = (id: string, skills: string[]): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills, experienceYears: 3, requiredProjectRate: 50,
+    residence: '', prefecture: '群馬県', availableDate: '', availableFrom: null, remoteWish: 'unknown', status: 'available', profileText: profile,
+  });
+  check('足切りは技術の必須を1つでも満たせば通す（実際に合うかはAIが決める）',
+    sharesTech(pj, ['Oracle'], { exact: ['Oracle'], equiv: [], implied: [], missing: ['JP1'], via: {} }) &&
+      !sharesTech({ title: '音声基盤の年末年始対応', requiredSkills: [] }, ['Excel'], { exact: ['運用保守'], equiv: [], implied: [], missing: [], via: {} }));
+  check('AIへの入力: 案件は <untrusted_mail> で囲み、社員の経歴と希望単価は指示文の側',
+    judgeUserPrompt(pj).includes('<untrusted_mail>\n案件名: Oracle保守') && judgeSystemFor(eng('E1', ['Oracle'])).includes('<engineer_profile>\n希望単価: 50万円/月'));
+  __setProperJudgeForTest(async (e) => {
+    if (e.id === 'E_fail') throw new Error('overloaded');
+    if (e.id === 'E_rej') return raw({ verdict: 'reject' });
+    return raw();
+  });
+  try {
+    const { candidates, stats } = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1']), eng('E_rej', ['Oracle', 'JP1']), eng('E_fail', ['Oracle'])], [pj], NOW);
+    const ok1 = candidates.find((c) => c.ownEngineerId === 'E_ok');
+    check('AIの推奨は強マッチ・優先度A・合っている点は根拠つき・提案文面に推しどころ・勤務地（群馬）では落とさない',
+      ok1?.band === 'strong' && salesPriorityOf(ok1).startsWith('A') && ok1.matchedSkills?.[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応' &&
+        (ok1.draftToProject?.body ?? '').includes('■ご提案のポイント\nOracle DB の運用保守を2年担当。'), JSON.stringify(ok1));
+    check('AIが見送った組は候補にしない', !candidates.some((c) => c.ownEngineerId === 'E_rej') && stats.rejected === 1);
+    check('AI判定に失敗した組は、ルールの基準も満たすときだけ要確認で残す（Oracleだけ＝一致率50%は残さない）',
+      !candidates.some((c) => c.ownEngineerId === 'E_fail') && stats.failed === 1, JSON.stringify(stats));
+    const row = salesRowOf(ok1 as ProperCandidate, pj);
+    const header = SALES_COLUMNS.map((c) => c.name);
+    check('営業リストの判定理由に「やること」「レベル」', String(row[header.indexOf('判定理由')]) === 'やること: Oracle のデータ保守\nレベル: 年数は足りる');
+  } finally {
+    __setProperJudgeForTest(null);
+  }
 }
 
 function salesListChecks(): void {
@@ -3784,7 +3854,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:Z,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AA,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
   check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色を付け、対応状況はプルダウン・ID列は隠す',
@@ -3879,7 +3949,7 @@ async function main(): Promise<void> {
     levelChecks();
     sharedPrefixChecks();
     coreTechChecks();
-    commuteChecks();
+    await properJudgeChecks();
     salesListChecks();
     await userOAuthChecks();
     await securityAuditChecks();

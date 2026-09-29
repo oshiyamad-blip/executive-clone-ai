@@ -3,10 +3,11 @@
 //       案件スプレッドシートの「プロパー候補」タブへ保存（提案の全員に返信文面つき。担当者メールで次回バッチが下書きにする）
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
-import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays } from '../config.js';
+import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
-import { matchOwnEngineersToProjects, signedMan } from '../ownMatch.js';
+import { ownPairsForJudge, signedMan } from '../ownMatch.js';
+import { judgeProperPairs } from './judge.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
 import { recordHealEvent } from '../heal/events.js';
@@ -22,7 +23,7 @@ import {
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
 import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows } from './salesList.js';
-import type { Project, ProperEngineer, ProperCandidate } from '../../types/index.js';
+import type { Project, ProperEngineer, ProperCandidate, OwnMatch, ProperJudgment } from '../../types/index.js';
 
 export interface ProperRunResult {
   demo: boolean;
@@ -39,24 +40,96 @@ export interface ProperRunResult {
 // Sheetsの案件タブは全行を読むため、直近の遡り期間に絞った上での上限は大きめでよい（Notionは100件で頭打ち）
 const PROJECT_FETCH_LIMIT = 1000;
 
-export function buildProperCandidates(engineers: ProperEngineer[], projects: Project[]): ProperCandidate[] {
+export interface JudgeStats {
+  prefiltered: number; // ルールの足切りを通った組
+  judged: number; // AI判定した組（控えの再利用を含む）
+  cached: number;
+  rejected: number; // AIが見送りとした組
+  failed: number; // AI判定に失敗した組
+  overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
+}
+
+// AIの判定を候補に反映する。見送りは null（候補にしない）
+export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
+  if (j.verdict === 'reject') return null;
+  const notes = [
+    ...j.reviewNotes.map((n) => `［確認］${n}。`),
+    ...j.concerns.map((c) => `［確認］${c.replace(/。$/, '')}。`),
+  ].join('');
+  return {
+    ...m,
+    band: j.verdict === 'recommend' ? 'strong' : 'tentative',
+    needsReview: m.needsReview || j.reviewNotes.length > 0,
+    matchedSkills: j.met,
+    missingSkills: j.gaps,
+    reason: `${notes}${m.reason}`,
+    judgment: j,
+  };
+}
+
+// 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
+export async function buildProperCandidates(
+  engineers: ProperEngineer[],
+  projects: Project[],
+  now = new Date(),
+): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats }> {
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
   const projectById = new Map(projects.map((p) => [p.id, p]));
+  const perItem = properJudgePerEngineer();
+  const all = ownPairsForJudge(engineers, projects, Number.MAX_SAFE_INTEGER, now);
+  const pairs = ownPairsForJudge(engineers, projects, perItem, now);
+  const stats: JudgeStats = { prefiltered: all.length, judged: 0, cached: 0, rejected: 0, failed: 0, overCap: all.length - pairs.length };
+  const outcomes = await judgeProperPairs(
+    pairs.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project })),
+    projects,
+  );
+  const judged: OwnMatch[] = [];
+  pairs.forEach((p, i) => {
+    const o = outcomes[i];
+    if (!o.judgment) {
+      stats.failed += 1;
+      // AI判定に失敗した組は、ルールだけの基準も満たすときに限り要確認で残す
+      if (p.rulePass) judged.push({ ...p.match, needsReview: true, reason: `AI判定に失敗したため要確認です。${p.match.reason}` });
+      return;
+    }
+    stats.judged += 1;
+    if (o.cached) stats.cached += 1;
+    const m = applyJudgment(p.match, o.judgment);
+    if (m) judged.push(m);
+    else stats.rejected += 1;
+  });
+  // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はルールの並び（pairs の順）。社員ごと・案件ごとの上限を掛ける
+  const cat = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
+  const order = judged.map((m, i) => ({ m, i })).sort((a, b) => cat(a.m) - cat(b.m) || a.i - b.i);
+  const limit = maxCandidatesPerItem();
+  const perEngineer = new Map<string, number>();
+  const perProject = new Map<string, number>();
   const candidates: ProperCandidate[] = [];
   const seen = new Set<string>();
-  for (const m of matchOwnEngineersToProjects(engineers, projects)) {
+  for (const { m } of order) {
     // 人がシートの行を複製していても、同じ社員×案件の候補は1件にする（同じIDの行が2つあると
     // 担当者メールを入れた側の行が下書き依頼として読まれない）
     if (seen.has(m.id)) continue;
-    seen.add(m.id);
+    if ((perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit) continue;
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
+    seen.add(m.id);
+    perEngineer.set(m.ownEngineerId, (perEngineer.get(m.ownEngineerId) ?? 0) + 1);
+    perProject.set(m.projectId, (perProject.get(m.projectId) ?? 0) + 1);
     // 元のメールにAIへの指示らしき記載がある案件には、提案文面（下書きの元）を用意しない（要確認で人が確かめる）
-    const draftToProject = project.injectionSuspected ? undefined : buildProperProposalDraft(engineer, project);
+    const suspicious = project.injectionSuspected || /AIへの指示らしき記載/.test(m.judgment?.reviewNotes.join('') ?? '');
+    const draftToProject = suspicious ? undefined : buildProperProposalDraft(engineer, project, m.judgment?.pitch);
     candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}) });
   }
-  return candidates;
+  return { candidates, stats };
+}
+
+function logJudge(s: JudgeStats): void {
+  console.log(
+    `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・失敗${s.failed}` +
+      (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
+  );
 }
 
 function logCounts(prefix: string, r: ProperRunResult): void {
@@ -64,9 +137,10 @@ function logCounts(prefix: string, r: ProperRunResult): void {
   console.log(`${prefix}: 社員${r.engineers}名 × 案件${r.projects}件 → 候補${r.candidates.length}件（提案文面${drafts}件）`);
 }
 
-function runProperDemo(projects: Project[]): ProperRunResult {
+async function runProperDemo(projects: Project[]): Promise<ProperRunResult> {
   const engineers = loadFixtureProperEngineers();
-  const candidates = buildProperCandidates(engineers, projects);
+  const { candidates, stats } = await buildProperCandidates(engineers, projects);
+  logJudge(stats);
   writeDemoArtifact('proper-candidates', candidates);
   // 営業リストの行（本番で営業用スプレッドシートの「全体」タブに書く内容）
   const projectById = new Map(projects.map((p) => [p.id, p]));
@@ -133,7 +207,8 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const engineers = [...(sync ? await loadProperEngineers(sync.presentFileIds) : []), ...(await loadRosterSafely())];
   const since = new Date(Date.now() - properProjectLookbackDays() * 24 * 60 * 60 * 1000);
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
-  const candidates = buildProperCandidates(engineers, projects);
+  const { candidates, stats } = await buildProperCandidates(engineers, projects);
+  logJudge(stats);
 
   let saved = 0;
   let retired = 0;

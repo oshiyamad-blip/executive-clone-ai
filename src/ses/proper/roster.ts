@@ -123,9 +123,24 @@ async function tabValues(sheets: sheets_v4.Sheets, id: string, tab: string): Pro
   return ((res.data.values ?? []) as unknown[][]).map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c))));
 }
 
+// AI判定に渡す経歴の本文。サマリの年齢・性別・最寄（判定に使わない項目）は除く
+export function rosterProfileText(summary: string, sheetText: string): string {
+  const s = summary
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*■\s*(年\s*齢|性\s*別|最\s*寄|名\s*前)\s*[:：]/.test(l.normalize('NFKC')))
+    .join('\n')
+    .trim();
+  return [s && `【要員リストのサマリ】\n${s}`, sheetText.trim() && `【スキルシート】\n${sheetText.trim()}`].filter(Boolean).join('\n\n');
+}
+
+// スキルシートのタブの本文（セルをタブ区切り・行を改行で並べる。結合セルの繰り返しは1つにする）
+async function sheetText(sheets: sheets_v4.Sheets, id: string, tab: string): Promise<string> {
+  const rows = (await tabValues(sheets, id, tab)).map((r) => r.map((c) => c.trim()).filter((c, i, a) => c && c !== a[i - 1]).join('\t'));
+  return rows.filter(Boolean).join('\n').slice(0, SHEET_TEXT_MAX);
+}
+
 // スキルシートのタブのレベル。内容のハッシュで控えを引き、無ければ抽出して控える（案件DBが無ければ抽出しない）
-async function sheetLevel(sheets: sheets_v4.Sheets, id: string, tab: string): Promise<EngineerLevel | null> {
-  const text = (await tabValues(sheets, id, tab)).map((r) => r.filter(Boolean).join('\t')).filter(Boolean).join('\n').slice(0, SHEET_TEXT_MAX);
+async function sheetLevel(text: string): Promise<EngineerLevel | null> {
   if (!text.trim()) return null;
   const key = `roster_level:${createHash('sha256').update(text).digest('hex').slice(0, 32)}`;
   const cached = await readStateJson<EngineerLevel>(key);
@@ -164,9 +179,11 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
     const skills = normalizeSkills(s.skills);
     const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
     let level = summaryLevel(s);
+    let text = '';
     if (gidOf.has(tab)) {
       try {
-        level = mergeLevels(await sheetLevel(sheets, id, tab), level);
+        text = await sheetText(sheets, id, tab);
+        level = mergeLevels(await sheetLevel(text), level);
       } catch (err) {
         sheetFailures += 1;
         console.warn(`要員リスト: スキルシートのタブを読めませんでした（サマリの内容だけで照合します）: ${safeErr(err)}`);
@@ -193,6 +210,7 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
       status: 'available',
       affiliation: s.affiliation,
       ...(hasEngineerLevel(level) ? { level } : {}),
+      profileText: rosterProfileText(r[col('サマリ')] ?? '', text),
     });
   }
   console.log(`要員リスト: 営業中${out.length}名を読みました${sheetFailures > 0 ? `（スキルシートのタブを読めなかった要員${sheetFailures}名）` : ''}`);

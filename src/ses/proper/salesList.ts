@@ -36,7 +36,8 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '勤務地', width: 110, wrap: true },
   { name: 'リモート', width: 56 },
   { name: '開始', width: 80, wrap: true },
-  { name: '合っている点', width: 200, wrap: true },
+  { name: '判定理由', width: 260, wrap: true },
+  { name: '合っている点', width: 260, wrap: true },
   { name: '足りない点', width: 160, wrap: true },
   { name: '交渉ポイント', width: 220, wrap: true },
   { name: '対応状況', width: 80, human: true },
@@ -63,9 +64,11 @@ type Row = Array<string | number>;
 // 営業向けの表記（保存用の「不可」ではなく「常駐」）
 const SALES_REMOTE_LABEL: Record<Project['remote'], string> = { full: 'フル', partial: '一部', none: '常駐', unknown: '' };
 
-// 優先度: 要確認（単価・勤務地・スキル不明や指示混入疑い）→ C、交渉や参考提案の注記が無く単価を満たす強マッチ → A、ほかは B
+// 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。
+// AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
 export function salesPriorityOf(c: ProperCandidate): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
+  if (c.judgment) return c.judgment.verdict === 'recommend' && c.meetsRate ? SALES_PRIORITIES.a : SALES_PRIORITIES.b;
   if (c.band === 'strong' && c.meetsRate && !/【(単価交渉|経験交渉|年数交渉|参考提案)】/.test(c.reason)) return SALES_PRIORITIES.a;
   return SALES_PRIORITIES.b;
 }
@@ -101,8 +104,11 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['案件単価(万)']] = c.projectRate ?? '';
   row[COL['希望単価(万)']] = c.requiredProjectRate ?? '';
   row[COL['差(万)']] = c.rateGapMan ?? '';
-  row[COL['合っている点']] = (c.matchedSkills ?? []).join('、');
-  row[COL['足りない点']] = (c.missingSkills ?? []).join('、');
+  // AI判定があれば「要件 ← 経歴の根拠」を1行ずつ、無ければ満たしたスキル名を並べる
+  const sep = c.judgment ? '\n' : '、';
+  row[COL['判定理由']] = c.judgment ? [`やること: ${c.judgment.work}`, c.judgment.levelFit ? `レベル: ${c.judgment.levelFit}` : ''].filter(Boolean).join('\n') : '';
+  row[COL['合っている点']] = (c.matchedSkills ?? []).join(sep);
+  row[COL['足りない点']] = (c.missingSkills ?? []).join(sep);
   row[COL['交渉ポイント']] = negotiation;
   row[COL['確認事項']] = confirm;
   row[COL['提案文面（案）']] = c.draftToProject?.body ?? '';
