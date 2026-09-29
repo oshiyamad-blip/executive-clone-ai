@@ -24,7 +24,9 @@ import {
   maxCandidatesPerItem,
   logRedact,
   properRateToleranceMan,
+  levelYearsTolerance,
 } from './config.js';
+import { evaluateLevel } from './level.js';
 import { safeErr } from './redact.js';
 import {
   allocateWithCaps,
@@ -51,6 +53,7 @@ export function signedMan(gap: number): string {
 // 並びに使う内部の値（OwnMatch には載せない）
 interface OwnRankInfo {
   skill: PairBreakdown['skill'];
+  levelGap: number; // 経験年数・工程・立場の足りない度合い（0が最良）
   freshness: Freshness;
   receivedMs: number;
 }
@@ -113,6 +116,10 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const rateUnknown = rate === null || required === null;
   if (!rateUnknown && (rate as number) < (required as number) - properRateToleranceMan()) return null;
   if (rateUnknown) reviewReasons.push('単価不明');
+  // レベル（技術ごとの経験年数・工程・立場）: 技術名が合っていても、別の軸としてはっきり足りなければ除外する（level.ts）
+  const level = evaluateLevel(project.level, own.level, own.experienceYears, levelYearsTolerance());
+  if (level.verdict === 'exclude') return null;
+
   // 元のメールにAIへの指示らしき記載がある案件は、人が確かめる（提案文面も作らない。proper/index.ts）
   if (project.injectionSuspected) reviewReasons.push(INJECTION_REVIEW_REASON);
   else if (unsafeOutgoingText([project.title, project.agentContact])) reviewReasons.push(OUTGOING_TEXT_REVIEW_REASON);
@@ -126,11 +133,13 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const stale = freshness.level === 'stale';
   const skillBand = band;
   if (stale) band = 'tentative';
+  // 少しだけ足りない軸がある組は参考提案にする（強マッチとして上に並べない）
+  if (level.verdict === 'negotiate') band = 'tentative';
 
   const needsReview = reviewReasons.length > 0;
   const score = Math.max(
     0,
-    Math.round(skill.rate * 70 + (locationOk ? 20 : 0) + (timingOk ? 10 : 0) - freshnessScorePenalty(freshness)),
+    Math.round(skill.rate * 70 + (locationOk ? 20 : 0) + (timingOk ? 10 : 0) - freshnessScorePenalty(freshness) - level.gapScore * 10),
   );
 
   const pct = Math.round(skill.rate * 100);
@@ -142,7 +151,10 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     (implied ? `${implied}。` : '') +
     (stale ? `${staleCaution('案件')}。` : '') +
     (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '') +
-    (rateNegotiation ? `【単価交渉】必要案件単価まで${fmtMan(-(rateGapMan as number))}万円不足（本人の了承が前提）。` : '');
+    (rateNegotiation ? `【単価交渉】必要案件単価まで${fmtMan(-(rateGapMan as number))}万円不足（本人の了承が前提）。` : '') +
+    (level.gaps.length > 0 ? `【経験交渉】${level.gaps.join('・')}。` : '') +
+    (level.unknowns.length > 0 ? `［確認］${level.unknowns.join('・')}。` : '') +
+    (level.bonus.length > 0 ? `（${level.bonus.join('・')}）` : '');
   const skillText =
     skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
   const reason = needsReview
@@ -181,6 +193,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
         total: b ? b.exact.length + b.equiv.length + b.implied.length + b.missing.length : 0,
         preferred: skill.preferred,
       },
+      levelGap: level.gapScore,
       freshness,
       receivedMs: Number.isFinite(new Date(project.receivedAt).getTime()) ? new Date(project.receivedAt).getTime() : 0,
     },
@@ -188,8 +201,10 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
 }
 
 // 自社社員ごとに合いそうな案件を最大 maxCandidatesPerItem() 件（案件ごとにも同数まで）返す（純関数・LLM不使用）。
-// 並びは適合が先: 強マッチ → 参考提案 → 要確認、同じ区分の中はスキル適合度（一致率−鮮度の減点）→ 完全一致の割合 →
-// 尚可の一致 → 単価差 → 受信の新しい順 → ID。割り当ては外部要員の一次選抜と同じ上限つき貪欲法
+// 並びは適合が先: 強マッチ → 参考提案 → 要確認、同じ区分の中はレベルの合い方（経験年数・工程・立場の不足が小さい順）→
+// スキル適合度（一致率−鮮度の減点）→ 完全一致の割合 → 尚可の一致 → 必要案件単価を満たすか → 受信の新しい順 → ID。
+// 単価の差の大きさでは並べない（社員は必要案件単価どおりでよく、高単価の案件ほど求めるレベルも高いため）。
+// 割り当ては外部要員の一次選抜と同じ上限つき貪欲法
 export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Project[], now = new Date()): OwnMatch[] {
   const openProjects = projects.filter((p) => p.status === 'open');
   const availableOwn = own.filter((o) => o.status === 'available');
@@ -204,10 +219,11 @@ export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Projec
   const category = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
   const keys = (c: { match: OwnMatch; rank: OwnRankInfo }): number[] => [
     -category(c.match),
+    -c.rank.levelGap,
     skillFitScore(c.rank.skill, c.rank.freshness),
     ...directnessKeys(c.rank.skill),
     preferredShare(c.rank.skill),
-    c.match.rateGapMan ?? -Infinity,
+    c.match.meetsRate ? 1 : 0,
     c.rank.receivedMs,
   ];
   candidates.sort((a, b) => compareDesc(keys(a), keys(b)) || (a.match.id < b.match.id ? -1 : a.match.id > b.match.id ? 1 : 0));

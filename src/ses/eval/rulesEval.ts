@@ -98,6 +98,11 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects } from '../ownMatch.js';
+import {
+  parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
+  EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
+} from '../level.js';
+import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3622,6 +3627,77 @@ function summarySendChecks(): void {
   }
 }
 
+// ===== レベル（技術ごとの経験年数・工程・立場を別の軸として照合する。level.ts・要員リストの読み取り） =====
+function levelChecks(): void {
+  section('レベルの軸: 年数・工程・立場の読み取り');
+  check('年数: 「3年6ヶ月」「11ヶ月」「約6年9ヵ月」「2.5」、日付は年数にしない',
+    parseYears('3年6ヶ月') === 3.5 && parseYears('11ヶ月') === 0.9 && parseYears('約6年9ヵ月') === 6.8 && parseYears('2.5') === 2.5 && parseYears('2026年10月〜') === null);
+  const phases = parsePhaseYears('3年6ヶ月（要件調査3ヶ月、テスト11ヶ月、運用保守2年1ヶ月、Java研修3ヶ月）');
+  check('工程ごとの年数（合計の年数は工程に数えない）', JSON.stringify(phases) === JSON.stringify([{ phase: '要件定義', years: 0.3 }, { phase: 'テスト', years: 0.9 }, { phase: '運用保守', years: 2.1 }]), JSON.stringify(phases));
+  const range = parsePhaseYears('詳細設計〜結合テスト 2年');
+  check('工程の範囲は範囲の工程すべてに同じ年数', range.map((p) => p.phase).join(',') === '詳細設計,製造,テスト' && range.every((p) => p.years === 2), JSON.stringify(range));
+  const sy = parseSkillYears('12年5ヵ月（VB.NET：約6年9ヶ月、SQL / PL/SQL：約9年4ヶ月）');
+  check('技術ごとの年数（並んだ技術はそれぞれ）', sy.some((x) => x.skill === 'VB.NET' && x.years === 6.8) && sy.some((x) => x.skill === 'PL/SQL' && x.years === 9.3), JSON.stringify(sy));
+  check('「Java案件：2年7ヶ月」→ Java 2.6年', JSON.stringify(parseSkillYears('Java案件：2年7ヶ月')) === JSON.stringify([{ skill: 'Java', years: 2.6 }]));
+  check('立場: PG / 「SE/PL」は上の方 / リーダー経験は PL', parseRole('PGとして参画') === 'PG' && parseRole('SE/PL') === 'PL' && parseRole('リーダー経験あり') === 'PL' && parseRole('PMO補佐') === null);
+  check('要員の最も上流の工程は半年以上の経験のあるもの（数か月の要件調査は数えない）', topPhaseOf({ skillYears: [], phaseYears: phases, role: null }) === 'テスト');
+
+  section('レベルの軸: 照合（最も弱い軸で決める）');
+  const eng: EngineerLevel = { skillYears: [{ skill: 'Java', years: 2.4 }], phaseYears: [{ phase: '詳細設計', years: 2 }, { phase: '製造', years: 2 }], role: 'PG' };
+  const lvl = (over: Partial<ProjectLevel>): ProjectLevel => ({ ...EMPTY_PROJECT_LEVEL, ...over });
+  check('条件の無い案件は ok', evaluateLevel(lvl({}), eng, 2.4).verdict === 'ok');
+  check('Java 3年以上に 2.4年は経験交渉（1年以内の不足）', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), eng, 2.4).verdict === 'negotiate');
+  check('Java 5年以上に 2.4年は除外', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 5 }] }), eng, 2.4).verdict === 'exclude');
+  check('工程: 基本設計からは1段上で経験交渉、要件定義からは2段上で除外',
+    evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ topPhase: '要件定義' }), eng, 2.4).verdict === 'exclude');
+  check('工程: 製造からの案件は ok（上流の経験があれば下流も担える）', evaluateLevel(lvl({ topPhase: '製造' }), eng, 2.4).verdict === 'ok');
+  check('立場: SE は1段上で経験交渉、PL は2段上で除外', evaluateLevel(lvl({ role: 'SE' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ role: 'PL' }), eng, 2.4).verdict === 'exclude');
+  check('2つの軸が少しずつ足りなければ除外（年数と工程）', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'exclude');
+  const noYears = evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 2 }] }), eng, 5);
+  check('技術ごとの年数が分からなければ確認事項（合計年数で足りる場合は落とさない）', noYears.verdict === 'ok' && noYears.unknowns.length === 1);
+  check('合計年数が必要年数に届かなければ技術の年数も足りないとみなす', evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 5 }] }), eng, 2.4).verdict === 'exclude');
+  check('要員のレベルが分からない社員は判定しない（確認事項だけ）', evaluateLevel(lvl({ topPhase: '要件定義', role: 'PM' }), undefined, null).verdict === 'ok');
+  check('SES_LEVEL_YEARS_TOLERANCE=0 なら少しの不足でも除外', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), eng, 2.4, 0).verdict === 'exclude');
+
+  section('レベルの軸: 抽出結果・保存値の検証');
+  const dirty = sanitizeProjectLevel({ skillYears: [{ skill: 'Java', years: 3 }, { skill: '基本設計', years: 2 }, { skill: 'Go', years: -1 }, { skill: 'AWS', years: 99 }], totalYears: 'x', topPhase: '上流', role: 'CTO', juniorOk: 'yes' });
+  check('工程名の技術・負・範囲外の年数・未知の工程と立場・真偽値でない値を捨てる', JSON.stringify(dirty) === JSON.stringify({ ...EMPTY_PROJECT_LEVEL, skillYears: [{ skill: 'Java', years: 3 }] }), JSON.stringify(dirty));
+  const saved = parseProjectLevelJson(projectLevelJson(lvl({ topPhase: '詳細設計', role: 'PG', juniorOk: true })));
+  check('保存した JSON を読み戻せる／条件の無い案件は空欄', saved?.topPhase === '詳細設計' && saved.juniorOk && projectLevelJson(lvl({})) === '' && parseProjectLevelJson('{壊れた') === undefined);
+  const mail = { id: 'sesmail_lv', from: '', to: '', cc: '', subject: '', body: '', messageIdHeader: '', references: '', receivedAt: NOW, attachments: [], sheetLinks: [] };
+  const raw = { title: 'x', requiredSkills: ['Java'], preferredSkills: [], rateMin: null, rateMax: 60, rateUnit: 'manYenPerMonth' as const, location: '東京都', remote: 'partial' as const,
+    startPeriod: '', startDateIso: null, duration: '', businessFlow: '', agentCompany: '', agentContact: '', agentEmail: '',
+    minYearsBySkill: [{ skill: 'Java', years: 3 }, { skill: 'Spring', years: 7 }], minTotalYears: null, topPhase: '詳細設計', roleLevel: 'PG', juniorOk: false, selfDriven: true };
+  const built = buildProject(raw, mail, 0, sourceNumbers('Java 3年以上 60万'));
+  check('案件の年数は本文に現れる数値だけを通す（本文に無い7年は捨てる）', built.level?.skillYears.length === 1 && built.level.skillYears[0].years === 3 && built.level.topPhase === '詳細設計' && built.level.selfDriven, JSON.stringify(built.level));
+
+  section('レベルの軸: 社員の照合への組み込み');
+  const ownL = (over: Partial<OwnEngineer> = {}): OwnEngineer => ({
+    id: 'lv1', displayName: 'A', skills: ['Java', 'Spring Boot'], experienceYears: 2.4, requiredProjectRate: 50, residence: '東京都', prefecture: '東京都',
+    availableDate: '', availableFrom: null, remoteWish: 'partial', status: 'available', level: eng, ...over,
+  });
+  const pj = (id: string, level: ProjectLevel | undefined, rateMax = 55) => project({ id, requiredSkills: ['Java', 'Spring Boot'], rateMax, receivedAt: daysAgo(1), ...(level ? { level } : {}) });
+  check('工程が2段上の案件は、技術が100%合っていても候補にしない', evaluateOwnMatch(ownL(), pj('p_up', lvl({ topPhase: '要件定義' })), NOW) === null);
+  const nego = evaluateOwnMatch(ownL(), pj('p_nego', lvl({ role: 'SE' })), NOW);
+  check('1つの軸が少し足りない案件は参考提案・根拠に【経験交渉】', nego?.band === 'tentative' && nego.reason.includes('【経験交渉】立場はSE（経験はPG）'), nego?.reason);
+  const junior = evaluateOwnMatch(ownL(), pj('p_jr', lvl({ juniorOk: true, topPhase: '製造' })), NOW);
+  check('若手可の案件は根拠に若手可', junior?.band === 'strong' && junior.reason.includes('若手可'), junior?.reason);
+  const ranked = matchOwnEngineersToProjects([ownL()], [pj('p_rich', lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), 80), pj('p_fit', lvl({ topPhase: '製造' }), 50)], NOW).map((m) => m.projectId);
+  check('単価の高い案件より、レベルの合う案件を先に並べる', ranked[0] === 'p_fit', ranked.join(','));
+
+  section('要員リストの読み取り（サマリの■の欄・架空の値）');
+  const summary = '■名　前：A.B\n■年　齢：26歳\n■所　属：弊社社員\n■最　寄：大宮駅（埼玉県）\n■単　価：52万円 ※ご相談可能です\n■スキル：Java、Spring Boot、PostgreSQL\n■経験年数：Java案件：2年3ヶ月（詳細設計〜テスト 2年）\n■備　考：PGとして参画';
+  const r = parseRosterSummary(summary);
+  check('単価・所属・最寄・スキルを読む', r.rateMan === 52 && r.affiliation === 'proper' && r.station.includes('大宮') && r.skills.length === 3 && r.age === 26, JSON.stringify(r));
+  const sl = summaryLevel(r);
+  check('経験年数の欄から技術・工程の年数、備考から立場', sl.skillYears[0]?.skill === 'Java' && sl.skillYears[0]?.years === 2.3 && topPhaseOf(sl) === '詳細設計' && sl.role === 'PG', JSON.stringify(sl));
+  check('所属が協力会社ならパートナー', parseRosterSummary('■所　属：協力会社（1社先）').affiliation === 'partner');
+  const now = new Date('2026-09-29T03:00:00Z');
+  check('稼働開始時期「10月 or 11月」は早い方・「即日」は今日', rosterAvailableFrom('10月\nor\n11月', now) === '2026-10-01' && rosterAvailableFrom('即日', now) === '2026-09-29' && rosterAvailableFrom('1月', now) === '2027-01-01');
+  const merged = mergeLevels({ skillYears: [{ skill: 'Java', years: 2 }], phaseYears: [], role: null }, sl);
+  check('スキルシートの値を優先し、無い軸はサマリで補う', merged.skillYears[0].years === 2 && topPhaseOf(merged) === '詳細設計' && merged.role === 'PG');
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3662,6 +3738,7 @@ async function main(): Promise<void> {
     rateFormatChecks();
     marketRateChecks();
     summarySendChecks();
+    levelChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

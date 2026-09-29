@@ -1,3 +1,5 @@
+import type { ProjectLevel, EngineerLevel } from '../ses/level.js';
+
 // データソースの種類
 export type DataSource =
   | 'slack'
@@ -148,6 +150,8 @@ export interface Project {
   matched?: boolean;
   // 元のメールにAIへの指示らしき記載がある（抽出のAIの印・コードの検知）。この案件の組は要確認にし、AI判定・自動の下書きをしない
   injectionSuspected?: boolean;
+  // 経験年数・工程・立場の条件（level.ts）。記載が無い案件・古い保存データは未定義
+  level?: ProjectLevel;
 }
 
 // SES要員（エンジニア）。氏名・年齢等はPII（CLAUDE.md §非機能要件）
@@ -391,6 +395,8 @@ export interface OwnEngineer {
   remoteWish: RemoteOption;
   status: OwnEngineerStatus;
   notionPageId?: string;
+  // 技術ごとの年数・工程ごとの年数・立場（level.ts）。分からない社員は未定義
+  level?: EngineerLevel;
 }
 
 // プロパー（自社社員）: 別管理のスキルシート（Drive）から抽出し、管理表「プロパー管理」で人が

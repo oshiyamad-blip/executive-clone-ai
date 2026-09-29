@@ -744,7 +744,22 @@ export function properMasterSpreadsheetId(): string {
   return driveIdFrom(process.env.PROPER_MASTER_SPREADSHEET_ID);
 }
 
+// 要員リスト（営業用のスプレッドシート。「要員」タブ＋「スキルシート_<名前>」タブ）。メインのサービスアカウントに閲覧で共有する
+export function properRosterSpreadsheetId(): string {
+  return driveIdFrom(process.env.PROPER_ROSTER_SPREADSHEET_ID);
+}
+
+export function properRosterTab(): string {
+  return envStr('PROPER_ROSTER_TAB', '要員');
+}
+
+// スキルシートのフォルダ＋管理表、または要員リストのどちらかがあれば社員の候補探しを行う
 export function properEnabled(): boolean {
+  return Boolean((properFolderId() && properMasterSpreadsheetId()) || properRosterSpreadsheetId());
+}
+
+// スキルシートのフォルダと管理表の両方があるか（管理表の同期を行うか）
+export function properMasterEnabled(): boolean {
   return Boolean(properFolderId() && properMasterSpreadsheetId());
 }
 
@@ -781,6 +796,11 @@ export function properMasterInMainTenant(): boolean {
 // 0 にすると必要案件単価以上の案件だけにする
 export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
+}
+
+// 社員と案件のレベルの照合（level.ts）で、経験年数がこの年数までの不足なら「経験交渉」として残す（超えたら除外）
+export function levelYearsTolerance(): number {
+  return envNum('SES_LEVEL_YEARS_TOLERANCE', 1, { min: 0 });
 }
 
 // プロパー候補の突合対象にする案件の受信日の遡り日数

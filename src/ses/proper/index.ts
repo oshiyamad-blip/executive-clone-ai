@@ -3,7 +3,9 @@
 //       案件スプレッドシートの「プロパー候補」タブへ保存（提案の全員に返信文面つき。担当者メールで次回バッチが下書きにする）
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
-import { isDemo, properEnabled, properProjectLookbackDays } from '../config.js';
+import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays } from '../config.js';
+import { loadRosterEngineers, rosterConfigured } from './roster.js';
+import { safeErr } from '../redact.js';
 import { matchOwnEngineersToProjects, signedMan } from '../ownMatch.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
@@ -78,22 +80,38 @@ function logSync(s: ProperSyncResult): void {
   );
 }
 
+// 要員リストを読めなかった回は、稼働中の社員の候補を退役させない（読めなかっただけで一覧から消えたとみなさない）
+let rosterReadOk = true;
+
+async function loadRosterSafely(): Promise<ProperEngineer[]> {
+  rosterReadOk = true;
+  if (!rosterConfigured()) return [];
+  try {
+    return await loadRosterEngineers();
+  } catch (err) {
+    rosterReadOk = false;
+    console.error(`要員リスト: 読み込みに失敗しました（今回は要員リストの社員を使いません）: ${safeErr(err)}`);
+    recordHealEvent('warn', '要員リストを読めませんでした（サービスアカウントへの共有とシートIDを確認してください）');
+    return [];
+  }
+}
+
 // demoProjects は demo でだけ使う（本番は案件DBから直近の募集中案件を読む）。
 // 未設定なら null（スキップ）。例外は呼び出し側で受け、本体のバッチは止めない
 export async function runProperFlow(demoProjects: Project[] = []): Promise<ProperRunResult | null> {
   if (!isDemo() && !properEnabled()) {
-    console.log('プロパー候補: PROPER_SKILLSHEET_FOLDER_ID / PROPER_MASTER_SPREADSHEET_ID が未設定のためスキップします');
+    console.log('プロパー候補: PROPER_SKILLSHEET_FOLDER_ID / PROPER_MASTER_SPREADSHEET_ID（または PROPER_ROSTER_SPREADSHEET_ID）が未設定のためスキップします');
     return null;
   }
   await loadSkillEquivalences(); // 育てた同義辞書をスキル判定に反映
   if (isDemo()) return runProperDemo(demoProjects);
 
-  const sync = await syncProperMaster();
-  logSync(sync);
-  if (sync.writeFailed > 0) {
+  const sync = properMasterEnabled() ? await syncProperMaster() : null;
+  if (sync) logSync(sync);
+  if (sync && sync.writeFailed > 0) {
     recordHealEvent('warn', `管理表「プロパー管理」への書き込みに${sync.writeFailed}件失敗しました（次回の実行で再試行します）`);
   }
-  const engineers = await loadProperEngineers(sync.presentFileIds);
+  const engineers = [...(sync ? await loadProperEngineers(sync.presentFileIds) : []), ...(await loadRosterSafely())];
   const since = new Date(Date.now() - properProjectLookbackDays() * 24 * 60 * 60 * 1000);
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
   const candidates = buildProperCandidates(engineers, projects);
@@ -105,7 +123,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
     added = (await newProperCandidateIdsSheets(candidates.map((c) => c.id))).size;
     saved = await saveProperCandidatesSheets(candidates);
     // 管理表を読めたとき（未設定で空に見えているのではないとき）だけ、稼働可でなくなった社員の候補を退役させる
-    if (properMasterConfigured()) retired = await retireProperCandidatesSheets(new Set(engineers.map((e) => e.id)));
+    if (rosterReadOk && (properMasterConfigured() || rosterConfigured())) retired = await retireProperCandidatesSheets(new Set(engineers.map((e) => e.id)));
     if (retired > 0) console.log(`プロパー候補: 稼働可でなくなった社員の候補${retired}行を退役させました（氏名・必要案件単価・文面を消去）`);
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
@@ -118,8 +136,16 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
 // 担当者メールによるプロパー候補の下書き依頼を受けてよい社員（管理表で稼働可の社員）のID。確かめられなければ null
 // （依頼は作らずに次回へ回す）
 export async function activeProperEngineerIds(): Promise<Set<string> | null> {
-  if (isDemo() || !properEnabled() || !properMasterConfigured()) return null;
-  return new Set((await loadProperEngineers(null)).map((e) => e.id));
+  if (isDemo() || !properEnabled() || (!properMasterConfigured() && !rosterConfigured())) return null;
+  const master = properMasterConfigured() ? await loadProperEngineers(null) : [];
+  let roster: ProperEngineer[] = [];
+  try {
+    roster = rosterConfigured() ? await loadRosterEngineers() : [];
+  } catch (err) {
+    console.warn(`要員リスト: 読み込みに失敗したため、下書き依頼の確認を次回に回します: ${safeErr(err)}`);
+    return null;
+  }
+  return new Set([...master, ...roster].map((e) => e.id));
 }
 
 // ===== サマリメール =====

@@ -28,6 +28,7 @@ import {
 import { extractSkillSheet, sanitizeInitials, proposalAvailableText, type SkillSheetProfile } from './extractSkillSheet.js';
 import { pastRunDeadline } from '../schedule.js';
 import type { ProperEngineer } from '../../types/index.js';
+import { formatSkillYears, formatPhaseYears, parseSkillYears, parsePhaseYears, parseRole, hasEngineerLevel } from '../level.js';
 
 export const PROPER_MASTER_TAB = 'プロパー管理';
 
@@ -37,6 +38,9 @@ export const PROPER_MASTER_COLUMNS = [
   // 区分: プロパー（自社社員。空欄も同じ）/ パートナー（協力会社の要員）。手動ID: スキルシートの無い、人が手で追加した行に
   // バッチが振るID（候補の行を同じ要員に結び付け続けるため。消したり書き換えたりしない）
   '区分', '手動ID',
+  // レベル（level.ts）: スキルシートから機械が書く。手で追加した行は人が書いてよい（例: 「Java 2.5年, Oracle 2年」
+  // 「詳細設計 2年, 製造 2年, テスト 2年」「PG」）。案件の経験年数・工程・立場の条件との照合に使う
+  '技術経験年数', '工程経験', '立場',
 ];
 
 export const PARTNER_LABEL = 'パートナー';
@@ -160,6 +164,9 @@ export function planMasterCells(
       ['経験年数', p.experienceYears],
       ['居住地', p.residence],
       ['リモート希望', remoteLabel(p.remoteWish)],
+      ['技術経験年数', formatSkillYears(p.level?.skillYears ?? [])],
+      ['工程経験', formatPhaseYears(p.level?.phaseYears ?? [])],
+      ['立場', p.level?.role ?? ''],
       ['ファイル更新日時', file.modifiedTime],
       ['抽出日時', jstStamp(now)],
       ['抽出メモ', successMemo(p, cell(existing, '稼働状況').trim() === '')],
@@ -429,7 +436,14 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
     remoteWish: labelToRemote(c('リモート希望')),
     status: 'available',
     affiliation: c('区分') === PARTNER_LABEL ? 'partner' : 'proper',
+    ...levelOfCells(c('技術経験年数'), c('工程経験'), c('立場')),
   };
+}
+
+// 人・機械が書いた「技術経験年数」「工程経験」「立場」の列 → レベル（どれも空なら未定義＝照合で判定しない）
+export function levelOfCells(skillYears: string, phaseYears: string, role: string): { level?: ProperEngineer['level'] } {
+  const level = { skillYears: parseSkillYears(skillYears), phaseYears: parsePhaseYears(phaseYears), role: parseRole(role) };
+  return hasEngineerLevel(level) ? { level } : {};
 }
 
 // 行の要員キー（スキルシートのファイルID、なければ手動ID）

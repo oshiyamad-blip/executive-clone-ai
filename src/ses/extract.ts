@@ -22,6 +22,7 @@ import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
 import { sanitizeListItem } from '../database/mapping.js';
 import { safeErr, logId } from './redact.js';
 import { toInitials } from './pii.js';
+import { PHASES, ROLES, sanitizeProjectLevel, hasLevelRequirement } from './level.js';
 import { capSubject } from '../collectors/email.js';
 import { looksLikeInjection, dataSafe } from './injection.js';
 import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyTarget } from '../types/index.js';
@@ -67,6 +68,17 @@ export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリ�
   （例: 「工程: 基本設計〜テスト」→ "基本設計〜テスト"、「PL経験あり」「リーダー経験」→ "PL"、「PM経験」→ "PM"、
   「金融系（銀行）の開発経験」→ "金融"、「証券会社向け」→ "証券"）
 - 必須の欄に「尚可」「歓迎」と書かれた技術は preferredSkills に入れてください
+- 案件のレベルの条件は、スキル名とは別の項目に入れてください（技術・工程・立場は別の軸として照合します）:
+  - minYearsBySkill: 必須の技術ごとの最低経験年数（例: 「Java 3年以上」→ {skill: "Java", years: 3}、「Java経験2〜3年」→ 2）。
+    年数の書かれていない技術は入れない。尚可の技術の年数は入れない
+  - minTotalYears: IT・開発の経験全体の最低年数（「実務経験5年以上」「SE経験3年」など。無ければ null）
+  - topPhase: この案件で担当する工程のうち最も上流のもの（要件定義/基本設計/詳細設計/製造/テスト/運用保守）。
+    「基本設計〜テスト」→ 基本設計、「詳細設計から」→ 詳細設計、「製造・単体テスト」→ 製造、「テスト要員」→ テスト、「運用保守」→ 運用保守。
+    必須スキルに「基本設計の経験」があれば基本設計。工程が読み取れなければ null
+  - roleLevel: 求める立場（PG/SE/PL/PM）。「PG」「プログラマー」→ PG、「SE」「SEクラス」「設計者」→ SE、
+    「リーダー」「PL」→ PL、「PM」「マネージャー」→ PM。読み取れなければ null（「PMO」は PM にしない）
+  - juniorOk: 「若手可」「未経験可」「経験浅め可」「20代」「育成枠」など経験の浅い人を受け入れる記載があれば true
+  - selfDriven: 「一人称で」「自走できる」「自立して」など一人で進められることが条件なら true
 - 案件の businessFlow（商流メモ）には、参画の条件を原文の言い回しのまま入れてください: 商流・再委託の範囲（貴社社員まで／貴社1社先まで など）、
   所属・雇用形態（個人事業主・フリーランスの可否）、外国籍の可否と日本語の条件、年齢の条件（「年齢：〜45歳」「30代前半まで」など）、
   面談回数、精算幅。見出しの無い一覧でも、これらの語が書かれた行は businessFlow に含めてください（条件はコードで照合します）
@@ -123,6 +135,20 @@ const PROJECT_ITEM_SCHEMA = {
     agentCompany: { type: 'string' },
     agentContact: { type: 'string' },
     agentEmail: { type: 'string' },
+    minYearsBySkill: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { skill: { type: 'string' }, years: { type: 'number' } },
+        required: ['skill', 'years'],
+      },
+    },
+    minTotalYears: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+    topPhase: { anyOf: [{ type: 'string', enum: [...PHASES] }, { type: 'null' }] },
+    roleLevel: { anyOf: [{ type: 'string', enum: [...ROLES] }, { type: 'null' }] },
+    juniorOk: { type: 'boolean' },
+    selfDriven: { type: 'boolean' },
   },
   required: [
     'title',
@@ -140,6 +166,12 @@ const PROJECT_ITEM_SCHEMA = {
     'agentCompany',
     'agentContact',
     'agentEmail',
+    'minYearsBySkill',
+    'minTotalYears',
+    'topPhase',
+    'roleLevel',
+    'juniorOk',
+    'selfDriven',
   ],
 } as const;
 
@@ -209,6 +241,13 @@ export interface RawProject {
   agentCompany: string;
   agentContact: string;
   agentEmail: string;
+  // レベルの条件（level.ts）。古い抽出結果・テストの値には無いことがある
+  minYearsBySkill?: Array<{ skill: string; years: number }>;
+  minTotalYears?: number | null;
+  topPhase?: string | null;
+  roleLevel?: string | null;
+  juniorOk?: boolean;
+  selfDriven?: boolean;
 }
 
 export interface RawEngineer {
@@ -879,7 +918,21 @@ export function buildProject(raw: RawProject, mail: SesRawMail, index: number, n
     sourceMailId: mail.id,
     receivedAt: mail.receivedAt,
     status: 'open',
+    ...levelOf(raw, numbers),
   };
+}
+
+// 案件のレベルの条件。年数は本文に現れる数値だけを通す（単金・年齢と同じく、照合の結果を左右する数値のため）
+function levelOf(raw: RawProject, numbers: Set<string> | null): { level?: Project['level'] } {
+  const level = sanitizeProjectLevel({
+    skillYears: (raw.minYearsBySkill ?? []).map((s) => ({ skill: s.skill, years: sourceBacked(s.years, numbers) })),
+    totalYears: raw.minTotalYears === null || raw.minTotalYears === undefined ? null : sourceBacked(raw.minTotalYears, numbers),
+    topPhase: raw.topPhase ?? null,
+    role: raw.roleLevel ?? null,
+    juniorOk: raw.juniorOk === true,
+    selfDriven: raw.selfDriven === true,
+  });
+  return hasLevelRequirement(level) ? { level } : {};
 }
 
 // 居住地から都道府県が取れず最寄駅から取れる場合は、居住地に最寄駅を添えて保存する

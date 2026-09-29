@@ -318,6 +318,9 @@ Xserver の **サーバーパネル** にログイン →「メール」の **�
    編集者は人事・運用担当とサービスアカウントだけにします。同じファイルを指定すると事前確認が ❌ で止めます。
    案件スプレッドシートの「プロパー候補」タブには、社員を提案用表記（イニシャル）でだけ書きます）
 3. フォルダの URL を Secret `PROPER_SKILLSHEET_FOLDER_ID`、管理表の URL を Secret `PROPER_MASTER_SPREADSHEET_ID` に登録
+   - **営業用の要員リストがある場合**は、そのスプレッドシートを**サービスアカウントに「閲覧者」**で共有し、URL を Secret `PROPER_ROSTER_SPREADSHEET_ID` に登録するだけで使えます
+     （「要員」タブの状況が「営業中」の行を毎回読み、■単価を必要案件単価、■経験年数・「スキルシート_<名前>」タブから技術・工程ごとの経験年数と立場を読みます。
+     スキルシートのタブは内容が変わったときだけ抽出します。フォルダ・管理表と併用も可）
 4. 実行後、「プロパー管理」タブで各社員の **「必要案件単価」（万円/月）** と **「稼働状況」（稼働可／アサイン済／対象外）** だけを入力します
 5. **案件だけモード（既定 `SES_TARGET=projects`）**では、パートナーから届く要員メールは抽出しません。売りたい要員は「プロパー管理」タブに登録します。
    - スキルシートをフォルダに入れる（自動で行ができます）か、**行を手で追加**します（`提案用表記`（イニシャル）・`スキル`・`稼働状況`＝稼働可 は必須、`必要案件単価`・`稼働可能日`・`居住地`・`リモート希望` は任意）。
@@ -425,6 +428,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_INTERNAL_FILE_DOMAINS` | `<グループ会社のドメイン>` | 任意 | メールに貼られたリンク先を「社内のファイル」として読まない、自社以外のドメイン（カンマ区切り） |
 | `PROPER_SKILLSHEET_FOLDER_ID` | `https://drive.google.com/drive/folders/xxxx` | 任意 | 4-3（プロパー機能） |
 | `PROPER_MASTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（プロパー機能） |
+| `PROPER_ROSTER_SPREADSHEET_ID` | `https://docs.google.com/spreadsheets/d/xxxx/edit` | 任意 | 4-3（営業用の要員リスト。サービスアカウントに「閲覧者」で共有。「営業中」の要員を毎回読む） |
 | `PROPER_GOOGLE_SA_KEY_JSON` | `{"type":"service_account",…}` | 任意 | スキルシートが別テナントにあり、そのテナントのサービスアカウントを使う場合だけ（4-4 C） |
 | `PROPER_GOOGLE_IMPERSONATE` | `ops@<別テナント>` | 任意 | 4-4 C で共有できない場合だけ（`PROPER_GOOGLE_SA_KEY_JSON` と組み合わせたときだけ使われます） |
 | `SES_TARGET_GMAIL` / `SES_GMAIL_SA_KEY_JSON` | — | 不要 | メールを Gmail で運用する場合だけ（`MAIL_PROVIDER=gmail`。Gmail の DWD は専用の鍵 `SES_GMAIL_SA_KEY_JSON` で。9章） |
@@ -460,7 +464,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_ALLOW_GEMINI_API` | `paid` | `gemini` を使う場合は**必須** | `LLM_PROVIDER=gemini` では、メール本文・添付・社員のスキルシートを Google AI Studio に送ります。無料枠は送った内容が品質改善や人による確認に使われ得るため、**課金を有効にしたプロジェクトで利用条件を確認したうえで** `paid` を登録します（未登録なら事前確認が ❌ で止め、バッチも始めません） |
 | `SES_NOTIFY_ALLOW_EXTERNAL` | `false` | 任意 | `true` のときだけ、`SES_NOTIFY_TO` の自社ドメイン以外の宛先にもサマリを送ります（既定では送らず、事前確認が ❌ で知らせます） |
 | `SES_RETENTION_DAYS` | `180` | 任意 | 個人データの保存期間（日。既定 180、30〜3650）。4-2 の「保存期間」を参照 |
-| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_NOTIFY_ALWAYS`（既定 false＝新しい候補がある回だけサマリを送る） `SES_MAX_FETCH_PER_RUN`（既定1500） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `PROPER_RATE_TOLERANCE_MAN`（既定5＝必要案件単価の5万円下まで単価交渉として候補に残す） `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
+| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_NOTIFY_ALWAYS`（既定 false＝新しい候補がある回だけサマリを送る） `SES_MAX_FETCH_PER_RUN`（既定1500） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `PROPER_RATE_TOLERANCE_MAN`（既定5＝必要案件単価の5万円下まで単価交渉として候補に残す） `PROPER_ROSTER_TAB`（既定「要員」） `SES_LEVEL_YEARS_TOLERANCE`（既定1＝経験年数の1年までの不足は経験交渉） `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
 
 **Secrets に移した設定**: 以前の手順で `SES_OWN_DOMAINS` `SES_ALLOWED_SENDER_DOMAINS` `SHEETS_DB_IMPERSONATE` `PROPER_GOOGLE_IMPERSONATE`
 `MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、Secrets に登録し直し（価格の方針は `SES_PRICING_POLICY_JSON` にまとめる）、Variables から削除してください
