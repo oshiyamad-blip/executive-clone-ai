@@ -58,7 +58,7 @@ OAuth モードでは **下書きの作成とサマリメールの送信はし�
 | `DB_PROVIDER` | `sheets` |
 | `SHEETS_DB_SPREADSHEET_ID` | 案件スプレッドシート（空のシートを作ってURL） |
 | `PROPER_ROSTER_SPREADSHEET_ID` | 要員リストのURL |
-| `PROPER_SALES_SPREADSHEET_ID` | 営業リスト（空のシートを作ってURL） |
+| `PROPER_SALES_SPREADSHEET_ID` | 営業リストのURL（今使っているシートをそのまま指定。毎回同じシートを更新する） |
 | `SES_PRICING_POLICY_JSON` | 粗利下限・交渉幅（GitHub Actions と同じ値） |
 
 ### OAuth のリフレッシュトークンを得る（初回だけ・5分程度）
