@@ -22,7 +22,7 @@ import {
 } from '../config.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
-import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare } from '../../llm/pricing.js';
+import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare, uncachedModels } from '../../llm/pricing.js';
 import { recordLlmUsage, getLlmUsageLog } from '../../llm/usage.js';
 import { isModelUnavailableError } from '../../llm/errors.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
@@ -1440,6 +1440,11 @@ function pricingChecks(): void {
   check('円換算 = ドル × JPY_PER_USD、見積もりと実績の計算は同じ', near(usageCostJpy(u), usageCostUsd(u) * jpyPerUsd()) && near(estimateCallJpy(u.model, 1234, 567), usageCostJpy(u)));
   check('キャッシュ読込率 = 読込 ÷（入力＋書込＋読込）', near(cacheReadShare([{ model: 'm', inputTokens: 100, outputTokens: 0, cacheReadInputTokens: 300 }]) ?? -1, 0.75));
   check('入力が無ければキャッシュ読込率は不明（null）', cacheReadShare([]) === null);
+  const cu = (model: string, read = 0, created = 0) => ({ model, inputTokens: 100, outputTokens: 0, cacheReadInputTokens: read, cacheCreationInputTokens: created });
+  check('キャッシュが一度も効かないモデルを検出（5回未満・一度でも効いたモデルは除く）',
+    JSON.stringify(uncachedModels([...Array(5)].map(() => cu('haiku')), 5)) === '["haiku"]' &&
+      uncachedModels([...Array(4)].map(() => cu('haiku'))).length === 0 &&
+      uncachedModels([cu('sonnet', 0, 500), ...[...Array(5)].map(() => cu('sonnet'))]).length === 0);
   const before = getLlmUsageLog().length;
   recordLlmUsage('claude-sonnet-5', 100, 10, { creation: null, creation1h: null, read: undefined });
   recordLlmUsage('claude-sonnet-5', Number.NaN, 10, { creation: 200, creation1h: 500, read: 50 });

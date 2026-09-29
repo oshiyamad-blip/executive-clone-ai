@@ -47,6 +47,13 @@ function outputConfig(model: string, schema: object, opts: GenOptions): Anthropi
   return opts.effort && EFFORT_MODELS.test(model) ? { format, effort: opts.effort } : { format };
 }
 
+// 構造化出力の呼び出し（抽出・判定）は同じ system を1回のバッチで何百回も送るため、system の末尾でキャッシュする。
+// 5分以内に次の呼び出しが来れば読み込み（入力の約0.1倍）になる。モデルの最小長（Haiku 4.5 は4096トークン）に
+// 満たない system は黙ってキャッシュされないだけで、料金は増えない（効いたかはメトリクスの「キャッシュ読込率」で分かる）
+function cachedSystem(system: string): Anthropic.Messages.TextBlockParam[] {
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+}
+
 // 呼び出し単位のSDKオプション（再試行回数・タイムアウト）
 function requestOptions(opts: GenOptions): { maxRetries?: number; timeout?: number } {
   const o: { maxRetries?: number; timeout?: number } = {};
@@ -112,7 +119,7 @@ export async function anthropicJson(
       model: resolvedModel,
       max_tokens: maxTokens,
       ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
-      system,
+      system: cachedSystem(system),
       output_config: outputConfig(resolvedModel, schema, opts),
       messages: [{ role: 'user', content: user }],
     },
@@ -150,7 +157,7 @@ export async function anthropicJsonWithDocuments(
       model: resolvedModel,
       max_tokens: maxTokens,
       ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
-      system,
+      system: cachedSystem(system),
       output_config: outputConfig(resolvedModel, schema, opts),
       messages: [{ role: 'user', content }],
     },
