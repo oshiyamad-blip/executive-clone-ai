@@ -629,7 +629,7 @@ export function extractModel(): string {
 
 // 最終判定・メール生成用モデル（候補ペアのみ。既定Sonnet）
 export function matchModel(): string {
-  return envStr('ANTHROPIC_MODEL_MATCH', 'claude-sonnet-5');
+  return envStr('ANTHROPIC_MODEL_MATCH', 'claude-sonnet-5-5');
 }
 
 // SESデータの保存先。notion（既定）| sheets（Googleスプレッドシート）。

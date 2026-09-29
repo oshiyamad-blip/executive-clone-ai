@@ -1388,9 +1388,11 @@ function injectionChecks(): void {
   check('メールアドレスの無い文面は通す', disclosureIssues('田中様\nK.S.をご提案します。単金はご相談させてください。', 'project', dp, de, m).length === 0);
 }
 
-// ===== 15. 料金の計算（Sonnet 5 = $2/$10・Haiku 4.5 = $1/$5・キャッシュ倍率） =====
+// ===== 15. 料金の計算（Sonnet 5.5 / Sonnet 5 = $2/$10・Haiku 4.5 = $1/$5・キャッシュ倍率） =====
 
 const PRICE_CASES: Array<[string, { input?: number; output?: number; write?: number; write1h?: number; read?: number }, number, string]> = [
+  ['claude-sonnet-5-5', { input: 1_000_000 }, 2, 'Sonnet 5.5 入力1MTok = $2'],
+  ['claude-sonnet-5-5', { output: 1_000_000 }, 10, 'Sonnet 5.5 出力1MTok = $10'],
   ['claude-sonnet-5', { input: 1_000_000 }, 2, 'Sonnet 5 入力1MTok = $2'],
   ['claude-sonnet-5', { output: 1_000_000 }, 10, 'Sonnet 5 出力1MTok = $10'],
   ['claude-haiku-4-5', { input: 1_000_000 }, 1, 'Haiku 4.5 入力1MTok = $1'],

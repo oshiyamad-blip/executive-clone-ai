@@ -1,5 +1,5 @@
 // 抽出モデル（既定 Haiku 4.5）の退役・提供終了への備え。設定されたモデルが使えないとAPIが答えたら、
-// このプロセスの残りの抽出（メール・スキルシート）を判定用モデル（既定 Sonnet 5）に切り替えて続け、
+// このプロセスの残りの抽出（メール・スキルシート）を判定用モデル（既定 Sonnet 5.5）に切り替えて続け、
 // 費用が増える旨をバッチの診断（サマリメール）に載せる。Haiku 向けの設定（thinking なし・effort なし）は
 // llm/anthropic.ts がモデル名で決めるため、代替モデルには従来どおりの規則で adaptive thinking が付く
 import { isModelUnavailableError } from '../llm/errors.js';

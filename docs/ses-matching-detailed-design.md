@@ -45,7 +45,7 @@ Claude Opus/Sonnet の現行世代でのみ有効な設定である。SES抽出�
 
 修正: `src/llm/anthropic.ts` に `supportsAdaptiveThinking(model)` / `thinkingParam(model)` を追加し、
 モデル名に `haiku` を含む場合は `thinking` パラメータ自体を省略する（Haiku系は思考なしで実行）よう分岐した。
-Opus/Sonnet系（`matchModel()` 既定 `claude-sonnet-5`、グローバル既定 `claude-opus-4-8`）は従来どおり
+Opus/Sonnet系（`matchModel()` 既定 `claude-sonnet-5-5`、グローバル既定 `claude-opus-4-8`）は従来どおり
 `adaptive` を付与する。分類+抽出は構造化出力（JSON Schema）で十分な精度が出る定型タスクのため、
 thinkingを省略しても機能要件（F3）に影響はない。
 

@@ -182,7 +182,7 @@ const ENGINEER_ITEM_SCHEMA = {
   ],
 } as const;
 
-const EXTRACT_SCHEMA = {
+export const EXTRACT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {

@@ -1,4 +1,4 @@
-// 紹介メール2通(案件側宛/要員側宛)を生成する。本番=Sonnet 5 生成→Gmail下書き作成、
+// 紹介メール2通(案件側宛/要員側宛)を生成する。本番=Sonnet 5.5 生成→Gmail下書き作成、
 // demo=テンプレート生成+ローカル保存。自動送信はしない（下書き止まり。要件F5・運用§10-1）。
 //
 // 基本設計I/F（createDrafts(matches): Promise<MatchResult[]>）に対し、実装では案件・要員の
@@ -488,7 +488,7 @@ function subjectToEngineer(project: Project, engineer: Engineer): string {
   return `【ご紹介】${project.title} - ${engineerLabel(engineer)}様向け`;
 }
 
-// ---------- 本番（Sonnet 5生成 → 全員に返信の下書き内容を用意） ----------
+// ---------- 本番（Sonnet 5.5生成 → 全員に返信の下書き内容を用意） ----------
 // 送信元は担当営業個人の会社アドレスのため、実際の下書き作成は本人のアドレス確定後に行う
 // （確認UI、またはSheets運用では次回バッチが担当者メール列を見て materializeReplyDraft を呼ぶ）。
 // ここでは全員に返信の文面・宛先・スレッド情報を用意する（Sheets運用ではマッチタブの下書きデータ列に保存される）。

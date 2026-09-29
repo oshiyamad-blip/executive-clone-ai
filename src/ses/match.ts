@@ -1,5 +1,5 @@
 // マッチング。一次選抜（純コード・無料、primarySelect）→ 通過ペアのみ最終判定
-// （本番=Sonnet 5、demo=決定的な代用判定、要確認枠=ヒューリスティック）。
+// （本番=Sonnet 5.5、demo=決定的な代用判定、要確認枠=ヒューリスティック）。
 // 最終判定は下書きの関門: 基準（MATCH_MIN_LLM_SCORE）未満は参考提案、即NG条件・MATCH_REJECT_LLM_SCORE 未満は不適合。
 import { generateJson, LlmOutputError } from '../llm/index.js';
 import { totalLlmCostJpy } from '../llm/pricing.js';
