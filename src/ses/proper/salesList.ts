@@ -36,6 +36,8 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '勤務地', width: 110, wrap: true },
   { name: 'リモート', width: 56 },
   { name: '開始', width: 80, wrap: true },
+  { name: '合っている点', width: 200, wrap: true },
+  { name: '足りない点', width: 160, wrap: true },
   { name: '交渉ポイント', width: 220, wrap: true },
   { name: '対応状況', width: 80, human: true },
   { name: '担当営業', width: 72, human: true },
@@ -99,6 +101,8 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['案件単価(万)']] = c.projectRate ?? '';
   row[COL['希望単価(万)']] = c.requiredProjectRate ?? '';
   row[COL['差(万)']] = c.rateGapMan ?? '';
+  row[COL['合っている点']] = (c.matchedSkills ?? []).join('、');
+  row[COL['足りない点']] = (c.missingSkills ?? []).join('、');
   row[COL['交渉ポイント']] = negotiation;
   row[COL['確認事項']] = confirm;
   row[COL['提案文面（案）']] = c.draftToProject?.body ?? '';

@@ -97,7 +97,7 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech } from '../ownMatch.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
@@ -3725,6 +3725,21 @@ function sharedPrefixChecks(): void {
       normalizeRequirementLists(['基本設計またはテストの経験'], []).required[0] === '基本設計 / テスト（いずれか）');
 }
 
+function coreTechChecks(): void {
+  section('案件の中心の技術（工程・役割の語だけで一致率を満たした組を除く）');
+  const b = (exact: string[], missing: string[]) => ({ exact, equiv: [], implied: [], missing, via: {} });
+  check('技術の必須を1つも満たさない組は除く（Power BI 研修に基本設計・PLだけの社員）',
+    !coversCoreTech({ title: '社内向け研修', requiredSkills: [] }, ['基本設計', 'PL'], b(['基本設計', 'PL'], ['Power BI'])));
+  check('案件名の技術を1つも持たない組は除く', !coversCoreTech({ title: '某企業の社内向けPowerBI研修', requiredSkills: [] }, ['Java', 'SQL'], b(['SQL'], [])));
+  check('技術の必須を1つでも満たし、案件名の技術を持つ組は残す',
+    coversCoreTech({ title: 'Java詳細設計（パッケージ製品）', requiredSkills: [] }, ['Java', 'Oracle'], b(['Java'], ['Eclipse'])));
+  check('案件名に技術名が無く技術の必須を満たせば残す', coversCoreTech({ title: 'システム再構築支援', requiredSkills: [] }, ['Java'], b(['Java'], [])));
+  const nw = normalizeRequirementLists(['NWの新規導入(設計/構築/移行)'], []).required;
+  check('総称の親の括弧内の工程の語は、親の代わりにしない（設計・構築の経験だけでNW導入を満たさない）',
+    (skillMatch(nw, ['基本設計', '構築', '設計'])?.rate ?? 1) === 0, JSON.stringify(nw));
+  check('総称の親の括弧内の技術の例示は、これまでどおり親の代わりにする', (skillMatch(['RDB(Oracle/MySQL)'], ['Oracle'])?.rate ?? 0) === 1);
+}
+
 function commuteChecks(): void {
   section('通勤圏（プロパーの勤務地の判定）');
   check('隣接・1都3県どうし・関西どうしは通勤圏',
@@ -3767,7 +3782,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:X,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:Z,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
   check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色を付け、対応状況はプルダウン・ID列は隠す',
@@ -3861,6 +3876,7 @@ async function main(): Promise<void> {
     summarySendChecks();
     levelChecks();
     sharedPrefixChecks();
+    coreTechChecks();
     commuteChecks();
     salesListChecks();
     await userOAuthChecks();

@@ -462,6 +462,8 @@ export interface OwnMatch {
   reason: string; // 提示理由
   agentEmail: string; // 案件の営業元（打診先）
   detectedAt: Date;
+  matchedSkills?: string[]; // 満たした必須スキル（営業リストの「合っている点」）
+  missingSkills?: string[]; // 満たさない必須スキル（「足りない点」）
 }
 
 // ===== 人間フィードバックによる精度向上 =====

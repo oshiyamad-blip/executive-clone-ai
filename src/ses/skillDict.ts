@@ -162,6 +162,7 @@ const SKILLS: string[][] = [
   ['Power Apps'],
   ['Power Automate'],
   ['Power BI'],
+  ['Microsoft 365', 'M365', 'Office 365', 'O365', 'Microsoft365'],
   ['Dynamics 365', 'dynamics', 'd365'],
   ['SharePoint'],
   ['Microsoft 365', 'm365', 'office365', 'office 365'],
@@ -532,7 +533,12 @@ interface PieceParts {
 function classifyChild(parent: string, child: string, forceRequired: boolean, out: PieceParts): void {
   const parentCat = skillCategory(parent);
   const childCat = skillCategory(child);
-  if (parentCat === null) out.alts.push(child); // 総称の親（'RDB(Oracle/MySQL)'）の例示
+  // 総称の親（'RDB(Oracle/MySQL)'）の技術の例示は親の代わりにする。技術ではない子（'NWの新規導入(設計/構築/移行)' の
+  // 設計・構築）は内容の説明で、親の代わりにならない（設計・構築の経験だけでNWの導入を満たしたことにしない）
+  if (parentCat === null) {
+    if (childCat === 'skill') out.alts.push(child);
+    else out.qualifiers.push(child);
+  }
   else if (childCat === null) out.qualifiers.push(child);
   else if (forceRequired) out.required.push(child);
   else if (impliesSkill(child, parent)) out.alts.push(child); // 親の具体例（'AWS(EC2)'）
@@ -780,6 +786,20 @@ export function parseRequirements(raw: string): SkillRequirement[] {
 
 // 1つの記載 → 正規化したスキル名の配列（辞書にあれば正規形、無ければ正規化した表記）。
 // 要員のスキル・同義辞書・集計用で、選択肢や括弧の補足も1語ずつに分ける
+// 文の中に現れる辞書の技術名（正規形）。案件名の中心の技術を知るのに使う（「某企業のPowerBI研修」→ Power BI）
+export function techNamesIn(text: string): string[] {
+  const compactText = text.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+  const out: string[] = [];
+  for (const [alias, name] of ALIAS) {
+    if (CANONICAL.get(name.toLowerCase())?.category !== 'skill') continue;
+    const a = alias.replace(/\s+/g, '');
+    if (a.length < 2) continue;
+    const re = /^[a-z0-9]/.test(a) ? new RegExp(`(?<![a-z0-9#+.&])${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9#+&])`) : null;
+    if (re ? re.test(compactText) : compactText.includes(a)) out.push(name);
+  }
+  return uniqueCi(out);
+}
+
 export function tokenizeSkill(raw: string): string[] {
   return uniqueCi(parseRequirements(raw).flatMap((r) => r.span ?? [...r.members, ...r.qualifiers]));
 }
