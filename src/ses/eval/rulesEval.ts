@@ -3749,7 +3749,7 @@ async function properJudgeChecks(): Promise<void> {
   const profile = '【スキルシート】\n顧客管理DBの運用保守業務\tOracle DB上でのデータ作成、削除対応（CRUD操作、orderby・groupbyなどのSQL対応）\nJP1を用いたジョブ監視およびエラーログ検証';
   const raw = (over: Partial<RawProperJudgment> = {}): RawProperJudgment => ({
     work: 'Oracle のデータ保守', levelFit: '年数は足りる', preferenceFit: '記載なし', verdict: 'recommend', pitch: 'Oracle DB の運用保守を2年担当。', concerns: [],
-    injectionSuspected: false,
+    workPrefecture: '', injectionSuspected: false,
     requirements: [
       { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
       { requirement: 'JP1', status: 'met', evidence: 'JP1を用いたジョブ監視', note: '' },
@@ -3865,6 +3865,18 @@ async function properJudgeChecks(): Promise<void> {
     const tentativeNote = applyJudgment({ ...(ok1 as ProperCandidate), reason: '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。【年数交渉】Java3年に対し2年。' }, jj);
     check('ルールの参考提案の注記はAIの判定で置き換え、年数交渉の注記は残す',
       !(tentativeNote?.reason ?? '').includes('参考提案') && (tentativeNote?.reason ?? '').includes('【年数交渉】'), tentativeNote?.reason);
+    const unknownArea = project({ id: 'p_area', title: 'Oracle保守', requiredSkills: ['Oracle', 'JP1'], rateMax: 60, prefecture: null, location: '某駅', remote: 'none', receivedAt: daysAgo(1) });
+    __setProperJudgeForTest(async () => raw({ workPrefecture: '大阪府' }));
+    const ar = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], [unknownArea], NOW);
+    __setProperJudgeForTest(async () => raw({ workPrefecture: '東京都' }));
+    const ar2 = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], [unknownArea], NOW);
+    check('勤務地をルールで読めない案件は、AIが読んだ出社先が本人と違う地方なら候補にしない（群馬の社員に大阪は出さない・東京は出す）',
+      ar.candidates.length === 0 && ar.stats.outOfArea === 1 && ar2.candidates.length === 1, JSON.stringify(ar.stats));
+    __setProperJudgeForTest(async (e) => {
+      if (e.id === 'E_fail') throw new Error('overloaded');
+      if (e.id === 'E_rej') return raw({ verdict: 'reject' });
+      return raw();
+    });
     check('AIが見送った組は候補にしない', !candidates.some((c) => c.ownEngineerId === 'E_rej') && stats.rejected === 1);
     check('AI判定に失敗した組は、ルールの基準も満たすときだけ要確認で残す（Oracleだけ＝一致率50%は残さない）',
       !candidates.some((c) => c.ownEngineerId === 'E_fail') && stats.failed === 1, JSON.stringify(stats));

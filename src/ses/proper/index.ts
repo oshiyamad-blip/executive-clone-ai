@@ -8,6 +8,7 @@ import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
 import { ownPairsForJudge, signedMan } from '../ownMatch.js';
 import { judgeProperPairs } from './judge.js';
+import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
 import { recordHealEvent } from '../heal/events.js';
@@ -45,6 +46,7 @@ export interface JudgeStats {
   judged: number; // AI判定した組（控えの再利用を含む）
   cached: number;
   rejected: number; // AIが見送りとした組
+  outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
 }
@@ -121,7 +123,7 @@ export async function buildProperCandidates(
   const perItem = properJudgePerEngineer();
   const all = ownPairsForJudge(engineers, projects, Number.MAX_SAFE_INTEGER, now);
   const pairs = ownPairsForJudge(engineers, projects, perItem, now);
-  const stats: JudgeStats = { prefiltered: all.length, judged: 0, cached: 0, rejected: 0, failed: 0, overCap: all.length - pairs.length };
+  const stats: JudgeStats = { prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length };
   const outcomes = await judgeProperPairs(
     pairs.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project })),
     projects,
@@ -137,6 +139,16 @@ export async function buildProperCandidates(
     }
     stats.judged += 1;
     if (o.cached) stats.cached += 1;
+    // 勤務地をルールで読めなかった案件は、AIが読んだ出社先の地方で判定する（本人と違う地方の出社は候補にしない）
+    const project = projectById.get(p.match.projectId) as Project;
+    const engineer = engineerById.get(p.match.ownEngineerId) as ProperEngineer;
+    const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
+    const aiRegion = wideRegionOf(o.judgment.workPrefecture ?? null);
+    const ownRegion = wideRegionOf(engineer.prefecture);
+    if (!project.prefecture && !fullRemote && aiRegion && ownRegion && aiRegion !== ownRegion) {
+      stats.outOfArea += 1;
+      return;
+    }
     const m = applyJudgment(p.match, o.judgment);
     const dup = deduped.others.get(p.match.projectId);
     if (m && dup) m.reason = `［確認］同じ案件が別のメールでも届いています${dup.length > 0 ? `（${dup.join('、')}）` : ''}。${m.reason}`;
@@ -190,7 +202,7 @@ export function judgmentFit(j: ProperJudgment | undefined): number {
 
 function logJudge(s: JudgeStats): void {
   console.log(
-    `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・失敗${s.failed}` +
+    `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
 }
