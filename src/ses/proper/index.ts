@@ -49,6 +49,8 @@ export interface JudgeStats {
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
 }
 
+const SKILL_TENTATIVE_NOTE = '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。';
+
 // 案件単価が希望単価をこの額（万円）以上上回る案件は、求められる水準が大きく上とみなし、AIが推奨しない限り候補にしない
 export const LEVEL_GAP_MAN = 30;
 
@@ -66,7 +68,8 @@ export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
     needsReview: m.needsReview || j.reviewNotes.length > 0,
     matchedSkills: j.met,
     missingSkills: j.gaps,
-    reason: `${notes}${m.reason}`,
+    // スキルの一致率による参考提案の注記はAIの判定で置き換える（鮮度・単価・年数の注記は残す）
+    reason: `${notes}${m.reason.replace(SKILL_TENTATIVE_NOTE, '')}`,
     judgment: j,
   };
 }
@@ -155,7 +158,9 @@ export async function buildProperCandidates(
     // 人がシートの行を複製していても、同じ社員×案件の候補は1件にする（同じIDの行が2つあると
     // 担当者メールを入れた側の行が下書き依頼として読まれない）
     if (seen.has(m.id)) continue;
-    if ((perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit) continue;
+    // 基準を超える組（clearsBar）は上限に関係なく載せ、ほかは社員ごと・案件ごとに上限まで
+    const full = (perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit;
+    if (full && !clearsBar(m)) continue;
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
@@ -168,6 +173,13 @@ export async function buildProperCandidates(
     candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}) });
   }
   return { candidates, stats };
+}
+
+// 件数の上限（MAX_CANDIDATES_PER_ITEM）を超えても載せる組: AIの推奨、または条件つきで経歴の裏付けのある要件が足りない要件以上。
+// 要確認（根拠が経歴に無い等）は含めない
+export function clearsBar(m: OwnMatch): boolean {
+  if (m.needsReview || !m.judgment) return false;
+  return m.judgment.verdict === 'recommend' || judgmentFit(m.judgment) >= 0;
 }
 
 // AIの見立ての合い方: 満たす要件（近い経験を除く）の数 − 足りない要件（近い経験のみを含む）の数
