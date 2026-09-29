@@ -610,7 +610,17 @@ function parentReq(parent: string, parts: PieceParts, preferred: boolean): Skill
   return { label: `${parent}(${kids.join('/')})`, members: uniqueCi([parent, ...parts.alts]), qualifiers: [...parts.qualifiers], preferred };
 }
 
-function anyOfReq(reqs: SkillRequirement[], preferred: boolean): SkillRequirement {
+// 「ITパッケージ製品の導入 / 運用保守（いずれか）」の「運用保守」は「ITパッケージ製品の運用保守」の略。選択肢に「〇〇の…」の
+// 記載があれば、工程だけの選択肢にその前置きを付ける（工程の経験だけで、対象の製品・業務の経験を満たしたことにしない）
+function withSharedPrefix(reqs: SkillRequirement[]): SkillRequirement[] {
+  const isPhase = (l: string) => phaseIndex(l) >= 0 || phaseRangeOf(l) !== null;
+  const prefix = reqs.map((r) => r.label).find((l) => !isPhase(l) && /^.{2,}の.+/.test(l))?.match(/^(.*の)/)?.[1];
+  if (!prefix) return reqs;
+  return reqs.map((r) => (isPhase(r.label) ? { label: `${prefix}${r.label}`, members: [`${prefix}${r.label}`], qualifiers: [], preferred: r.preferred } : r));
+}
+
+function anyOfReq(given: SkillRequirement[], preferred: boolean): SkillRequirement {
+  const reqs = withSharedPrefix(given);
   const members = uniqueCi(reqs.flatMap((r) => r.members));
   if (reqs.length === 1) return { ...reqs[0], preferred };
   if (members.length === 1) return singleReq(members[0], preferred);

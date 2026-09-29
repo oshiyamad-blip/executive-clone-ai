@@ -3715,6 +3715,16 @@ function levelChecks(): void {
   check('スキルシートの値を優先し、無い軸はサマリで補う', merged.skillYears[0].years === 2 && topPhaseOf(merged) === '詳細設計' && merged.role === 'PG');
 }
 
+function sharedPrefixChecks(): void {
+  section('選択肢の前置き（「〇〇の導入 / 運用保守（いずれか）」）');
+  const r = normalizeRequirementLists(['ITパッケージ製品の導入 / 運用保守（いずれか）'], []).required;
+  check('工程だけの選択肢に前置きを付ける（工程の経験だけで満たさない）', r[0] === 'ITパッケージ製品の導入 / ITパッケージ製品の運用保守（いずれか）', JSON.stringify(r));
+  check('読み戻しても同じ要件', normalizeRequirementLists(r, []).required[0] === r[0]);
+  check('技術どうしの選択肢・工程どうしの選択肢は変えない',
+    normalizeRequirementLists(['Java / C#（いずれか）'], []).required[0] === 'Java / C#（いずれか）' &&
+      normalizeRequirementLists(['基本設計またはテストの経験'], []).required[0] === '基本設計 / テスト（いずれか）');
+}
+
 function commuteChecks(): void {
   section('通勤圏（プロパーの勤務地の判定）');
   check('隣接・1都3県どうし・関西どうしは通勤圏',
@@ -3850,6 +3860,7 @@ async function main(): Promise<void> {
     marketRateChecks();
     summarySendChecks();
     levelChecks();
+    sharedPrefixChecks();
     commuteChecks();
     salesListChecks();
     await userOAuthChecks();
