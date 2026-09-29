@@ -411,6 +411,7 @@ export interface ProperEngineer extends OwnEngineer {
   proposalLabel: string; // 提案用表記（イニシャル）。社外向けの提案文面にはこれだけを使う
   skillSheetUrl: string;
   affiliation?: 'proper' | 'partner'; // 区分（空欄はプロパー＝自社社員）
+  wish?: string; // 本人の希望（要員リストの「■備考」。営業リストの「要員一覧」に出す）
 }
 
 // プロパー × 案件の候補（案件スプレッドシートの「プロパー候補」タブ1行に対応）

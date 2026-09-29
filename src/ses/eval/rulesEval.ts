@@ -106,7 +106,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3914,6 +3914,14 @@ function salesListChecks(): void {
     sv.length === 6 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AC2:AC)" &&
       sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")` && sv[5][0] === '要員 A"A' &&
       sv[5][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
+  const sl = staffListValues([
+    { proposalLabel: 'N.H', displayName: 'N.H', availableDate: '即日', requiredProjectRate: 40, experienceYears: 0.1, skills: ['kintone'], wish: 'ヘルプデスク希望' },
+    { proposalLabel: 'A"A', displayName: 'A"A', availableDate: '10月', requiredProjectRate: null, experienceYears: null, skills: [] },
+  ]);
+  check('要員一覧: 候補が0件の要員も含めて1行ずつ（本人の希望・候補数・うちA・提案済以降・成約の数式）',
+    sl.strings.length === 3 && sl.strings[1][0] === 'A"A' && sl.strings[2][5] === 'ヘルプデスク希望' && sl.strings[2][2] === 40 &&
+      sl.formulas[0][0] === '候補数' && sl.formulas[1][0] === `=COUNTIFS('全体'!C2:C,"A""A")` &&
+      sl.formulas[2][3] === `=COUNTIFS('全体'!C2:C,"N.H",'全体'!${String.fromCharCode(65 + col('対応状況'))}2:${String.fromCharCode(65 + col('対応状況'))},"成約")`, JSON.stringify(sl));
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
   check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色＋精度チェック4色を付け、対応状況・精度チェックはプルダウン・ID列は隠す',

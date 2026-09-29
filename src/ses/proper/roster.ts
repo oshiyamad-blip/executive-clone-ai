@@ -209,6 +209,7 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
       remoteWish: 'unknown',
       status: 'available',
       affiliation: s.affiliation,
+      ...(s.note ? { wish: s.note } : {}),
       ...(hasEngineerLevel(level) ? { level } : {}),
       profileText: rosterProfileText(r[col('サマリ')] ?? '', text),
     });
