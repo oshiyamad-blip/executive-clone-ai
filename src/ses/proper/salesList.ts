@@ -126,9 +126,27 @@ function hasHumanInput(row: Row): boolean {
   });
 }
 
+const legacyKey = (engineer: string, title: string) => `${engineer}|${title}`.replace(/\s+/g, '');
+
+// ID列の無い以前のリスト（バッチ導入前に手で作った営業リスト）の人の入力を、要員＋案件名で引ける形にする
+function legacyInputs(legacy: string[][]): Map<string, string[]> {
+  const header = legacy[0] ?? [];
+  const at = (name: string) => header.indexOf(name);
+  const out = new Map<string, string[]>();
+  if (at('要員') < 0 || at('案件名') < 0) return out;
+  for (const cells of legacy.slice(1)) {
+    const key = legacyKey(cells[at('要員')] ?? '', cells[at('案件名')] ?? '');
+    const human = HUMAN_COLS.map((i) => (at(HEADER[i]) >= 0 ? (cells[at(HEADER[i])] ?? '').trim() : ''));
+    if (human.some((v) => v !== '') && !out.has(key)) out.set(key, human);
+  }
+  return out;
+}
+
 // 今回の行に、前回までのシートの人の入力を ID で引き継ぐ。今回の候補に無い行は、人の入力があるものだけ前回のまま残す。
-// existing はシートの値（1行目は見出し。列は見出しの名前で探すため、人が列を並べ替えていても読める）
-export function mergeSalesRows(fresh: Row[], existing: string[][]): Row[] {
+// existing はシートの値（1行目は見出し。列は見出しの名前で探すため、人が列を並べ替えていても読める）。
+// legacy は同じスプレッドシートにある以前のリスト（ID列なし）。IDで引けない行だけ、要員＋案件名が同じ行の入力を引き継ぐ
+export function mergeSalesRows(fresh: Row[], existing: string[][], legacy: string[][] = []): Row[] {
+  const fromLegacy = legacyInputs(legacy);
   const header = existing[0] ?? [];
   const at = (name: string) => header.indexOf(name);
   const idAt = at('ID');
@@ -151,7 +169,10 @@ export function mergeSalesRows(fresh: Row[], existing: string[][]): Row[] {
     seen.add(id);
     const prev = previous.get(id);
     const merged = [...r];
-    for (const i of HUMAN_COLS) merged[i] = prev ? prev[i] : '';
+    const old = prev ? null : fromLegacy.get(legacyKey(String(r[COL['要員']]), String(r[COL['案件名']])));
+    HUMAN_COLS.forEach((i, k) => {
+      merged[i] = prev ? prev[i] : (old?.[k] ?? '');
+    });
     if (merged[COL['対応状況']] === '') merged[COL['対応状況']] = SALES_STATUSES[0];
     out.push(merged);
   }
@@ -317,6 +338,17 @@ async function readTabs(api: sheets_v4.Sheets, spreadsheetId: string): Promise<T
   }));
 }
 
+// 見出しに「要員」「案件名」「対応状況」がある最初のタブ（バッチが作った要員のタブを除く）。無ければ空
+async function readLegacyList(api: sheets_v4.Sheets, spreadsheetId: string, tabs: TabInfo[]): Promise<string[][]> {
+  for (const t of tabs.filter((x) => !x.staff)) {
+    const res = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(t.title)}!A:AZ` }));
+    const values = (res.data.values ?? []) as string[][];
+    const header = values[0] ?? [];
+    if (['要員', '案件名', '対応状況'].every((h) => header.includes(h))) return values;
+  }
+  return [];
+}
+
 // 候補を営業リストへ書き出す。書き出した行数（人の入力で残した行を含む）を返す。未設定なら null
 export async function writeSalesList(candidates: ProperCandidate[], projects: Project[]): Promise<number | null> {
   const spreadsheetId = properSalesSpreadsheetId();
@@ -328,6 +360,8 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   const fresh = candidates.map((c) => salesRowOf(c, projectById.get(c.projectId)));
 
   let tabs = await readTabs(api, spreadsheetId);
+  // 初回（「全体」タブがまだ無い）は、同じスプレッドシートにある以前の営業リストのタブから人の入力を引き継ぐ
+  const legacy = tabs.some((t) => t.title === SALES_ALL_TAB) ? [] : await readLegacyList(api, spreadsheetId, tabs);
   const structural: sheets_v4.Schema$Request[] = [];
   if (!tabs.some((t) => t.title === SALES_ALL_TAB)) structural.push({ addSheet: { properties: { title: SALES_ALL_TAB, index: 0 } } });
   if (structural.length > 0) {
@@ -336,7 +370,7 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   }
 
   const existing = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }));
-  const rows = mergeSalesRows(fresh, (existing.data.values ?? []) as string[][]);
+  const rows = mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy);
 
   // 要員のタブ: 行のある要員の分を揃え、いなくなった要員のタブ（バッチが作ったものだけ）を消す
   const labels = [...new Set(rows.map((r) => String(r[COL['要員']])))].filter(Boolean).sort();
