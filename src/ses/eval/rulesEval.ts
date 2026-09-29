@@ -106,7 +106,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3902,13 +3902,25 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AA,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AC,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  const prevAcc = header.map(() => '');
+  prevAcc[col('ID')] = 'ownmatch_a_p1'; prevAcc[col('精度チェック')] = '× ズレ'; prevAcc[col('精度メモ')] = 'Javaは研修のみ';
+  const accMerged = mergeSalesRows([salesRowOf(base, undefined)], [header, prevAcc]);
+  check('精度チェック・精度メモは人の入力としてIDで引き継ぐ',
+    accMerged[0][col('精度チェック')] === '× ズレ' && accMerged[0][col('精度メモ')] === 'Javaは研修のみ');
+  const sv = summaryValues(['A"A']);
+  const accCol = String.fromCharCode(65 + col('精度チェック'));
+  check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
+    sv.length === 6 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AC2:AC)" &&
+      sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")` && sv[5][0] === '要員 A"A' &&
+      sv[5][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
-  check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色を付け、対応状況はプルダウン・ID列は隠す',
-    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 8 &&
-      rules.every((r) => [col('優先度'), col('対応状況')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
+  check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色＋精度チェック4色を付け、対応状況・精度チェックはプルダウン・ID列は隠す',
+    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 12 &&
+      rules.every((r) => [col('優先度'), col('対応状況'), col('精度チェック')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
+      fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('精度チェック')) &&
       fmt.some((r) => r.updateDimensionProperties?.range?.startIndex === col('ID') && r.updateDimensionProperties?.properties?.hiddenByUser === true));
   const legacyHeader = ['No', '優先度', '要員', '案件名', '対応状況', '担当営業', 'メモ'];
   const fromOld = mergeSalesRows([salesRowOf(nego, undefined)], [], [legacyHeader, ['1', 'B', 'A.A', 'Java 開発', '提案済', '田中', '返信待ち']]);
