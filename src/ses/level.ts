@@ -271,13 +271,16 @@ export function evaluateLevel(project: ProjectLevel | undefined, engineer: Engin
     }
   }
   if (project.role) {
-    const role = engineer?.role ?? null;
+    // 立場の記載が無い要員は経験年数から目安を置く（5年未満はPG相当、それ以上はSE相当。PL・PMは記載があるときだけ）。
+    // 経験の浅い要員がリーダー・PMの案件に並ばないようにするため
+    const inferred = !engineer?.role && engineerTotalYears !== null;
+    const role: RoleLevel | null = engineer?.role ?? (engineerTotalYears === null ? null : engineerTotalYears < 5 ? 'PG' : 'SE');
     if (!role) v.unknowns.push(`立場${project.role}`);
     else {
       const steps = roleIdx(project.role) - roleIdx(role);
       if (steps >= 2) exclude = true;
       else if (steps === 1) {
-        v.gaps.push(`立場は${project.role}（経験は${role}）`);
+        v.gaps.push(`立場は${project.role}（経験は${role}${inferred ? '相当。経験年数からの目安' : ''}）`);
         v.gapScore += 1;
         shortAxes.add('role');
       }

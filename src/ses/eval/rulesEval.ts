@@ -146,7 +146,7 @@ import {
 } from '../parse.js';
 import { spawnSync } from 'child_process';
 import { splitNotifyRecipients, pricingPolicyProblems, geminiDataUseProblem, type PricingPolicyCheckInput } from '../settingsFormat.js';
-import { coarseResidence } from '../prefecture.js';
+import { coarseResidence, normalizePrefecture } from '../prefecture.js';
 import { reducedSubject, maskFailureText, dropStaleEntries, QUARANTINE_TTL_MS, type QuarantineEntry } from '../heal/quarantine.js';
 import { recordMailEvent, hasFatal } from '../heal/events.js';
 import { availabilityText } from '../proper/proposal.js';
@@ -3658,6 +3658,9 @@ function levelChecks(): void {
   check('技術ごとの年数が分からなければ確認事項（合計年数で足りる場合は落とさない）', noYears.verdict === 'ok' && noYears.unknowns.length === 1);
   check('合計年数が必要年数に届かなければ技術の年数も足りないとみなす（年数交渉）', evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 5 }] }), eng, 2.4).yearGaps.length === 1);
   check('要員のレベルが分からない社員は判定しない（確認事項だけ）', evaluateLevel(lvl({ topPhase: '要件定義', role: 'PM' }), undefined, null).verdict === 'ok');
+  check('立場の記載が無い要員は経験年数で目安を置く（3年ならPG相当→PLの案件は除外、12年ならSE相当→PLは経験交渉）',
+    evaluateLevel(lvl({ role: 'PL' }), { skillYears: [], phaseYears: [], role: null }, 3).verdict === 'exclude' &&
+      evaluateLevel(lvl({ role: 'PL' }), { skillYears: [], phaseYears: [], role: null }, 12).verdict === 'negotiate');
 
   section('レベルの軸: 抽出結果・保存値の検証');
   const dirty = sanitizeProjectLevel({ skillYears: [{ skill: 'Java', years: 3 }, { skill: '基本設計', years: 2 }, { skill: 'Go', years: -1 }, { skill: 'AWS', years: 99 }], totalYears: 'x', topPhase: '上流', role: 'CTO', juniorOk: 'yes' });
@@ -3686,6 +3689,11 @@ function levelChecks(): void {
   check('年数だけ足りない案件は強マッチのまま候補にし、根拠に【年数交渉】', yrs?.band === 'strong' && yrs.reason.includes('【年数交渉】Java5年以上に対し2.4年'), yrs?.reason);
   const ranked = matchOwnEngineersToProjects([ownL()], [pj('p_rich', lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), 80), pj('p_fit', lvl({ topPhase: '製造' }), 50)], NOW).map((m) => m.projectId);
   check('単価の高い案件より、レベルの合う案件を先に並べる', ranked[0] === 'p_fit', ranked.join(','));
+
+  section('勤務地: 駅名だけの記載');
+  const STATIONS: Array<[string, string]> = [['東陽町', '東京都'], ['九段下 or 勝どき', '東京都'], ['溜池山王・国会議事堂前', '東京都'], ['浅草橋（基本出社）', '東京都'], ['天王町 / 保土ヶ谷', '神奈川県'], ['与野', '埼玉県'], ['大阪市中央区京橋', '大阪府']];
+  const wrong = STATIONS.filter(([t, p]) => normalizePrefecture(t) !== p);
+  check('オフィス街の駅名から都道府県を読む（市名が前にあればそちら）', wrong.length === 0, wrong.map(([t]) => `${t}→${normalizePrefecture(t)}`).join(' / '));
 
   section('要員リストの読み取り（サマリの■の欄・架空の値）');
   const summary = '■名　前：A.B\n■年　齢：26歳\n■所　属：弊社社員\n■最　寄：大宮駅（埼玉県）\n■単　価：52万円 ※ご相談可能です\n■スキル：Java、Spring Boot、PostgreSQL\n■経験年数：Java案件：2年3ヶ月（詳細設計〜テスト 2年）\n■備　考：PGとして参画';
