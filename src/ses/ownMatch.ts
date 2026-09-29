@@ -8,7 +8,8 @@ import { flowConstraints, violatesHops } from './constraints.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
-import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown } from './pricing.js';
+import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
+import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
 import { commuteFit, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
@@ -37,7 +38,7 @@ import {
   skillFitScore,
   staleCaution,
 } from './ranking.js';
-import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand, PairBreakdown, Freshness } from '../types/index.js';
+import type { OwnEngineer, Project, OwnMatch, ExtractedItem, MatchBand, PairBreakdown, Freshness, SkillBreakdown } from '../types/index.js';
 
 // 案件単価は上限(rateMax)を優先し、無ければ下限(rateMin)。両方無ければ null。
 export function projectRateMan(project: Project): number | null {
@@ -55,6 +56,19 @@ interface OwnRankInfo {
   levelGap: number; // 経験年数・工程・立場の足りない度合い（0が最良）
   freshness: Freshness;
   receivedMs: number;
+}
+
+// 案件の中心の技術を持っているか。技術（辞書の技術名）の必須があればそのどれかを満たし、案件名に技術名があれば
+// そのどれかを持っていること（「PowerBI研修」に基本設計・PLの経験だけの社員を付けない）
+export function coversCoreTech(project: Pick<Project, 'title' | 'requiredSkills'>, have: string[], b: SkillBreakdown | null): boolean {
+  const isTech = (label: string) => parseRequirements(label).some((r) => r.members.some((m) => skillCategory(m) === 'skill'));
+  if (b) {
+    const techReqs = [...b.exact, ...b.equiv, ...b.implied, ...b.missing].filter(isTech);
+    if (techReqs.length > 0 && techReqs.every((l) => b.missing.includes(l))) return false;
+  }
+  const titleTech = techNamesIn(project.title);
+  if (titleTech.length === 0) return true;
+  return titleTech.some((t) => (skillMatch([t], have)?.rate ?? 0) > 0);
 }
 
 // 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
@@ -76,6 +90,8 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     reviewReasons.push('必須スキル不明');
   } else {
     if (skill.rate < skillMatchThreshold()) return null;
+    // 工程・役割の語だけで一致率を満たした組は除く（技術の必須を1つも満たさない、または案件名の技術を1つも持たない）
+    if (!coversCoreTech(project, own.skills, skill.breakdown)) return null;
     if (skill.basis === 'required' && directSkillRate(skill.breakdown) >= skillMatchStrongThreshold()) band = 'strong';
   }
 
@@ -185,6 +201,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
       reason,
       agentEmail: project.agentEmail,
       detectedAt: new Date(),
+      ...(b ? { matchedSkills: [...b.exact, ...b.equiv, ...b.implied], missingSkills: [...b.missing] } : {}),
     },
     rank: {
       skill: {
