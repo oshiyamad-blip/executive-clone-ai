@@ -26,7 +26,8 @@ export function availabilityText(e: Pick<ProperEngineer, 'availableDate' | 'avai
   return `${m[1]}年${Number(m[2])}月${day > 1 ? `${day}日` : ''}〜`;
 }
 
-export function buildProperProposalBody(e: ProperEngineer, project: Project): string {
+// pitch: AI判定の推しどころ（proper/judge.ts）。社外に出るため、URL・アドレス・指示らしき記載があれば文面ごと作らない
+export function buildProperProposalBody(e: ProperEngineer, project: Project, pitch = ''): string {
   const label = e.proposalLabel || MISSING_INITIALS_PLACEHOLDER;
   const lines = [
     `${project.agentContact || 'ご担当者'}様`,
@@ -44,6 +45,7 @@ export function buildProperProposalBody(e: ProperEngineer, project: Project): st
   ];
   if (e.prefecture) lines.push(`・居住地: ${e.prefecture}`);
   if (REMOTE_WISH_TEXT[e.remoteWish]) lines.push(`・勤務形態: ${REMOTE_WISH_TEXT[e.remoteWish]}`);
+  if (pitch.trim()) lines.push('', '■ご提案のポイント', pitch.trim());
   lines.push(
     '',
     '詳細なスキルシートは別途お送りいたします。',
@@ -55,20 +57,20 @@ export function buildProperProposalBody(e: ProperEngineer, project: Project): st
 
 // 提案文面にそのまま差し込む項目（案件名・営業元担当はスプレッドシートで書き換えられる）に URL・メールアドレス・
 // 指示らしき記載があるか。あれば文面を用意しない（書き換えた文言に署名を付けて社外への下書きにしないため）
-export function properProposalTextSuspicious(e: ProperEngineer, project: Project): boolean {
+export function properProposalTextSuspicious(e: ProperEngineer, project: Project, pitch = ''): boolean {
   return unsafeOutgoingText([
-    project.title, project.agentContact, e.proposalLabel, ...e.skills.slice(0, 12), e.availableDate, e.availableFrom, e.prefecture,
+    project.title, project.agentContact, e.proposalLabel, ...e.skills.slice(0, 12), e.availableDate, e.availableFrom, e.prefecture, pitch,
   ]);
 }
 
 // 案件の元メールへの全員に返信（元メール情報が無ければ営業元メール宛）。宛先が全く無ければ作らない
-export function buildProperProposalDraft(e: ProperEngineer, project: Project): DraftRef | undefined {
+export function buildProperProposalDraft(e: ProperEngineer, project: Project, pitch = ''): DraftRef | undefined {
   if (!project.replyTarget?.from && !project.agentEmail) return undefined;
-  if (properProposalTextSuspicious(e, project)) return undefined;
+  if (properProposalTextSuspicious(e, project, pitch)) return undefined;
   return buildReplyRef(
     project.replyTarget,
     project.agentEmail,
     `【ご提案】${project.title} - 弊社エンジニアのご紹介`,
-    buildProperProposalBody(e, project),
+    buildProperProposalBody(e, project, pitch),
   );
 }

@@ -1,7 +1,8 @@
 // 自社社員(候補要員)→ 合いそうな案件を探す機能。
 // 外部要員との突合(match.ts)と異なり、金額条件は「案件単価 ≥ 社員の必要案件単価」の閾値方式。
 // 必要案件単価を少し下回る案件（既定5万円まで。PROPER_RATE_TOLERANCE_MAN）は「単価交渉」として候補に残す。
-// スキル・勤務地・時期の判定は match.ts と同じヘルパーを流用する。
+// スキル・時期の判定は match.ts と同じヘルパーを流用する。勤務地・通勤は見ない。
+// プロパー候補（proper/index.ts）はここを緩い足切り（ownPairsForJudge）として使い、合うかどうかはAI判定（proper/judge.ts）で決める。
 // 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
 // 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
 import { flowConstraints, violatesHops } from './constraints.js';
@@ -10,7 +11,6 @@ import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
 import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
-import { commuteFit, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
@@ -73,12 +73,31 @@ export function coversCoreTech(project: Pick<Project, 'title' | 'requiredSkills'
   return titleTech.some((t) => (skillMatch([t], have)?.rate ?? 0) > 0);
 }
 
-// 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
-export function evaluateOwnMatch(own: OwnEngineer, project: Project, now = new Date()): OwnMatch | null {
-  return evaluateOwnMatchDetailed(own, project, now)?.match ?? null;
+// AI判定に回す組の足切り: 技術（辞書の技術名）の必須を1つでも満たすか、案件名の技術を1つでも持つ。
+// 一致率の閾値より緩くし、実際に合うかはAIが経歴を読んで決める（proper/judge.ts）
+export function sharesTech(project: Pick<Project, 'title' | 'requiredSkills'>, have: string[], b: SkillBreakdown | null): boolean {
+  const isTech = (label: string) => parseRequirements(label).some((r) => r.members.some((m) => skillCategory(m) === 'skill'));
+  if (b && [...b.exact, ...b.equiv, ...b.implied].some(isTech)) return true;
+  return techNamesIn(project.title).some((t) => (skillMatch([t], have)?.rate ?? 0) > 0);
 }
 
-function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date): { match: OwnMatch; rank: OwnRankInfo } | null {
+export interface OwnMatchOptions {
+  // AI判定の前段として緩く足切りする（sharesTech で通し、一致率・中心の技術の判定は rulePass に残す）
+  forJudge?: boolean;
+}
+
+// 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
+export function evaluateOwnMatch(own: OwnEngineer, project: Project, now = new Date(), opts: OwnMatchOptions = {}): OwnMatch | null {
+  return evaluateOwnMatchDetailed(own, project, now, opts)?.match ?? null;
+}
+
+interface Evaluated {
+  match: OwnMatch;
+  rank: OwnRankInfo;
+  rulePass: boolean; // ルールだけの基準（一致率の閾値・中心の技術）も満たすか。AI判定に失敗した組はこれで残すかを決める
+}
+
+function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date, opts: OwnMatchOptions): Evaluated | null {
   const reviewReasons: string[] = [];
   // スキル: 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける。
   // 必須スキルが空の案件は尚可スキルで参考判定、どちらも空なら案件名に社員のスキルが現れる場合だけ要確認
@@ -87,13 +106,14 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const skill = assessSkills(project, own.skills);
   let band: MatchBand = 'tentative';
   const implied = impliedSkillNote(skill.breakdown);
+  let rulePass = true;
   if (skill.basis === 'unknown') {
     if (skill.titleHits.length === 0) return null;
     reviewReasons.push('必須スキル不明');
   } else {
-    if (skill.rate < skillMatchThreshold()) return null;
     // 工程・役割の語だけで一致率を満たした組は除く（技術の必須を1つも満たさない、または案件名の技術を1つも持たない）
-    if (!coversCoreTech(project, own.skills, skill.breakdown)) return null;
+    rulePass = skill.rate >= skillMatchThreshold() && coversCoreTech(project, own.skills, skill.breakdown);
+    if (!rulePass && !(opts.forJudge && sharesTech(project, own.skills, skill.breakdown))) return null;
     if (skill.basis === 'required' && directSkillRate(skill.breakdown) >= skillMatchStrongThreshold()) band = 'strong';
   }
 
@@ -112,15 +132,8 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     (ageLimit !== null ? `［条件］年齢${ageLimit}歳まで。` : '') +
     (flow.soleProprietor === 'ng' && affiliation === 'partner' ? '［条件］個人事業主不可（所属を確認）。' : '');
 
-  // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
-  const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
-  // 隣接県に加えて通勤圏（1都3県どうし等）も通す。北関東から都内などは通勤時間の確認つきで残す
-  const commute = commuteFit(project.prefecture, own.prefecture);
-  const locationKnownOk = commute !== 'no';
-  const locationUnknown = !fullRemote && (project.prefecture === null || own.prefecture === null);
-  if (!fullRemote && !locationUnknown && !locationKnownOk) return null;
-  if (locationUnknown) reviewReasons.push('勤務地不明');
-  const locationOk = fullRemote || locationKnownOk;
+  // 勤務地・通勤は判定に使わない（自社社員は通える範囲を本人と相談して決めるため。営業リストに勤務地を出して人が見る）
+  const locationOk = true;
 
   // 時期: どちらか不明なら通過(緩め)
   const timingUnknown = project.startDate === null || own.availableFrom === null;
@@ -164,7 +177,6 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const pct = Math.round(skill.rate * 100);
   const notes =
     conditionNote +
-    (!fullRemote && commute === 'check' ? `［確認］通勤時間（${own.prefecture}から${project.prefecture}）。` : '') +
     (skillBand === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
     (skillBand === 'strong' && stale ? '【参考提案】' : '') +
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
@@ -180,7 +192,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     skill.basis === 'unknown' ? `案件名に社員のスキル（${skill.titleHits.join('、')}）の記載あり` : `スキル一致率${pct}%`;
   const reason = needsReview
     ? `${notes}${reviewReasons.join('・')}のため要確認です（${skillText}）。`
-    : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 ${signedMan(rateGapMan as number)}万円）・${skillText}・勤務地適合・時期${timingOk ? '適合' : '要確認'}。`;
+    : `${notes}必要案件単価${fmtMan(required as number)}万円に対し案件単価${fmtMan(rate as number)}万円（差 ${signedMan(rateGapMan as number)}万円）・${skillText}・時期${timingOk ? '適合' : '要確認'}。`;
 
   const b = skill.breakdown;
   return {
@@ -219,6 +231,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
       freshness,
       receivedMs: Number.isFinite(new Date(project.receivedAt).getTime()) ? new Date(project.receivedAt).getTime() : 0,
     },
+    rulePass,
   };
 }
 
@@ -228,18 +241,27 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
 // 単価の差の大きさでは並べない（社員は必要案件単価どおりでよく、高単価の案件ほど求めるレベルも高いため）。
 // 割り当ては外部要員の一次選抜と同じ上限つき貪欲法
 export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Project[], now = new Date()): OwnMatch[] {
+  return rankOwnPairs(own, projects, now, {}, maxCandidatesPerItem()).map((c) => c.match);
+}
+
+// AI判定に回す組（緩い足切り＋ルールの並び）。社員ごと・案件ごとに perItem 件まで
+export function ownPairsForJudge(own: OwnEngineer[], projects: Project[], perItem: number, now = new Date()): Array<{ match: OwnMatch; rulePass: boolean }> {
+  return rankOwnPairs(own, projects, now, { forJudge: true }, perItem).map((c) => ({ match: c.match, rulePass: c.rulePass }));
+}
+
+function rankOwnPairs(own: OwnEngineer[], projects: Project[], now: Date, opts: OwnMatchOptions, limit: number): Evaluated[] {
   const openProjects = projects.filter((p) => p.status === 'open');
   const availableOwn = own.filter((o) => o.status === 'available');
 
-  const candidates: Array<{ match: OwnMatch; rank: OwnRankInfo }> = [];
+  const candidates: Evaluated[] = [];
   for (const engineer of availableOwn) {
     for (const project of openProjects) {
-      const m = evaluateOwnMatchDetailed(engineer, project, now);
+      const m = evaluateOwnMatchDetailed(engineer, project, now, opts);
       if (m) candidates.push(m);
     }
   }
   const category = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
-  const keys = (c: { match: OwnMatch; rank: OwnRankInfo }): number[] => [
+  const keys = (c: Evaluated): number[] => [
     -category(c.match),
     -c.rank.levelGap,
     skillFitScore(c.rank.skill, c.rank.freshness),
@@ -249,11 +271,10 @@ export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Projec
     c.rank.receivedMs,
   ];
   candidates.sort((a, b) => compareDesc(keys(a), keys(b)) || (a.match.id < b.match.id ? -1 : a.match.id > b.match.id ? 1 : 0));
-  const limit = maxCandidatesPerItem();
   return allocateWithCaps(candidates, [
     { key: (c) => c.match.ownEngineerId, max: limit },
     { key: (c) => c.match.projectId, max: limit },
-  ]).map((c) => c.match);
+  ]);
 }
 
 async function loadOwnEngineers(): Promise<OwnEngineer[]> {

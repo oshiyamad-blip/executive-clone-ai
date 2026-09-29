@@ -399,6 +399,8 @@ export interface OwnEngineer {
   notionPageId?: string;
   // 技術ごとの年数・工程ごとの年数・立場（level.ts）。分からない社員は未定義
   level?: EngineerLevel;
+  // AI判定に渡す経歴の本文（要員リストのサマリ＋スキルシートのタブ）。根拠の引用の照合にも使う。無い社員はスキル一覧から作る
+  profileText?: string;
 }
 
 // プロパー（自社社員）: 別管理のスキルシート（Drive）から抽出し、管理表「プロパー管理」で人が
@@ -464,6 +466,20 @@ export interface OwnMatch {
   detectedAt: Date;
   matchedSkills?: string[]; // 満たした必須スキル（営業リストの「合っている点」）
   missingSkills?: string[]; // 満たさない必須スキル（「足りない点」）
+  judgment?: ProperJudgment; // AIの判定（proper/judge.ts）。ルールだけで出した候補は未定義
+}
+
+// プロパー×案件のAI判定（根拠の引用を経歴と照合した後の値）
+export type ProperVerdict = 'recommend' | 'conditional' | 'reject';
+export interface ProperJudgment {
+  verdict: ProperVerdict;
+  work: string; // 案件で実際に担う作業
+  met: string[]; // 「要件 ← 経歴の根拠」（営業リストの「合っている点」）
+  gaps: string[]; // 満たさない・近い経験のみの要件（「足りない点」）
+  levelFit: string;
+  pitch: string; // 相手先に伝える推しどころ
+  concerns: string[];
+  reviewNotes: string[]; // 人が確かめる事項（根拠が経歴に見当たらない・必須の記載が途中で切れている等）
 }
 
 // ===== 人間フィードバックによる精度向上 =====
