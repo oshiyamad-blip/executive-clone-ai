@@ -3751,6 +3751,10 @@ function salesListChecks(): void {
       rules.every((r) => [col('優先度'), col('対応状況')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
       fmt.some((r) => r.updateDimensionProperties?.range?.startIndex === col('ID') && r.updateDimensionProperties?.properties?.hiddenByUser === true));
+  const legacyHeader = ['No', '優先度', '要員', '案件名', '対応状況', '担当営業', 'メモ'];
+  const fromOld = mergeSalesRows([salesRowOf(nego, undefined)], [], [legacyHeader, ['1', 'B', 'A.A', 'Java 開発', '提案済', '田中', '返信待ち']]);
+  check('以前の営業リスト（ID列なし）の入力を要員＋案件名で引き継ぐ',
+    fromOld[0]?.[col('対応状況')] === '提案済' && fromOld[0]?.[col('担当営業')] === '田中' && fromOld[0]?.[col('メモ')] === '返信待ち' && fromOld.length === 1);
   const body = 'お世話になっております。\n\n■案件名\nJava開発A\n単価：55万\n\n■案件名\nPython開発B\n単価：60万\n--------------------\n株式会社サンプル\n> 引用';
   const ex0 = projectExcerpt(body, ['Java開発A', 'Python開発B'], 0);
   const ex1 = projectExcerpt(body, ['Java開発A', 'Python開発B'], 1);
