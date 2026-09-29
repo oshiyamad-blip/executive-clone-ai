@@ -106,7 +106,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3816,6 +3816,31 @@ async function properJudgeChecks(): Promise<void> {
   const inj = verifyJudgment(raw({ injectionSuspected: true }), profile, { requiredSkills: ['Oracle'] });
   check('案件メールに指示らしき記載があれば人の確認に回す', inj.reviewNotes.some((n) => n.includes('AIへの指示')));
   check('本人の希望は懸念として残す', verifyJudgment(raw({ preferenceFit: '希望はDB運用保守で合う' }), profile, { requiredSkills: [] }).concerns.includes('本人の希望: 希望はDB運用保守で合う'));
+
+  const withOpt = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle DBの運用経験', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+    { requirement: 'COBOL', kind: '尚可', quote: 'COBOL開発経験', status: 'unmet', evidence: '', note: '' },
+    { requirement: 'PostgreSQL', kind: '尚可', quote: 'PostgreSQL', status: 'close', evidence: 'orderby・groupbyなどのSQL対応', note: '' },
+  ] }), profile, { requiredSkills: ['Oracle'] });
+  check('尚可の未経験は判定（推奨）を下げない', withOpt.verdict === 'recommend', withOpt.verdict);
+  check('尚可の要件は「尚可: 」を付けて足りない点に出す', withOpt.gaps.includes('尚可: COBOL'), JSON.stringify(withOpt.gaps));
+  check('要件ごとの照合結果を必須・尚可つきで残す',
+    JSON.stringify(withOpt.checks?.map((c) => `${c.kind}${c.requirement}${c.status}`)) === JSON.stringify(['必須Oraclemet', '尚可COBOLunmet', '尚可PostgreSQLclose']), JSON.stringify(withOpt.checks));
+  const mail = '案件名：Oracle保守\n【必須スキル】\n・Oracle DBの運用経験\n【尚可スキル】\n・COBOL開発経験\n場所：新川';
+  const marked = markRequirementsInMail(mail, withOpt.checks ?? []);
+  check('メール本文の必須・尚可の行の先頭に ○△× を付ける', marked.includes('\n○ ・Oracle DBの運用経験') && marked.includes('\n× ・COBOL開発経験'), marked);
+  check('同じ語が案件名にもあるときは必須の見出しの下の行に付ける', !marked.includes('○ 案件名'), marked);
+  check('本文に見つからない要件は冒頭の一覧に回す', marked.split('\n').slice(0, 3).includes('△ 尚可: PostgreSQL'), marked);
+  const oneLine = markRequirementsInMail('【必須スキル】PL/SQL、JP1、Java', [
+    { kind: '必須', requirement: 'PL/SQL', quote: 'PL/SQL', status: 'close' }, { kind: '必須', requirement: 'Java', quote: 'Java', status: 'unmet' }]);
+  check('1行に複数の要件がある行は行末に要件ごとの記号を添える', oneLine.endsWith('【必須スキル】PL/SQL、JP1、Java　→ △PL/SQL　×Java'), oneLine);
+  const banner = markRequirementsInMail('◆Java詳細設計-海浜幕張◆\n≪必須≫\n・SpringBoot,Oracleの経験', [
+    { kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }, { kind: '必須', requirement: 'Oracle', quote: 'Oracle', status: 'met' }]);
+  check('要件の範囲の外にしか無い語は見出しの飾りに付けず冒頭の一覧に回す', !banner.includes('○ ◆') && banner.includes('○ 必須: Java') && banner.includes('○ ・SpringBoot'), banner);
+  const noHead = markRequirementsInMail('◆Java詳細設計◆\n≪全て該当の方のみ≫\n・Java で詳細設計から対応できる方', [{ kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }]);
+  check('同じ語が見出しの飾りと箇条書きにあれば箇条書きの行に付ける', noHead.includes('○ ・Java で詳細設計') && !noHead.includes('○ ◆'), noHead);
+  check('照合結果が無ければ本文はそのまま', markRequirementsInMail(mail, []) === mail);
+  check('本文が無くても要件の一覧は出す', markRequirementsInMail('', withOpt.checks ?? []).includes('○ 必須: Oracle'));
 
   const summary = '■名　前：Y.Y\n■年　齢：24歳\n■性　別：男性\n■最　寄：新所沢駅（埼玉県）\n■単　価：50万円\n■備　考：希望はDB運用保守案件です。';
   const pt = rosterProfileText(summary, 'Oracle DB上でのデータ作成');

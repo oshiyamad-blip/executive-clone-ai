@@ -10,7 +10,8 @@ import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
 import { properSalesSpreadsheetId } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
-import type { Project, ProperCandidate, ProperEngineer } from '../../types/index.js';
+import { norm } from './judge.js';
+import type { Project, ProperCandidate, ProperEngineer, RequirementCheck } from '../../types/index.js';
 
 export const SALES_ALL_TAB = '全体';
 const STAFF_TAB_METADATA_KEY = 'ses_sales_staff_tab';
@@ -105,6 +106,51 @@ function jstLabel(d: Date): string {
   return `${j.getUTCFullYear()}/${p(j.getUTCMonth() + 1)}/${p(j.getUTCDate())} ${p(j.getUTCHours())}:${p(j.getUTCMinutes())}`;
 }
 
+const CHECK_MARKS: Record<RequirementCheck['status'], string> = { met: '○', close: '△', unmet: '×' };
+const BULLET = /^\s*(?:[・\-*●○◯◎►▶>＞]|\d+[.．)）])/;
+export const CHECK_LEGEND = '【要件の照合】○ 経験あり　△ 近い経験　× 経験なし（AIの判定を経歴と照合した結果）';
+
+// メール本文の必須・尚可の行の先頭に ○△× を付ける。1行に複数の要件がある行は行末に要件ごとの記号を添え、
+// 本文に見つからない要件は冒頭の一覧に回す
+export function markRequirementsInMail(detail: string, checks: RequirementCheck[]): string {
+  if (checks.length === 0) return detail;
+  const lines = detail.split('\n');
+  // 必須・尚可の見出し（【必須スキル】・▼尚可・必須：など）から次の見出しまでを要件の範囲とし、同じ語が案件名などにもあるときは範囲内の行を選ぶ
+  const inSkill: boolean[] = [];
+  let skill = false;
+  for (const l of lines) {
+    const t = l.trim();
+    const kw = /必須|尚可|歓迎|スキル|要件|求める|該当/;
+    const heading = /^[【▼■◆□●<＜≪《〈\[]/.test(t) || /^[^・\-*\s]{1,12}[：:]/.test(t) || (t.length <= 16 && kw.test(t));
+    if (heading) skill = kw.test(t.slice(0, 16));
+    inSkill.push(skill);
+  }
+  const lineOf = (q: string): number => {
+    const hits = lines.flatMap((l, i) => (norm(l).includes(q) ? [i] : []));
+    // 要件の範囲が読めるメールで範囲外にしか無い語（案件名・見出しの飾り）には付けず、冒頭の一覧に回す
+    return hits.find((i) => inSkill[i]) ?? hits.find((i) => BULLET.test(lines[i])) ?? (inSkill.includes(true) ? -1 : (hits[0] ?? -1));
+  };
+  const byLine = new Map<number, RequirementCheck[]>();
+  const unplaced: RequirementCheck[] = [];
+  for (const c of checks) {
+    const q = norm(c.quote);
+    const at = q.length >= 2 ? lineOf(q) : -1;
+    if (at < 0) unplaced.push(c);
+    else byLine.set(at, [...(byLine.get(at) ?? []), c]);
+  }
+  const marked = lines.map((line, i) => {
+    const cs = byLine.get(i);
+    if (!cs) return line;
+    if (cs.length === 1) return `${CHECK_MARKS[cs[0].status]} ${line}`;
+    return `${line}　→ ${cs.map((c) => `${CHECK_MARKS[c.status]}${c.requirement}`).join('　')}`;
+  });
+  const head = [CHECK_LEGEND];
+  if (unplaced.length > 0) {
+    head.push(...unplaced.map((c) => `${CHECK_MARKS[c.status]} ${c.kind}: ${c.requirement}`));
+  }
+  return [...head, '', ...(detail.trim() ? marked : [])].join('\n').trimEnd();
+}
+
 // 候補1件を「全体」タブの1行にする（No と人の入力列は後で埋める）
 export function salesRowOf(c: ProperCandidate, project: Project | undefined): Row {
   const row: Row = HEADER.map(() => '');
@@ -134,7 +180,7 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
     row[COL['担当者メール']] = project.agentEmail;
     row[COL['メール件名']] = project.replyTarget?.subject ?? '';
     row[COL['受信日時']] = jstLabel(project.receivedAt);
-    row[COL['案件詳細（メール本文より）']] = project.detail ?? '';
+    row[COL['案件詳細（メール本文より）']] = markRequirementsInMail((project.detail ?? '').replace(/&nbsp;/g, ' ').trim(), c.judgment?.checks ?? []);
   }
   return row;
 }

@@ -12,16 +12,17 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
-import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption } from '../../types/index.js';
+import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 4;
+const JUDGE_VERSION = 5;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
 export interface RawProperJudgment {
   work: string;
-  requirements: Array<{ requirement: string; status: 'met' | 'close' | 'unmet'; evidence: string; note: string }>;
+  // kind・quote は v5 から（それ以前の控え・自己検証の判定には無い）
+  requirements: Array<{ requirement: string; kind?: RequirementKind; quote?: string; status: 'met' | 'close' | 'unmet'; evidence: string; note: string }>;
   levelFit: string;
   preferenceFit: string;
   verdict: ProperVerdict;
@@ -36,7 +37,10 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
 
 手順
 1. work: 案件で実際に担う作業（対象のシステム・業務、工程、立場、使う技術）を1〜2文で書く
-2. requirements: 案件の必須スキル・必須条件を1つずつ判定する
+2. requirements: 案件の必須と尚可（歓迎）の要件を、メール本文に書かれた項目ごとにすべて判定する（1行に複数の技術が並ぶ行は技術ごとに分ける）
+   - kind: 必須 / 尚可
+   - quote: その要件が書かれたメール本文の記載を原文のまま（行頭の記号を除いた1行、または行の一部）。本文に無くカードにだけある要件はカードの表記
+   - requirement: 判定する要件の短い名前
    - met: 社員の経歴に、同じ技術・同じ種類の作業を実務で行った記載がある
    - close: 同じではないが近い実務経験があり、立ち上がれる見込みが高い（例: Spring の経験で Spring Boot、PostgreSQL の経験で Oracle のSQL）
    - unmet: 実務の記載が無い、または「運用保守」「テスト」「Excel」「コミュニケーション」などの一般的な語が重なるだけ
@@ -48,7 +52,7 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
 3. levelFit: 経験年数・担当工程・立場（リーダー等）が案件の求める水準に合うか。案件単価と本人の希望単価の差が大きい（案件がかなり高い）ときは、求められる水準が高い可能性として触れる
 4. preferenceFit: 業務内容・技術・案件の種類についての本人の希望（要員リストの備考など）に沿うか。通勤・勤務地の希望には触れない。希望の記載が無ければ「記載なし」
 5. verdict:
-   - recommend: 案件の中心となる作業を実務でやってきた記載があり、必須の大半が met。そのまま提案してよい
+   - recommend: 案件の中心となる作業を実務でやってきた記載があり、必須の大半が met。そのまま提案してよい（尚可は判断を左右しない）
    - conditional: 中心の作業は近いが、必須の一部が close / unmet、またはレベル・単価で相手先との相談が要る
    - reject: 案件の中心となる作業の実務経験が無い。一般的な語だけが重なる組、研修だけの技術で合わせている組はここ
 6. pitch: 営業が相手先に伝える推しどころ（経歴の具体的な実績に触れて2文以内。reject は空文字）
@@ -71,11 +75,13 @@ export const PROPER_JUDGE_SCHEMA = {
         additionalProperties: false,
         properties: {
           requirement: { type: 'string' },
+          kind: { type: 'string', enum: ['必須', '尚可'] },
+          quote: { type: 'string' },
           status: { type: 'string', enum: ['met', 'close', 'unmet'] },
           evidence: { type: 'string' },
           note: { type: 'string' },
         },
-        required: ['requirement', 'status', 'evidence', 'note'],
+        required: ['requirement', 'kind', 'quote', 'status', 'evidence', 'note'],
       },
     },
     levelFit: { type: 'string' },
@@ -132,7 +138,7 @@ export function judgeUserPrompt(p: Project): string {
 // ===== 照合（純関数） =====
 
 // 表記の揺れ（全角半角・空白・区切り記号・大小文字）を除いて比べる
-function norm(s: string): string {
+export function norm(s: string): string {
   return s.normalize('NFKC').toLowerCase().replace(/[\s|｜・、。,.:：;；()（）「」【】<>＜＞\-‐―ー~〜／/]/g, '');
 }
 
@@ -182,11 +188,15 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
   let weak = 0;
   let metCount = 0;
   let unmetCount = 0;
+  const checks: RequirementCheck[] = [];
   for (const r of raw.requirements) {
-    const label = r.requirement.trim();
-    if (!label) continue;
+    const name = r.requirement.trim();
+    if (!name) continue;
+    const kind: RequirementKind = r.kind ?? (/^尚可/.test(name) ? '尚可' : '必須');
+    const optional = kind === '尚可';
+    const label = optional && !/^尚可/.test(name) ? `尚可: ${name}` : name;
     const labelTech = techNamesIn(label);
-    labelTech.forEach((t) => askedTech.add(t.toLowerCase()));
+    if (!optional) labelTech.forEach((t) => askedTech.add(t.toLowerCase()));
     const ev = r.evidence.trim();
     const found = ev.length > 0 && norm(ev).length >= 4 && hay.includes(norm(ev));
     let status = r.status;
@@ -200,13 +210,18 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
       status = 'unmet';
       weak += 1;
     }
+    checks.push({ kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status });
     if (status === 'unmet') {
-      unmetCount += 1;
+      if (!optional) unmetCount += 1;
       gaps.push(r.note.trim() ? `${label}（${r.note.trim()}）` : label);
       continue;
     }
-    if (status === 'met') metCount += 1;
     labelTech.forEach((t) => heldTech.add(t.toLowerCase()));
+    if (optional) {
+      met.push(`${label}${status === 'close' ? '（近い経験）' : ''} ← ${ev}`);
+      continue;
+    }
+    if (status === 'met') metCount += 1;
     if (!isGenericRequirement(label)) substantive += 1;
     met.push(`${label}${status === 'close' ? '（近い経験）' : ''} ← ${ev}`);
     if (status === 'close') gaps.push(`${label}（近い経験のみ）`);
@@ -232,6 +247,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     pitch: verdict === 'reject' ? '' : raw.pitch.trim(),
     concerns: raw.preferenceFit.trim() && !/記載なし/.test(raw.preferenceFit) ? [...concerns, `本人の希望: ${raw.preferenceFit.trim()}`] : concerns,
     reviewNotes,
+    checks,
     ...(normalizePrefecture(raw.workPrefecture ?? '') ? { workPrefecture: normalizePrefecture(raw.workPrefecture ?? '') as string } : {}),
   };
 }
@@ -250,7 +266,7 @@ export function demoProperJudgment(e: OwnEngineer, p: Project): RawProperJudgmen
   const profile = profileTextOf(e);
   const reqs = p.requiredSkills.map((label) => {
     const hit = profile.split('\n').find((l) => norm(l).includes(norm(label)) && norm(label).length >= 2);
-    return { requirement: label, status: hit ? ('met' as const) : ('unmet' as const), evidence: hit ? hit.trim().slice(0, 60) : '', note: '' };
+    return { requirement: label, kind: '必須' as const, quote: label, status: hit ? ('met' as const) : ('unmet' as const), evidence: hit ? hit.trim().slice(0, 60) : '', note: '' };
   });
   const met = reqs.filter((r) => r.status === 'met').length;
   return {
