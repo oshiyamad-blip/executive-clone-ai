@@ -3730,7 +3730,9 @@ function coreTechChecks(): void {
   check('技術の必須を1つも満たさない組は除く（Power BI 研修に基本設計・PLだけの社員）',
     !coversCoreTech({ title: '社内向け研修', requiredSkills: [] }, ['基本設計', 'PL'], b(['基本設計', 'PL'], ['Power BI'])));
   check('案件名の技術を1つも持たない組は除く', !coversCoreTech({ title: '某企業の社内向けPowerBI研修', requiredSkills: [] }, ['Java', 'SQL'], b(['SQL'], [])));
-  check('技術の必須を1つでも満たし、案件名の技術を持つ組は残す',
+  check('技術の必須の過半数を満たさない組は除く（Java・Linux の必須に Linux だけ）',
+    !coversCoreTech({ title: 'システム再構築支援', requiredSkills: [] }, ['Linux'], b(['Linux', '詳細設計〜テスト'], ['Java'])));
+  check('技術の必須の過半数を満たし、案件名の技術を持つ組は残す',
     coversCoreTech({ title: 'Java詳細設計（パッケージ製品）', requiredSkills: [] }, ['Java', 'Oracle'], b(['Java'], ['Eclipse'])));
   check('案件名に技術名が無く技術の必須を満たせば残す', coversCoreTech({ title: 'システム再構築支援', requiredSkills: [] }, ['Java'], b(['Java'], [])));
   const nw = normalizeRequirementLists(['NWの新規導入(設計/構築/移行)'], []).required;
