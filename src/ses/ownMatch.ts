@@ -24,7 +24,6 @@ import {
   maxCandidatesPerItem,
   logRedact,
   properRateToleranceMan,
-  levelYearsTolerance,
 } from './config.js';
 import { evaluateLevel } from './level.js';
 import { safeErr } from './redact.js';
@@ -117,7 +116,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   if (!rateUnknown && (rate as number) < (required as number) - properRateToleranceMan()) return null;
   if (rateUnknown) reviewReasons.push('単価不明');
   // レベル（技術ごとの経験年数・工程・立場）: 技術名が合っていても、別の軸としてはっきり足りなければ除外する（level.ts）
-  const level = evaluateLevel(project.level, own.level, own.experienceYears, levelYearsTolerance());
+  const level = evaluateLevel(project.level, own.level, own.experienceYears);
   if (level.verdict === 'exclude') return null;
 
   // 元のメールにAIへの指示らしき記載がある案件は、人が確かめる（提案文面も作らない。proper/index.ts）
@@ -153,6 +152,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
     (!rateUnknown && project.rateMax === null ? '案件単価は下限の記載のみ。' : '') +
     (rateNegotiation ? `【単価交渉】必要案件単価まで${fmtMan(-(rateGapMan as number))}万円不足（本人の了承が前提）。` : '') +
     (level.gaps.length > 0 ? `【経験交渉】${level.gaps.join('・')}。` : '') +
+    (level.yearGaps.length > 0 ? `【年数交渉】${level.yearGaps.join('・')}。` : '') +
     (level.unknowns.length > 0 ? `［確認］${level.unknowns.join('・')}。` : '') +
     (level.bonus.length > 0 ? `（${level.bonus.join('・')}）` : '');
   const skillText =

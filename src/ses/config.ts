@@ -798,11 +798,6 @@ export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
 }
 
-// 社員と案件のレベルの照合（level.ts）で、経験年数がこの年数までの不足なら「経験交渉」として残す（超えたら除外）
-export function levelYearsTolerance(): number {
-  return envNum('SES_LEVEL_YEARS_TOLERANCE', 1, { min: 0 });
-}
-
 // プロパー候補の突合対象にする案件の受信日の遡り日数
 export function properProjectLookbackDays(): number {
   return envNum('PROPER_PROJECT_LOOKBACK_DAYS', 14, { min: 1 });

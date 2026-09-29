@@ -2,7 +2,9 @@
 //   ① 技術ごとの経験年数（「Java 3年以上」）と IT経験の合計年数
 //   ② 工程（要件定義→基本設計→詳細設計→製造→テスト→運用保守）: 案件が求める最も上流の工程を要員が経験しているか
 //   ③ 立場（PG→SE→PL→PM）
-// 軸の平均ではなく最も弱い軸で決める（どれか1つがはっきり足りない、または2つ以上の軸が少しずつ足りなければ除外。1つの軸だけ少し足りなければ「経験交渉」として残す）。
+// 経験年数は交渉できる条件として扱い、足りなくても除外しない（根拠に【年数交渉】を載せ、並びを少し下げるだけ）。
+// 工程・立場は軸の平均ではなく最も弱い軸で決める（どちらかが2段以上足りない、または両方が1段ずつ足りなければ除外。
+// 片方だけ1段足りなければ「経験交渉」として残す）。
 // 片方の値が分からない軸は判定しない（案件に書かれていない条件で落とさない。要員側が不明なら確認事項として根拠に載せる）
 import { normalizeSkill, skillCategory } from './skillDict.js';
 
@@ -214,8 +216,9 @@ export function parseProjectLevelJson(raw: string): ProjectLevel | undefined {
 // ===== 照合 =====
 
 export interface LevelVerdict {
-  verdict: 'ok' | 'negotiate' | 'exclude';
-  gaps: string[]; // 少し足りない軸（経験交渉の中身）
+  verdict: 'ok' | 'negotiate' | 'exclude'; // 工程・立場で決める（経験年数では除外も交渉にもしない）
+  gaps: string[]; // 1段足りない工程・立場（経験交渉の中身）
+  yearGaps: string[]; // 足りない経験年数（年数交渉の中身。除外の理由にしない）
   unknowns: string[]; // 要員側が分からず判定できなかった軸（確認事項）
   bonus: string[]; // 若手可など
   gapScore: number; // 足りない度合い（0が最良。並び順に使う）
@@ -228,31 +231,21 @@ export function topPhaseOf(level: EngineerLevel | undefined): Phase | null {
   return PHASES[Math.min(...done.map((p) => phaseIdx(p.phase)))] ?? null;
 }
 
-// yearsTolerance: 経験年数がこの年数までの不足なら経験交渉（超えたら除外）。工程・立場は1段までの不足が交渉
-export function evaluateLevel(
-  project: ProjectLevel | undefined,
-  engineer: EngineerLevel | undefined,
-  engineerTotalYears: number | null,
-  yearsTolerance = 1,
-): LevelVerdict {
-  const v: LevelVerdict = { verdict: 'ok', gaps: [], unknowns: [], bonus: [], gapScore: 0 };
+// 工程・立場は1段までの不足が経験交渉、2段以上または両方の不足は除外。経験年数の不足は年数交渉（除外しない）
+export function evaluateLevel(project: ProjectLevel | undefined, engineer: EngineerLevel | undefined, engineerTotalYears: number | null): LevelVerdict {
+  const v: LevelVerdict = { verdict: 'ok', gaps: [], yearGaps: [], unknowns: [], bonus: [], gapScore: 0 };
   if (!project) return v;
   let exclude = false;
-  // 少し足りない軸（技術年数・IT経験・工程・立場）。2つ以上の軸で足りなければ除外する
   const shortAxes = new Set<string>();
-  const years = (label: string, need: number, have: number | null, axis = 'years') => {
+  const years = (label: string, need: number, have: number | null) => {
     if (have === null) {
       v.unknowns.push(`${label}${need}年以上`);
       return;
     }
     const short = round1(need - have);
     if (short <= 0) return;
-    if (short > yearsTolerance) exclude = true;
-    else {
-      v.gaps.push(`${label}${need}年以上に対し${have}年`);
-      v.gapScore += short;
-      shortAxes.add(axis);
-    }
+    v.yearGaps.push(`${label}${need}年以上に対し${have}年`);
+    v.gapScore += Math.min(short, 3) / 3; // 並びを少し下げるだけ（工程・立場の1段の不足より小さく）
   };
   const skillMap = new Map((engineer?.skillYears ?? []).map((s) => [s.skill.toLowerCase(), s.years]));
   for (const req of project.skillYears) {

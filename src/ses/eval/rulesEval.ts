@@ -3646,18 +3646,18 @@ function levelChecks(): void {
   const eng: EngineerLevel = { skillYears: [{ skill: 'Java', years: 2.4 }], phaseYears: [{ phase: '詳細設計', years: 2 }, { phase: '製造', years: 2 }], role: 'PG' };
   const lvl = (over: Partial<ProjectLevel>): ProjectLevel => ({ ...EMPTY_PROJECT_LEVEL, ...over });
   check('条件の無い案件は ok', evaluateLevel(lvl({}), eng, 2.4).verdict === 'ok');
-  check('Java 3年以上に 2.4年は経験交渉（1年以内の不足）', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), eng, 2.4).verdict === 'negotiate');
-  check('Java 5年以上に 2.4年は除外', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 5 }] }), eng, 2.4).verdict === 'exclude');
+  const y5 = evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 5 }] }), eng, 2.4);
+  check('経験年数は足りなくても除外しない（Java 5年以上に 2.4年 → ok・年数交渉の注記）', y5.verdict === 'ok' && y5.yearGaps.length === 1 && y5.gapScore > 0 && y5.gapScore < 1, JSON.stringify(y5));
   check('工程: 基本設計からは1段上で経験交渉、要件定義からは2段上で除外',
     evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ topPhase: '要件定義' }), eng, 2.4).verdict === 'exclude');
   check('工程: 製造からの案件は ok（上流の経験があれば下流も担える）', evaluateLevel(lvl({ topPhase: '製造' }), eng, 2.4).verdict === 'ok');
   check('立場: SE は1段上で経験交渉、PL は2段上で除外', evaluateLevel(lvl({ role: 'SE' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ role: 'PL' }), eng, 2.4).verdict === 'exclude');
-  check('2つの軸が少しずつ足りなければ除外（年数と工程）', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'exclude');
+  check('工程と立場の両方が1段ずつ足りなければ除外', evaluateLevel(lvl({ topPhase: '基本設計', role: 'SE' }), eng, 2.4).verdict === 'exclude');
+  check('年数の不足は工程の不足と重なっても除外の理由にしない', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate');
   const noYears = evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 2 }] }), eng, 5);
   check('技術ごとの年数が分からなければ確認事項（合計年数で足りる場合は落とさない）', noYears.verdict === 'ok' && noYears.unknowns.length === 1);
-  check('合計年数が必要年数に届かなければ技術の年数も足りないとみなす', evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 5 }] }), eng, 2.4).verdict === 'exclude');
+  check('合計年数が必要年数に届かなければ技術の年数も足りないとみなす（年数交渉）', evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 5 }] }), eng, 2.4).yearGaps.length === 1);
   check('要員のレベルが分からない社員は判定しない（確認事項だけ）', evaluateLevel(lvl({ topPhase: '要件定義', role: 'PM' }), undefined, null).verdict === 'ok');
-  check('SES_LEVEL_YEARS_TOLERANCE=0 なら少しの不足でも除外', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), eng, 2.4, 0).verdict === 'exclude');
 
   section('レベルの軸: 抽出結果・保存値の検証');
   const dirty = sanitizeProjectLevel({ skillYears: [{ skill: 'Java', years: 3 }, { skill: '基本設計', years: 2 }, { skill: 'Go', years: -1 }, { skill: 'AWS', years: 99 }], totalYears: 'x', topPhase: '上流', role: 'CTO', juniorOk: 'yes' });
@@ -3682,6 +3682,8 @@ function levelChecks(): void {
   check('1つの軸が少し足りない案件は参考提案・根拠に【経験交渉】', nego?.band === 'tentative' && nego.reason.includes('【経験交渉】立場はSE（経験はPG）'), nego?.reason);
   const junior = evaluateOwnMatch(ownL(), pj('p_jr', lvl({ juniorOk: true, topPhase: '製造' })), NOW);
   check('若手可の案件は根拠に若手可', junior?.band === 'strong' && junior.reason.includes('若手可'), junior?.reason);
+  const yrs = evaluateOwnMatch(ownL(), pj('p_yrs', lvl({ skillYears: [{ skill: 'Java', years: 5 }], topPhase: '製造' })), NOW);
+  check('年数だけ足りない案件は強マッチのまま候補にし、根拠に【年数交渉】', yrs?.band === 'strong' && yrs.reason.includes('【年数交渉】Java5年以上に対し2.4年'), yrs?.reason);
   const ranked = matchOwnEngineersToProjects([ownL()], [pj('p_rich', lvl({ skillYears: [{ skill: 'Java', years: 3 }] }), 80), pj('p_fit', lvl({ topPhase: '製造' }), 50)], NOW).map((m) => m.projectId);
   check('単価の高い案件より、レベルの合う案件を先に並べる', ranked[0] === 'p_fit', ranked.join(','));
 
