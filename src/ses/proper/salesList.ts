@@ -4,12 +4,13 @@
 // - 要員ごとのタブ: 「全体」を FILTER で映す閲覧用（入力は「全体」で行う）。要員の増減に合わせてバッチが足し引きする
 // - 色: 優先度（A=緑/B=黄/C=灰）と対応状況（提案済=青/面談調整=紫/面談済=橙/成約=緑/見送り=灰）を条件付き書式で
 // - 人が入力する列（対応状況・担当営業・メモ・精度チェック・精度メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
+// - 要員一覧: いま営業している要員（稼働可）を、候補が0件の要員も含めて1行ずつ（稼働開始・希望単価・スキル・本人の希望・候補数）
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
 import { properSalesSpreadsheetId } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
-import type { Project, ProperCandidate } from '../../types/index.js';
+import type { Project, ProperCandidate, ProperEngineer } from '../../types/index.js';
 
 export const SALES_ALL_TAB = '全体';
 const STAFF_TAB_METADATA_KEY = 'ses_sales_staff_tab';
@@ -19,6 +20,8 @@ export const SALES_STATUSES = ['未着手', '提案済', '面談調整', '面談
 // 精度チェックの選択肢（先頭の記号で集計する）。◎○を「妥当」として妥当率に数える
 export const ACCURACY_MARKS = ['◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ'] as const;
 export const SALES_SUMMARY_TAB = '精度集計';
+export const SALES_STAFF_LIST_TAB = '要員一覧';
+const STAFF_LIST_TAB_METADATA_KEY = 'ses_sales_staff_list_tab';
 const SUMMARY_TAB_METADATA_KEY = 'ses_sales_summary_tab';
 export const SALES_PRIORITIES = { a: 'A 提案推奨', b: 'B 条件交渉', c: 'C 要確認' } as const;
 
@@ -253,6 +256,33 @@ export function summaryValues(staffLabels: string[]): string[][] {
   ];
 }
 
+// 「要員一覧」タブの値。文字の列（stringsは RAW で書く）と、候補数などの数式の列（formulas は USER_ENTERED）に分ける
+export const STAFF_LIST_HEADER = ['要員', '稼働開始', '希望単価(万)', '経験年数', '主なスキル', '本人の希望', '候補数', 'うちA', '提案済以降', '成約'];
+export function staffListValues(engineers: Array<Pick<ProperEngineer, 'proposalLabel' | 'displayName' | 'availableDate' | 'requiredProjectRate' | 'experienceYears' | 'skills' | 'wish'>>): { strings: Array<Array<string | number>>; formulas: string[][] } {
+  const tab = quoteTab(SALES_ALL_TAB);
+  const col = (name: string) => `${tab}!${columnLetter(COL[name])}2:${columnLetter(COL[name])}`;
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const sorted = [...engineers].sort((a, b) => (a.proposalLabel || a.displayName).localeCompare(b.proposalLabel || b.displayName));
+  const strings = sorted.map((e) => [
+    e.proposalLabel || e.displayName,
+    e.availableDate,
+    e.requiredProjectRate ?? '',
+    e.experienceYears ?? '',
+    e.skills.slice(0, 15).join('、'),
+    e.wish ?? '',
+  ]);
+  const formulas = sorted.map((e) => {
+    const who = `${col('要員')},${q(e.proposalLabel || e.displayName)}`;
+    return [
+      `=COUNTIFS(${who})`,
+      `=COUNTIFS(${who},${col('優先度')},"A*")`,
+      `=COUNTIFS(${who},${col('対応状況')},"<>未着手",${col('対応状況')},"<>見送り",${col('対応状況')},"<>")`,
+      `=COUNTIFS(${who},${col('対応状況')},"成約")`,
+    ];
+  });
+  return { strings: [STAFF_LIST_HEADER.slice(0, 6), ...strings], formulas: [STAFF_LIST_HEADER.slice(6), ...formulas] };
+}
+
 // ===== 書式 =====
 
 const rgb = (hex: string): sheets_v4.Schema$Color => ({
@@ -411,7 +441,8 @@ async function readLegacyList(api: sheets_v4.Sheets, spreadsheetId: string, tabs
 }
 
 // 候補を営業リストへ書き出す。書き出した行数（人の入力で残した行を含む）を返す。未設定なら null
-export async function writeSalesList(candidates: ProperCandidate[], projects: Project[]): Promise<number | null> {
+// engineers: いま営業している要員（「要員一覧」タブに、候補が0件の要員も含めて載せる）
+export async function writeSalesList(candidates: ProperCandidate[], projects: Project[], engineers: ProperEngineer[] = []): Promise<number | null> {
   const spreadsheetId = properSalesSpreadsheetId();
   if (!spreadsheetId) return null;
   const api = sheetsApi();
@@ -425,6 +456,15 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   const legacy = tabs.some((t) => t.title === SALES_ALL_TAB) ? [] : await readLegacyList(api, spreadsheetId, tabs);
   const structural: sheets_v4.Schema$Request[] = [];
   if (!tabs.some((t) => t.title === SALES_ALL_TAB)) structural.push({ addSheet: { properties: { title: SALES_ALL_TAB, index: 0 } } });
+  if (!tabs.some((t) => t.title === SALES_STAFF_LIST_TAB)) {
+    const sheetId = Math.max(0, ...tabs.map((t) => t.sheetId)) + 2000;
+    structural.push({ addSheet: { properties: { sheetId, title: SALES_STAFF_LIST_TAB, index: 1 } } });
+    structural.push({
+      createDeveloperMetadata: {
+        developerMetadata: { metadataKey: STAFF_LIST_TAB_METADATA_KEY, metadataValue: '1', location: { sheetId }, visibility: 'DOCUMENT' },
+      },
+    });
+  }
   if (!tabs.some((t) => t.title === SALES_SUMMARY_TAB)) {
     const sheetId = Math.max(0, ...tabs.map((t) => t.sheetId)) + 1000;
     structural.push({ addSheet: { properties: { sheetId, title: SALES_SUMMARY_TAB, index: 1 } } });
@@ -486,7 +526,22 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
       },
     }),
   );
-  await withGoogleRetry(() => api.spreadsheets.values.clear({ spreadsheetId, range: `${quoteTab(SALES_SUMMARY_TAB)}!A:H` }));
+  await withGoogleRetry(() =>
+    api.spreadsheets.values.batchClear({
+      spreadsheetId,
+      requestBody: { ranges: [`${quoteTab(SALES_SUMMARY_TAB)}!A:H`, `${quoteTab(SALES_STAFF_LIST_TAB)}!A:J`] },
+    }),
+  );
+  // 要員一覧: 要員リスト由来の文字は RAW、候補数の数式は USER_ENTERED
+  const staffList = staffListValues(engineers);
+  await withGoogleRetry(() =>
+    api.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${quoteTab(SALES_STAFF_LIST_TAB)}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: staffList.strings },
+    }),
+  );
   // 要員タブの FILTER と「精度集計」の数式だけ USER_ENTERED（外部由来の文字列は含まない）
   await withGoogleRetry(() =>
     api.spreadsheets.values.batchUpdate({
@@ -496,6 +551,7 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
         data: [
           ...staffTabs.map((t) => ({ range: `${quoteTab(t.title)}!A2`, values: [[staffFilterFormula(wanted.get(t.title) as string)]] })),
           { range: `${quoteTab(SALES_SUMMARY_TAB)}!A1`, values: summaryValues(labels) },
+          { range: `${quoteTab(SALES_STAFF_LIST_TAB)}!G1`, values: staffList.formulas },
         ],
       },
     }),
