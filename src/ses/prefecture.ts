@@ -206,6 +206,28 @@ export function isAdjacentOrSame(a: string | null, b: string | null): boolean {
   return (ADJACENCY[a] ?? []).includes(b) || (ADJACENCY[b] ?? []).includes(a);
 }
 
+// 通勤圏: 隣接していなくても電車で日常的に通える組み合わせ（1都3県どうし・関西の2府2県どうしは通勤圏、
+// 北関東3県から1都3県へは通う人が多いが時間がかかるため「確認」）。社員（プロパー）の勤務地の判定に使う
+const METRO_GROUPS = [
+  ['東京都', '神奈川県', '埼玉県', '千葉県'],
+  ['大阪府', '京都府', '兵庫県', '奈良県'],
+];
+const LONG_COMMUTE: Record<string, string[]> = {
+  群馬県: ['東京都', '神奈川県', '埼玉県', '千葉県'],
+  栃木県: ['東京都', '神奈川県', '埼玉県', '千葉県'],
+  茨城県: ['東京都', '神奈川県', '埼玉県', '千葉県'],
+};
+
+export type CommuteFit = 'ok' | 'check' | 'no';
+
+// 居住地（home）から勤務地（work）へ通えるか。どちらか不明は呼び出し側で扱う（ここでは no）
+export function commuteFit(work: string | null, home: string | null): CommuteFit {
+  if (!work || !home) return 'no';
+  if (isAdjacentOrSame(work, home)) return 'ok';
+  if (METRO_GROUPS.some((g) => g.includes(work) && g.includes(home))) return 'ok';
+  return (LONG_COMMUTE[home] ?? []).includes(work) ? 'check' : 'no';
+}
+
 // 居住地を都道府県・市区町村までにする（最初の数字以降の丁目・番地・建物を落とす）。
 // 突合・文面に使うのは都道府県だけのため、メール・スキルシートに番地まで書かれていても保存しない
 export function coarseResidence(raw: string): string {

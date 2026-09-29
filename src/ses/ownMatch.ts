@@ -9,7 +9,7 @@ import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown } from './pricing.js';
-import { isAdjacentOrSame, isFullRemoteLocation } from './prefecture.js';
+import { commuteFit, isFullRemoteLocation } from './prefecture.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
@@ -96,7 +96,9 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
 
   // 勤務地: フルリモート可なら不問。両方わかれば同一/隣接のみ通過、片方でも不明なら判定不能として要確認
   const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
-  const locationKnownOk = isAdjacentOrSame(project.prefecture, own.prefecture);
+  // 隣接県に加えて通勤圏（1都3県どうし等）も通す。北関東から都内などは通勤時間の確認つきで残す
+  const commute = commuteFit(project.prefecture, own.prefecture);
+  const locationKnownOk = commute !== 'no';
   const locationUnknown = !fullRemote && (project.prefecture === null || own.prefecture === null);
   if (!fullRemote && !locationUnknown && !locationKnownOk) return null;
   if (locationUnknown) reviewReasons.push('勤務地不明');
@@ -144,6 +146,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date)
   const pct = Math.round(skill.rate * 100);
   const notes =
     conditionNote +
+    (!fullRemote && commute === 'check' ? `［確認］通勤時間（${own.prefecture}から${project.prefecture}）。` : '') +
     (skillBand === 'tentative' && skill.basis !== 'unknown' ? '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。' : '') +
     (skillBand === 'strong' && stale ? '【参考提案】' : '') +
     (skill.basis === 'preferred' ? '必須スキルの記載がないため尚可スキルで判定。' : '') +
