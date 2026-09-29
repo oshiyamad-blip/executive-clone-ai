@@ -99,7 +99,7 @@ import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
 import { verifyJudgment, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, applyJudgment } from '../proper/index.js';
+import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3848,6 +3848,15 @@ async function properJudgeChecks(): Promise<void> {
     check('案件単価が希望より30万円以上高い組は、AIが推奨しない限り候補にしない',
       applyJudgment({ ...cond, rateGapMan: 40 }, j2) === null && applyJudgment({ ...cond, rateGapMan: 40 }, { ...j2, verdict: 'recommend' }) !== null &&
         applyJudgment({ ...cond, rateGapMan: 15 }, j2) !== null);
+    const jj = ok1?.judgment as NonNullable<ProperCandidate['judgment']>;
+    check('上限を超えても載せる基準: 推奨、または条件つきで裏付けのある要件が足りない要件以上（要確認は除く）',
+      clearsBar(ok1 as ProperCandidate) &&
+        clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', met: ['A ← x', 'B ← y'], gaps: ['C'] } }) &&
+        !clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', met: ['A（近い経験） ← x'], gaps: ['A（近い経験のみ）'] } }) &&
+        !clearsBar({ ...(ok1 as ProperCandidate), needsReview: true }));
+    const tentativeNote = applyJudgment({ ...(ok1 as ProperCandidate), reason: '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。【年数交渉】Java3年に対し2年。' }, jj);
+    check('ルールの参考提案の注記はAIの判定で置き換え、年数交渉の注記は残す',
+      !(tentativeNote?.reason ?? '').includes('参考提案') && (tentativeNote?.reason ?? '').includes('【年数交渉】'), tentativeNote?.reason);
     check('AIが見送った組は候補にしない', !candidates.some((c) => c.ownEngineerId === 'E_rej') && stats.rejected === 1);
     check('AI判定に失敗した組は、ルールの基準も満たすときだけ要確認で残す（Oracleだけ＝一致率50%は残さない）',
       !candidates.some((c) => c.ownEngineerId === 'E_fail') && stats.failed === 1, JSON.stringify(stats));
