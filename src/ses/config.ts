@@ -686,6 +686,21 @@ export function gmailServiceAccountEnvPrefix(): string {
 
 // メインの資格情報を鍵ファイルではなく ADC（Application Default Credentials。GitHub Actions では Workload Identity 連携）で得るか。
 // SES_GOOGLE_AUTH=adc のときだけ（手元の ADC が個人のアカウントのことがあるため、自動では切り替えない）
+// 本人のGoogleアカウントのOAuth（リフレッシュトークン）。個人のGmail（gmail.com）はDWDでなりすませないため、
+// Claudeの環境のルーティンで動かすときは本人の同意で得たトークンで、Gmailの読み取りとスプレッドシートの読み書きを行う。
+// 3つとも揃ったときだけ使う（docs/ses-claude-routine.md）
+export function sesGoogleOAuth(): { clientId: string; clientSecret: string; refreshToken: string } | null {
+  const clientId = env('SES_GOOGLE_OAUTH_CLIENT_ID');
+  const clientSecret = env('SES_GOOGLE_OAUTH_CLIENT_SECRET');
+  const refreshToken = env('SES_GOOGLE_OAUTH_REFRESH_TOKEN');
+  return clientId && clientSecret && refreshToken ? { clientId, clientSecret, refreshToken } : null;
+}
+
+// Gmail で収集するラベル（例: SES）。本人のOAuthで個人のGmailを読むときは必須（SES以外のメールを読まないため）
+export function sesGmailLabel(): string {
+  return env('SES_GMAIL_LABEL');
+}
+
 export function sesGoogleUsesAdc(): boolean {
   return env('SES_GOOGLE_AUTH').toLowerCase() === 'adc';
 }

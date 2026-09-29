@@ -87,9 +87,10 @@ import {
   properMasterInMainTenant,
   githubRef,
   environmentSentinel,
+  sesGmailLabel,
 } from './config.js';
 import { loadServiceAccountCredentials } from '../collectors/googleAuth.js';
-import { sesMainCredentials, sameServiceAccount, sheetsDbAuthProblem, gmailAuthProblem, dedicatedCredentials, delegationProbeSubject } from './googleCreds.js';
+import { sesMainCredentials, sameServiceAccount, sheetsDbAuthProblem, gmailAuthProblem, dedicatedCredentials, delegationProbeSubject, userOAuthConfigured } from './googleCreds.js';
 import {
   isPlainEmailAddress,
   looksLikeDomain,
@@ -392,6 +393,10 @@ function checkDatabase(): void {
     else if (!looksLikeGoogleId(sheetsDbSpreadsheetId())) {
       bad('SHEETS_DB_SPREADSHEET_ID の形式が正しくありません（スプレッドシートのURL、またはURLの /d/ と /edit の間の文字列）');
     } else ok('SHEETS_DB_SPREADSHEET_ID: 設定済み（IDの形式OK）');
+    if (userOAuthConfigured() && !sesMainCredentials()) {
+      ok('スプレッドシートは本人のOAuth（SES_GOOGLE_OAUTH_*）で読み書きします（サービスアカウントへの共有は不要）');
+      return;
+    }
     checkMainServiceAccount('サービスアカウント鍵');
     const impersonate = sheetsDbImpersonate();
     if (impersonate) {
@@ -482,6 +487,12 @@ function checkMail(): void {
   }
   if (provider === 'gmail') {
     checkEmailSetting('SES_TARGET_GMAIL', sesTargetGmail(), true, 'SES専用メールボックスの実ユーザーのアドレス');
+    if (userOAuthConfigured()) {
+      if (!sesGmailLabel()) bad('本人のOAuthで個人のGmailを読むときは SES_GMAIL_LABEL（例: SES）が必須です（SES以外のメールを読まないため）');
+      else ok(`本人のOAuthで「${sesGmailLabel()}」ラベルのメールだけを読みます（読み取り専用。下書き・サマリの送信はしません）`);
+      ok('送信ドメイン認証: Gmail（mx.google.com）が一番上に付けた Authentication-Results だけを信じます（一致するメールが無い回はサマリで知らせます）');
+      return;
+    }
     const prefix = gmailServiceAccountEnvPrefix();
     checkDedicatedKey(prefix, 'Gmail用のサービスアカウント鍵（DWD）');
     const problem = gmailAuthProblem();
@@ -534,7 +545,7 @@ function checkSenders(): void {
   if (invalid > 0) bad(`SES_ALLOWED_SENDERS にメールアドレスとして解釈できない値が${invalid}件あります（カンマ区切り）`);
   else if (addresses.length > 0) ok(`SES_ALLOWED_SENDERS: ${addresses.length}件（このアドレスだけを下書きの送信元にします）`);
   if (mailProvider() === 'gmail') {
-    if (addresses.length === 0) {
+    if (addresses.length === 0 && !userOAuthConfigured()) {
       bad('MAIL_PROVIDER=gmail では SES_ALLOWED_SENDERS（下書きの送信元にしてよい社員のアドレス）が必須です（DWDでその人のGmailに下書きを作るため）');
     }
     return;

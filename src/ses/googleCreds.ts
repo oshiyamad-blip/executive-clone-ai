@@ -27,9 +27,28 @@ import {
   sesNotifyTo,
   properImpersonate,
   sesDwdProbeSubject,
+  sesGoogleOAuth,
 } from './config.js';
 
-export type SesGoogleAuth = GoogleJwt | InstanceType<typeof google.auth.GoogleAuth>;
+export type GoogleUserOAuth = InstanceType<typeof google.auth.OAuth2>;
+export type SesGoogleAuth = GoogleJwt | InstanceType<typeof google.auth.GoogleAuth> | GoogleUserOAuth;
+
+let userOAuth: GoogleUserOAuth | null = null;
+
+// 本人のOAuth（SES_GOOGLE_OAUTH_*）。スコープは同意のときに決まる（gmail.readonly と spreadsheets）。未設定なら null
+export function userOAuthAuth(): GoogleUserOAuth | null {
+  const c = sesGoogleOAuth();
+  if (!c) return null;
+  if (!userOAuth) {
+    userOAuth = new google.auth.OAuth2(c.clientId, c.clientSecret);
+    userOAuth.setCredentials({ refresh_token: c.refreshToken });
+  }
+  return userOAuth;
+}
+
+export function userOAuthConfigured(): boolean {
+  return sesGoogleOAuth() !== null;
+}
 
 // 同じサービスアカウント（同じ client_email か、同じ秘密鍵）か
 export function sameServiceAccount(a: ServiceAccountCredentials | null | undefined, b: ServiceAccountCredentials | null | undefined): boolean {
@@ -48,7 +67,7 @@ export function sesMainCredentials(): { creds: ServiceAccountCredentials; prefix
 }
 
 export function sesMainConfigured(): boolean {
-  return sesGoogleUsesAdc() || sesMainCredentials() !== null;
+  return sesGoogleUsesAdc() || sesMainCredentials() !== null || userOAuthConfigured();
 }
 
 // メインのサービスアカウントのメール（シートの保護・共有先の案内。分からなければ ''）
@@ -61,7 +80,8 @@ export function sesMainAccountEmail(): string {
 export function sesMainAuth(scopes: string[]): SesGoogleAuth | null {
   if (sesGoogleUsesAdc()) return new google.auth.GoogleAuth({ scopes });
   const main = sesMainCredentials();
-  return main ? getServiceAccountAuth(scopes, undefined, main.creds) : null;
+  // サービスアカウントの鍵が無く本人のOAuthがあれば、本人としてシートを読み書きする（シートの共有は不要）
+  return main ? getServiceAccountAuth(scopes, undefined, main.creds) : userOAuthAuth();
 }
 
 // 専用の鍵（なりすましに使う）。メインの鍵・経営者クローンの鍵と同じなら sharesMain=true（使わない）
@@ -120,6 +140,7 @@ export function sheetsDbEditorAccount(): string {
 // ===== Gmail（MAIL_PROVIDER=gmail） =====
 
 export function gmailAuthProblem(): string | null {
+  if (userOAuthConfigured()) return null;
   const d = dedicatedCredentials(gmailServiceAccountEnvPrefix());
   if (!d.creds) return 'Gmail運用のDWDには専用のサービスアカウント鍵 SES_GMAIL_SA_KEY_JSON が必要です（メインの鍵ではなりすましません）';
   if (d.sharesMain) {
@@ -133,8 +154,10 @@ export function gmailCredentialsReady(): boolean {
 }
 
 // Gmail の DWD（subject のメールボックスとして）。使えなければ null
-export function gmailDelegatedAuth(subject: string | undefined, scopes: string[]): GoogleJwt | null {
+export function gmailDelegatedAuth(subject: string | undefined, scopes: string[]): GoogleJwt | GoogleUserOAuth | null {
   if (!subject) return null;
+  // 本人のOAuthは SES_TARGET_GMAIL（本人のアドレス）のメールボックスだけに使う（担当営業へのなりすましの代わりにはしない）
+  if (userOAuthConfigured()) return subject.trim().toLowerCase() === sesTargetGmail().trim().toLowerCase() ? userOAuthAuth() : null;
   const creds = usableDedicated(gmailServiceAccountEnvPrefix());
   if (!creds) {
     const problem = gmailAuthProblem();

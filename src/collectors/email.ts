@@ -112,7 +112,7 @@ function decodeBase64Url(data: string, charset = 'utf-8'): string {
 // （「メールが0件」と区別し、収集失敗としてバッチを異常終了扱いにするため）。
 // isProcessed で処理済みのメッセージは本文・添付をダウンロードしない（毎回全件を取り直さない）
 export async function collectSesRawMail(
-  auth: GoogleJwt,
+  auth: GoogleJwt | InstanceType<typeof google.auth.OAuth2>,
   query: string,
   isProcessed: (mailId: string) => boolean = () => false,
   opts: { limit?: number; pick?: <T extends { receivedAt: Date }>(items: T[], limit: number) => { picked: T[]; deferred: T[] } } = {},

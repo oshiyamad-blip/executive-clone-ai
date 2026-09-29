@@ -169,7 +169,8 @@ import { isBatchProtection } from '../../database/sheetBook.js';
 import { receivedFromOutside } from '../mail/authResults.js';
 import { mainRulesetProblems, singleMaintainerProblems } from '../mainRuleset.js';
 import { duplicateRequestIds, isAmbiguousDraftFailure } from '../pendingDrafts.js';
-import { classifyDelegationProbe, sameServiceAccount } from '../googleCreds.js';
+import { classifyDelegationProbe, sameServiceAccount, gmailDelegatedAuth, sesMainAuth, userOAuthConfigured } from '../googleCreds.js';
+import { draftReady as gmailDraftReady, sendReady as gmailSendReady, collect as gmailCollect } from '../mail/gmail.js';
 import { shortcutTargetAllowed } from '../proper/drive.js';
 import { readFileSync, existsSync } from 'fs';
 import { isDraftStateLocked } from '../../database/mapping.js';
@@ -3759,6 +3760,37 @@ function salesListChecks(): void {
     projectExcerpt('本文です\n単価50万', ['見つからない案件名'], 0) === '本文です\n単価50万' && projectExcerpt('あ'.repeat(3000), ['x'], 0).endsWith('（以下略）'));
 }
 
+async function userOAuthChecks(): Promise<void> {
+  section('本人のOAuth（Claudeの環境のルーティン・個人のGmail）');
+  const keys = ['SES_GOOGLE_OAUTH_CLIENT_ID', 'SES_GOOGLE_OAUTH_CLIENT_SECRET', 'SES_GOOGLE_OAUTH_REFRESH_TOKEN', 'SES_TARGET_GMAIL', 'SES_GMAIL_LABEL',
+    'SES_GOOGLE_SA_KEY_JSON', 'GOOGLE_SA_KEY_JSON', 'SES_GOOGLE_SA_KEY_FILE', 'GOOGLE_SA_KEY_FILE', 'SES_GOOGLE_AUTH'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  try {
+    process.env.SES_GOOGLE_OAUTH_CLIENT_ID = 'cid';
+    process.env.SES_GOOGLE_OAUTH_CLIENT_SECRET = 'secret';
+    check('3つ揃わなければ使わない', !userOAuthConfigured());
+    process.env.SES_GOOGLE_OAUTH_REFRESH_TOKEN = 'rt';
+    process.env.SES_TARGET_GMAIL = 'Me@example.com';
+    check('本人のメールボックスにだけ使い、ほかのアドレス（担当営業）には使わない',
+      userOAuthConfigured() && gmailDelegatedAuth('me@example.com', []) !== null && gmailDelegatedAuth('sales@example.com', []) === null);
+    check('サービスアカウントの鍵が無ければ、シートも本人として読み書きする', sesMainAuth([]) !== null);
+    check('読み取り専用: 下書き・サマリの送信はしない', !gmailDraftReady() && !gmailSendReady());
+    let refused = false;
+    try {
+      await gmailCollect(() => false, { limit: 1 });
+    } catch (err) {
+      refused = /SES_GMAIL_LABEL/.test(String(err));
+    }
+    check('SESのラベルが無ければ収集しない（私用のメールを読まない）', refused);
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -3801,6 +3833,7 @@ async function main(): Promise<void> {
     summarySendChecks();
     levelChecks();
     salesListChecks();
+    await userOAuthChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();
