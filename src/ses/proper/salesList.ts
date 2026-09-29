@@ -6,7 +6,6 @@
 // - 人が入力する列（対応状況・担当営業・メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
-import { REMOTE_LABEL } from '../../database/mapping.js';
 import { properSalesSpreadsheetId } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import type { Project, ProperCandidate } from '../../types/index.js';
@@ -59,6 +58,9 @@ const STAFF_STATUS_HEADER = '対応状況（入力は全体タブ）';
 
 type Row = Array<string | number>;
 
+// 営業向けの表記（保存用の「不可」ではなく「常駐」）
+const SALES_REMOTE_LABEL: Record<Project['remote'], string> = { full: 'フル', partial: '一部', none: '常駐', unknown: '' };
+
 // 優先度: 要確認（単価・勤務地・スキル不明や指示混入疑い）→ C、交渉や参考提案の注記が無く単価を満たす強マッチ → A、ほかは B
 export function salesPriorityOf(c: ProperCandidate): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
@@ -103,7 +105,7 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['ID']] = c.id;
   if (project) {
     row[COL['勤務地']] = project.location;
-    row[COL['リモート']] = project.remote === 'unknown' ? '' : REMOTE_LABEL[project.remote];
+    row[COL['リモート']] = SALES_REMOTE_LABEL[project.remote];
     row[COL['開始']] = project.startPeriod;
     row[COL['必須スキル']] = project.requiredSkills.join('、');
     row[COL['営業元会社']] = project.agentCompany;
