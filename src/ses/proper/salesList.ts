@@ -3,7 +3,8 @@
 // - 「全体」タブ: 優先度 → 要員 → 受信の新しい順。左に判断に要る列、右に詳細（本文・文面）。ID列は隠す
 // - 要員ごとのタブ: 「全体」を FILTER で映す閲覧用（入力は「全体」で行う）。要員の増減に合わせてバッチが足し引きする
 // - 色: 優先度（A=緑/B=黄/C=灰）と対応状況（提案済=青/面談調整=紫/面談済=橙/成約=緑/見送り=灰）を条件付き書式で
-// - 人が入力する列（対応状況・担当営業・メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
+// - 人が入力する列（対応状況・担当営業・メモ・精度チェック・精度メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
+// - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
 import { properSalesSpreadsheetId } from '../config.js';
@@ -15,6 +16,10 @@ const STAFF_TAB_METADATA_KEY = 'ses_sales_staff_tab';
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
 export const SALES_STATUSES = ['未着手', '提案済', '面談調整', '面談済', '成約', '見送り'] as const;
+// 精度チェックの選択肢（先頭の記号で集計する）。◎○を「妥当」として妥当率に数える
+export const ACCURACY_MARKS = ['◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ'] as const;
+export const SALES_SUMMARY_TAB = '精度集計';
+const SUMMARY_TAB_METADATA_KEY = 'ses_sales_summary_tab';
 export const SALES_PRIORITIES = { a: 'A 提案推奨', b: 'B 条件交渉', c: 'C 要確認' } as const;
 
 // 列の定義（順番がそのまま表示順）。width はピクセル、wrap=false は折り返さずに切る（長文はセルを開いて読む）
@@ -43,6 +48,8 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '対応状況', width: 80, human: true },
   { name: '担当営業', width: 72, human: true },
   { name: 'メモ', width: 160, wrap: true, human: true },
+  { name: '精度チェック', width: 96, human: true },
+  { name: '精度メモ', width: 180, wrap: true, human: true },
   { name: '確認事項', width: 220, wrap: true },
   { name: '必須スキル', width: 160, wrap: true },
   { name: '営業元会社', width: 140, wrap: true },
@@ -57,7 +64,8 @@ export const SALES_COLUMNS: SalesColumn[] = [
 const COL = Object.fromEntries(SALES_COLUMNS.map((c, i) => [c.name, i])) as Record<string, number>;
 const HEADER = SALES_COLUMNS.map((c) => c.name);
 const LAST_COL = columnLetter(SALES_COLUMNS.length - 1);
-const STAFF_STATUS_HEADER = '対応状況（入力は全体タブ）';
+// 要員のタブは FILTER で映すだけのため、人が入力する列の見出しに入力先を添える
+const staffHeaderOf = (h: string) => (SALES_COLUMNS.find((c) => c.name === h)?.human ? `${h}（入力は全体タブ）` : h);
 
 type Row = Array<string | number>;
 
@@ -221,6 +229,30 @@ export function staffFilterFormula(label: string): string {
   return `=IFERROR(FILTER(${tab}!A2:${LAST_COL},${tab}!${c}2:${c}="${label.replace(/"/g, '""')}"),"")`;
 }
 
+// 「精度集計」タブの値（数式）。優先度ごと・要員ごとに、精度チェックの件数と妥当率（◎○ ÷ チェック済み）を出す
+export function summaryValues(staffLabels: string[]): string[][] {
+  const tab = quoteTab(SALES_ALL_TAB);
+  const col = (name: string) => `${tab}!${columnLetter(COL[name])}2:${columnLetter(COL[name])}`;
+  const acc = col('精度チェック');
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const row = (label: string, cond: string, r: number): string[] => {
+    const c = (mark: string) => `=COUNTIFS(${cond}${cond ? ',' : ''}${acc},${q(`${mark}*`)})`;
+    const all = cond ? `=COUNTIFS(${cond})` : `=COUNTA(${col('ID')})`;
+    return [label, all, c('?'), c('◎'), c('○'), c('△'), c('×'), `=IFERROR((D${r}+E${r})/C${r},"")`];
+  };
+  const pri = col('優先度');
+  const staff = col('要員');
+  const groups: Array<[string, string]> = [
+    ['全体', ''],
+    ...(['A', 'B', 'C'] as const).map((p): [string, string] => [`優先度 ${p}`, `${pri},${q(`${p}*`)}`]),
+    ...staffLabels.map((l): [string, string] => [`要員 ${l}`, `${staff},${q(l)}`]),
+  ];
+  return [
+    ['区分', '候補数', 'チェック済', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）'],
+    ...groups.map(([label, cond], i) => row(label, cond, i + 2)),
+  ];
+}
+
 // ===== 書式 =====
 
 const rgb = (hex: string): sheets_v4.Schema$Color => ({
@@ -234,6 +266,12 @@ export const PRIORITY_COLORS: Array<[string, string, string]> = [
   ['A', 'C6EFCE', '006100'],
   ['B', 'FFEB9C', '9C5700'],
   ['C', 'D9D9D9', '404040'],
+];
+export const ACCURACY_COLORS: Array<[string, string, string]> = [
+  ['◎', 'C6EFCE', '006100'],
+  ['○', 'E2EFDA', '375623'],
+  ['△', 'FFEB9C', '9C5700'],
+  ['×', 'F8CBAD', '9C0006'],
 ];
 export const STATUS_COLORS: Array<[string, string, string]> = [
   ['提案済', 'DDEBF7', '1F4E78'],
@@ -260,6 +298,7 @@ function conditionalRules(sheetId: number): sheets_v4.Schema$Request[] {
   return [
     ...PRIORITY_COLORS.map(([p, bg, fg]) => rule(COL['優先度'], 'TEXT_STARTS_WITH', p, bg, fg, true)),
     ...STATUS_COLORS.map(([s, bg, fg]) => rule(COL['対応状況'], 'TEXT_EQ', s, bg, fg, s === '成約')),
+    ...ACCURACY_COLORS.map(([m, bg, fg]) => rule(COL['精度チェック'], 'TEXT_STARTS_WITH', m, bg, fg, true)),
   ];
 }
 
@@ -310,6 +349,16 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
         range: { sheetId, startRowIndex: 1, startColumnIndex: COL['対応状況'], endColumnIndex: COL['対応状況'] + 1 },
         rule: {
           condition: { type: 'ONE_OF_LIST', values: SALES_STATUSES.map((s) => ({ userEnteredValue: s })) },
+          showCustomUi: true,
+          strict: false,
+        },
+      },
+    });
+    reqs.push({
+      setDataValidation: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: COL['精度チェック'], endColumnIndex: COL['精度チェック'] + 1 },
+        rule: {
+          condition: { type: 'ONE_OF_LIST', values: ACCURACY_MARKS.map((s) => ({ userEnteredValue: s })) },
           showCustomUi: true,
           strict: false,
         },
@@ -376,6 +425,15 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   const legacy = tabs.some((t) => t.title === SALES_ALL_TAB) ? [] : await readLegacyList(api, spreadsheetId, tabs);
   const structural: sheets_v4.Schema$Request[] = [];
   if (!tabs.some((t) => t.title === SALES_ALL_TAB)) structural.push({ addSheet: { properties: { title: SALES_ALL_TAB, index: 0 } } });
+  if (!tabs.some((t) => t.title === SALES_SUMMARY_TAB)) {
+    const sheetId = Math.max(0, ...tabs.map((t) => t.sheetId)) + 1000;
+    structural.push({ addSheet: { properties: { sheetId, title: SALES_SUMMARY_TAB, index: 1 } } });
+    structural.push({
+      createDeveloperMetadata: {
+        developerMetadata: { metadataKey: SUMMARY_TAB_METADATA_KEY, metadataValue: '1', location: { sheetId }, visibility: 'DOCUMENT' },
+      },
+    });
+  }
   if (structural.length > 0) {
     await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: structural } }));
     tabs = await readTabs(api, spreadsheetId);
@@ -422,23 +480,26 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
           { range: `${quoteTab(SALES_ALL_TAB)}!A1`, values: [HEADER, ...rows] },
           ...staffTabs.map((t) => ({
             range: `${quoteTab(t.title)}!A1`,
-            values: [HEADER.map((h) => (h === '対応状況' ? STAFF_STATUS_HEADER : h))],
+            values: [HEADER.map(staffHeaderOf)],
           })),
         ],
       },
     }),
   );
-  if (staffTabs.length > 0) {
-    await withGoogleRetry(() =>
-      api.spreadsheets.values.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          valueInputOption: 'USER_ENTERED',
-          data: staffTabs.map((t) => ({ range: `${quoteTab(t.title)}!A2`, values: [[staffFilterFormula(wanted.get(t.title) as string)]] })),
-        },
-      }),
-    );
-  }
+  await withGoogleRetry(() => api.spreadsheets.values.clear({ spreadsheetId, range: `${quoteTab(SALES_SUMMARY_TAB)}!A:H` }));
+  // 要員タブの FILTER と「精度集計」の数式だけ USER_ENTERED（外部由来の文字列は含まない）
+  await withGoogleRetry(() =>
+    api.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          ...staffTabs.map((t) => ({ range: `${quoteTab(t.title)}!A2`, values: [[staffFilterFormula(wanted.get(t.title) as string)]] })),
+          { range: `${quoteTab(SALES_SUMMARY_TAB)}!A1`, values: summaryValues(labels) },
+        ],
+      },
+    }),
+  );
 
   const all = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
   const format = [
