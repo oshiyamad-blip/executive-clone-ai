@@ -229,10 +229,17 @@ function legacyInputs(legacy: string[][]): Map<string, string[]> {
   return out;
 }
 
-// 今回の行に、前回までのシートの人の入力を ID で引き継ぐ。今回の候補に無い行は、人の入力があるものだけ前回のまま残す。
+// 今回の行に、前回までのシートの人の入力を ID で引き継ぐ（IDが変わった行は要員＋案件名で引く）。
+// 今回の候補に無い前回の行は、人の入力があるか stillOpen が真（案件がまだ募集中で要員も営業中）なら前回のまま残す。
+// 判定の上限や重複の代表の入れ替わりで、営業が見たばかりの行が次の回に消えないようにするため。
 // existing はシートの値（1行目は見出し。列は見出しの名前で探すため、人が列を並べ替えていても読める）。
 // legacy は同じスプレッドシートにある以前のリスト（ID列なし）。IDで引けない行だけ、要員＋案件名が同じ行の入力を引き継ぐ
-export function mergeSalesRows(fresh: Row[], existing: string[][], legacy: string[][] = []): Row[] {
+export function mergeSalesRows(
+  fresh: Row[],
+  existing: string[][],
+  legacy: string[][] = [],
+  stillOpen: (id: string) => boolean = () => false,
+): Row[] {
   const fromLegacy = legacyInputs(legacy);
   const header = existing[0] ?? [];
   const at = (name: string) => header.indexOf(name);
@@ -249,12 +256,25 @@ export function mergeSalesRows(fresh: Row[], existing: string[][], legacy: strin
       previous.set(id, row);
     }
   }
+  const byKey = new Map<string, string>();
+  for (const [id, prev] of previous) {
+    const key = legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']]));
+    if (!byKey.has(key)) byKey.set(key, id);
+  }
+  const freshIds = new Set(fresh.map((r) => String(r[COL['ID']])));
   const out: Row[] = [];
   const seen = new Set<string>();
   for (const r of fresh) {
     const id = String(r[COL['ID']]);
     seen.add(id);
-    const prev = previous.get(id);
+    let prev = previous.get(id);
+    if (!prev) {
+      const other = byKey.get(legacyKey(String(r[COL['要員']]), String(r[COL['案件名']])));
+      if (other && !freshIds.has(other) && !seen.has(other)) {
+        prev = previous.get(other);
+        seen.add(other);
+      }
+    }
     const merged = [...r];
     const old = prev ? null : fromLegacy.get(legacyKey(String(r[COL['要員']]), String(r[COL['案件名']])));
     HUMAN_COLS.forEach((i, k) => {
@@ -263,7 +283,7 @@ export function mergeSalesRows(fresh: Row[], existing: string[][], legacy: strin
     if (merged[COL['対応状況']] === '') merged[COL['対応状況']] = SALES_STATUSES[0];
     out.push(merged);
   }
-  for (const [id, prev] of previous) if (!seen.has(id) && hasHumanInput(prev)) out.push(prev);
+  for (const [id, prev] of previous) if (!seen.has(id) && (hasHumanInput(prev) || stillOpen(id))) out.push(prev);
   return sortSalesRows(out);
 }
 
@@ -397,10 +417,11 @@ function conditionalRules(sheetId: number): sheets_v4.Schema$Request[] {
 }
 
 // タブ1枚分の見た目（見出し・固定・列幅・折り返し・色・隠し列）。既存の条件付き書式は消してから付け直す
-export function formatRequests(sheetId: number, existingRuleCount: number, isAll: boolean): sheets_v4.Schema$Request[] {
+// layout: 列幅・非表示・固定・フィルタも付ける（作ったばかりのタブだけ。毎回付け直すと、営業が変えた列幅や絞り込みが消える）
+export function formatRequests(sheetId: number, existingRuleCount: number, isAll: boolean, layout = true): sheets_v4.Schema$Request[] {
   const reqs: sheets_v4.Schema$Request[] = [];
   for (let i = existingRuleCount - 1; i >= 0; i--) reqs.push({ deleteConditionalFormatRule: { sheetId, index: i } });
-  reqs.push({
+  if (layout) reqs.push({
     updateSheetProperties: {
       properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: COL['要員'] + 1 } },
       fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount',
@@ -421,7 +442,7 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
     },
   });
   SALES_COLUMNS.forEach((c, i) => {
-    reqs.push({
+    if (layout) reqs.push({
       updateDimensionProperties: {
         range: { sheetId, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 },
         properties: { pixelSize: c.width, hiddenByUser: Boolean(c.hidden) },
@@ -431,8 +452,14 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
     reqs.push({
       repeatCell: {
         range: { sheetId, startRowIndex: 1, startColumnIndex: i, endColumnIndex: i + 1 },
-        cell: { userEnteredFormat: { wrapStrategy: c.wrap ? 'WRAP' : 'CLIP', verticalAlignment: 'TOP' } },
-        fields: 'userEnteredFormat(wrapStrategy,verticalAlignment)',
+        cell: {
+          userEnteredFormat: {
+            wrapStrategy: c.wrap ? 'WRAP' : 'CLIP',
+            verticalAlignment: 'TOP',
+            horizontalAlignment: NUMERIC_COLS.has(c.name) ? 'RIGHT' : 'LEFT',
+          },
+        },
+        fields: 'userEnteredFormat(wrapStrategy,verticalAlignment,horizontalAlignment)',
       },
     });
   });
@@ -458,9 +485,51 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
         },
       },
     });
-    reqs.push({ setBasicFilter: { filter: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0, endColumnIndex: SALES_COLUMNS.length } } } });
+    if (layout) reqs.push({ setBasicFilter: { filter: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0, endColumnIndex: SALES_COLUMNS.length } } } });
   }
   return reqs;
+}
+
+const HEADER_FORMAT: sheets_v4.Schema$CellFormat = {
+  backgroundColor: rgb('1F4E78'),
+  textFormat: { foregroundColor: rgb('FFFFFF'), bold: true },
+  verticalAlignment: 'MIDDLE',
+};
+
+// 「精度集計」「要員一覧」の書式: 見出しの色・数字は右寄せ・文字は左上寄せ・妥当率は％
+export function sideTabFormatRequests(summaryId: number, staffListId: number): sheets_v4.Schema$Request[] {
+  const cells = (sheetId: number, from: number, to: number, format: sheets_v4.Schema$CellFormat, fields: string, header = false) => ({
+    repeatCell: {
+      range: { sheetId, startRowIndex: header ? 0 : 1, ...(header ? { endRowIndex: 1 } : {}), startColumnIndex: from, endColumnIndex: to },
+      cell: { userEnteredFormat: format },
+      fields: `userEnteredFormat(${fields})`,
+    },
+  });
+  const frozen = (sheetId: number) => ({
+    updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' },
+  });
+  const width = (sheetId: number, index: number, pixelSize: number) => ({
+    updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: index, endIndex: index + 1 }, properties: { pixelSize }, fields: 'pixelSize' },
+  });
+  const topLeft = { horizontalAlignment: 'LEFT', verticalAlignment: 'TOP', wrapStrategy: 'WRAP' };
+  const right = { horizontalAlignment: 'RIGHT', verticalAlignment: 'TOP' };
+  const summaryCols = 8;
+  return [
+    frozen(summaryId),
+    cells(summaryId, 0, summaryCols, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment', true),
+    cells(summaryId, 0, 1, topLeft, 'horizontalAlignment,verticalAlignment,wrapStrategy'),
+    cells(summaryId, 1, summaryCols, right, 'horizontalAlignment,verticalAlignment'),
+    cells(summaryId, summaryCols - 1, summaryCols, { numberFormat: { type: 'PERCENT', pattern: '0.0%' } }, 'numberFormat'),
+    ...Array.from({ length: summaryCols }, (_, i) => width(summaryId, i, 110)),
+    frozen(staffListId),
+    cells(staffListId, 0, STAFF_LIST_HEADER.length, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment', true),
+    cells(staffListId, 0, 2, topLeft, 'horizontalAlignment,verticalAlignment,wrapStrategy'),
+    cells(staffListId, 2, 4, right, 'horizontalAlignment,verticalAlignment'),
+    cells(staffListId, 4, 6, topLeft, 'horizontalAlignment,verticalAlignment,wrapStrategy'),
+    cells(staffListId, 6, STAFF_LIST_HEADER.length, right, 'horizontalAlignment,verticalAlignment'),
+    width(staffListId, 4, 360),
+    width(staffListId, 5, 260),
+  ];
 }
 
 // ===== 書き出し =====
@@ -506,7 +575,14 @@ async function readLegacyList(api: sheets_v4.Sheets, spreadsheetId: string, tabs
 
 // 候補を営業リストへ書き出す。書き出した行数（人の入力で残した行を含む）を返す。未設定なら null
 // engineers: いま営業している要員（「要員一覧」タブに、候補が0件の要員も含めて載せる）
-export async function writeSalesList(candidates: ProperCandidate[], projects: Project[], engineers: ProperEngineer[] = []): Promise<number | null> {
+// openProjectIds: 今回の突合対象にした募集中の案件（重複を除いた代表）。前回の行のうち、案件がここにあり要員も営業中のものは
+// 今回の候補に入らなくても残す（案件が募集終了・遡り期間外になるか、要員が営業から外れたら消える）
+export async function writeSalesList(
+  candidates: ProperCandidate[],
+  projects: Project[],
+  engineers: ProperEngineer[] = [],
+  openProjectIds: Set<string> = new Set(),
+): Promise<number | null> {
   const spreadsheetId = properSalesSpreadsheetId();
   if (!spreadsheetId) return null;
   const api = sheetsApi();
@@ -543,8 +619,13 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
     tabs = await readTabs(api, spreadsheetId);
   }
 
-  const existing = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }));
-  const rows = mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy);
+  const stillOpen = (id: string) =>
+    engineers.some((e) => id.startsWith(`ownmatch_${e.id}_`) && openProjectIds.has(id.slice(`ownmatch_${e.id}_`.length)));
+  const readRows = async () => {
+    const existing = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }));
+    return mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy, stillOpen);
+  };
+  let rows = await readRows();
 
   // 要員のタブ: 行のある要員の分を揃え、いなくなった要員のタブ（バッチが作ったものだけ）を消す
   // 候補が0件の要員（いま営業している要員）にもタブを作る
@@ -555,8 +636,10 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   const tabChanges: sheets_v4.Schema$Request[] = [];
   for (const t of tabs) if (t.staff && !wanted.has(t.title)) tabChanges.push({ deleteSheet: { sheetId: t.sheetId } });
   let nextId = Math.max(0, ...tabs.map((t) => t.sheetId)) + 1;
+  const created = new Set<string>(structural.some((r) => r.addSheet?.properties?.title === SALES_ALL_TAB) ? [SALES_ALL_TAB] : []);
   for (const title of wanted.keys()) {
     if (tabs.some((t) => t.title === title)) continue;
+    created.add(title);
     const sheetId = nextId++;
     tabChanges.push({ addSheet: { properties: { sheetId, title } } });
     tabChanges.push({
@@ -572,6 +655,8 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
 
   // 値: 外部由来の文字列（件名・本文・社名）を数式にしないよう RAW で書く。要員タブの FILTER だけ USER_ENTERED
   const staffTabs = tabs.filter((t) => wanted.has(t.title));
+  // 営業が「全体」に入力してから消して書き直すまでの間を短くするため、書く直前に読み直して人の入力を引き継ぐ
+  rows = await readRows();
   await withGoogleRetry(() =>
     api.spreadsheets.values.batchClear({
       spreadsheetId,
@@ -625,9 +710,12 @@ export async function writeSalesList(candidates: ProperCandidate[], projects: Pr
   );
 
   const all = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
+  const summary = tabs.find((t) => t.title === SALES_SUMMARY_TAB);
+  const staffListTab = tabs.find((t) => t.title === SALES_STAFF_LIST_TAB);
   const format = [
-    ...formatRequests(all.sheetId, all.rules, true),
-    ...staffTabs.flatMap((t) => formatRequests(t.sheetId, t.rules, false)),
+    ...formatRequests(all.sheetId, all.rules, true, created.has(SALES_ALL_TAB)),
+    ...staffTabs.flatMap((t) => formatRequests(t.sheetId, t.rules, false, created.has(t.title))),
+    ...(summary && staffListTab ? sideTabFormatRequests(summary.sheetId, staffListTab.sheetId) : []),
   ];
   await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: format } }));
   return rows.length;
