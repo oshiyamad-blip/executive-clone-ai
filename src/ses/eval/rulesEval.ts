@@ -4023,7 +4023,7 @@ function salesListChecks(): void {
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
   check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色＋精度チェック4色を付け、対応状況・精度チェックはプルダウン・ID列は隠す',
-    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 12 &&
+    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 13 &&
       rules.every((r) => [col('優先度'), col('対応状況'), col('精度チェック')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('精度チェック')) &&
@@ -4044,7 +4044,7 @@ function salesListChecks(): void {
   const alignOf = (reqs: typeof fmtAgain, c: number) => reqs.find((r) => r.repeatCell?.range?.startRowIndex === 1 && r.repeatCell?.range?.startColumnIndex === c)?.repeatCell?.cell?.userEnteredFormat?.horizontalAlignment;
   check('書式: 2回目以降は列幅・固定・フィルタを付け直さない（営業が変えた幅や絞り込みを残す）。色とプルダウンは付け直す',
     !fmtAgain.some((r) => r.updateDimensionProperties || r.setBasicFilter || r.updateSheetProperties) &&
-      fmtAgain.filter((r) => r.addConditionalFormatRule).length === 12 && fmtAgain.filter((r) => r.setDataValidation).length === 2 &&
+      fmtAgain.filter((r) => r.addConditionalFormatRule).length === 13 && fmtAgain.filter((r) => r.setDataValidation).length === 2 &&
       fmt.some((r) => r.setBasicFilter) && fmt.some((r) => r.updateDimensionProperties));
   check('書式: 本文は左上寄せ・数字の列（No・単価・差）は右寄せ',
     alignOf(fmtAgain, col('案件名')) === 'LEFT' && alignOf(fmtAgain, col('No')) === 'RIGHT' && alignOf(fmtAgain, col('差(万)')) === 'RIGHT' && alignOf(fmtAgain, col('案件単価(万)')) === 'RIGHT');
@@ -4082,6 +4082,15 @@ function salesListChecks(): void {
       planned.deleteIds.join() === 'ownmatch_gone' && planned.rows.length === 5);
   check('営業リストの更新: 人が列を並べ替えたシートは差分で書かない（全体を書き直す）',
     planSalesUpdate([], [[...header].reverse()]) === null && planSalesUpdate([], [header]) !== null);
+  const closing = planSalesUpdate(
+    [salesRowOf(base, undefined), salesRowOf(nego, undefined), salesRowOf(review, undefined)],
+    [header, sheetRow('ownmatch_a_p1', { 対応状況: 'クローズ', メモ: '決まった' }), sheetRow('ownmatch_keep', { 対応状況: '提案済' })],
+    () => false, (id) => id, new Set([review.id]),
+  );
+  check('営業リストの更新: クローズにした行は全体から外して控えに移し、同じ候補が次の回に届いても戻さない（控えにある候補も戻さない）',
+    closing !== null && closing.closeIds.join() === 'ownmatch_a_p1' && closing.closedRows[0][col('メモ')] === '決まった' &&
+      closing.updates.length === 0 && closing.appends.map((r) => r[col('ID')]).join() === nego.id &&
+      closing.rows.map((r) => r[col('ID')]).join() === `ownmatch_keep,${nego.id}`, JSON.stringify(closing?.rows.map((r) => r[col('ID')])));
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
   check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
   const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);
