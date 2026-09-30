@@ -444,28 +444,24 @@ export function staffFilterFormula(label: string): string {
 // 「精度集計」タブの値（数式）。優先度ごと・要員ごとに、精度チェックの件数と妥当率（◎○ ÷ チェック済み）を出す
 export function summaryValues(staffLabels: string[]): string[][] {
   const tab = quoteTab(SALES_ALL_TAB);
-  const col = (name: string) => `${tab}!${columnLetter(COL[name])}2:${columnLetter(COL[name])}`;
-  const acc = col('精度チェック');
-  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
-  const row = (label: string, cond: string, r: number): string[] => {
-    const c = (mark: string) => `=COUNTIFS(${cond}${cond ? ',' : ''}${acc},${q(`${mark}*`)})`;
-    const all = cond ? `=COUNTIFS(${cond})` : `=COUNTA(${col('ID')})`;
-    return [label, all, c('?'), c('◎'), c('○'), c('△'), c('×'), `=IFERROR((D${r}+E${r})/C${r},"")`];
-  };
-  const pri = col('優先度');
-  const staff = col('要員');
-  const groups: Array<[string, string]> = [
-    ['全体', ''],
-    ...(['A', 'B', 'C', 'D'] as const).map((p): [string, string] => [`優先度 ${p}`, `${pri},${q(`${p}*`)}`]),
-    ...staffLabels.map((l): [string, string] => [`要員 ${l}`, `${staff},${q(l)}`]),
-  ];
-  // 見送り理由: 全体とクローズ済みの両方を数える（クローズした行は全体から外れるため）
   const closed = quoteTab(SALES_CLOSED_TAB);
   const letter = (name: string) => columnLetter(COL[name]);
-  const both = (conds: Array<[string, string]>) =>
-    [tab, closed].map((t) => `COUNTIFS(${conds.map(([n, v]) => `${t}!${letter(n)}2:${letter(n)},${q(v)}`).join(',')})`).join('+');
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const inTab = (t: string, conds: Array<[string, string]>) => conds.map(([n, v]) => `${t}!${letter(n)}2:${letter(n)},${q(v)}`).join(',');
+  // 全体とクローズ済みの両方を数える（期限切れ・クローズした行は全体から外れるため）
+  const both = (conds: Array<[string, string]>) => [tab, closed].map((t) => `COUNTIFS(${inTab(t, conds)})`).join('+');
+  const row = (label: string, cond: Array<[string, string]>, r: number): string[] => {
+    const c = (mark: string) => `=${both([...cond, ['精度チェック', `${mark}*`]])}`;
+    const all = cond.length ? `=COUNTIFS(${inTab(tab, cond)})` : `=COUNTA(${tab}!${letter('ID')}2:${letter('ID')})`;
+    return [label, all, c('?'), c('◎'), c('○'), c('△'), c('×'), `=IFERROR((D${r}+E${r})/C${r},"")`];
+  };
+  const groups: Array<[string, Array<[string, string]>]> = [
+    ['全体', []],
+    ...(['A', 'B', 'C', 'D'] as const).map((p): [string, Array<[string, string]>] => [`優先度 ${p}`, [['優先度', `${p}*`]]]),
+    ...staffLabels.map((l): [string, Array<[string, string]>] => [`要員 ${l}`, [['要員', l]]]),
+  ];
   return [
-    ['区分', '候補数', 'チェック済', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）'],
+    ['区分', '候補数', 'チェック済（クローズ済みを含む）', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）'],
     ...groups.map(([label, cond], i) => row(label, cond, i + 2)),
     [],
     ['見送り理由（クローズ済みを含む）', '件数', ...staffLabels],

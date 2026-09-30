@@ -4024,8 +4024,12 @@ function salesListChecks(): void {
   const accCol = String.fromCharCode(65 + col('精度チェック'));
   check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
     sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AD2:AD)" && sv[5][0] === '優先度 D' &&
-      sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
+      sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")+COUNTIFS('クローズ済み'!B2:B,"A*",'クローズ済み'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
       sv[6][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
+  check('精度集計: チェック済・◎は全体とクローズ済みの両方を数え（優先度の行も両方で優先度列を条件にし）、候補数はクローズ済みを見ない',
+    sv[1][2].includes("'全体'!") && sv[1][2].includes("'クローズ済み'!") && sv[1][3].includes("'全体'!") && sv[1][3].includes("'クローズ済み'!") &&
+      (sv[2][2].match(/COUNTIFS\('(全体|クローズ済み)'!B2:B,"A\*"/g) ?? []).length === 2 && sv[2][2].includes("'クローズ済み'!B2:B,\"A*\"") &&
+      sv.slice(1, 7).every((r) => !r[1].includes('クローズ済み')), JSON.stringify(sv[1]));
   const sl = staffListValues([
     { proposalLabel: 'N.H', displayName: 'N.H', availableDate: '即日', requiredProjectRate: 40, experienceYears: 0.1, skills: ['kintone'], wish: 'ヘルプデスク希望' },
     { proposalLabel: 'A"A', displayName: 'A"A', availableDate: '10月', requiredProjectRate: null, experienceYears: null, skills: [] },
