@@ -15,7 +15,7 @@ import { skillMatch } from '../pricing.js';
 import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 5;
+const JUDGE_VERSION = 6;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
@@ -41,8 +41,11 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
    - kind: 必須 / 尚可
    - quote: その要件が書かれたメール本文の記載を原文のまま（行頭の記号を除いた1行、または行の一部）。本文に無くカードにだけある要件はカードの表記
    - requirement: 判定する要件の短い名前
-   - met: 社員の経歴に、同じ技術・同じ種類の作業を実務で行った記載がある
-   - close: 同じではないが近い実務経験があり、立ち上がれる見込みが高い（例: Spring の経験で Spring Boot、PostgreSQL の経験で Oracle のSQL）
+   - met: 社員の経歴に、同じ技術・同じ種類の作業を実務で行った記載がある。要件と経歴の言い方が違っても、同じものを指していれば met
+     （例: 「簡単なマクロ」に VBA でのツール開発、「Subversion」に TortoiseSVN、「トラブル対応」に障害の1次・2次切り分けと復旧、
+     「OS構築」に Linux・Windows サーバーの構築、「Tera Term」に Teraterm での作業）
+   - close: 別の技術・作業だが近い実務経験があり、立ち上がれる見込みが高い（例: Spring の経験で Spring Boot、PostgreSQL の経験で Oracle のSQL）。
+     同じものを指す経験を、控えめに close にしない
    - unmet: 実務の記載が無い、または「運用保守」「テスト」「Excel」「コミュニケーション」などの一般的な語が重なるだけ
    - evidence: met・close のときは、根拠となる社員の経歴の記載を原文のまま（言い換え・要約・結合をせずに）10〜60文字で1か所抜き出す。unmet は空文字。
      その要件の技術名や作業が書かれている業務内容の文を選ぶ（「～ | SQL | Linux」のような表の断片より、何をしたかが分かる文を優先）。

@@ -24,7 +24,7 @@ export interface BatchStats {
   healedRetry: number;
   healedEscalation: number;
   budgetExhausted: number;
-  skillTokens: number; // 抽出したスキル語の数（人名・社名らしい語を除く）
+  skillTokens: number; // 抽出した技術名らしいスキル語の数（人名・社名らしい語・日本語の文を除く）
   unknownSkillTokens: number; // うち辞書に無い語の数（辞書拡充の指標）
   // 抽出品質（バッチのメトリクス。件数だけ）
   extractedProjects: number;

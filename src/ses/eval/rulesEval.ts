@@ -99,7 +99,7 @@ import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
 import { verifyJudgment, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar } from '../proper/index.js';
+import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3470,6 +3470,9 @@ function mailKindChecks(): void {
   check('見出しの無い短い本文は unknown', k('ご確認をお願いいたします。') === 'unknown');
   check('引用部分の見出しは数えない', k('> 【氏名】A.B.\n> 【最寄駅】品川\n> 【希望単価】60万\nご提案ありがとうございます。') === 'unknown');
   check('件名は使わない（件名が「要員募集」でも本文が案件なら project）', k(PROJ) === 'project');
+  check('【氏名】【所属】【稼働】【単金】の要員紹介の定型も engineer', k('【氏名】FI(27歳_男性_泉岳寺駅)\n【所属】弊社個人事業主\n【稼働】9月～\n【単金】75万\n【スキル】Java\n') === 'engineer');
+  check('案件の見出しが2つ以上あれば「稼働：」「所属：」の行があっても engineer にしない',
+    k(PROJ + '【稼働】週5日\n【所属】貴社正社員まで\n') !== 'engineer');
   const t0 = Date.now();
   k(' '.repeat(50_000) + '\n' + '【'.repeat(50_000));
   check('空白・飾りの長い行でも遅くならない', Date.now() - t0 < 500, `${Date.now() - t0}ms`);
@@ -3810,6 +3813,15 @@ async function properJudgeChecks(): Promise<void> {
   const dd = dedupeProjects([dupA, dupB, roleSe, rolePg]);
   check('別のメールで届いた同じ案件（括弧の補足を除いた名前と単価が同じ）は新しい受信の1件にまとめ、他の営業元を控える・単価の無い案件はまとめない',
     dd.kept.map((p) => p.id).sort().join(',') === 'd2,d3,d4' && dd.others.get('d2')?.join() === 'A社', JSON.stringify([...dd.others]));
+  const op = (title: string, requiredSkills: string[]) => project({ id: title, title, requiredSkills, rateMax: 80 });
+  check('括弧の役割・担当が違う同名の案件は別の枠（まとめない）',
+    !sameOpening(op('注文システム機能リプレース（会員認証基盤移行担当）', ['Python', 'PHP', 'Lambda']), op('注文システム機能リプレース（API担当）', ['Python', 'Lambda'])));
+  check('案件番号・働き方の書き添えの違いは同じ案件（まとめる）',
+    sameOpening(op('デザイナー募集（フルリモート）', ['Figma', 'DTPデザイン']), op('デザイナー募集（DC-23615）', ['Figma', 'DTPデザイン'])) &&
+      sameOpening(op('システム再構築支援', ['Java', 'Linux']), op('システム再構築支援（金融システム バッチ実行・テスト対応）', ['Java', 'Linux'])));
+  check('必須の技術が重ならない同名の案件は別の枠（Db2/MQ と RHEL/UNIX・SQL と Office操作）',
+    !sameOpening(op('パッチ適用案件', ['Db2', 'MQ']), op('パッチ適用案件', ['RHEL', 'UNIX'])) &&
+      !sameOpening(op('稼働立ち合い業務', ['DB操作', 'SQL']), op('稼働立ち合い業務', ['Excel,Word,PowerPointの業務使用', '問い合わせ対応'])));
   check('途中で切れた必須を見分ける', isTruncatedRequirement('開発プロセスの改善提案のご') && isTruncatedRequirement('Linux(RHEL') && !isTruncatedRequirement('Java(3年以上)'));
   const trunc = verifyJudgment(raw(), profile, { requiredSkills: ['Oracle', '開発プロセスの改善提案のご'] });
   check('途中で切れた必須がある案件は人の確認に回す', trunc.reviewNotes.some((n) => n.includes('途中で切れています')));
