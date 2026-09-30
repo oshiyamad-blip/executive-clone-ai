@@ -98,7 +98,7 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
-import { verifyJudgment, pitchWithVerifiedYears, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
@@ -3835,6 +3835,11 @@ async function properJudgeChecks(): Promise<void> {
     pitchWithVerifiedYears('Linux・Windowsサーバーの運用保守を約20年経験しています。10年間無事故の運用を完遂しました。', yp) === '10年間無事故の運用を完遂しました。' &&
       pitchWithVerifiedYears('経験18年の運用のプロです。', yp) === '経験18年の運用のプロです。' &&
       pitchWithVerifiedYears('経験8年です。', yp) === '');
+  check('ほかの要件の一部になっている技術名の無い短い語（「システム」）は要件として数えない',
+    isFragmentRequirement('システム', [judgeNorm('小売・物流業界でのシステム開発経験'), judgeNorm('システム')]) &&
+      !isFragmentRequirement('Java', [judgeNorm('Java開発経験')]) && !isFragmentRequirement('要件定義', [judgeNorm('基本設計')]));
+  check('「問題発生時の報告・連絡・相談」「勤怠良好」も一般的な語として扱う',
+    isGenericRequirement('問題発生時の報告・連絡・相談') && isGenericRequirement('勤怠良好な方') && !isGenericRequirement('Oracle DBの運用'));
   const withOpt = verifyJudgment(raw({ requirements: [
     { requirement: 'Oracle', kind: '必須', quote: 'Oracle DBの運用経験', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
     { requirement: 'COBOL', kind: '尚可', quote: 'COBOL開発経験', status: 'unmet', evidence: '', note: '' },

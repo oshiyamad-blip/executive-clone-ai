@@ -159,7 +159,7 @@ const GENERIC = new Set(
 );
 
 // Office系の道具・人柄や作業姿勢の条件（どの社員にも当てはまりやすく、案件に合う根拠にならない）
-const OFFICE_OR_SOFT = /excel|エクセル|word|powerpoint|パワーポイント|office|365|スプレッドシート|コミュニケーション|報連相|ミスなく|正確|丁寧|作業精度|スケジュール通り|主体的|積極的|協調|責任感|前向き|マナー/i;
+const OFFICE_OR_SOFT = /excel|エクセル|word|powerpoint|パワーポイント|office|365|スプレッドシート|コミュニケーション|報連相|報告[・、]?連絡|連絡[・、]?相談|ミスなく|正確|丁寧|作業精度|スケジュール通り|主体的|積極的|協調|責任感|前向き|マナー|勤怠/i;
 
 export function isGenericRequirement(label: string): boolean {
   if (OFFICE_OR_SOFT.test(label.normalize('NFKC'))) return true;
@@ -173,6 +173,14 @@ export function isTruncatedRequirement(label: string): boolean {
   const open = (t.match(/[（(]/g) ?? []).length;
   const close = (t.match(/[)）]/g) ?? []).length;
   return open > close || /[のごをにがはとでやへ、]$/.test(t);
+}
+
+// 抽出の区切りで切れた断片（「小売・物流業界でのシステム開発経験」の「システム」）。技術名が無い短い語で、
+// ほかの要件の記載の一部になっているものは要件として数えない（「×システム」のような意味の無い印を出さない）
+export function isFragmentRequirement(label: string, otherQuotes: string[]): boolean {
+  const n = norm(label.replace(/^尚可[:：]\s*/, ''));
+  if (n.length > 4 || techNamesIn(label).length > 0) return false;
+  return otherQuotes.some((q) => q.length > n.length && q.includes(n));
 }
 
 // 要件の技術名（候補のどれか）が根拠の記載に出てくるか。要件に技術名が無ければ問わない
@@ -212,9 +220,11 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
   let metCount = 0;
   let unmetCount = 0;
   const checks: RequirementCheck[] = [];
+  const quotes = raw.requirements.map((r) => norm(r.quote ?? r.requirement));
   for (const r of raw.requirements) {
     const name = r.requirement.trim();
     if (!name) continue;
+    if (isFragmentRequirement(name, quotes)) continue;
     const kind: RequirementKind = r.kind ?? (/^尚可/.test(name) ? '尚可' : '必須');
     const optional = kind === '尚可';
     const label = optional && !/^尚可/.test(name) ? `尚可: ${name}` : name;
