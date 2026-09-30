@@ -239,6 +239,7 @@ export function mergeSalesRows(
   existing: string[][],
   legacy: string[][] = [],
   stillOpen: (id: string, previous: Row) => boolean = () => false,
+  canonical: (id: string) => string = (id) => id,
 ): Row[] {
   const fromLegacy = legacyInputs(legacy);
   const header = existing[0] ?? [];
@@ -262,12 +263,19 @@ export function mergeSalesRows(
     if (!byKey.has(key)) byKey.set(key, id);
   }
   const freshIds = new Set(fresh.map((r) => String(r[COL['ID']])));
+  const byCanonical = new Map<string, string>();
+  for (const id of previous.keys()) if (!byCanonical.has(canonical(id))) byCanonical.set(canonical(id), id);
   const out: Row[] = [];
   const seen = new Set<string>();
   for (const r of fresh) {
     const id = String(r[COL['ID']]);
     seen.add(id);
     let prev = previous.get(id);
+    const alias = byCanonical.get(id);
+    if (!prev && alias && !freshIds.has(alias) && !seen.has(alias)) {
+      prev = previous.get(alias);
+      seen.add(alias);
+    }
     if (!prev) {
       const other = byKey.get(legacyKey(String(r[COL['要員']]), String(r[COL['案件名']])));
       if (other && !freshIds.has(other) && !seen.has(other)) {
@@ -303,6 +311,79 @@ export function sortSalesRows(rows: Row[]): Row[] {
     return copy;
   });
 }
+
+// 営業が入力している最中のシートを書き直さないための、行ごとの差分。
+// 並び替えも「全体」の消去もせず、既存の行はバッチが作る列（人の入力の列以外）だけを同じ行に書き直し、新しい候補は下に足す。
+// 消すのは、今回の候補に無く・人の入力も無く・案件が募集中でもない行だけ（書く直前に読み直して、入力が入っていれば残す）。
+// 見出しが既定の並びでない（人が列を並べ替えた・初回）ときは null（全体を書き直す）
+export interface SalesUpdatePlan {
+  updates: Array<{ row: number; values: Row }>; // row はシートの行番号（1始まり、見出しが1行目）
+  appends: Row[];
+  deleteIds: string[];
+  rows: Row[]; // 書いた後のシートの並び（要員のタブ・件数用）
+}
+
+export function planSalesUpdate(
+  fresh: Row[],
+  existing: string[][],
+  stillOpen: (id: string, previous: Row) => boolean = () => false,
+  canonical: (id: string) => string = (id) => id,
+): SalesUpdatePlan | null {
+  const header = existing[0] ?? [];
+  if (header.length !== HEADER.length || header.some((h, i) => h !== HEADER[i])) return null;
+  const toRow = (cells: string[]): Row =>
+    HEADER.map((name, i) => {
+      const v = cells[i] ?? '';
+      return NUMERIC_COLS.has(name) && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v;
+    });
+  const current = existing.slice(1).map(toRow);
+  const freshById = new Map(fresh.map((r) => [String(r[COL['ID']]), r]));
+  const freshByKey = new Map<string, string>();
+  for (const r of fresh) {
+    const key = legacyKey(String(r[COL['要員']]), String(r[COL['案件名']]));
+    if (!freshByKey.has(key)) freshByKey.set(key, String(r[COL['ID']]));
+  }
+  const used = new Set<string>();
+  const updates: SalesUpdatePlan['updates'] = [];
+  const deleteIds: string[] = [];
+  const rows: Row[] = [];
+  current.forEach((prev, i) => {
+    const id = String(prev[COL['ID']]).trim();
+    if (!id) {
+      rows.push(prev); // 人が足した行（IDなし）はそのまま
+      return;
+    }
+    const byId = [id, canonical(id)].find((x) => freshById.has(x) && !used.has(x));
+    const byKey = freshByKey.get(legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']])));
+    const match = byId ?? (byKey && !used.has(byKey) ? byKey : undefined);
+    if (match) {
+      used.add(match);
+      const next = [...(freshById.get(match) as Row)];
+      next[COL['No']] = prev[COL['No']];
+      HUMAN_COLS.forEach((c) => {
+        next[c] = prev[c];
+      });
+      updates.push({ row: i + 2, values: next });
+      rows.push(next);
+    } else if (hasHumanInput(prev) || stillOpen(id, prev)) {
+      rows.push(prev);
+    } else {
+      deleteIds.push(id);
+    }
+  });
+  const maxNo = Math.max(0, ...current.map((r) => (typeof r[COL['No']] === 'number' ? (r[COL['No']] as number) : 0)));
+  const appends = sortSalesRows(fresh.filter((r) => !used.has(String(r[COL['ID']])))).map((r, k) => {
+    const next = [...r];
+    next[COL['No']] = maxNo + k + 1;
+    if (next[COL['対応状況']] === '') next[COL['対応状況']] = SALES_STATUSES[0];
+    return next;
+  });
+  return { updates, appends, deleteIds, rows: [...rows, ...appends] };
+}
+
+// 人の入力の列（対応状況〜精度メモ）は連続している。行を書き直すときはその両側だけを書く
+const HUMAN_FIRST = Math.min(...HUMAN_COLS);
+const HUMAN_LAST = Math.max(...HUMAN_COLS);
 
 // 要員のタブ名（シート名に使えない文字を除く。「全体」と重ならないようにする）
 export function staffTabName(label: string): string {
@@ -487,7 +568,21 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
     });
     if (layout) reqs.push({ setBasicFilter: { filter: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0, endColumnIndex: SALES_COLUMNS.length } } } });
   }
+  if (layout) reqs.push(...protectRequests(sheetId, isAll));
   return reqs;
+}
+
+// 入力しない場所を触ると確認が出るようにする（止めはしない）。バッチが毎回書き直す列・FILTERで映すだけの要員のタブへの入力は消えるため
+export function protectRequests(sheetId: number, isAll: boolean): sheets_v4.Schema$Request[] {
+  const protect = (range: sheets_v4.Schema$GridRange, description: string) => ({
+    addProtectedRange: { protectedRange: { range, description, warningOnly: true } },
+  });
+  if (!isAll) return [protect({ sheetId }, '全体タブから自動で映しています。対応状況・メモなどは全体タブに入力してください')];
+  const note = 'バッチが更新のたびに書き直す列です。入力は「対応状況」〜「精度メモ」の列へ';
+  return [
+    protect({ sheetId, startColumnIndex: 0, endColumnIndex: HUMAN_FIRST }, note),
+    protect({ sheetId, startColumnIndex: HUMAN_LAST + 1, endColumnIndex: SALES_COLUMNS.length }, note),
+  ];
 }
 
 const HEADER_FORMAT: sheets_v4.Schema$CellFormat = {
@@ -583,7 +678,7 @@ export async function writeSalesList(
   candidates: ProperCandidate[],
   projects: Project[],
   engineers: ProperEngineer[] = [],
-  openProjectIds: Set<string> = new Set(),
+  open: { ids: Set<string>; aliasOf: Map<string, string> } = { ids: new Set(), aliasOf: new Map() },
 ): Promise<number | null> {
   const spreadsheetId = properSalesSpreadsheetId();
   if (!spreadsheetId) return null;
@@ -626,14 +721,24 @@ export async function writeSalesList(
     engineers.some(
       (e) =>
         id.startsWith(`ownmatch_${e.id}_`) &&
-        openProjectIds.has(id.slice(`ownmatch_${e.id}_`.length)) &&
+        open.ids.has(id.slice(`ownmatch_${e.id}_`.length)) &&
         String(e.requiredProjectRate ?? '') === String(previous[COL['希望単価(万)']] ?? '').trim(),
     );
-  const readRows = async () => {
-    const existing = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }));
-    return mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy, stillOpen);
+  // 前回の行の案件が、今回は同じ案件の別メール（重複の代表）になっているときは代表のIDに読み替える
+  const canonical = (id: string) => {
+    for (const e of engineers) {
+      const prefix = `ownmatch_${e.id}_`;
+      const alias = id.startsWith(prefix) ? open.aliasOf.get(id.slice(prefix.length)) : undefined;
+      if (alias) return `${prefix}${alias}`;
+    }
+    return id;
   };
-  let rows = await readRows();
+  const readExisting = async () =>
+    ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }))).data.values ??
+      []) as string[][];
+  let existingValues = await readExisting();
+  let plan = planSalesUpdate(fresh, existingValues, stillOpen, canonical);
+  let rows = plan ? plan.rows : mergeSalesRows(fresh, existingValues, legacy, stillOpen, canonical);
 
   // 要員のタブ: 行のある要員の分を揃え、いなくなった要員のタブ（バッチが作ったものだけ）を消す
   // 候補が0件の要員（いま営業している要員）にもタブを作る
@@ -663,36 +768,66 @@ export async function writeSalesList(
 
   // 値: 外部由来の文字列（件名・本文・社名）を数式にしないよう RAW で書く。要員タブの FILTER だけ USER_ENTERED
   const staffTabs = tabs.filter((t) => wanted.has(t.title));
-  // 営業が「全体」に入力してから消して書き直すまでの間を短くするため、書く直前に読み直して人の入力を引き継ぐ
-  rows = await readRows();
+  // 書く直前に読み直す（営業の入力・行の並べ替えを取り込む）
+  existingValues = await readExisting();
+  plan = planSalesUpdate(fresh, existingValues, stillOpen, canonical);
+  rows = plan ? plan.rows : mergeSalesRows(fresh, existingValues, legacy, stillOpen, canonical);
   // 人が作ったタブは行の枠が小さいことがあり、枠を超える書き込みは弾かれるため先に広げる（FILTERで映す要員のタブも同じ行数にそろえる）
-  const need = rows.length + 1;
+  const need = Math.max(rows.length, existingValues.length - 1 + (plan?.appends.length ?? 0)) + 1;
   const grow = [SALES_ALL_TAB, ...staffTabs.map((t) => t.title)].flatMap((title) => {
     const t = tabs.find((x) => x.title === title);
     return t && t.rowCount < need ? [{ appendDimension: { sheetId: t.sheetId, dimension: 'ROWS', length: need - t.rowCount } }] : [];
   });
   if (grow.length > 0) await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: grow } }));
-  await withGoogleRetry(() =>
-    api.spreadsheets.values.batchClear({
-      spreadsheetId,
-      requestBody: { ranges: [SALES_ALL_TAB, ...staffTabs.map((t) => t.title)].map((t) => `${quoteTab(t)}!A:${LAST_COL}`) },
-    }),
-  );
-  await withGoogleRetry(() =>
-    api.spreadsheets.values.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: [
-          { range: `${quoteTab(SALES_ALL_TAB)}!A1`, values: [HEADER, ...rows] },
-          ...staffTabs.map((t) => ({
-            range: `${quoteTab(t.title)}!A1`,
-            values: [HEADER.map(staffHeaderOf)],
-          })),
-        ],
-      },
-    }),
-  );
+  const staffHeaders = staffTabs.map((t) => ({ range: `${quoteTab(t.title)}!A1`, values: [HEADER.map(staffHeaderOf)] }));
+  if (plan) {
+    // 既存の行は人の入力の列を書かない（入力中のセルを上書きしない）。新しい候補は最後の行の下に足す
+    const all = quoteTab(SALES_ALL_TAB);
+    const machine = plan.updates.flatMap((u) => [
+      { range: `${all}!A${u.row}:${columnLetter(HUMAN_FIRST - 1)}${u.row}`, values: [u.values.slice(0, HUMAN_FIRST)] },
+      { range: `${all}!${columnLetter(HUMAN_LAST + 1)}${u.row}:${LAST_COL}${u.row}`, values: [u.values.slice(HUMAN_LAST + 1)] },
+    ]);
+    const appends = plan.appends.length > 0 ? [{ range: `${all}!A${existingValues.length + 1}`, values: plan.appends }] : [];
+    await withGoogleRetry(() =>
+      api.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data: [...machine, ...appends, ...staffHeaders] } }),
+    );
+    if (plan.deleteIds.length > 0) {
+      // 消す直前にもう一度読み、その間に入力が入った行・並べ替えで動いた行を取り違えない
+      const drop = new Set(plan.deleteIds);
+      const now = await readExisting();
+      const allTab = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
+      const rowsToDelete = now
+        .map((cells, i) => ({ cells, i }))
+        .filter(({ cells, i }) => i > 0 && drop.has((cells[COL['ID']] ?? '').trim()) && !hasHumanInput(cells))
+        .map(({ i }) => i)
+        .sort((a, b) => b - a);
+      if (rowsToDelete.length > 0) {
+        await withGoogleRetry(() =>
+          api.spreadsheets.batchUpdate({
+            spreadsheetId,
+            requestBody: {
+              requests: rowsToDelete.map((i) => ({
+                deleteDimension: { range: { sheetId: allTab.sheetId, dimension: 'ROWS', startIndex: i, endIndex: i + 1 } },
+              })),
+            },
+          }),
+        );
+      }
+    }
+  } else {
+    await withGoogleRetry(() =>
+      api.spreadsheets.values.batchClear({
+        spreadsheetId,
+        requestBody: { ranges: [SALES_ALL_TAB, ...staffTabs.map((t) => t.title)].map((t) => `${quoteTab(t)}!A:${LAST_COL}`) },
+      }),
+    );
+    await withGoogleRetry(() =>
+      api.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: { valueInputOption: 'RAW', data: [{ range: `${quoteTab(SALES_ALL_TAB)}!A1`, values: [HEADER, ...rows] }, ...staffHeaders] },
+      }),
+    );
+  }
   await withGoogleRetry(() =>
     api.spreadsheets.values.batchClear({
       spreadsheetId,

@@ -92,6 +92,13 @@ const DEDUPE_RATE_GAP_MAN = 10;
 const DEDUPE_MIN_TECH_OVERLAP = 0.5;
 const DEDUPE_MIN_TEXT_OVERLAP = 0.3; // 片方に技術名が無いとき
 const DEDUPE_SAME_TEXT = 0.6; // 技術名の重なりが少なくても、必須の書きぶりがほぼ同じなら同じ案件
+// 名前の違う同じ案件とみなす条件（sameOpeningRetitled）
+const DEDUPE_RETITLED_TITLE_OVERLAP = 0.3;
+const DEDUPE_RETITLED_CLOSE_TITLE = 0.4; // これ未満なら必須の書きぶりがほぼ同じ（DEDUPE_SAME_TEXT）ことも求める
+const DEDUPE_RETITLED_REQ_OVERLAP = 0.3;
+const DEDUPE_RETITLED_RATE_GAP_MAN = 5;
+const DEDUPE_RETITLED_SAME_TITLE = 0.8; // 名前がほぼ同じなら単価の差は同じ名前の案件と同じ幅まで許す
+const DEDUPE_RETITLED_ROLE_SHARED = 0.4; // 括弧の役割の文字がこの割合も相手の名前に無ければ別の枠
 
 // 丸括弧の補足のうち役割・担当を表すもの。案件番号（「DC-23615」）や働き方（「フルリモート」「急募」）は営業元ごとの書き添えなので除く
 function roleKeyOf(title: string): string {
@@ -114,6 +121,10 @@ function rolesDiffer(ra: string, rb: string): boolean {
 // 同じ案件の再送・転送とみなせる2件か（役割が同じで、必須の技術が半分以上重なる。技術が片方にしか無いものは別の枠）
 export function sameOpening(a: Project, b: Project): boolean {
   if (rolesDiffer(roleKeyOf(a.title), roleKeyOf(b.title))) return false;
+  return requirementsMatch(a, b);
+}
+
+function requirementsMatch(a: Project, b: Project): boolean {
   const ta = new Set(techNamesIn(a.requiredSkills.join('、')).map((t) => t.toLowerCase()));
   const tb = new Set(techNamesIn(b.requiredSkills.join('、')).map((t) => t.toLowerCase()));
   const text = textOverlap(a.requiredSkills.join(''), b.requiredSkills.join(''));
@@ -136,7 +147,40 @@ export function textOverlap(a: string, b: string): number {
   return jaccard(grams(a), grams(b));
 }
 
-export function dedupeProjects(projects: Project[]): { kept: Project[]; others: Map<string, string[]> } {
+// 出社先の駅・地名の先頭（「勝どき（出社メイン）」「勝どき駅」を同じにする）。フルリモート等で地名が無ければ空
+function locationKeyOf(location: string): string {
+  const head = location.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').split(/[、,/／・\s]/)[0] ?? '';
+  const key = head.replace(/駅$|常駐$|出社$/g, '').trim();
+  return /リモート|在宅|未定|不明|応相談/.test(key) ? '' : key;
+}
+
+// 案件名の書き方が違う同じ案件か（営業元ごとに名前を付け直す：「システム再構築支援」と「再構築支援（金融システム再構築プロジェクト）」）。
+// 名前が違う分、出社先・必須の書きぶり・案件名の書きぶりの重なりをそろって求め、単価の差も小さいものに限る。
+// 9/29〜30の実メール1498件で、名前の違う別の枠（NVH解析と衝突解析、LLM開発と要件整理、別システムのJava開発）を
+// まとめないよう決めた値
+function sameOpeningRetitled(a: Project, b: Project): boolean {
+  const ra = a.rateMax ?? a.rateMin;
+  const rb = b.rateMax ?? b.rateMin;
+  if (ra === null || rb === null) return false;
+  const la = locationKeyOf(a.location);
+  if (!la || la !== locationKeyOf(b.location)) return false;
+  const title = textOverlap(a.title, b.title);
+  const req = textOverlap(a.requiredSkills.join(''), b.requiredSkills.join(''));
+  if (Math.abs(ra - rb) > DEDUPE_RETITLED_RATE_GAP_MAN && title < DEDUPE_RETITLED_SAME_TITLE) return false;
+  if (title < DEDUPE_RETITLED_TITLE_OVERLAP || req < DEDUPE_RETITLED_REQ_OVERLAP) return false;
+  if (title < DEDUPE_RETITLED_CLOSE_TITLE && req < DEDUPE_SAME_TEXT) return false;
+  // 括弧の役割は、相手の案件名のどこにも書かれていないときだけ別の枠とみなす（名前と括弧が入れ替わった書き方があるため）
+  const roleClash = (x: Project, y: Project) => {
+    const role = roleKeyOf(x.title);
+    if (!role) return false;
+    const other = new Set(y.title.normalize('NFKC').toLowerCase());
+    const chars = [...new Set(role)];
+    return chars.filter((c) => other.has(c)).length / chars.length < DEDUPE_RETITLED_ROLE_SHARED;
+  };
+  return !roleClash(a, b) && !roleClash(b, a) && requirementsMatch(a, b);
+}
+
+export function dedupeProjects(projects: Project[]): { kept: Project[]; others: Map<string, string[]>; aliasOf: Map<string, string> } {
   const core = (t: string) => t.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').replace(/\s+/g, '').toLowerCase();
   const rateOf = (p: Project) => p.rateMax ?? p.rateMin;
   const byTitle = new Map<string, Project[]>();
@@ -145,23 +189,34 @@ export function dedupeProjects(projects: Project[]): { kept: Project[]; others: 
     if (rateOf(p) === null || !core(p.title)) kept.push(p);
     else byTitle.set(core(p.title), [...(byTitle.get(core(p.title)) ?? []), p]);
   }
-  const others = new Map<string, string[]>();
+  const byRate = (a: Project, b: Project) =>
+    (rateOf(b) as number) - (rateOf(a) as number) || new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime();
+  const clusters: Project[][] = [];
   for (const group of byTitle.values()) {
-    const sorted = [...group].sort(
-      (a, b) => (rateOf(b) as number) - (rateOf(a) as number) || new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime(),
-    );
-    const clusters: Project[][] = [];
-    for (const p of sorted) {
-      const c = clusters.find((cl) => Math.abs((rateOf(cl[0]) as number) - (rateOf(p) as number)) <= DEDUPE_RATE_GAP_MAN && sameOpening(cl[0], p));
+    const own: Project[][] = [];
+    for (const p of [...group].sort(byRate)) {
+      const c = own.find((cl) => Math.abs((rateOf(cl[0]) as number) - (rateOf(p) as number)) <= DEDUPE_RATE_GAP_MAN && sameOpening(cl[0], p));
       if (c) c.push(p);
-      else clusters.push([p]);
+      else own.push([p]);
     }
-    for (const cl of clusters) {
-      kept.push(cl[0]);
-      if (cl.length > 1) others.set(cl[0].id, [...new Set(cl.slice(1).map((p) => p.agentCompany).filter(Boolean))]);
-    }
+    clusters.push(...own);
   }
-  return { kept, others };
+  // 名前の違う同じ案件をまとめる（代表どうしを比べ、単価の高い方・新しい受信を代表に残す）
+  const merged: Project[][] = [];
+  for (const cl of [...clusters].sort((x, y) => byRate(x[0], y[0]))) {
+    // 同じ名前どうしは上で単価の幅・役割を見て分けたので、ここでは名前の違うものだけをまとめる
+    const into = merged.find((m) => core(m[0].title) !== core(cl[0].title) && sameOpeningRetitled(m[0], cl[0]));
+    if (into) into.push(...cl);
+    else merged.push([...cl]);
+  }
+  const others = new Map<string, string[]>();
+  const aliasOf = new Map<string, string>();
+  for (const cl of merged) {
+    kept.push(cl[0]);
+    for (const p of cl.slice(1)) aliasOf.set(p.id, cl[0].id);
+    if (cl.length > 1) others.set(cl[0].id, [...new Set(cl.slice(1).map((p) => p.agentCompany).filter(Boolean))]);
+  }
+  return { kept, others, aliasOf };
 }
 
 // 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
@@ -327,11 +382,11 @@ async function writeSalesListSafely(
   candidates: ProperCandidate[],
   projects: Project[],
   engineers: ProperEngineer[],
-  openProjectIds: Set<string>,
+  openProjects: { ids: Set<string>; aliasOf: Map<string, string> },
 ): Promise<number | null> {
   if (!salesListConfigured()) return null;
   try {
-    const n = await writeSalesList(candidates, projects, engineers, openProjectIds);
+    const n = await writeSalesList(candidates, projects, engineers, openProjects);
     console.log(`営業リスト: ${n ?? 0}行を書き出しました`);
     return n;
   } catch (err) {
@@ -361,7 +416,8 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
   const { candidates, stats } = await buildProperCandidates(engineers, projects);
   logJudge(stats);
-  const openProjectIds = new Set(dedupeProjects(projects).kept.map((p) => p.id));
+  const deduped = dedupeProjects(projects);
+  const openProjects = { ids: new Set(deduped.kept.map((p) => p.id)), aliasOf: deduped.aliasOf };
 
   let saved = 0;
   let retired = 0;
@@ -378,7 +434,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   // 要員リストや案件を読めなかった回に書くと、営業中の要員の行が消えるため書かない（前回のまま残す）
   const canWriteSales = rosterReadOk && projects.length > 0;
   if (!canWriteSales) console.warn('営業リスト: 要員リストか案件を読めなかったため、今回は書き出しません（前回のまま残します）');
-  const salesRows = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjectIds) : null;
+  const salesRows = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjects) : null;
   const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows };
   logCounts('プロパー候補', result);
   return result;

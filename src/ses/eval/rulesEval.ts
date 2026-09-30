@@ -106,7 +106,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3814,6 +3814,22 @@ async function properJudgeChecks(): Promise<void> {
   const dd = dedupeProjects([dupA, dupB, roleSe, rolePg]);
   check('別のメールで届いた同じ案件（括弧の補足を除いた名前と単価が同じ）は新しい受信の1件にまとめ、他の営業元を控える・単価の無い案件はまとめない',
     dd.kept.map((p) => p.id).sort().join(',') === 'd2,d3,d4' && dd.others.get('d2')?.join() === 'A社', JSON.stringify([...dd.others]));
+  const re = (id: string, title: string, requiredSkills: string[], rateMax: number, location: string) => project({ id, title, requiredSkills, rateMax, location, receivedAt: daysAgo(1) });
+  const rt = dedupeProjects([
+    re('r1', 'システム再構築支援', ['Java', '詳細設計〜テスト', 'Linux'], 60, '勝どき'),
+    re('r2', '再構築支援（金融システム再構築プロジェクト）', ['Java', '詳細設計〜テスト', 'Linux'], 60, '勝どき（出社メイン・在宅なし）'),
+    re('r3', 'パッケージ製品の開発および保守（Java詳細設計～結合テスト）', ['Java', 'Spring Boot', 'JavaScript', 'Eclipse', 'Oracle', 'HTML', 'CSS', '詳細設計'], 60, '海浜幕張（常駐）'),
+    re('r4', 'Java詳細設計（パッケージ製品の開発・保守）', ['Java', 'Spring Boot', 'JavaScript', 'Eclipse', 'Oracle', 'HTML', 'CSS', '詳細設計'], 60, '海浜幕張'),
+    re('r5', 'クレジットカードシステム開発支援', ['Java', '詳細設計', 'SQL'], 60, '豊洲'),
+    re('r6', '航空管制システム 開発支援', ['Java', 'Java Silver の資格'], 50, '豊洲'),
+    re('r7', '＜自動車業界向け＞NVH（騒音・振動）CAEエンジニア', ['CAE解析', 'Nastran'], 90, '横浜'),
+    re('r8', '＜自動車業界向け＞衝突安全CAEエンジニア', ['CAE解析', 'LS-DYNA'], 80, '横浜'),
+  ]);
+  check('名前の書き方が違う同じ案件（単価・出社先・必須・名前の書きぶりが重なる）はまとめ、元のIDを代表に対応づける',
+    rt.aliasOf.size === 2 && new Set([rt.aliasOf.get('r1') ?? 'r1', rt.aliasOf.get('r2') ?? 'r2']).size === 1 &&
+      new Set([rt.aliasOf.get('r3') ?? 'r3', rt.aliasOf.get('r4') ?? 'r4']).size === 1, JSON.stringify([...rt.aliasOf]));
+  check('名前の似た別の案件（別システムのJava開発・NVH解析と衝突解析）はまとめない',
+    ['r5', 'r6', 'r7', 'r8'].every((id) => !rt.aliasOf.has(id) && rt.kept.some((p) => p.id === id)));
   const op = (title: string, requiredSkills: string[]) => project({ id: title, title, requiredSkills, rateMax: 80 });
   check('括弧の役割・担当が違う同名の案件は別の枠（まとめない）',
     !sameOpening(op('注文システム機能リプレース（会員認証基盤移行担当）', ['Python', 'PHP', 'Lambda']), op('注文システム機能リプレース（API担当）', ['Python', 'Lambda'])));
@@ -4038,6 +4054,41 @@ function salesListChecks(): void {
     side.some((r) => r.repeatCell?.range?.sheetId === 1001 && r.repeatCell?.cell?.userEnteredFormat?.numberFormat?.type === 'PERCENT' && r.repeatCell?.range?.startColumnIndex === 7) &&
       side.some((r) => r.repeatCell?.range?.sheetId === 2001 && r.repeatCell?.range?.startColumnIndex === 6 && r.repeatCell?.cell?.userEnteredFormat?.horizontalAlignment === 'RIGHT') &&
       side.filter((r) => r.repeatCell?.range?.endRowIndex === 1).length === 2);
+  const sheetRow = (id: string, over: Record<string, string> = {}) => {
+    const r = header.map(() => '');
+    r[col('ID')] = id; r[col('No')] = '7'; r[col('要員')] = 'A.A'; r[col('対応状況')] = '未着手';
+    for (const [k, v] of Object.entries(over)) r[col(k)] = v;
+    return r;
+  };
+  const planned = planSalesUpdate(
+    [salesRowOf(base, undefined), salesRowOf({ ...base, id: 'ownmatch_a_pNEWREP', projectId: 'pNEWREP', projectTitle: '別名の同じ案件' }, undefined), salesRowOf(nego, undefined)],
+    [header,
+      sheetRow('ownmatch_a_p1', { 対応状況: '面談調整', メモ: '先方回答待ち', 案件名: '古い名前' }),
+      sheetRow('ownmatch_a_pOLDDUP', { 精度チェック: '○ 概ね妥当', 案件名: '古い別名' }),
+      sheetRow('ownmatch_gone_touched', { 担当営業: '佐藤' }),
+      sheetRow('ownmatch_gone_open'),
+      sheetRow('ownmatch_gone'),
+    ],
+    (id) => id === 'ownmatch_gone_open',
+    (id) => (id === 'ownmatch_a_pOLDDUP' ? 'ownmatch_a_pNEWREP' : id),
+  );
+  check('営業リストの更新: 既存の行は同じ行のまま（並べ替えない）書き直し、人の入力とNoは残す',
+    planned !== null && planned.updates.length === 2 && planned.updates[0].row === 2 && planned.updates[0].values[col('対応状況')] === '面談調整' &&
+      planned.updates[0].values[col('メモ')] === '先方回答待ち' && planned.updates[0].values[col('No')] === 7 && planned.updates[0].values[col('案件名')] === base.projectTitle,
+    JSON.stringify(planned?.updates.map((u) => u.row)));
+  check('営業リストの更新: 同じ案件の別メールが代表になった行はその行を新しい代表で書き直す（精度チェックを残す）',
+    planned?.updates[1].row === 3 && planned.updates[1].values[col('ID')] === 'ownmatch_a_pNEWREP' && planned.updates[1].values[col('精度チェック')] === '○ 概ね妥当');
+  check('営業リストの更新: 新しい候補は下に足す（No は続き・未着手）。消すのは入力も無く募集も終わった行だけ',
+    planned?.appends.length === 1 && planned.appends[0][col('ID')] === nego.id && planned.appends[0][col('No')] === 8 && planned.appends[0][col('対応状況')] === '未着手' &&
+      planned.deleteIds.join() === 'ownmatch_gone' && planned.rows.length === 5);
+  check('営業リストの更新: 人が列を並べ替えたシートは差分で書かない（全体を書き直す）',
+    planSalesUpdate([], [[...header].reverse()]) === null && planSalesUpdate([], [header]) !== null);
+  const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
+  check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
+  const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);
+  check('入力しない列・要員のタブを触ると確認が出る（止めない）。2回目以降は付け足さない',
+    prot.length === 2 && prot.every((r) => r.addProtectedRange?.protectedRange?.warningOnly === true) &&
+      formatRequests(8, 0, false).filter((r) => r.addProtectedRange).length === 1 && formatRequests(7, 0, true, false).every((r) => !r.addProtectedRange));
   const legacyHeader = ['No', '優先度', '要員', '案件名', '対応状況', '担当営業', 'メモ'];
   const fromOld = mergeSalesRows([salesRowOf(nego, undefined)], [], [legacyHeader, ['1', 'B', 'A.A', 'Java 開発', '提案済', '田中', '返信待ち']]);
   check('以前の営業リスト（ID列なし）の入力を要員＋案件名で引き継ぐ',
