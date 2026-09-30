@@ -646,6 +646,9 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number): s
 
 // ===== 書き出し =====
 
+// 新しいタブの既定は26列で、29列の表を書くと枠を超えて弾かれるため列を足して作る
+const WIDE_GRID = { columnCount: SALES_COLUMNS.length + 1 };
+
 export function salesListConfigured(): boolean {
   return Boolean(properSalesSpreadsheetId());
 }
@@ -660,18 +663,20 @@ interface TabInfo {
   title: string;
   rules: number;
   rowCount: number;
+  columnCount: number;
   staff: boolean; // バッチが作った要員のタブ
 }
 
 async function readTabs(api: sheets_v4.Sheets, spreadsheetId: string): Promise<TabInfo[]> {
   const res = await withGoogleRetry(() =>
-    api.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title,gridProperties(rowCount)),conditionalFormats,developerMetadata(metadataKey))' }),
+    api.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),conditionalFormats,developerMetadata(metadataKey))' }),
   );
   return (res.data.sheets ?? []).map((s) => ({
     sheetId: s.properties?.sheetId ?? 0,
     title: s.properties?.title ?? '',
     rules: s.conditionalFormats?.length ?? 0,
     rowCount: s.properties?.gridProperties?.rowCount ?? 0,
+    columnCount: s.properties?.gridProperties?.columnCount ?? 0,
     staff: (s.developerMetadata ?? []).some((m) => m.metadataKey === STAFF_TAB_METADATA_KEY),
   }));
 }
@@ -709,7 +714,7 @@ export async function writeSalesList(
   // 初回（「全体」タブがまだ無い）は、同じスプレッドシートにある以前の営業リストのタブから人の入力を引き継ぐ
   const legacy = tabs.some((t) => t.title === SALES_ALL_TAB) ? [] : await readLegacyList(api, spreadsheetId, tabs);
   const structural: sheets_v4.Schema$Request[] = [];
-  if (!tabs.some((t) => t.title === SALES_ALL_TAB)) structural.push({ addSheet: { properties: { title: SALES_ALL_TAB, index: 0 } } });
+  if (!tabs.some((t) => t.title === SALES_ALL_TAB)) structural.push({ addSheet: { properties: { title: SALES_ALL_TAB, index: 0, gridProperties: WIDE_GRID } } });
   if (!tabs.some((t) => t.title === SALES_STAFF_LIST_TAB)) {
     const sheetId = Math.max(0, ...tabs.map((t) => t.sheetId)) + 2000;
     structural.push({ addSheet: { properties: { sheetId, title: SALES_STAFF_LIST_TAB, index: 1 } } });
@@ -728,7 +733,7 @@ export async function writeSalesList(
       },
     });
   }
-  if (!tabs.some((t) => t.title === SALES_CLOSED_TAB)) structural.push({ addSheet: { properties: { title: SALES_CLOSED_TAB } } });
+  if (!tabs.some((t) => t.title === SALES_CLOSED_TAB)) structural.push({ addSheet: { properties: { title: SALES_CLOSED_TAB, gridProperties: WIDE_GRID } } });
   if (structural.length > 0) {
     await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: structural } }));
     tabs = await readTabs(api, spreadsheetId);
@@ -800,7 +805,7 @@ export async function writeSalesList(
     if (tabs.some((t) => t.title === title)) continue;
     created.add(title);
     const sheetId = nextId++;
-    tabChanges.push({ addSheet: { properties: { sheetId, title } } });
+    tabChanges.push({ addSheet: { properties: { sheetId, title, gridProperties: WIDE_GRID } } });
     tabChanges.push({
       createDeveloperMetadata: {
         developerMetadata: { metadataKey: STAFF_TAB_METADATA_KEY, metadataValue: '1', location: { sheetId }, visibility: 'DOCUMENT' },
@@ -819,6 +824,17 @@ export async function writeSalesList(
   planned = planFor(existingValues);
   plan = planned.plan;
   rows = planned.rows;
+  // 人が作ったタブは行の枠が小さいことがあり、枠を超える書き込みは弾かれるため先に広げる（FILTERで映す要員のタブも同じ行数にそろえる）
+  const need = Math.max(rows.length, existingValues.length - 1 + (plan?.appends.length ?? 0)) + 1;
+  const grow = [SALES_ALL_TAB, SALES_CLOSED_TAB, ...staffTabs.map((t) => t.title)].flatMap((title) => {
+    const t = tabs.find((x) => x.title === title);
+    if (!t) return [];
+    return [
+      ...(t.rowCount < need && title !== SALES_CLOSED_TAB ? [{ appendDimension: { sheetId: t.sheetId, dimension: 'ROWS', length: need - t.rowCount } }] : []),
+      ...(t.columnCount < SALES_COLUMNS.length ? [{ appendDimension: { sheetId: t.sheetId, dimension: 'COLUMNS', length: SALES_COLUMNS.length - t.columnCount } }] : []),
+    ];
+  });
+  if (grow.length > 0) await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: grow } }));
   // クローズの行は先に控えへ移す（全体から消すのはその後。途中で失敗しても行が失われないように）
   if (planned.closedRows.length > 0) {
     const data = closedValues.length === 0 ? [HEADER, ...planned.closedRows] : planned.closedRows;
@@ -832,13 +848,6 @@ export async function writeSalesList(
       }),
     );
   }
-  // 人が作ったタブは行の枠が小さいことがあり、枠を超える書き込みは弾かれるため先に広げる（FILTERで映す要員のタブも同じ行数にそろえる）
-  const need = Math.max(rows.length, existingValues.length - 1 + (plan?.appends.length ?? 0)) + 1;
-  const grow = [SALES_ALL_TAB, ...staffTabs.map((t) => t.title)].flatMap((title) => {
-    const t = tabs.find((x) => x.title === title);
-    return t && t.rowCount < need ? [{ appendDimension: { sheetId: t.sheetId, dimension: 'ROWS', length: need - t.rowCount } }] : [];
-  });
-  if (grow.length > 0) await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: grow } }));
   const staffHeaders = staffTabs.map((t) => ({ range: `${quoteTab(t.title)}!A1`, values: [HEADER.map(staffHeaderOf)] }));
   if (plan) {
     // 既存の行は人の入力の列を書かない（入力中のセルを上書きしない）。新しい候補は最後の行の下に足す
