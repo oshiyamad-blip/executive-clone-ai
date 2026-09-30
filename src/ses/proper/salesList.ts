@@ -547,17 +547,19 @@ interface TabInfo {
   sheetId: number;
   title: string;
   rules: number;
+  rowCount: number;
   staff: boolean; // バッチが作った要員のタブ
 }
 
 async function readTabs(api: sheets_v4.Sheets, spreadsheetId: string): Promise<TabInfo[]> {
   const res = await withGoogleRetry(() =>
-    api.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title),conditionalFormats,developerMetadata(metadataKey))' }),
+    api.spreadsheets.get({ spreadsheetId, fields: 'sheets(properties(sheetId,title,gridProperties(rowCount)),conditionalFormats,developerMetadata(metadataKey))' }),
   );
   return (res.data.sheets ?? []).map((s) => ({
     sheetId: s.properties?.sheetId ?? 0,
     title: s.properties?.title ?? '',
     rules: s.conditionalFormats?.length ?? 0,
+    rowCount: s.properties?.gridProperties?.rowCount ?? 0,
     staff: (s.developerMetadata ?? []).some((m) => m.metadataKey === STAFF_TAB_METADATA_KEY),
   }));
 }
@@ -663,6 +665,13 @@ export async function writeSalesList(
   const staffTabs = tabs.filter((t) => wanted.has(t.title));
   // 営業が「全体」に入力してから消して書き直すまでの間を短くするため、書く直前に読み直して人の入力を引き継ぐ
   rows = await readRows();
+  // 人が作ったタブは行の枠が小さいことがあり、枠を超える書き込みは弾かれるため先に広げる（FILTERで映す要員のタブも同じ行数にそろえる）
+  const need = rows.length + 1;
+  const grow = [SALES_ALL_TAB, ...staffTabs.map((t) => t.title)].flatMap((title) => {
+    const t = tabs.find((x) => x.title === title);
+    return t && t.rowCount < need ? [{ appendDimension: { sheetId: t.sheetId, dimension: 'ROWS', length: need - t.rowCount } }] : [];
+  });
+  if (grow.length > 0) await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: grow } }));
   await withGoogleRetry(() =>
     api.spreadsheets.values.batchClear({
       spreadsheetId,
