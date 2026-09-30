@@ -27,7 +27,9 @@ export const SALES_SUMMARY_TAB = '精度集計';
 export const SALES_STAFF_LIST_TAB = '要員一覧';
 const STAFF_LIST_TAB_METADATA_KEY = 'ses_sales_staff_list_tab';
 const SUMMARY_TAB_METADATA_KEY = 'ses_sales_summary_tab';
-export const SALES_PRIORITIES = { a: 'A 提案推奨', b: 'B 条件交渉', c: 'C 要確認' } as const;
+export const SALES_PRIORITIES = { a: 'A 提案推奨', b: 'B 条件交渉', c: 'C 要確認', d: 'D 参考' } as const;
+// 営業が見送り・クローズにした理由（AI判定の見直しと、要員ごとの傾向の集計に使う）
+export const SALES_SKIP_REASONS = ['ハードルが高い（スキル・経験不足）', '単価が安い', '勤務地・通勤', '本人の希望と違う', '募集終了', '重複', 'その他'] as const;
 
 // 列の定義（順番がそのまま表示順）。width はピクセル、wrap=false は折り返さずに切る（長文はセルを開いて読む）
 interface SalesColumn {
@@ -53,6 +55,7 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '足りない点', width: 160, wrap: true },
   { name: '交渉ポイント', width: 220, wrap: true },
   { name: '対応状況', width: 80, human: true },
+  { name: '見送り理由', width: 140, human: true },
   { name: '担当営業', width: 72, human: true },
   { name: 'メモ', width: 160, wrap: true, human: true },
   { name: '精度チェック', width: 96, human: true },
@@ -83,6 +86,7 @@ const SALES_REMOTE_LABEL: Record<Project['remote'], string> = { full: 'フル', 
 // AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
 export function salesPriorityOf(c: ProperCandidate): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
+  if (c.reference) return SALES_PRIORITIES.d;
   if (c.judgment) return c.judgment.verdict === 'recommend' && c.meetsRate ? SALES_PRIORITIES.a : SALES_PRIORITIES.b;
   if (c.band === 'strong' && c.meetsRate && !/【(単価交渉|経験交渉|年数交渉|参考提案)】/.test(c.reason)) return SALES_PRIORITIES.a;
   return SALES_PRIORITIES.b;
@@ -428,13 +432,26 @@ export function summaryValues(staffLabels: string[]): string[][] {
   const staff = col('要員');
   const groups: Array<[string, string]> = [
     ['全体', ''],
-    ...(['A', 'B', 'C'] as const).map((p): [string, string] => [`優先度 ${p}`, `${pri},${q(`${p}*`)}`]),
+    ...(['A', 'B', 'C', 'D'] as const).map((p): [string, string] => [`優先度 ${p}`, `${pri},${q(`${p}*`)}`]),
     ...staffLabels.map((l): [string, string] => [`要員 ${l}`, `${staff},${q(l)}`]),
   ];
+  // 見送り理由: 全体とクローズ済みの両方を数える（クローズした行は全体から外れるため）
+  const closed = quoteTab(SALES_CLOSED_TAB);
+  const letter = (name: string) => columnLetter(COL[name]);
+  const both = (conds: Array<[string, string]>) =>
+    [tab, closed].map((t) => `COUNTIFS(${conds.map(([n, v]) => `${t}!${letter(n)}2:${letter(n)},${q(v)}`).join(',')})`).join('+');
   return [
     ['区分', '候補数', 'チェック済', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）'],
     ...groups.map(([label, cond], i) => row(label, cond, i + 2)),
+    [],
+    ['見送り理由（クローズ済みを含む）', '件数', ...staffLabels],
+    ...SALES_SKIP_REASONS.map((r) => [r, `=${both([['見送り理由', r]])}`, ...staffLabels.map((l) => `=${both([['見送り理由', r], ['要員', l]])}`)]),
   ];
+}
+
+// 「精度集計」の上の表（妥当率の％表示を付ける行数。見出しを含む）
+export function summaryTopRows(staffLabels: string[]): number {
+  return 1 + 1 + 4 + staffLabels.length;
 }
 
 // 「要員一覧」タブの値。文字の列（stringsは RAW で書く）と、候補数などの数式の列（formulas は USER_ENTERED）に分ける
@@ -477,6 +494,7 @@ export const PRIORITY_COLORS: Array<[string, string, string]> = [
   ['A', 'C6EFCE', '006100'],
   ['B', 'FFEB9C', '9C5700'],
   ['C', 'D9D9D9', '404040'],
+  ['D', 'DEEAF6', '44546A'],
 ];
 export const ACCURACY_COLORS: Array<[string, string, string]> = [
   ['◎', 'C6EFCE', '006100'],
@@ -575,6 +593,16 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
     });
     reqs.push({
       setDataValidation: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: COL['見送り理由'], endColumnIndex: COL['見送り理由'] + 1 },
+        rule: {
+          condition: { type: 'ONE_OF_LIST', values: SALES_SKIP_REASONS.map((s) => ({ userEnteredValue: s })) },
+          showCustomUi: true,
+          strict: false,
+        },
+      },
+    });
+    reqs.push({
+      setDataValidation: {
         range: { sheetId, startRowIndex: 1, startColumnIndex: COL['精度チェック'], endColumnIndex: COL['精度チェック'] + 1 },
         rule: {
           condition: { type: 'ONE_OF_LIST', values: ACCURACY_MARKS.map((s) => ({ userEnteredValue: s })) },
@@ -602,6 +630,7 @@ export function protectRequests(sheetId: number, isAll: boolean): sheets_v4.Sche
   ];
 }
 
+const SUMMARY_MAX_COLS = 26; // 精度集計の見送り理由の表は要員の数だけ横に伸びる
 const HEADER_FORMAT: sheets_v4.Schema$CellFormat = {
   backgroundColor: rgb('1F4E78'),
   textFormat: { foregroundColor: rgb('FFFFFF'), bold: true },
@@ -609,7 +638,7 @@ const HEADER_FORMAT: sheets_v4.Schema$CellFormat = {
 };
 
 // 「精度集計」「要員一覧」の書式: 見出しの色・数字は右寄せ・文字は左上寄せ・妥当率は％
-export function sideTabFormatRequests(summaryId: number, staffListId: number): sheets_v4.Schema$Request[] {
+export function sideTabFormatRequests(summaryId: number, staffListId: number, summaryRows = 1000): sheets_v4.Schema$Request[] {
   const cells = (sheetId: number, from: number, to: number, format: sheets_v4.Schema$CellFormat, fields: string, header = false) => ({
     repeatCell: {
       range: { sheetId, startRowIndex: header ? 0 : 1, ...(header ? { endRowIndex: 1 } : {}), startColumnIndex: from, endColumnIndex: to },
@@ -626,12 +655,17 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number): s
   const topLeft = { horizontalAlignment: 'LEFT', verticalAlignment: 'TOP', wrapStrategy: 'WRAP' };
   const right = { horizontalAlignment: 'RIGHT', verticalAlignment: 'TOP' };
   const summaryCols = 8;
+  const rowsOf = (req: ReturnType<typeof cells>, start: number, end: number) => ({
+    repeatCell: { ...req.repeatCell, range: { ...req.repeatCell.range, startRowIndex: start, endRowIndex: end } },
+  });
   return [
     frozen(summaryId),
     cells(summaryId, 0, summaryCols, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment', true),
     cells(summaryId, 0, 1, topLeft, 'horizontalAlignment,verticalAlignment,wrapStrategy'),
-    cells(summaryId, 1, summaryCols, right, 'horizontalAlignment,verticalAlignment'),
-    cells(summaryId, summaryCols - 1, summaryCols, { numberFormat: { type: 'PERCENT', pattern: '0.0%' } }, 'numberFormat'),
+    cells(summaryId, 1, SUMMARY_MAX_COLS, right, 'horizontalAlignment,verticalAlignment'),
+    rowsOf(cells(summaryId, summaryCols - 1, summaryCols, { numberFormat: { type: 'PERCENT', pattern: '0.0%' } }, 'numberFormat'), 1, summaryRows),
+    // 下の見送り理由の表の見出し
+    rowsOf(cells(summaryId, 0, SUMMARY_MAX_COLS, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment'), summaryRows + 1, summaryRows + 2),
     ...Array.from({ length: summaryCols }, (_, i) => width(summaryId, i, 110)),
     frozen(staffListId),
     cells(staffListId, 0, STAFF_LIST_HEADER.length, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment', true),
@@ -905,7 +939,7 @@ export async function writeSalesList(
   await withGoogleRetry(() =>
     api.spreadsheets.values.batchClear({
       spreadsheetId,
-      requestBody: { ranges: [`${quoteTab(SALES_SUMMARY_TAB)}!A:H`, `${quoteTab(SALES_STAFF_LIST_TAB)}!A:J`] },
+      requestBody: { ranges: [`${quoteTab(SALES_SUMMARY_TAB)}!A:Z`, `${quoteTab(SALES_STAFF_LIST_TAB)}!A:J`] },
     }),
   );
   // 要員一覧: 要員リスト由来の文字は RAW、候補数の数式は USER_ENTERED
@@ -939,7 +973,7 @@ export async function writeSalesList(
   const format = [
     ...formatRequests(all.sheetId, all.rules, true, created.has(SALES_ALL_TAB)),
     ...staffTabs.flatMap((t) => formatRequests(t.sheetId, t.rules, false, created.has(t.title))),
-    ...(summary && staffListTab ? sideTabFormatRequests(summary.sheetId, staffListTab.sheetId) : []),
+    ...(summary && staffListTab ? sideTabFormatRequests(summary.sheetId, staffListTab.sheetId, summaryTopRows(labels)) : []),
   ];
   await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: format } }));
   return rows.length;

@@ -3952,6 +3952,12 @@ async function properJudgeChecks(): Promise<void> {
     const ar2 = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], [unknownArea], NOW);
     check('勤務地をルールで読めない案件は、AIが読んだ出社先が本人と違う地方なら候補にしない（群馬の社員に大阪は出さない・東京は出す）',
       ar.candidates.length === 0 && ar.stats.outOfArea === 1 && ar2.candidates.length === 1, JSON.stringify(ar.stats));
+    __setProperJudgeForTest(async () => raw({ verdict: 'conditional', requirements: [{ requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'close', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' }] }));
+    const many = Array.from({ length: 7 }, (_, i) => project({ id: `p_many${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, location: ['品川', '新宿', '渋谷', '池袋', '上野', '大手町', '横浜'][i], receivedAt: daysAgo(1) }));
+    const capped = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], many, NOW);
+    check('社員ごとの上限を超えた組も、AIが見送っていなければ「参考」として残す（主な候補は上限まで）',
+      capped.candidates.length === 7 && capped.candidates.filter((c) => c.reference).length === 2 &&
+        capped.candidates.filter((c) => !c.reference).length === 5, JSON.stringify(capped.candidates.map((c) => c.reference ?? false)));
     __setProperJudgeForTest(async (e) => {
       if (e.id === 'E_fail') throw new Error('overloaded');
       if (e.id === 'E_rej') return raw({ verdict: 'reject' });
@@ -4001,7 +4007,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AC,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AD,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const prevAcc = header.map(() => '');
   prevAcc[col('ID')] = 'ownmatch_a_p1'; prevAcc[col('精度チェック')] = '× ズレ'; prevAcc[col('精度メモ')] = 'Javaは研修のみ';
   const accMerged = mergeSalesRows([salesRowOf(base, undefined)], [header, prevAcc]);
@@ -4010,9 +4016,9 @@ function salesListChecks(): void {
   const sv = summaryValues(['A"A']);
   const accCol = String.fromCharCode(65 + col('精度チェック'));
   check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
-    sv.length === 6 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AC2:AC)" &&
-      sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")` && sv[5][0] === '要員 A"A' &&
-      sv[5][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
+    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AD2:AD)" && sv[5][0] === '優先度 D' &&
+      sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
+      sv[6][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
   const sl = staffListValues([
     { proposalLabel: 'N.H', displayName: 'N.H', availableDate: '即日', requiredProjectRate: 40, experienceYears: 0.1, skills: ['kintone'], wish: 'ヘルプデスク希望' },
     { proposalLabel: 'A"A', displayName: 'A"A', availableDate: '10月', requiredProjectRate: null, experienceYears: null, skills: [] },
@@ -4024,7 +4030,7 @@ function salesListChecks(): void {
   const fmt = formatRequests(7, 2, true);
   const rules = fmt.filter((r) => r.addConditionalFormatRule);
   check('書式: 既存の色の規則を消してから優先度3色＋対応状況5色＋精度チェック4色を付け、対応状況・精度チェックはプルダウン・ID列は隠す',
-    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 13 &&
+    fmt.filter((r) => r.deleteConditionalFormatRule).length === 2 && rules.length === 14 &&
       rules.every((r) => [col('優先度'), col('対応状況'), col('精度チェック')].includes(r.addConditionalFormatRule?.rule?.ranges?.[0]?.startColumnIndex ?? -1)) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('精度チェック')) &&
@@ -4045,7 +4051,7 @@ function salesListChecks(): void {
   const alignOf = (reqs: typeof fmtAgain, c: number) => reqs.find((r) => r.repeatCell?.range?.startRowIndex === 1 && r.repeatCell?.range?.startColumnIndex === c)?.repeatCell?.cell?.userEnteredFormat?.horizontalAlignment;
   check('書式: 2回目以降は列幅・固定・フィルタを付け直さない（営業が変えた幅や絞り込みを残す）。色とプルダウンは付け直す',
     !fmtAgain.some((r) => r.updateDimensionProperties || r.setBasicFilter || r.updateSheetProperties) &&
-      fmtAgain.filter((r) => r.addConditionalFormatRule).length === 13 && fmtAgain.filter((r) => r.setDataValidation).length === 2 &&
+      fmtAgain.filter((r) => r.addConditionalFormatRule).length === 14 && fmtAgain.filter((r) => r.setDataValidation).length === 3 &&
       fmt.some((r) => r.setBasicFilter) && fmt.some((r) => r.updateDimensionProperties));
   check('書式: 本文は左上寄せ・数字の列（No・単価・差）は右寄せ',
     alignOf(fmtAgain, col('案件名')) === 'LEFT' && alignOf(fmtAgain, col('No')) === 'RIGHT' && alignOf(fmtAgain, col('差(万)')) === 'RIGHT' && alignOf(fmtAgain, col('案件単価(万)')) === 'RIGHT');
@@ -4092,6 +4098,14 @@ function salesListChecks(): void {
     closing !== null && closing.closeIds.join() === 'ownmatch_a_p1' && closing.closedRows[0][col('メモ')] === '決まった' &&
       closing.updates.length === 0 && closing.appends.map((r) => r[col('ID')]).join() === nego.id &&
       closing.rows.map((r) => r[col('ID')]).join() === `ownmatch_keep,${nego.id}`, JSON.stringify(closing?.rows.map((r) => r[col('ID')])));
+  check('精度集計: 見送り理由ごと・要員ごとの件数を、全体とクローズ済みの両方から数える',
+    sv[8][0].startsWith('見送り理由') && sv[9][0] === 'ハードルが高い（スキル・経験不足）' &&
+      sv[9][2] === `=COUNTIFS('全体'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'全体'!C2:C,"A""A")+COUNTIFS('クローズ済み'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'クローズ済み'!C2:C,"A""A")`,
+    JSON.stringify(sv[9]));
+  check('見送り理由は人の入力の列（書き直さず引き継ぐ）で、プルダウンで選ぶ',
+    SALES_COLUMNS.find((c) => c.name === '見送り理由')?.human === true && fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('見送り理由')));
+  check('優先度: 上限を超えてAIが見送らなかった組は「D 参考」（要確認が先）',
+    salesPriorityOf({ ...base, reference: true }).startsWith('D') && salesPriorityOf({ ...review, reference: true }).startsWith('C'));
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
   check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
   const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);

@@ -280,18 +280,22 @@ export async function buildProperCandidates(
     // 担当者メールを入れた側の行が下書き依頼として読まれない）
     if (seen.has(m.id)) continue;
     // 基準を超える組（clearsBar）は上限に関係なく載せ、ほかは社員ごと・案件ごとに上限まで
+    // 上限を超えた組も、AIが見送っていなければ「参考」として残す（営業から候補の数を求められているため。
+    // 主な候補とは優先度で分け、見送り理由・精度チェックで参考の当たり率を測る）
     const full = (perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit;
-    if (full && !clearsBar(m)) continue;
+    const reference = full && !clearsBar(m);
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
     seen.add(m.id);
-    perEngineer.set(m.ownEngineerId, (perEngineer.get(m.ownEngineerId) ?? 0) + 1);
-    perProject.set(m.projectId, (perProject.get(m.projectId) ?? 0) + 1);
+    if (!reference) {
+      perEngineer.set(m.ownEngineerId, (perEngineer.get(m.ownEngineerId) ?? 0) + 1);
+      perProject.set(m.projectId, (perProject.get(m.projectId) ?? 0) + 1);
+    }
     // 元のメールにAIへの指示らしき記載がある案件には、提案文面（下書きの元）を用意しない（要確認で人が確かめる）
     const suspicious = project.injectionSuspected || /AIへの指示らしき記載/.test(m.judgment?.reviewNotes.join('') ?? '');
     const draftToProject = suspicious ? undefined : buildProperProposalDraft(engineer, project, m.judgment?.pitch);
-    candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}) });
+    candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}), ...(reference ? { reference: true } : {}) });
   }
   return { candidates, stats };
 }

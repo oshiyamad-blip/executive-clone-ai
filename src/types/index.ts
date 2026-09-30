@@ -418,6 +418,7 @@ export interface ProperEngineer extends OwnEngineer {
 export interface ProperCandidate extends OwnMatch {
   properLabel: string; // 「プロパー」列の表示（提案用表記。氏名はプロパー管理表にだけ置く）。ログに出さない
   draftToProject?: DraftRef; // 案件の元メールへの全員に返信（提案文面。テンプレート生成）
+  reference?: boolean; // 社員ごとの上限を超えた、AIが見送らなかった組（営業リストでは「D 参考」。数を出しつつ主な候補と分ける）
 }
 
 // マッチ確認UI（web.ts）が扱う表示用のマッチ。demo/本番で同一形にするため
