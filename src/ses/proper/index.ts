@@ -375,7 +375,10 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
-  const salesRows = await writeSalesListSafely(candidates, projects, engineers, openProjectIds);
+  // 要員リストや案件を読めなかった回に書くと、営業中の要員の行が消えるため書かない（前回のまま残す）
+  const canWriteSales = rosterReadOk && projects.length > 0;
+  if (!canWriteSales) console.warn('営業リスト: 要員リストか案件を読めなかったため、今回は書き出しません（前回のまま残します）');
+  const salesRows = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjectIds) : null;
   const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows };
   logCounts('プロパー候補', result);
   return result;
