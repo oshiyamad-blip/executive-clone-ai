@@ -204,7 +204,7 @@ export async function buildProperCandidates(
     if (m) judged.push(m);
     else stats.rejected += 1;
   });
-  // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はAIの見立ての合い方（満たす要件の数 − 足りない要件の数）→ ルールの並び。
+  // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はAIの見立ての合い方（必須の満たす・近い経験・経験なしの重みづけ）→ ルールの並び。
   // 社員ごと・案件ごとの上限を掛ける（上限の中にAIが良いと見た組から入るように）
   const cat = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
   const order = judged
@@ -240,13 +240,31 @@ export async function buildProperCandidates(
 // 要確認（根拠が経歴に無い等）は含めない
 export function clearsBar(m: OwnMatch): boolean {
   if (m.needsReview || !m.judgment) return false;
-  return m.judgment.verdict === 'recommend' || judgmentFit(m.judgment) >= 0;
+  if (m.judgment.verdict === 'recommend') return true;
+  const r = requiredCounts(m.judgment);
+  return r.met - r.close - r.unmet >= 0;
 }
 
-// AIの見立ての合い方: 満たす要件（近い経験を除く）の数 − 足りない要件（近い経験のみを含む）の数
+// 必須の要件の照合結果の数（尚可は数えない）。照合結果の無い古い判定は「合っている点」「足りない点」の行から数える
+function requiredCounts(j: ProperJudgment): { met: number; close: number; unmet: number } {
+  if (j.checks) {
+    const req = j.checks.filter((c) => c.kind === '必須');
+    return {
+      met: req.filter((c) => c.status === 'met').length,
+      close: req.filter((c) => c.status === 'close').length,
+      unmet: req.filter((c) => c.status === 'unmet').length,
+    };
+  }
+  const close = j.met.filter((l) => /（近い経験） ← /.test(l)).length;
+  return { met: j.met.length - close, close, unmet: Math.max(0, j.gaps.length - close) };
+}
+
+// AIの見立ての合い方（必須だけで数える。尚可の数で並びが動かないように）: 満たす1・近い経験0.5・経験なし−2。
+// 経験の無い必須がある組は、近い経験ばかりの組より下にする
 export function judgmentFit(j: ProperJudgment | undefined): number {
   if (!j) return -Infinity;
-  return j.met.filter((l) => !/（近い経験） ← /.test(l)).length - j.gaps.length;
+  const r = requiredCounts(j);
+  return r.met + 0.5 * r.close - 2 * r.unmet;
 }
 
 function logJudge(s: JudgeStats): void {

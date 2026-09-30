@@ -98,8 +98,8 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
-import { verifyJudgment, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening } from '../proper/index.js';
+import { verifyJudgment, pitchWithVerifiedYears, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3751,7 +3751,7 @@ async function properJudgeChecks(): Promise<void> {
   section('プロパー × 案件のAI判定: 根拠の照合・一般的な語だけの一致・候補への反映');
   const profile = '【スキルシート】\n顧客管理DBの運用保守業務\tOracle DB上でのデータ作成、削除対応（CRUD操作、orderby・groupbyなどのSQL対応）\nJP1を用いたジョブ監視およびエラーログ検証';
   const raw = (over: Partial<RawProperJudgment> = {}): RawProperJudgment => ({
-    work: 'Oracle のデータ保守', levelFit: '年数は足りる', preferenceFit: '記載なし', verdict: 'recommend', pitch: 'Oracle DB の運用保守を2年担当。', concerns: [],
+    work: 'Oracle のデータ保守', levelFit: '年数は足りる', preferenceFit: '記載なし', verdict: 'recommend', pitch: 'Oracle DB の運用保守を担当。', concerns: [],
     workPrefecture: '', injectionSuspected: false,
     requirements: [
       { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
@@ -3829,6 +3829,11 @@ async function properJudgeChecks(): Promise<void> {
   check('案件メールに指示らしき記載があれば人の確認に回す', inj.reviewNotes.some((n) => n.includes('AIへの指示')));
   check('本人の希望は懸念として残す', verifyJudgment(raw({ preferenceFit: '希望はDB運用保守で合う' }), profile, { requiredSkills: [] }).concerns.includes('本人の希望: 希望はDB運用保守で合う'));
 
+  const yp = '■経験年数：18年4ヶ月\n顧客先データセンターで10年間無事故の運用';
+  check('推しどころの文のうち経歴に無い年数（約20年）の文は除き、経歴にある年数の文は残す',
+    pitchWithVerifiedYears('Linux・Windowsサーバーの運用保守を約20年経験しています。10年間無事故の運用を完遂しました。', yp) === '10年間無事故の運用を完遂しました。' &&
+      pitchWithVerifiedYears('経験18年の運用のプロです。', yp) === '経験18年の運用のプロです。' &&
+      pitchWithVerifiedYears('経験8年です。', yp) === '');
   const withOpt = verifyJudgment(raw({ requirements: [
     { requirement: 'Oracle', kind: '必須', quote: 'Oracle DBの運用経験', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
     { requirement: 'COBOL', kind: '尚可', quote: 'COBOL開発経験', status: 'unmet', evidence: '', note: '' },
@@ -3887,18 +3892,24 @@ async function properJudgeChecks(): Promise<void> {
     const ok1 = candidates.find((c) => c.ownEngineerId === 'E_ok');
     check('AIの推奨は強マッチ・優先度A・合っている点は根拠つき・提案文面に推しどころ・勤務地（群馬）では落とさない',
       ok1?.band === 'strong' && salesPriorityOf(ok1).startsWith('A') && ok1.matchedSkills?.[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応' &&
-        (ok1.draftToProject?.body ?? '').includes('■ご提案のポイント\nOracle DB の運用保守を2年担当。'), JSON.stringify(ok1));
+        (ok1.draftToProject?.body ?? '').includes('■ご提案のポイント\nOracle DB の運用保守を担当。'), JSON.stringify(ok1));
     const cond = { ...(ok1 as ProperCandidate) };
     const j2 = { ...(ok1?.judgment as NonNullable<ProperCandidate['judgment']>), verdict: 'conditional' as const };
     check('案件単価が希望より30万円以上高い組は、AIが推奨しない限り候補にしない',
       applyJudgment({ ...cond, rateGapMan: 40 }, j2) === null && applyJudgment({ ...cond, rateGapMan: 40 }, { ...j2, verdict: 'recommend' }) !== null &&
         applyJudgment({ ...cond, rateGapMan: 15 }, j2) !== null);
     const jj = ok1?.judgment as NonNullable<ProperCandidate['judgment']>;
+    const req = (requirement: string, status: 'met' | 'close' | 'unmet') => ({ kind: '必須' as const, requirement, quote: requirement, status });
+    const opt = (requirement: string, status: 'met' | 'close' | 'unmet') => ({ kind: '尚可' as const, requirement, quote: requirement, status });
     check('上限を超えても載せる基準: 推奨、または条件つきで裏付けのある要件が足りない要件以上（要確認は除く）',
       clearsBar(ok1 as ProperCandidate) &&
-        clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', met: ['A ← x', 'B ← y'], gaps: ['C'] } }) &&
-        !clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', met: ['A（近い経験） ← x'], gaps: ['A（近い経験のみ）'] } }) &&
+        clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', checks: [req('A', 'met'), req('B', 'met'), req('C', 'unmet'), opt('D', 'unmet'), opt('E', 'unmet')] } }) &&
+        !clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', checks: [req('A', 'close'), opt('B', 'met'), opt('C', 'met')] } }) &&
+        clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, checks: undefined, verdict: 'conditional', met: ['A ← x', 'B ← y'], gaps: ['C'] } }) &&
         !clearsBar({ ...(ok1 as ProperCandidate), needsReview: true }));
+    check('並びは必須だけで比べ、経験の無い必須がある組を近い経験ばかりの組より下にする（尚可の数で動かない）',
+      judgmentFit({ ...jj, checks: [req('A', 'close'), req('B', 'close'), req('C', 'close'), req('D', 'close')] }) >
+        judgmentFit({ ...jj, checks: [req('A', 'met'), req('B', 'met'), req('C', 'close'), req('D', 'unmet'), opt('E', 'met'), opt('F', 'met')] }));
     const tentativeNote = applyJudgment({ ...(ok1 as ProperCandidate), reason: '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。【年数交渉】Java3年に対し2年。' }, jj);
     check('ルールの参考提案の注記はAIの判定で置き換え、年数交渉の注記は残す',
       !(tentativeNote?.reason ?? '').includes('参考提案') && (tentativeNote?.reason ?? '').includes('【年数交渉】'), tentativeNote?.reason);

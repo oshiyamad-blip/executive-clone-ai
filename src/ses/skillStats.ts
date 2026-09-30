@@ -37,9 +37,9 @@ export function storableUnknownToken(token: string): boolean {
 // 抽出した1件分のスキル語を数える。names は表示名・営業元の会社名・担当者名（その語は人名・社名として数えない）
 export function tallySkillTokens(tokens: string[], names: string[]): void {
   const { counted, unknown } = classifySkillTokens(tokens, names);
-  // 率は技術名らしい語（英字を含む語・辞書にある語）だけで数える。「コミュニケーション能力」「金融業界の経験」のような
-  // 文は辞書に載せる語ではなく、数えると率が常に高止まりして辞書の抜け（Excel・GitHub 等）が見えなくなる
-  const techLike = (t: string) => isKnownSkill(t) || /[a-z]/i.test(t);
+  // 率は技術名らしい語（辞書にある語と、英字で始まる英数字だけの語）で数える。「コミュニケーション能力」「AWS設計」のような
+  // 文や型番（「5520-24X」）は辞書に載せる語ではなく、数えると率が常に高止まりして辞書の抜け（GitHub 等）が見えなくなる
+  const techLike = (t: string) => isKnownSkill(t) || /^[a-z][\x20-\x7e]*$/i.test(t);
   const countedTech = counted.filter(techLike).length;
   const unknownTech = unknown.filter(techLike).length;
   if (countedTech > 0) recordStat('skillTokens', countedTech);
