@@ -59,6 +59,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    2. `plan.json` の `closedRows` があれば、「クローズ済み」タブの最後に足す（先に控えへ）
    3. `writes/wNN.json` ごとにサブエージェントを起動し、各要素の `range` に `values` をそのまま（1文字も変えずに）`update_values` で書かせる
    4. 行の削除: 「全体」の ID 列を読み直し、`deleteIds` の行のうち人の入力（対応状況が未着手以外・見送り理由・担当営業・メモ・精度チェック・精度メモ）が空のもの、
+      `expireIds` の行のうち営業の入力（対応状況が未着手以外・見送り理由・担当営業・メモ）が空のもの、
       `closeIds` の行のうち対応状況がまだ「クローズ」のものを、下の行から順に削除する（deleteDimension）
 7. 要員リストの顔ぶれが変わったとき（`PHASE=side` の `labels` と今の要員のタブが違うとき）は、`side.json` から「要員一覧」（A1 に strings、G1 に formulas）・
    「精度集計」（A1 に summary）・要員のタブ（1行目に header、A2 に formula）を書く。新しい要員のタブは既存の要員のタブを複製して作る

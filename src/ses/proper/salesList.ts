@@ -220,6 +220,16 @@ function hasHumanInput(row: Row): boolean {
   });
 }
 
+// 営業が対応した印になる入力（精度チェック・精度メモは対応していなくても付くので除く）
+const ACCURACY_COLS = new Set([COL['精度チェック'], COL['精度メモ']]);
+function hasSalesInput(row: Row): boolean {
+  return HUMAN_COLS.some((i) => {
+    if (ACCURACY_COLS.has(i)) return false;
+    const v = String(row[i] ?? '').trim();
+    return v !== '' && !(i === COL['対応状況'] && v === SALES_STATUSES[0]);
+  });
+}
+
 const legacyKey = (engineer: string, title: string) => `${engineer}|${title}`.replace(/\s+/g, '');
 
 // ID列の無い以前のリスト（バッチ導入前に手で作った営業リスト）の人の入力を、要員＋案件名で引ける形にする
@@ -328,7 +338,8 @@ export interface SalesUpdatePlan {
   appends: Row[];
   deleteIds: string[];
   closeIds: string[]; // 営業が「クローズ」にした行（「クローズ済み」へ移して「全体」から消す）
-  closedRows: Row[];
+  expireIds: string[]; // 精度チェック・精度メモだけの行が期限切れになったもの（「クローズ済み」へ移して「全体」から消す）
+  closedRows: Row[]; // クローズにした行＋期限切れの行
   rows: Row[]; // 書いた後のシートの並び（要員のタブ・件数用）
 }
 
@@ -365,6 +376,8 @@ export function planSalesUpdate(
   const used = new Set<string>();
   const updates: SalesUpdatePlan['updates'] = [];
   const deleteIds: string[] = [];
+  const expireIds: string[] = [];
+  const expiredRows: Row[] = [];
   const rows: Row[] = [];
   current.forEach((prev, i) => {
     const id = String(prev[COL['ID']]).trim();
@@ -385,8 +398,11 @@ export function planSalesUpdate(
       });
       updates.push({ row: i + 2, values: next });
       rows.push(next);
-    } else if (hasHumanInput(prev) || stillOpen(id, prev)) {
+    } else if (stillOpen(id, prev) || hasSalesInput(prev)) {
       rows.push(prev);
+    } else if (hasHumanInput(prev)) {
+      expireIds.push(id);
+      expiredRows.push(prev);
     } else {
       deleteIds.push(id);
     }
@@ -398,7 +414,15 @@ export function planSalesUpdate(
     if (next[COL['対応状況']] === '') next[COL['対応状況']] = SALES_STATUSES[0];
     return next;
   });
-  return { updates, appends, deleteIds, closeIds: closedRows.map((r) => String(r[COL['ID']]).trim()), closedRows, rows: [...rows, ...appends] };
+  return {
+    updates,
+    appends,
+    deleteIds,
+    closeIds: closedRows.map((r) => String(r[COL['ID']]).trim()),
+    expireIds,
+    closedRows: [...closedRows, ...expiredRows],
+    rows: [...rows, ...appends],
+  };
 }
 
 // 人の入力の列（対応状況〜精度メモ）は連続している。行を書き直すときはその両側だけを書く
@@ -894,10 +918,11 @@ export async function writeSalesList(
     await withGoogleRetry(() =>
       api.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data: [...machine, ...appends, ...staffHeaders] } }),
     );
-    if (plan.deleteIds.length > 0 || plan.closeIds.length > 0) {
+    if (plan.deleteIds.length > 0 || plan.closeIds.length > 0 || plan.expireIds.length > 0) {
       // 消す直前にもう一度読み、その間に入力が入った行・並べ替えで動いた行・クローズを戻した行を取り違えない
       const drop = new Set(plan.deleteIds);
       const close = new Set(plan.closeIds);
+      const expire = new Set(plan.expireIds);
       const now = await readExisting();
       const allTab = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
       const rowsToDelete = now
@@ -905,7 +930,7 @@ export async function writeSalesList(
         .filter(({ cells, i }) => {
           const id = (cells[COL['ID']] ?? '').trim();
           if (i === 0) return false;
-          return (drop.has(id) && !hasHumanInput(cells)) || (close.has(id) && (cells[COL['対応状況']] ?? '').trim() === SALES_CLOSED_STATUS);
+          return (drop.has(id) && !hasHumanInput(cells)) || (expire.has(id) && !hasSalesInput(cells)) || (close.has(id) && (cells[COL['対応状況']] ?? '').trim() === SALES_CLOSED_STATUS);
         })
         .map(({ i }) => i)
         .sort((a, b) => b - a);
