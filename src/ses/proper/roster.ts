@@ -133,12 +133,6 @@ export function rosterProfileText(summary: string, sheetText: string): string {
   return [s && `【要員リストのサマリ】\n${s}`, sheetText.trim() && `【スキルシート】\n${sheetText.trim()}`].filter(Boolean).join('\n\n');
 }
 
-// スキルシートのタブの本文（セルをタブ区切り・行を改行で並べる。結合セルの繰り返しは1つにする）
-async function sheetText(sheets: sheets_v4.Sheets, id: string, tab: string): Promise<string> {
-  const rows = (await tabValues(sheets, id, tab)).map((r) => r.map((c) => c.trim()).filter((c, i, a) => c && c !== a[i - 1]).join('\t'));
-  return rows.filter(Boolean).join('\n').slice(0, SHEET_TEXT_MAX);
-}
-
 // スキルシートのタブのレベル。内容のハッシュで控えを引き、無ければ抽出して控える（案件DBが無ければ抽出しない）
 async function sheetLevel(text: string): Promise<EngineerLevel | null> {
   if (!text.trim()) return null;
@@ -152,41 +146,45 @@ async function sheetLevel(text: string): Promise<EngineerLevel | null> {
   return profile.level;
 }
 
-export async function loadRosterEngineers(now = new Date()): Promise<ProperEngineer[]> {
-  if (isDemo() || !rosterConfigured()) return [];
-  const sheets = api();
-  if (!sheets) {
-    console.warn('要員リスト: Google の認証情報が無いため読めません');
-    return [];
-  }
-  const id = properRosterSpreadsheetId();
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: id, fields: 'sheets.properties(sheetId,title)' });
-  const gidOf = new Map((meta.data.sheets ?? []).map((s) => [s.properties?.title ?? '', s.properties?.sheetId ?? 0]));
-  const rows = await tabValues(sheets, id, properRosterTab());
-  const headerAt = rows.findIndex((r) => r.includes('状況') && r.includes('名前') && r.includes('サマリ'));
+// 要員リストの値（「要員」タブ）とスキルシートのタブの本文から社員を作る（Google を読まない部分。試運転でも使う）
+export interface RosterInput {
+  spreadsheetId: string;
+  rows: string[][]; // 「要員」タブの値
+  gidOf: Map<string, number>; // タブ名 → シートID（スキルシートのリンク用）
+  sheetTexts: Map<string, string>; // 名前 → スキルシートのタブの本文（読めたものだけ）
+  levels?: Map<string, EngineerLevel | null>; // 名前 → スキルシートから抽出したレベル
+}
+
+export function rosterHeaderAt(rows: string[][]): number {
+  return rows.findIndex((r) => r.includes('状況') && r.includes('名前') && r.includes('サマリ'));
+}
+
+export function activeRosterNames(rows: string[][]): string[] {
+  const at = rosterHeaderAt(rows);
+  if (at < 0) return [];
+  const h = rows[at];
+  return rows
+    .slice(at + 1)
+    .filter((r) => (r[h.indexOf('名前')] ?? '').trim() && (r[h.indexOf('状況')] ?? '').trim() === ROSTER_ACTIVE_STATUS)
+    .map((r) => (r[h.indexOf('名前')] ?? '').trim());
+}
+
+export function rosterEngineersFromValues(input: RosterInput, now = new Date()): ProperEngineer[] {
+  const { spreadsheetId: id, rows, gidOf } = input;
+  const headerAt = rosterHeaderAt(rows);
   // 見出しが無いのは読み方の問題（要員0名ではない）。空で返すと営業リストの行や候補を退役させてしまうため失敗として扱う
   if (headerAt < 0) throw new Error(`「${properRosterTab()}」タブに「状況」「名前」「サマリ」の見出しの行が見つかりません`);
   const h = rows[headerAt];
   const col = (name: string) => h.indexOf(name);
   const out: ProperEngineer[] = [];
-  let sheetFailures = 0;
   for (const r of rows.slice(headerAt + 1)) {
     const name = (r[col('名前')] ?? '').trim();
     if (!name || (r[col('状況')] ?? '').trim() !== ROSTER_ACTIVE_STATUS) continue;
     const s = parseRosterSummary(r[col('サマリ')] ?? '');
     const skills = normalizeSkills(s.skills);
     const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
-    let level = summaryLevel(s);
-    let text = '';
-    if (gidOf.has(tab)) {
-      try {
-        text = await sheetText(sheets, id, tab);
-        level = mergeLevels(await sheetLevel(text), level);
-      } catch (err) {
-        sheetFailures += 1;
-        console.warn(`要員リスト: スキルシートのタブを読めませんでした（サマリの内容だけで照合します）: ${safeErr(err)}`);
-      }
-    }
+    const text = input.sheetTexts.get(name) ?? '';
+    const level = mergeLevels(input.levels?.get(name) ?? null, summaryLevel(s));
     const available = (r[col('稼働開始時期')] ?? '').trim();
     const head = s.experienceText.split(/[（(]/)[0] ?? '';
     const label = sanitizeInitials(name, '');
@@ -212,6 +210,42 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
       profileText: rosterProfileText(r[col('サマリ')] ?? '', text),
     });
   }
+  return out;
+}
+
+// スキルシートのタブの値を本文にする（セルをタブ区切り・行を改行で並べる。結合セルの繰り返しは1つにする）
+export function skillSheetText(values: string[][]): string {
+  const rows = values.map((r) => r.map((c) => c.trim()).filter((c, i, a) => c && c !== a[i - 1]).join('\t'));
+  return rows.filter(Boolean).join('\n').slice(0, SHEET_TEXT_MAX);
+}
+
+export async function loadRosterEngineers(now = new Date()): Promise<ProperEngineer[]> {
+  if (isDemo() || !rosterConfigured()) return [];
+  const sheets = api();
+  if (!sheets) {
+    console.warn('要員リスト: Google の認証情報が無いため読めません');
+    return [];
+  }
+  const id = properRosterSpreadsheetId();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: id, fields: 'sheets.properties(sheetId,title)' });
+  const gidOf = new Map((meta.data.sheets ?? []).map((s) => [s.properties?.title ?? '', s.properties?.sheetId ?? 0]));
+  const rows = await tabValues(sheets, id, properRosterTab());
+  const sheetTexts = new Map<string, string>();
+  const levels = new Map<string, EngineerLevel | null>();
+  let sheetFailures = 0;
+  for (const name of activeRosterNames(rows)) {
+    const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
+    if (!gidOf.has(tab)) continue;
+    try {
+      const text = skillSheetText(await tabValues(sheets, id, tab));
+      sheetTexts.set(name, text);
+      levels.set(name, await sheetLevel(text));
+    } catch (err) {
+      sheetFailures += 1;
+      console.warn(`要員リスト: スキルシートのタブを読めませんでした（サマリの内容だけで照合します）: ${safeErr(err)}`);
+    }
+  }
+  const out = rosterEngineersFromValues({ spreadsheetId: id, rows, gidOf, sheetTexts, levels }, now);
   console.log(`要員リスト: 営業中${out.length}名を読みました${sheetFailures > 0 ? `（スキルシートのタブを読めなかった要員${sheetFailures}名）` : ''}`);
   return out;
 }
