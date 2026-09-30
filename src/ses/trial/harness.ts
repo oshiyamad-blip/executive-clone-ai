@@ -225,10 +225,11 @@ if (phase === 'prompts') {
     updateRows: plan.updates.map((u) => u.row),
     deleteIds: plan.deleteIds,
     closeIds: plan.closeIds,
+    expireIds: plan.expireIds,
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, chunks: chunks.length }));
 } else if (phase === 'side') {
   const list = engineers();
   // 行の残っている要員（営業から外れても、人の入力がある行は残る）のタブも作る

@@ -4105,6 +4105,22 @@ function salesListChecks(): void {
     closing !== null && closing.closeIds.join() === 'ownmatch_a_p1' && closing.closedRows[0][col('メモ')] === '決まった' &&
       closing.updates.length === 0 && closing.appends.map((r) => r[col('ID')]).join() === nego.id &&
       closing.rows.map((r) => r[col('ID')]).join() === `ownmatch_keep,${nego.id}`, JSON.stringify(closing?.rows.map((r) => r[col('ID')])));
+  const expiring = planSalesUpdate(
+    [],
+    [header,
+      sheetRow('ownmatch_exp_a', { 精度チェック: '○ 概ね妥当' }),
+      sheetRow('ownmatch_exp_b', { 担当営業: '佐藤', 精度チェック: '○ 概ね妥当' }),
+      sheetRow('ownmatch_exp_c'),
+      sheetRow('ownmatch_exp_d', { 精度チェック: '○ 概ね妥当' }),
+      sheetRow('ownmatch_exp_e', { 対応状況: 'クローズ' }),
+    ],
+    (id) => id === 'ownmatch_exp_d',
+  );
+  const expIds = (rs: unknown[][] | undefined) => (rs ?? []).map((r) => r[col('ID')]).join();
+  check('営業リストの更新: 精度チェックだけの行は期限切れで控えへ移し、営業の入力がある行・募集中の行は残す',
+    expiring !== null && expiring.expireIds.join() === 'ownmatch_exp_a' && expIds(expiring.closedRows) === 'ownmatch_exp_e,ownmatch_exp_a' &&
+      expIds(expiring.rows) === 'ownmatch_exp_b,ownmatch_exp_d' && expiring.deleteIds.join() === 'ownmatch_exp_c' &&
+      expiring.closeIds.join() === 'ownmatch_exp_e', JSON.stringify(expiring?.expireIds));
   check('精度集計: 見送り理由ごと・要員ごとの件数を、全体とクローズ済みの両方から数える',
     sv[8][0].startsWith('見送り理由') && sv[9][0] === 'ハードルが高い（スキル・経験不足）' &&
       sv[9][2] === `=COUNTIFS('全体'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'全体'!C2:C,"A""A")+COUNTIFS('クローズ済み'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'クローズ済み'!C2:C,"A""A")`,
