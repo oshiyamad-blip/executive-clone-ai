@@ -230,7 +230,7 @@ function legacyInputs(legacy: string[][]): Map<string, string[]> {
 }
 
 // 今回の行に、前回までのシートの人の入力を ID で引き継ぐ（IDが変わった行は要員＋案件名で引く）。
-// 今回の候補に無い前回の行は、人の入力があるか stillOpen が真（案件がまだ募集中で要員も営業中）なら前回のまま残す。
+// 今回の候補に無い前回の行は、人の入力があるか stillOpen が真（案件がまだ募集中で要員も営業中・希望単価も同じ）なら前回のまま残す。
 // 判定の上限や重複の代表の入れ替わりで、営業が見たばかりの行が次の回に消えないようにするため。
 // existing はシートの値（1行目は見出し。列は見出しの名前で探すため、人が列を並べ替えていても読める）。
 // legacy は同じスプレッドシートにある以前のリスト（ID列なし）。IDで引けない行だけ、要員＋案件名が同じ行の入力を引き継ぐ
@@ -238,7 +238,7 @@ export function mergeSalesRows(
   fresh: Row[],
   existing: string[][],
   legacy: string[][] = [],
-  stillOpen: (id: string) => boolean = () => false,
+  stillOpen: (id: string, previous: Row) => boolean = () => false,
 ): Row[] {
   const fromLegacy = legacyInputs(legacy);
   const header = existing[0] ?? [];
@@ -283,7 +283,7 @@ export function mergeSalesRows(
     if (merged[COL['対応状況']] === '') merged[COL['対応状況']] = SALES_STATUSES[0];
     out.push(merged);
   }
-  for (const [id, prev] of previous) if (!seen.has(id) && (hasHumanInput(prev) || stillOpen(id))) out.push(prev);
+  for (const [id, prev] of previous) if (!seen.has(id) && (hasHumanInput(prev) || stillOpen(id, prev))) out.push(prev);
   return sortSalesRows(out);
 }
 
@@ -619,8 +619,14 @@ export async function writeSalesList(
     tabs = await readTabs(api, spreadsheetId);
   }
 
-  const stillOpen = (id: string) =>
-    engineers.some((e) => id.startsWith(`ownmatch_${e.id}_`) && openProjectIds.has(id.slice(`ownmatch_${e.id}_`.length)));
+  // 要員の希望単価が変わった行は前回の判定のまま残さない（今回の候補に入っていれば新しい単価で書き直される）
+  const stillOpen = (id: string, previous: Row) =>
+    engineers.some(
+      (e) =>
+        id.startsWith(`ownmatch_${e.id}_`) &&
+        openProjectIds.has(id.slice(`ownmatch_${e.id}_`.length)) &&
+        String(e.requiredProjectRate ?? '') === String(previous[COL['希望単価(万)']] ?? '').trim(),
+    );
   const readRows = async () => {
     const existing = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }));
     return mergeSalesRows(fresh, (existing.data.values ?? []) as string[][], legacy, stillOpen);

@@ -4014,6 +4014,10 @@ function salesListChecks(): void {
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('精度チェック')) &&
       fmt.some((r) => r.updateDimensionProperties?.range?.startIndex === col('ID') && r.updateDimensionProperties?.properties?.hiddenByUser === true));
   const keepOpen = mergeSalesRows([salesRowOf(base, undefined)], [header, prevUntouched], [], (id) => id === 'ownmatch_stale');
+  const prevRate = [...prevUntouched];
+  prevRate[col('希望単価(万)')] = '50';
+  const rateChanged = mergeSalesRows([], [header, prevRate], [], (_id, prev) => String(prev[col('希望単価(万)')]) === '55');
+  check('希望単価が変わった要員の前回の行（未着手）は残さない', rateChanged.length === 0);
   check('今回の候補に無くても、案件が募集中で要員も営業中なら未着手の行を残す（上限や重複の代表の入れ替わりで消さない）',
     keepOpen.some((r) => r[col('ID')] === 'ownmatch_stale') && keepOpen.length === 2);
   const renamed = header.map(() => '');

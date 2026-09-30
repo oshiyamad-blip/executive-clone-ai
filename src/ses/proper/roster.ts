@@ -164,10 +164,8 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
   const gidOf = new Map((meta.data.sheets ?? []).map((s) => [s.properties?.title ?? '', s.properties?.sheetId ?? 0]));
   const rows = await tabValues(sheets, id, properRosterTab());
   const headerAt = rows.findIndex((r) => r.includes('状況') && r.includes('名前') && r.includes('サマリ'));
-  if (headerAt < 0) {
-    console.warn(`要員リスト: 「${properRosterTab()}」タブに「状況」「名前」「サマリ」の見出しの行が見つかりません`);
-    return [];
-  }
+  // 見出しが無いのは読み方の問題（要員0名ではない）。空で返すと営業リストの行や候補を退役させてしまうため失敗として扱う
+  if (headerAt < 0) throw new Error(`「${properRosterTab()}」タブに「状況」「名前」「サマリ」の見出しの行が見つかりません`);
   const h = rows[headerAt];
   const col = (name: string) => h.indexOf(name);
   const out: ProperEngineer[] = [];
