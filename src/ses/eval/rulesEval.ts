@@ -99,7 +99,7 @@ import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
 import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit } from '../proper/index.js';
+import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3928,6 +3928,14 @@ async function properJudgeChecks(): Promise<void> {
         !clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', checks: [req('A', 'close'), opt('B', 'met'), opt('C', 'met')] } }) &&
         clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, checks: undefined, verdict: 'conditional', met: ['A ← x', 'B ← y'], gaps: ['C'] } }) &&
         !clearsBar({ ...(ok1 as ProperCandidate), needsReview: true }));
+    const withChecks = (verdict: 'recommend' | 'conditional', checks: Array<ReturnType<typeof req> | ReturnType<typeof opt>>) => ({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict, checks } });
+    check('必須の半分以上が経験なし（2件以上）で満たす必須が1件以下の条件つきは「参考」に下げる（推奨・足りない必須が1件の組は下げない）',
+      weakOnRequired(withChecks('conditional', [req('A', 'unmet'), req('B', 'unmet'), req('C', 'close'), req('D', 'met')])) &&
+        weakOnRequired(withChecks('conditional', [req('A', 'unmet'), req('B', 'unmet'), req('C', 'close'), req('D', 'close'), opt('E', 'met')])) &&
+        !weakOnRequired(withChecks('conditional', [req('A', 'unmet'), req('B', 'unmet'), req('C', 'met'), req('D', 'met')])) &&
+        !weakOnRequired(withChecks('conditional', [req('A', 'unmet'), req('B', 'close'), req('C', 'close')])) &&
+        !weakOnRequired(withChecks('conditional', [req('A', 'unmet'), req('B', 'unmet'), req('C', 'close'), req('D', 'close'), req('E', 'close')])) &&
+        !weakOnRequired(withChecks('recommend', [req('A', 'unmet'), req('B', 'unmet'), req('C', 'met')])));
     const unmetJ = { ...jj, verdict: 'conditional' as const, checks: [req('Oracle', 'met'), req('React', 'unmet')] };
     const levelHigh = applyJudgment({ ...cond, rateGapMan: 20 }, { ...unmetJ, rateReason: 'high_level' });
     const flowShallow = applyJudgment({ ...cond, rateGapMan: 20 }, { ...unmetJ, rateReason: 'shallow_flow' });

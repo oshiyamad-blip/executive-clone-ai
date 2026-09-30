@@ -283,7 +283,8 @@ export async function buildProperCandidates(
     // 上限を超えた組も、AIが見送っていなければ「参考」として残す（営業から候補の数を求められているため。
     // 主な候補とは優先度で分け、見送り理由・精度チェックで参考の当たり率を測る）
     const full = (perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit;
-    const reference = full && !clearsBar(m);
+    // 必須の半分以上が経験なしの条件つきは、上限に関係なく「参考」に下げる（数は出しつつ主な候補の当たり率を保つ）
+    const reference = (full && !clearsBar(m)) || weakOnRequired(m);
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
@@ -307,6 +308,14 @@ export function clearsBar(m: OwnMatch): boolean {
   if (m.judgment.verdict === 'recommend') return true;
   const r = requiredCounts(m.judgment);
   return r.met - r.close - r.unmet >= 0;
+}
+
+// 条件つきのうち、必須の2件以上かつ半分以上が経験なしで、満たす必須が1件以下の組
+export function weakOnRequired(m: OwnMatch): boolean {
+  if (!m.judgment || m.judgment.verdict === 'recommend' || !m.judgment.checks) return false;
+  const r = requiredCounts(m.judgment);
+  const total = r.met + r.close + r.unmet;
+  return r.unmet >= 2 && r.unmet * 2 >= total && r.met <= 1;
 }
 
 // 必須の要件の照合結果の数（尚可は数えない）。照合結果の無い古い判定は「合っている点」「足りない点」の行から数える
