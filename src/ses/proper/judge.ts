@@ -15,7 +15,7 @@ import { skillMatch } from '../pricing.js';
 import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 6;
+const JUDGE_VERSION = 7;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
@@ -58,7 +58,8 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
    - recommend: 案件の中心となる作業を実務でやってきた記載があり、必須の大半が met。そのまま提案してよい（尚可は判断を左右しない）
    - conditional: 中心の作業は近いが、必須の一部が close / unmet、またはレベル・単価で相手先との相談が要る
    - reject: 案件の中心となる作業の実務経験が無い。一般的な語だけが重なる組、研修だけの技術で合わせている組はここ
-6. pitch: 営業が相手先に伝える推しどころ（経歴の具体的な実績に触れて2文以内。reject は空文字）
+6. pitch: 営業が相手先に伝える推しどころ（経歴の具体的な実績に触れて2文以内。reject は空文字）。経歴に書かれた実績だけを書き、
+   「〜まで見据えた対応ができます」のような経歴に無い見込みは書かない。年数は経歴に書かれた数字のまま使い、足し合わせたり丸めて増やしたりしない
 7. concerns: 提案前に確かめる懸念（無ければ空の配列）
 8. workPrefecture: 出社が必要な勤務地の都道府県名（例: 東京都・大阪府）。フルリモートや勤務地の記載が無ければ空文字
 
@@ -176,6 +177,19 @@ export function evidenceMentionsTech(requirement: string, evidence: string): boo
   return need.some((t) => (skillMatch([t], have)?.rate ?? 0) > 0);
 }
 
+// 推しどころの文のうち、経歴に無い年数（「約20年」）を書いた文を除く（相手先に送る文面に盛った年数を出さない）
+export function pitchWithVerifiedYears(pitch: string, profile: string): string {
+  const hay = profile.normalize('NFKC').replace(/\s+/g, '');
+  return pitch
+    .split(/(?<=。)/)
+    .filter((sentence) => {
+      const years = [...sentence.normalize('NFKC').matchAll(/(\d+(?:\.\d+)?)\s*年/g)].map((m) => m[1]);
+      return years.every((y) => new RegExp(`(?<![\\d.])${y.replace('.', '\\.')}年`).test(hay));
+    })
+    .join('')
+    .trim();
+}
+
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
 export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string }): ProperJudgment {
@@ -247,7 +261,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     met,
     gaps,
     levelFit: raw.levelFit.trim(),
-    pitch: verdict === 'reject' ? '' : raw.pitch.trim(),
+    pitch: verdict === 'reject' ? '' : pitchWithVerifiedYears(raw.pitch.trim(), profile),
     concerns: raw.preferenceFit.trim() && !/記載なし/.test(raw.preferenceFit) ? [...concerns, `本人の希望: ${raw.preferenceFit.trim()}`] : concerns,
     reviewNotes,
     checks,
