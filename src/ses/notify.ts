@@ -57,7 +57,7 @@ export async function notifyResults(
   const metrics = collectBatchMetrics({ requestedDrafts: requestedDrafts.created });
   await recordBatchMetrics(metrics);
   const metricsLines = formatMetricsLines(metrics);
-  // 毎時の実行のため、新しい候補（今回判定したマッチ・初めて見つかったプロパー候補・前回知らせ損ねた分）が無い回は
+  // 1日4回の実行のため、新しい候補（今回判定したマッチ・初めて見つかったプロパー候補・前回知らせ損ねた分）が無い回は
   // サマリを送らない（重大な異常は送る。GitHub の失敗通知とは別に内容を知らせるため）。メトリクスは上で記録済み
   if (!shouldSendSummary(saved, proper, carried)) {
     console.log('SES通知: 新しい候補が無いため、今回はサマリメールを送りません');

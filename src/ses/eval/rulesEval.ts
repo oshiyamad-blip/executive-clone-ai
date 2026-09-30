@@ -3502,14 +3502,14 @@ function manualEngineerChecks(): void {
   check('パートナーの要員は「弊社社員」と書かない', !partnerBody.includes('弊社社員') && partnerBody.includes('パートナー所属') && properBody.includes('弊社社員'));
 }
 
-// ===== 毎時の実行と、抽出の枠の選び方 =====
+// ===== 定時の実行と、抽出の枠の選び方 =====
 
 function hourlyScheduleChecks(): void {
-  section('毎時の実行・抽出の枠');
+  section('定時の実行・抽出の枠');
   const jst = (s: string) => new Date(`${s}+09:00`);
-  check('平日の8:30の次の回は10:00（10〜19時の毎時）', nextRunAt(jst('2026-09-24T08:30:00').getTime()) === jst('2026-09-24T10:00:00').getTime());
-  check('平日の19:10の次の回は翌平日の10:00', nextRunAt(jst('2026-09-24T19:10:00').getTime()) === jst('2026-09-25T10:00:00').getTime());
-  check('金曜19:10の次の回は月曜10:00', nextRunAt(jst('2026-09-25T19:10:00').getTime()) === jst('2026-09-28T10:00:00').getTime());
+  check('平日の8:30の次の回は9:00（9・12・15・18時）', nextRunAt(jst('2026-09-24T08:30:00').getTime()) === jst('2026-09-24T09:00:00').getTime());
+  check('平日の19:10の次の回は翌平日の9:00', nextRunAt(jst('2026-09-24T19:10:00').getTime()) === jst('2026-09-25T09:00:00').getTime());
+  check('金曜19:10の次の回は月曜9:00', nextRunAt(jst('2026-09-25T19:10:00').getTime()) === jst('2026-09-28T09:00:00').getTime());
   const now = jst('2026-09-24T10:00:00');
   const at = (h: number) => ({ id: `m${h}`, receivedAt: new Date(now.getTime() - h * 3600_000) });
   const items = [at(1), at(2), at(3), at(167), at(166), at(165), at(164), at(5)]; // 16x時間前 = 7日の窓の端
