@@ -106,7 +106,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -4012,6 +4012,27 @@ function salesListChecks(): void {
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('対応状況')) &&
       fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('精度チェック')) &&
       fmt.some((r) => r.updateDimensionProperties?.range?.startIndex === col('ID') && r.updateDimensionProperties?.properties?.hiddenByUser === true));
+  const keepOpen = mergeSalesRows([salesRowOf(base, undefined)], [header, prevUntouched], [], (id) => id === 'ownmatch_stale');
+  check('今回の候補に無くても、案件が募集中で要員も営業中なら未着手の行を残す（上限や重複の代表の入れ替わりで消さない）',
+    keepOpen.some((r) => r[col('ID')] === 'ownmatch_stale') && keepOpen.length === 2);
+  const renamed = header.map(() => '');
+  renamed[col('ID')] = 'ownmatch_a_pOLD'; renamed[col('要員')] = base.properLabel; renamed[col('案件名')] = base.projectTitle; renamed[col('対応状況')] = '面談調整';
+  const reKeyed = mergeSalesRows([salesRowOf(base, undefined)], [header, renamed], [], () => true);
+  check('IDが変わった行（同じ案件の別メールが代表になった等）は要員＋案件名で人の入力を引き継ぎ、古い行は重ねて残さない',
+    reKeyed.length === 1 && reKeyed[0][col('対応状況')] === '面談調整' && reKeyed[0][col('ID')] === base.id, JSON.stringify(reKeyed.map((r) => r[col('ID')])));
+  const fmtAgain = formatRequests(7, 12, true, false);
+  const alignOf = (reqs: typeof fmtAgain, c: number) => reqs.find((r) => r.repeatCell?.range?.startRowIndex === 1 && r.repeatCell?.range?.startColumnIndex === c)?.repeatCell?.cell?.userEnteredFormat?.horizontalAlignment;
+  check('書式: 2回目以降は列幅・固定・フィルタを付け直さない（営業が変えた幅や絞り込みを残す）。色とプルダウンは付け直す',
+    !fmtAgain.some((r) => r.updateDimensionProperties || r.setBasicFilter || r.updateSheetProperties) &&
+      fmtAgain.filter((r) => r.addConditionalFormatRule).length === 12 && fmtAgain.filter((r) => r.setDataValidation).length === 2 &&
+      fmt.some((r) => r.setBasicFilter) && fmt.some((r) => r.updateDimensionProperties));
+  check('書式: 本文は左上寄せ・数字の列（No・単価・差）は右寄せ',
+    alignOf(fmtAgain, col('案件名')) === 'LEFT' && alignOf(fmtAgain, col('No')) === 'RIGHT' && alignOf(fmtAgain, col('差(万)')) === 'RIGHT' && alignOf(fmtAgain, col('案件単価(万)')) === 'RIGHT');
+  const side = sideTabFormatRequests(1001, 2001);
+  check('精度集計・要員一覧: 見出しの色・妥当率は％・件数は右寄せ',
+    side.some((r) => r.repeatCell?.range?.sheetId === 1001 && r.repeatCell?.cell?.userEnteredFormat?.numberFormat?.type === 'PERCENT' && r.repeatCell?.range?.startColumnIndex === 7) &&
+      side.some((r) => r.repeatCell?.range?.sheetId === 2001 && r.repeatCell?.range?.startColumnIndex === 6 && r.repeatCell?.cell?.userEnteredFormat?.horizontalAlignment === 'RIGHT') &&
+      side.filter((r) => r.repeatCell?.range?.endRowIndex === 1).length === 2);
   const legacyHeader = ['No', '優先度', '要員', '案件名', '対応状況', '担当営業', 'メモ'];
   const fromOld = mergeSalesRows([salesRowOf(nego, undefined)], [], [legacyHeader, ['1', 'B', 'A.A', 'Java 開発', '提案済', '田中', '返信待ち']]);
   check('以前の営業リスト（ID列なし）の入力を要員＋案件名で引き継ぐ',

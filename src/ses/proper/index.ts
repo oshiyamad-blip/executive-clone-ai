@@ -323,10 +323,15 @@ async function loadRosterSafely(): Promise<ProperEngineer[]> {
 }
 
 // 営業リストの失敗は候補の保存（案件スプレッドシート）を止めない
-async function writeSalesListSafely(candidates: ProperCandidate[], projects: Project[], engineers: ProperEngineer[]): Promise<number | null> {
+async function writeSalesListSafely(
+  candidates: ProperCandidate[],
+  projects: Project[],
+  engineers: ProperEngineer[],
+  openProjectIds: Set<string>,
+): Promise<number | null> {
   if (!salesListConfigured()) return null;
   try {
-    const n = await writeSalesList(candidates, projects, engineers);
+    const n = await writeSalesList(candidates, projects, engineers, openProjectIds);
     console.log(`営業リスト: ${n ?? 0}行を書き出しました`);
     return n;
   } catch (err) {
@@ -356,6 +361,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
   const { candidates, stats } = await buildProperCandidates(engineers, projects);
   logJudge(stats);
+  const openProjectIds = new Set(dedupeProjects(projects).kept.map((p) => p.id));
 
   let saved = 0;
   let retired = 0;
@@ -369,7 +375,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   } else if (candidates.length > 0) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
-  const salesRows = await writeSalesListSafely(candidates, projects, engineers);
+  const salesRows = await writeSalesListSafely(candidates, projects, engineers, openProjectIds);
   const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows };
   logCounts('プロパー候補', result);
   return result;
