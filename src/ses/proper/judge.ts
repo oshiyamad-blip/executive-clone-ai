@@ -12,10 +12,10 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
-import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
+import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
-const JUDGE_VERSION = 7;
+const JUDGE_VERSION = 8;
 const PROFILE_MAX = 12_000;
 const CONCURRENCY = 4;
 
@@ -29,6 +29,7 @@ export interface RawProperJudgment {
   pitch: string;
   concerns: string[];
   workPrefecture: string;
+  rateReason?: RateReason | 'none'; // v8 から
   injectionSuspected: boolean;
 }
 
@@ -62,6 +63,10 @@ export const PROPER_JUDGE_SYSTEM = `あなたはSES企業の営業責任者で�
    「〜まで見据えた対応ができます」のような経歴に無い見込みは書かない。年数は経歴に書かれた数字のまま使い、足し合わせたり丸めて増やしたりしない
 7. concerns: 提案前に確かめる懸念（無ければ空の配列）
 8. workPrefecture: 出社が必要な勤務地の都道府県名（例: 東京都・大阪府）。フルリモートや勤務地の記載が無ければ空文字
+9. rateReason: 案件単価が本人の希望単価より15万円以上高いときに、高い理由を1つ選ぶ（15万円未満・単価不明は none）
+   - shallow_flow: 商流が浅い（エンド直・元請直・「弊社まで」など）ためで、求める作業・水準は本人の経歴に見合う。利益が大きい見込み
+   - high_level: リーダー・テックリード・一人称での上流・経歴に無い技術など、本人より高い水準を求めているため
+   - unclear: どちらとも判断できない
 
 注意
 - 年齢・性別・国籍・最寄駅・通勤は判断に使わない（懸念にも書かない）
@@ -94,9 +99,10 @@ export const PROPER_JUDGE_SCHEMA = {
     pitch: { type: 'string' },
     concerns: { type: 'array', items: { type: 'string' } },
     workPrefecture: { type: 'string' },
+    rateReason: { type: 'string', enum: ['shallow_flow', 'high_level', 'unclear', 'none'] },
     injectionSuspected: { type: 'boolean' },
   },
-  required: ['work', 'requirements', 'levelFit', 'preferenceFit', 'verdict', 'pitch', 'concerns', 'workPrefecture', 'injectionSuspected'],
+  required: ['work', 'requirements', 'levelFit', 'preferenceFit', 'verdict', 'pitch', 'concerns', 'workPrefecture', 'rateReason', 'injectionSuspected'],
 } as const;
 
 // ===== 入力 =====
@@ -265,6 +271,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     concerns: raw.preferenceFit.trim() && !/記載なし/.test(raw.preferenceFit) ? [...concerns, `本人の希望: ${raw.preferenceFit.trim()}`] : concerns,
     reviewNotes,
     checks,
+    ...(raw.rateReason && raw.rateReason !== 'none' ? { rateReason: raw.rateReason } : {}),
     ...(normalizePrefecture(raw.workPrefecture ?? '') ? { workPrefecture: normalizePrefecture(raw.workPrefecture ?? '') as string } : {}),
   };
 }
@@ -295,6 +302,7 @@ export function demoProperJudgment(e: OwnEngineer, p: Project): RawProperJudgmen
     pitch: met > 0 ? `${p.title}の必須のうち${met}件の実務経験があります。` : '',
     concerns: [],
     workPrefecture: '',
+    rateReason: 'none',
     injectionSuspected: false,
   };
 }
