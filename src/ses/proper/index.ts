@@ -8,6 +8,7 @@ import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
 import { ownPairsForJudge, signedMan } from '../ownMatch.js';
 import { judgeProperPairs } from './judge.js';
+import { techNamesIn } from '../skillDict.js';
 import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
@@ -79,8 +80,56 @@ export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
 // 同じ案件が別のメール（別の会社経由・再送）で届いたものを1件にまとめる。案件名（括弧の補足を除く）が同じで単価の差が
 // DEDUPE_RATE_GAP_MAN 以内なら同じ案件とみなし、単価の高い方（同じなら新しい受信）を残す（商流で単価が数万円違うことがある）。
 // 単価の無い案件はまとめない（同じ名前でSE枠・PG枠のように役割が違うことがある）。
+// 丸括弧の中（「会員認証基盤移行担当」「API担当」のような役割・担当）が違う案件、必須の技術が重ならない案件もまとめない
+// （9/29の試行で、案件名が同じ別の枠を1件にまとめてしまう誤りが53組中6組あった）。
 // 残した案件のIDに、まとめた他のメールの営業元会社を返す（営業リストの確認事項に出す）
 const DEDUPE_RATE_GAP_MAN = 10;
+const DEDUPE_MIN_TECH_OVERLAP = 0.5;
+const DEDUPE_MIN_TEXT_OVERLAP = 0.3; // 片方に技術名が無いとき
+const DEDUPE_SAME_TEXT = 0.6; // 技術名の重なりが少なくても、必須の書きぶりがほぼ同じなら同じ案件
+
+// 丸括弧の補足のうち役割・担当を表すもの。案件番号（「DC-23615」）や働き方（「フルリモート」「急募」）は営業元ごとの書き添えなので除く
+function roleKeyOf(title: string): string {
+  return [...title.normalize('NFKC').matchAll(/[(（]([^()（）]*)[)）]/g)]
+    .map((m) => m[1].replace(/\s+/g, '').toLowerCase())
+    .filter((k) => k && !/^[a-z]{0,4}[-_#]?\d[\w-]*$/.test(k) && !/^(?:フル)?リモート|在宅|常駐|出社|急募/.test(k))
+    .join('|');
+}
+
+// 両方に括弧の補足があり、互いに含まず、使う文字も半分以上違うときだけ別の役割とみなす
+// （「（証券向けサポート募集）」と「（証券向け）」、「（Java+PHP）」と「（PHP+Java）」は同じ枠の書き方の違い）
+function rolesDiffer(ra: string, rb: string): boolean {
+  if (!ra || !rb || ra === rb || ra.includes(rb) || rb.includes(ra)) return false;
+  const ca = new Set(ra);
+  const cb = new Set(rb);
+  const inter = [...ca].filter((c) => cb.has(c)).length;
+  return inter / (ca.size + cb.size - inter) < 0.5;
+}
+
+// 同じ案件の再送・転送とみなせる2件か（役割が同じで、必須の技術が半分以上重なる。技術が片方にしか無いものは別の枠）
+export function sameOpening(a: Project, b: Project): boolean {
+  if (rolesDiffer(roleKeyOf(a.title), roleKeyOf(b.title))) return false;
+  const ta = new Set(techNamesIn(a.requiredSkills.join('、')).map((t) => t.toLowerCase()));
+  const tb = new Set(techNamesIn(b.requiredSkills.join('、')).map((t) => t.toLowerCase()));
+  const text = textOverlap(a.requiredSkills.join(''), b.requiredSkills.join(''));
+  if (ta.size === 0 || tb.size === 0) return text >= DEDUPE_MIN_TEXT_OVERLAP;
+  return jaccard(ta, tb) >= DEDUPE_MIN_TECH_OVERLAP || text >= DEDUPE_SAME_TEXT;
+}
+
+function jaccard<T>(a: Set<T>, b: Set<T>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  const inter = [...a].filter((x) => b.has(x)).length;
+  return inter / (a.size + b.size - inter);
+}
+
+// 必須の書きぶりの近さ（2文字ずつの重なり）。技術名の無い要件（「基地局の置局施工管理」）どうしを比べる
+export function textOverlap(a: string, b: string): number {
+  const grams = (s: string) => {
+    const t = s.normalize('NFKC').toLowerCase().replace(/[\s、,・/()（）]/g, '');
+    return new Set(Array.from({ length: Math.max(0, t.length - 1) }, (_, i) => t.slice(i, i + 2)));
+  };
+  return jaccard(grams(a), grams(b));
+}
 
 export function dedupeProjects(projects: Project[]): { kept: Project[]; others: Map<string, string[]> } {
   const core = (t: string) => t.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').replace(/\s+/g, '').toLowerCase();
@@ -98,7 +147,7 @@ export function dedupeProjects(projects: Project[]): { kept: Project[]; others: 
     );
     const clusters: Project[][] = [];
     for (const p of sorted) {
-      const c = clusters.find((cl) => Math.abs((rateOf(cl[0]) as number) - (rateOf(p) as number)) <= DEDUPE_RATE_GAP_MAN);
+      const c = clusters.find((cl) => Math.abs((rateOf(cl[0]) as number) - (rateOf(p) as number)) <= DEDUPE_RATE_GAP_MAN && sameOpening(cl[0], p));
       if (c) c.push(p);
       else clusters.push([p]);
     }
