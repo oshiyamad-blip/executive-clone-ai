@@ -11,7 +11,7 @@ import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } fr
 import { properSalesSpreadsheetId } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import { norm } from './judge.js';
-import type { Project, ProperCandidate, ProperEngineer, RequirementCheck } from '../../types/index.js';
+import type { Project, ProperCandidate, ProperEngineer, RateReason, RequirementCheck } from '../../types/index.js';
 
 export const SALES_ALL_TAB = '全体';
 const STAFF_TAB_METADATA_KEY = 'ses_sales_staff_tab';
@@ -151,6 +151,22 @@ export function markRequirementsInMail(detail: string, checks: RequirementCheck[
   return [...head, '', ...(detail.trim() ? marked : [])].join('\n').trimEnd();
 }
 
+// 案件単価が希望単価をこの額（万円）以上上回る組には、AIが見立てた高い理由（商流が浅い／求める水準が高い）を出す
+export const HIGH_RATE_GAP_MAN = 15;
+
+const RATE_REASON_LABEL: Record<RateReason, string> = {
+  shallow_flow: '商流が浅い見込み（利益が大きい）',
+  high_level: '求める水準が高い見込み',
+  unclear: '理由は判断できず',
+};
+
+// 案件単価が希望より大きく高い組の「高単価の理由」（AIの見立て）
+function rateReasonLine(c: ProperCandidate): string {
+  const reason = c.judgment?.rateReason;
+  if (!reason || (c.rateGapMan ?? 0) < HIGH_RATE_GAP_MAN) return '';
+  return `高単価: 希望より+${c.rateGapMan}万円（${RATE_REASON_LABEL[reason]}）`;
+}
+
 // 候補1件を「全体」タブの1行にする（No と人の入力列は後で埋める）
 export function salesRowOf(c: ProperCandidate, project: Project | undefined): Row {
   const row: Row = HEADER.map(() => '');
@@ -163,7 +179,9 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['差(万)']] = c.rateGapMan ?? '';
   // AI判定があれば「要件 ← 経歴の根拠」を1行ずつ、無ければ満たしたスキル名を並べる
   const sep = c.judgment ? '\n' : '、';
-  row[COL['判定理由']] = c.judgment ? [`やること: ${c.judgment.work}`, c.judgment.levelFit ? `レベル: ${c.judgment.levelFit}` : ''].filter(Boolean).join('\n') : '';
+  row[COL['判定理由']] = c.judgment
+    ? [`やること: ${c.judgment.work}`, c.judgment.levelFit ? `レベル: ${c.judgment.levelFit}` : '', rateReasonLine(c)].filter(Boolean).join('\n')
+    : '';
   row[COL['合っている点']] = (c.matchedSkills ?? []).join(sep);
   row[COL['足りない点']] = (c.missingSkills ?? []).join(sep);
   row[COL['交渉ポイント']] = negotiation;

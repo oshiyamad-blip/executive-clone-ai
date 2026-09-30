@@ -3908,6 +3908,16 @@ async function properJudgeChecks(): Promise<void> {
         !clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, verdict: 'conditional', checks: [req('A', 'close'), opt('B', 'met'), opt('C', 'met')] } }) &&
         clearsBar({ ...(ok1 as ProperCandidate), judgment: { ...jj, checks: undefined, verdict: 'conditional', met: ['A ← x', 'B ← y'], gaps: ['C'] } }) &&
         !clearsBar({ ...(ok1 as ProperCandidate), needsReview: true }));
+    const unmetJ = { ...jj, verdict: 'conditional' as const, checks: [req('Oracle', 'met'), req('React', 'unmet')] };
+    const levelHigh = applyJudgment({ ...cond, rateGapMan: 20 }, { ...unmetJ, rateReason: 'high_level' });
+    const flowShallow = applyJudgment({ ...cond, rateGapMan: 20 }, { ...unmetJ, rateReason: 'shallow_flow' });
+    const smallGap = applyJudgment({ ...cond, rateGapMan: 10 }, { ...unmetJ, rateReason: 'high_level' });
+    check('単価差15万円以上・求める水準が高い・経験の無い必須がある組は候補に残して要確認（優先度C）にする',
+      levelHigh?.needsReview === true && salesPriorityOf(levelHigh as ProperCandidate).startsWith('C') && (levelHigh?.reason ?? '').includes('経験の無い必須があります（React）'));
+    check('商流が浅い高単価の組・単価差が15万円未満の組は要確認にしない',
+      flowShallow?.needsReview === false && smallGap?.needsReview === false);
+    const hr = salesRowOf({ ...(flowShallow as ProperCandidate), properLabel: 'X' }, undefined);
+    check('営業リストの判定理由に高単価の理由を出す', hr[SALES_COLUMNS.findIndex((c) => c.name === '判定理由')].toString().includes('高単価: 希望より+20万円（商流が浅い見込み（利益が大きい））'));
     check('並びは必須だけで比べ、経験の無い必須がある組を近い経験ばかりの組より下にする（尚可の数で動かない）',
       judgmentFit({ ...jj, checks: [req('A', 'close'), req('B', 'close'), req('C', 'close'), req('D', 'close')] }) >
         judgmentFit({ ...jj, checks: [req('A', 'met'), req('B', 'met'), req('C', 'close'), req('D', 'unmet'), opt('E', 'met'), opt('F', 'met')] }));

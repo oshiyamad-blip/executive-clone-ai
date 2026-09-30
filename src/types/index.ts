@@ -473,6 +473,8 @@ export interface OwnMatch {
 // プロパー×案件のAI判定（根拠の引用を経歴と照合した後の値）
 export type ProperVerdict = 'recommend' | 'conditional' | 'reject';
 export type RequirementKind = '必須' | '尚可';
+// 案件単価が高い理由: 商流が浅い（利益が大きい見込み）／求める水準が高い／判断できない
+export type RateReason = 'shallow_flow' | 'high_level' | 'unclear';
 export interface RequirementCheck {
   kind: RequirementKind;
   requirement: string;
@@ -490,6 +492,7 @@ export interface ProperJudgment {
   reviewNotes: string[]; // 人が確かめる事項（根拠が経歴に見当たらない・必須の記載が途中で切れている等）
   checks?: RequirementCheck[]; // 必須・尚可の要件ごとの照合後の結果（営業リストでメール本文の該当行に ○△× を付ける）
   workPrefecture?: string; // AIが案件メールから読んだ出社先の都道府県（ルールで勤務地を読めなかった案件の地方の判定に使う）
+  rateReason?: RateReason; // 案件単価が希望単価より大きく高い理由（AIの見立て。差が小さい組は持たない）
 }
 
 // ===== 人間フィードバックによる精度向上 =====

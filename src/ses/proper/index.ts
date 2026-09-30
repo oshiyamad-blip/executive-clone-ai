@@ -24,7 +24,7 @@ import {
 } from '../../database/sheets.js';
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
-import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows } from './salesList.js';
+import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN } from './salesList.js';
 import type { Project, ProperEngineer, ProperCandidate, OwnMatch, ProperJudgment } from '../../types/index.js';
 
 export interface ProperRunResult {
@@ -61,14 +61,19 @@ export const LEVEL_GAP_MAN = 30;
 export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
   if (j.verdict === 'reject') return null;
   if (j.verdict !== 'recommend' && (m.rateGapMan ?? 0) >= LEVEL_GAP_MAN) return null;
+  // 求める水準が高く経験の無い必須がある高単価の組は、候補に残したまま要確認（優先度C）にする（商流が浅い高単価の組は利益が大きいため外さない）
+  const highGap = (m.rateGapMan ?? 0) >= HIGH_RATE_GAP_MAN;
+  const unmetRequired = (j.checks ?? []).filter((c) => c.kind === '必須' && c.status === 'unmet').map((c) => c.requirement);
+  const overLevel = highGap && j.rateReason === 'high_level' && unmetRequired.length > 0;
   const notes = [
+    ...(overLevel ? [`［確認］案件単価が希望より${m.rateGapMan}万円高く求める水準も高い案件で、経験の無い必須があります（${unmetRequired.join('、')}）。`] : []),
     ...j.reviewNotes.map((n) => `［確認］${n}。`),
     ...j.concerns.map((c) => `［確認］${c.replace(/。$/, '')}。`),
   ].join('');
   return {
     ...m,
     band: j.verdict === 'recommend' ? 'strong' : 'tentative',
-    needsReview: m.needsReview || j.reviewNotes.length > 0,
+    needsReview: m.needsReview || j.reviewNotes.length > 0 || overLevel,
     matchedSkills: j.met,
     missingSkills: j.gaps,
     // スキルの一致率による参考提案の注記はAIの判定で置き換える（鮮度・単価・年数の注記は残す）
