@@ -3892,6 +3892,35 @@ async function properJudgeChecks(): Promise<void> {
   check('尚可の「N年以上」は下げない', yOpt.checks?.[0].status === 'met', JSON.stringify(yOpt.checks));
   const yMe = verifyJudgment(yrsRaw('Java 3年目のメンバー'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
   check('「3年目」は年数の条件として読まない', yMe.checks?.[0].status === 'met', JSON.stringify(yMe.checks));
+  // 要件・quote が「Java」だけでも、案件の必須スキルに同じ技術の「N年以上」があればそれを読む
+  const yBare = (skills: string[], req = 'Java', years?: number) => verifyJudgment(raw({ requirements: [
+    { requirement: req, kind: '必須', quote: req, status: 'met', evidence: 'Java でのWeb開発', note: '' },
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+  ] }), yrsProfileFull, { requiredSkills: skills }, { level: yrsLevel, experienceYears: years ?? 3 });
+  const yb1 = yBare(['Java（3年以上）', 'Oracle']);
+  check('要件「Java」でも案件の必須スキル「Java（3年以上）」から読み、経歴2.6年なら近い経験にする',
+    yb1.checks?.[0].status === 'close' && yb1.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(yb1.checks) + JSON.stringify(yb1.gaps));
+  check('案件の必須スキルに年数が無ければ満たすまま', yBare(['Java', 'Oracle']).checks?.[0].status === 'met');
+  check('案件の必須スキルの年数が別の技術（PHP 5年以上）なら満たすまま', yBare(['PHP 5年以上', 'Oracle']).checks?.[0].status === 'met');
+  check('技術名の無い要件（実務経験）は案件の必須スキルの年数を使わない', yBare(['実務経験5年以上'], '実務経験').checks?.[0].status === 'met');
+  check('同じ技術に年数条件が複数あれば最初の1つを使う', yBare(['Java（2年以上）', 'Java（5年以上）']).checks?.[0].status === 'met' && yBare(['Java（3年以上）', 'Java（1年以上）']).checks?.[0].status === 'close');
+  // 案件のレベル（level.skillYears / totalYears）の年数も読む
+  const lvOf = (skillYears: Array<{ skill: string; years: number }>, totalYears: number | null = null) => ({ skillYears, totalYears, topPhase: null, role: null, juniorOk: false, selfDriven: false });
+  const yLv = (skillYears: Array<{ skill: string; years: number }>) => verifyJudgment(raw({ requirements: [
+    { requirement: 'Java', kind: '必須', quote: 'Java', status: 'met', evidence: 'Java でのWeb開発', note: '' },
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+  ] }), yrsProfileFull, { requiredSkills: ['Java', 'Oracle'], level: lvOf(skillYears) }, { level: yrsLevel, experienceYears: 3 });
+  const yl3 = yLv([{ skill: 'Java', years: 3 }]);
+  check('案件のレベルに Java 3年があれば経歴2.6年は近い経験にし、足りない点に年数を出す',
+    yl3.checks?.[0].status === 'close' && yl3.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(yl3.checks) + JSON.stringify(yl3.gaps));
+  check('案件のレベルが Java 2年なら満たすまま', yLv([{ skill: 'Java', years: 2 }]).checks?.[0].status === 'met');
+  check('案件のレベルの年数が別の技術（PHP 3年）なら満たすまま', yLv([{ skill: 'PHP', years: 3 }]).checks?.[0].status === 'met');
+  const yTot = (total: number | null, years: number | null) => verifyJudgment(raw({ requirements: [
+    { requirement: '実務経験', kind: '必須', quote: '実務経験', status: 'met', evidence: 'Java でのWeb開発', note: '' },
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+  ] }), yrsProfileFull, { requiredSkills: ['Oracle'], level: lvOf([], total) }, { experienceYears: years }).checks?.[0].status;
+  check('技術名の無い「実務経験」は案件のレベルのIT経験の合計5年と経験年数3を比べて近い経験・合計が無ければ満たすまま',
+    yTot(5, 3) === 'close' && yTot(null, 3) === 'met' && yTot(2, 3) === 'met', `${yTot(5, 3)} ${yTot(null, 3)} ${yTot(2, 3)}`);
   const yRec = verifyJudgment(yrsRaw('Java（3年以上）'), yrsProfileFull, yrsProj, { level: yrsLevel });
   check('年数で近い経験になっても判定（推奨）は直接変えない', yRec.verdict === 'recommend', yRec.verdict);
 
