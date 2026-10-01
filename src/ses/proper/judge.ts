@@ -12,7 +12,7 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
-import type { OwnEngineer, Project, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
+import type { OwnEngineer, Project, ProperEngineer, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
 const JUDGE_VERSION = 8;
@@ -295,6 +295,13 @@ export function __setProperJudgeForTest(fn: ((e: OwnEngineer, p: Project) => Pro
   judgeOverride = fn;
 }
 
+let cachedIdsOverride: ((e: OwnEngineer) => Promise<Set<string>>) | null = null;
+
+// 自己検証用: 判定の控えにある案件IDを差し替える。null で元に戻す
+export function __setCachedProjectIdsForTest(fn: ((e: OwnEngineer) => Promise<Set<string>>) | null): void {
+  cachedIdsOverride = fn;
+}
+
 // demo（外部呼び出しなし）: 経歴の本文に必須の語がそのまま現れるかだけで作る判定
 export function demoProperJudgment(e: OwnEngineer, p: Project): RawProperJudgment {
   const profile = profileTextOf(e);
@@ -366,6 +373,12 @@ async function writeCache(key: string, cache: JudgeCache, projects: Project[]): 
   } catch (err) {
     console.warn(`プロパー判定: 判定の控えを書けませんでした: ${safeErr(err)}`);
   }
+}
+
+// 社員ごとの判定の控えにある案件ID（読めなければ空）。上限の数え方で「判定済みの組」を見分けるのに使う
+export async function cachedProjectIdsFor(engineer: ProperEngineer): Promise<Set<string>> {
+  if (cachedIdsOverride) return cachedIdsOverride(engineer);
+  return new Set(Object.keys(await readCache(cacheKeyOf(engineer))));
 }
 
 export interface JudgeOutcome {

@@ -19,6 +19,7 @@ import {
   maxNegotiationCutMan,
   pricingSettingsInvalid,
   retentionDays,
+  properJudgePerEngineer,
 } from '../config.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
@@ -98,8 +99,8 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
-import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
+import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { buildProperCandidates, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3972,6 +3973,46 @@ async function properJudgeChecks(): Promise<void> {
     check('社員ごとの上限を超えた組も、AIが見送っていなければ「参考」として残す（主な候補は上限まで）',
       capped.candidates.length === 7 && capped.candidates.filter((c) => c.reference).length === 2 &&
         capped.candidates.filter((c) => !c.reference).length === 5, JSON.stringify(capped.candidates.map((c) => c.reference ?? false)));
+    // 判定の控えにある組は上限に数えず、控えに無い組だけが上限まで新しく判定される。上限で漏れた組は次の回に回る
+    const savedPerItem = process.env.PROPER_JUDGE_PER_ENGINEER;
+    const calledIds: string[] = [];
+    const known = new Set<string>();
+    __setProperJudgeForTest(async (_e, p) => {
+      calledIds.push(p.id);
+      return raw();
+    });
+    __setCachedProjectIdsForTest(async () => new Set(known));
+    try {
+      process.env.PROPER_JUDGE_PER_ENGINEER = '2';
+      const carry = Array.from({ length: 5 }, (_, i) => project({ id: `p_carry${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, location: ['品川', '新宿', '渋谷', '池袋', '上野'][i], receivedAt: daysAgo(1) }));
+      const r1 = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], carry, NOW);
+      const first = [...calledIds];
+      calledIds.length = 0;
+      first.forEach((id) => known.add(id));
+      const r2 = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], carry, NOW);
+      // 試験では控えの読み書きが無いので、控えにある組の呼び出しは控えの再利用とみなして除く
+      const second = calledIds.filter((id) => !known.has(id));
+      check('控えに無い組は社員ごとの上限（2組）まで判定し、残りは上限で見送る', first.length === 2 && r1.stats.overCap === 3 && r1.stats.prefiltered === 5, JSON.stringify(r1.stats));
+      check('2回目は控えにある組を上限に数えず、1回目に選ばれなかった組が新しく判定される',
+        second.length === 2 && second.every((id) => !first.includes(id)) && r2.stats.overCap === 1 && r2.stats.judged === 4, JSON.stringify({ second, stats: r2.stats }));
+    } finally {
+      if (savedPerItem === undefined) delete process.env.PROPER_JUDGE_PER_ENGINEER;
+      else process.env.PROPER_JUDGE_PER_ENGINEER = savedPerItem;
+      __setCachedProjectIdsForTest(null);
+    }
+    const mk = (e: string, pr: string) => ({ match: { ownEngineerId: e, projectId: pr } });
+    const sel = selectPairsForJudge([mk('a', 'p1'), mk('a', 'p2'), mk('a', 'p3'), mk('a', 'p4'), mk('b', 'p1')], (id) => (id === 'a' ? new Set(['p1', 'p3']) : undefined), 1, Number.MAX_SAFE_INTEGER);
+    check('選び方: 判定済みの組は常に選び、未判定の組だけを上限で数える（並びは入力のまま）',
+      sel.map((x) => `${x.match.ownEngineerId}${x.match.projectId}`).join(',') === 'ap1,ap2,ap3,bp1', JSON.stringify(sel));
+    const selProject = selectPairsForJudge([mk('a', 'p1'), mk('b', 'p1'), mk('c', 'p1')], () => undefined, 5, 2);
+    check('選び方: 案件ごとの上限も未判定の組だけを数える', selProject.length === 2);
+    const savedDefault = process.env.PROPER_JUDGE_PER_ENGINEER;
+    delete process.env.PROPER_JUDGE_PER_ENGINEER;
+    check('AI判定の上限の既定値は社員ごとに50組', properJudgePerEngineer() === 50);
+    process.env.PROPER_JUDGE_PER_ENGINEER = '100';
+    check('AI判定の上限は100組まで指定できる', properJudgePerEngineer() === 100);
+    if (savedDefault === undefined) delete process.env.PROPER_JUDGE_PER_ENGINEER;
+    else process.env.PROPER_JUDGE_PER_ENGINEER = savedDefault;
     __setProperJudgeForTest(async (e) => {
       if (e.id === 'E_fail') throw new Error('overloaded');
       if (e.id === 'E_rej') return raw({ verdict: 'reject' });

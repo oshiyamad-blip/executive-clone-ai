@@ -7,7 +7,7 @@ import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, 
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
 import { ownPairsForJudge, signedMan } from '../ownMatch.js';
-import { judgeProperPairs } from './judge.js';
+import { judgeProperPairs, cachedProjectIdsFor } from './judge.js';
 import { techNamesIn } from '../skillDict.js';
 import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
@@ -219,6 +219,26 @@ export function dedupeProjects(projects: Project[]): { kept: Project[]; others: 
   return { kept, others, aliasOf };
 }
 
+// AI判定する組の選び方。控えにある（判定済みの）組は上限に関係なく選び、控えに無い組は
+// 社員ごと・案件ごとの新規判定数が上限未満のときだけ選ぶ。上限で漏れた組は控えが増えるにつれ次の回に回る。並びは入力のまま
+export function selectPairsForJudge<T extends { match: { ownEngineerId: string; projectId: string } }>(
+  all: T[],
+  cachedIdsOf: (engineerId: string) => Set<string> | undefined,
+  perEngineer: number,
+  perProject: number,
+): T[] {
+  const byEngineer = new Map<string, number>();
+  const byProject = new Map<string, number>();
+  return all.filter((p) => {
+    const { ownEngineerId: e, projectId: pr } = p.match;
+    if (cachedIdsOf(e)?.has(pr)) return true;
+    if ((byEngineer.get(e) ?? 0) >= perEngineer || (byProject.get(pr) ?? 0) >= perProject) return false;
+    byEngineer.set(e, (byEngineer.get(e) ?? 0) + 1);
+    byProject.set(pr, (byProject.get(pr) ?? 0) + 1);
+    return true;
+  });
+}
+
 // 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
 export async function buildProperCandidates(
   engineers: ProperEngineer[],
@@ -231,7 +251,9 @@ export async function buildProperCandidates(
   const projectById = new Map(projects.map((p) => [p.id, p]));
   const perItem = properJudgePerEngineer();
   const all = ownPairsForJudge(engineers, projects, Number.MAX_SAFE_INTEGER, now);
-  const pairs = ownPairsForJudge(engineers, projects, perItem, now);
+  const cachedByEngineer = new Map<string, Set<string>>();
+  for (const e of engineers) cachedByEngineer.set(e.id, await cachedProjectIdsFor(e));
+  const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
   const stats: JudgeStats = { prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length };
   const outcomes = await judgeProperPairs(
     pairs.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project })),
