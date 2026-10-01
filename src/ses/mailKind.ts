@@ -11,9 +11,18 @@ export type MailKind = 'engineer' | 'project' | 'unknown';
 // 行頭の飾り（【】■◆・数字の見出し等）を除いた見出し語。全角空白で字間を空けた「氏　名」も読む
 const LEAD = String.raw`^[\s　]*(?:[【\[［■◆◇●○▼▽★☆・\-*]|\d{1,2}[.)）]|[①-⑳])*[\s　]*`;
 
+// 行頭の飾りの記号（LEAD と同じ。数字の見出しは含めない）。◆氏名◆ のように閉じの飾りで終わる見出しは、行頭にも飾りがある行だけ読む
+const DECO = String.raw`[【\[［■◆◇●○▼▽★☆・\-*]`;
+const CLOSE_DECO = String.raw`[◆◇■□●○★☆▼▽]`;
+
 function heading(words: string[]): RegExp {
   const spaced = words.map((w) => [...w].join('[\\s　]*')).join('|');
-  return new RegExp(`${LEAD}(?:${spaced})[\\s　]*[】\\]］]?[\\s　]*[:：】]`, 'm');
+  const word = `(?:${spaced})`;
+  const tail = String.raw`[\s　]*[】\]］]?[\s　]*[:：】]`;
+  // 括弧で始まる見出しだけ、見出し語の前に短い語＋区切りを1つまで許す（【年齢・性別】【住所／最寄り駅】）。上限つきで入れ子の量指定子は作らない
+  const bracketed = String.raw`^[\s　]*(?:${DECO})*[【\[［][\s　]*(?:[^】\]］\n]{1,6}[・／/、][\s　]*)?${word}${tail}`;
+  const closedByDeco = String.raw`^[\s　]*(?:${DECO})+[\s　]*${word}[\s　]*${CLOSE_DECO}`;
+  return new RegExp(`${LEAD}${word}${tail}|${bracketed}|${closedByDeco}`, 'm');
 }
 
 // 所属・稼働・住まい・並行状況は要員の紹介の定型（【氏名】【所属】【稼働】【単金】の並び）。案件にも書かれうるが、
