@@ -12,7 +12,7 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
-import type { EngineerLevel } from '../level.js';
+import type { EngineerLevel, ProjectLevel } from '../level.js';
 import type { OwnEngineer, Project, ProperEngineer, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
@@ -205,6 +205,8 @@ export function pitchWithVerifiedYears(pitch: string, profile: string): string {
     .trim();
 }
 
+const hasYearsCondition = (text: string): boolean => /(\d+(?:\.\d+)?)\s*年\s*以上/.test(text.normalize('NFKC'));
+
 // 必須の「N年以上」に対する社員の年数（社員側の値だけ。AIの根拠の文からは読まない）。条件を読めない・年数が分からないときは null
 function shortOfRequiredYears(label: string, text: string, opts: { level?: EngineerLevel; experienceYears?: number | null }): { have: number } | null {
   const need = Number(text.normalize('NFKC').match(/(\d+(?:\.\d+)?)\s*年\s*以上/)?.[1]);
@@ -223,7 +225,7 @@ function shortOfRequiredYears(label: string, text: string, opts: { level?: Engin
 
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
-export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string },
+export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string; level?: ProjectLevel },
   opts: { level?: EngineerLevel; experienceYears?: number | null } = {}): ProperJudgment {
   const hay = norm(profile);
   const met: string[] = [];
@@ -264,7 +266,20 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     // 必須の「N年以上」は、技術名の一致だけで満たすとせず、社員側の年数が足りなければ近い経験にする
     let shortYears: number | null = null;
     if (status === 'met' && !optional) {
-      const short = shortOfRequiredYears(label, r.quote?.trim() || r.requirement, opts);
+      const own = r.quote?.trim() || r.requirement;
+      let yearsText = own;
+      // AIが年数を落として要件を「Java」とだけ書いたときは、案件の必須スキルの同じ技術の記載から年数を読む（技術名の無い要件では決められないので使わない）
+      if (!hasYearsCondition(own) && labelTech.length > 0) {
+        yearsText = project.requiredSkills.find((s) => hasYearsCondition(s) && techNamesIn(s).some((t) => labelTech.some((l) => (skillMatch([l], [t])?.rate ?? 0) > 0))) ?? own;
+      }
+      // 案件の必須スキルにも年数が無いときは、抽出した案件のレベル（技術ごとの年数・IT経験の合計）から読む
+      if (!hasYearsCondition(yearsText)) {
+        const lv = project.level;
+        const hit = labelTech.length > 0 ? lv?.skillYears.find((y) => labelTech.some((l) => (skillMatch([l], [y.skill])?.rate ?? 0) > 0)) : undefined;
+        if (hit) yearsText = `${own} ${hit.years}年以上`;
+        else if (labelTech.length === 0 && lv?.totalYears) yearsText = `${own} ${lv.totalYears}年以上`;
+      }
+      const short = shortOfRequiredYears(label, yearsText, opts);
       if (short) {
         status = 'close';
         shortYears = short.have;
