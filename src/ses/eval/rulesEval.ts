@@ -3863,6 +3863,38 @@ async function properJudgeChecks(): Promise<void> {
   check('案件メールに指示らしき記載があれば人の確認に回す', inj.reviewNotes.some((n) => n.includes('AIへの指示')));
   check('本人の希望は懸念として残す', verifyJudgment(raw({ preferenceFit: '希望はDB運用保守で合う' }), profile, { requiredSkills: [] }).concerns.includes('本人の希望: 希望はDB運用保守で合う'));
 
+  // 必須の「N年以上」: 社員側の年数が足りなければ met → close（作り物の経歴）
+  const yrsProfile = 'Java でのWeb開発（2年7か月）。実務経験3年。';
+  const yrsLevel = { skillYears: [{ skill: 'Java', years: 2.6 }], phaseYears: [], role: null };
+  const yrsRaw = (requirement: string, kind: '必須' | '尚可' = '必須') => raw({ requirements: [
+    { requirement, kind, quote: requirement, status: 'met', evidence: 'Java でのWeb開発', note: '' },
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+  ] });
+  const yrsProj = { requiredSkills: ['Java', 'Oracle'] };
+  const yrsProfileFull = `${yrsProfile}\nOracle DB上でのデータ作成、削除対応`;
+  const y3 = verifyJudgment(yrsRaw('Java（3年以上）'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
+  check('必須「Java 3年以上」を経歴2.6年なら近い経験にし、足りない点に年数を出す',
+    y3.checks?.[0].status === 'close' && y3.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(y3.checks) + JSON.stringify(y3.gaps));
+  const y2 = verifyJudgment(yrsRaw('Java（2年以上）'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
+  check('「Java 2年以上」は経歴2.6年なら満たすまま', y2.checks?.[0].status === 'met' && y2.gaps.length === 0, JSON.stringify(y2.checks));
+  const yEq = verifyJudgment(yrsRaw('Java（2.6年以上）'), yrsProfileFull, yrsProj, { level: yrsLevel });
+  check('条件の年数が経歴と等しければ満たすまま', yEq.checks?.[0].status === 'met', JSON.stringify(yEq.checks));
+  const yNone = verifyJudgment(yrsRaw('Java（3年以上）'), yrsProfileFull, yrsProj);
+  check('4つ目の引数を省けば年数では下げない（今までどおり）', yNone.checks?.[0].status === 'met', JSON.stringify(yNone.checks));
+  const yUnknown = verifyJudgment(yrsRaw('Java（3年以上）'), yrsProfileFull, yrsProj, { level: { skillYears: [], phaseYears: [], role: null }, experienceYears: null });
+  check('技術の年数が分からなければ下げない', yUnknown.checks?.[0].status === 'met', JSON.stringify(yUnknown.checks));
+  const yExp = (years: number | null) => verifyJudgment(raw({ requirements: [
+    { requirement: '実務経験5年以上', kind: '必須', quote: '実務経験5年以上', status: 'met', evidence: 'Java でのWeb開発', note: '' },
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+  ] }), yrsProfileFull, yrsProj, { experienceYears: years }).checks?.[0].status;
+  check('技術名の無い「実務経験5年以上」は経験年数3なら近い経験・不明（null）なら満たすまま', yExp(3) === 'close' && yExp(null) === 'met', `${yExp(3)} ${yExp(null)}`);
+  const yOpt = verifyJudgment(yrsRaw('Java（5年以上）', '尚可'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
+  check('尚可の「N年以上」は下げない', yOpt.checks?.[0].status === 'met', JSON.stringify(yOpt.checks));
+  const yMe = verifyJudgment(yrsRaw('Java 3年目のメンバー'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
+  check('「3年目」は年数の条件として読まない', yMe.checks?.[0].status === 'met', JSON.stringify(yMe.checks));
+  const yRec = verifyJudgment(yrsRaw('Java（3年以上）'), yrsProfileFull, yrsProj, { level: yrsLevel });
+  check('年数で近い経験になっても判定（推奨）は直接変えない', yRec.verdict === 'recommend', yRec.verdict);
+
   const yp = '■経験年数：18年4ヶ月\n顧客先データセンターで10年間無事故の運用';
   check('推しどころの文のうち経歴に無い年数（約20年）の文は除き、経歴にある年数の文は残す',
     pitchWithVerifiedYears('Linux・Windowsサーバーの運用保守を約20年経験しています。10年間無事故の運用を完遂しました。', yp) === '10年間無事故の運用を完遂しました。' &&
