@@ -70,6 +70,16 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    「精度集計」（A1 に summary）・要員のタブ（1行目に header、A2 に formula）を書く。新しい要員のタブは既存の要員のタブを複製して作る
 8. 書いた後に「全体」の ID 列と件数・「精度集計」を読み戻して確かめる
 9. `PHASE=labels` を実行し、判定と営業の評価をラベルストア（`SES_LABELS_DIR`、スクラッチパッドの `labels/`）に足す。同じ組は2回書かれない。出力の件数を実行ログに書く
+10. `labels_backup.tsv`（この回に増えた組。0件なら無い）があれば、サブエージェント（sonnet）に Drive のバックアップのフォルダ（Routine の指示文で渡すID）へ
+    `create_file`（title `labels_<RUN_DIRの名前>.tsv`、contentMimeType `text/plain`、disableConversionToGoogleType true、textContent にファイルの中身をそのまま）で上げさせる。
+    上げたファイルを `read_file_content` で読み戻して `RUN_DIR/backup_readback/` に保存させ、`PHASE=labels_verify` で確かめる（出力は `{written, readBack, missing, bad, ok}`。ok でなければ終了コード1）。
+    ok でなければ同じ手順で1回だけ上げ直し、それでもだめなら実行ログに残す
+
+    - 1行ごとにチェックサム（crc）が付くので、写し間違いのある行は読み戻しで bad になり、`missing` にその組のキーが出る。控えるのは組のキー・元メールID・判定の結論（verdict・優先度・必須/尚可ごとの結果）だけ
+    - 最初の1回だけ、ストア全体の控えを作る: `LABELS_BACKUP_ALL=1 PHASE=labels` なら `labels_backup_01.tsv`…（15000バイトごと）に書く。
+      RUN_DIR の判定ファイルが無いときは `npm run ses:labels:backup -- <出力先フォルダ>`（ストアの全組を同じ形に分けて書く。出力は件数とバイト数だけ）。分けたファイルを1つずつ上げ、`backup_readback/` に戻して同じ確認をする
+    - コンテナが片付けられて scratchpad の `labels/` が消えたときは、Drive の控えのファイルを読んでフォルダに保存し、
+      `npm run ses:labels:restore -- <控えのフォルダ>` を実行する。`SES_LABELS_DIR/restored_index.jsonl`（組ごとの結論）と `restored_mail_ids.txt`（Gmail から抽出し直す対象の元メールID）ができる。出力は件数だけ
 
 ### 判定の指示（サブエージェントに渡す）
 
