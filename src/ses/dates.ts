@@ -6,8 +6,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000; // 日本時間は夏時間がないため固定オフセットで足りる
 
 // 年の記載の無い月日・LLM が返した日付が、受信日のこの日数より前なら翌年とみなす。
-// 再送された案件の「8月〜」は受信が9月でも今年の8月（＝既に開始可）で、1年近く先の開始は SES では稀なため
-export const PAST_TOLERANCE_DAYS = 60;
+// 再送された案件の「7月〜」は受信が10月でも今年の7月（＝既に開始可）で、1年近く先の開始は SES では稀なため
+export const PAST_TOLERANCE_DAYS = 120;
 
 // 受信日からこれより先の日付は読み違いとみなす
 const FUTURE_LIMIT_DAYS = 730;
@@ -47,7 +47,7 @@ function dayOfPart(part: string | undefined, y: number, m: number): number {
 }
 
 // 年の記載が無い月日を、受信日の PAST_TOLERANCE_DAYS 日前以降で最も早い日付になる年で解決する
-// （受信 2026-09-23: 「10月」→2026-10-01、「1月」→2027-01-01、「8月」→2026-08-01）
+// （受信 2026-10-01: 「7月」→2026-07-01、「5月」→2027-05-01、「1月」→2027-01-01）
 function withInferredYear(month: number, day: number | 'part', part: string | undefined, receivedIso: string): string | null {
   const receivedYear = Number(receivedIso.slice(0, 4));
   const floor = dayNumber(receivedIso) - PAST_TOLERANCE_DAYS;

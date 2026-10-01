@@ -17,7 +17,7 @@ import { normalizeSkills, normalizeRequirementLists, requirementMembers, SKILL_I
 import { tallySkillTokens } from './skillStats.js';
 import { normalizePrefecture, isFullRemoteLocation, coarseResidence } from './prefecture.js';
 import { normalizeRate, type RateUnit } from './pricing.js';
-import { jstDateOf, resolveItemDate } from './dates.js';
+import { jstDateOf, resolveItemDate, PAST_TOLERANCE_DAYS } from './dates.js';
 import { EXPECTED_EXTRACTIONS } from './fixtures/expectedExtractions.js';
 import { sanitizeListItem } from '../database/mapping.js';
 import { safeErr, logId } from './redact.js';
@@ -53,8 +53,8 @@ export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリ�
   startDateIso / availableFromIso に設定し、読み取れなければ null にしてください。
   日付は <untrusted_mail> の前にある「受信日」を基準に解釈します:
   「即日」「随時」「即稼働可」は受信日、「来月」「翌月」は受信日の翌月1日、「○月〜」「○月から」はその月の1日、
-  上旬=1日・中旬=11日・下旬=21日・末=その月の末日。年の記載が無い月日は、受信日の60日前以降で最も早い日付になる年を選ぶ
-  （例: 受信日 2026-09-23 の「10月」→ 2026-10-01、「1月」→ 2027-01-01、「8月」→ 2026-08-01）
+  上旬=1日・中旬=11日・下旬=21日・末=その月の末日。年の記載が無い月日は、受信日の${PAST_TOLERANCE_DAYS}日前以降で最も早い日付になる年を選ぶ
+  （例: 受信日 2026-10-01 の「7月」→ 2026-07-01、「5月」→ 2027-05-01、「1月」→ 2027-01-01）
 - startPeriod / availableDate には原文の表記（「即日」「2026年10月〜」「11月中旬」等）をそのまま入れてください
 - リモート可否は full（フルリモート可）/ partial（一部リモート可）/ none（不可）/ unknown（不明）から選んでください
 - スキル（requiredSkills / preferredSkills / skills）は配列の1要素に1つの技術名だけを入れてください。
