@@ -132,6 +132,7 @@ import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMark
 import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
+import { parseJstLabel } from '../trial/jstLabel.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
 import { joinList, splitList } from '../../database/mapping.js';
 import { createHash, randomBytes } from 'crypto';
@@ -4641,4 +4642,20 @@ function securityAuditRound12Checks(): void {
   const BENIGN_LINK12 = ['2026/09/24 10:00', '09:30〜18:00', '稼働 140h〜180h', '60,000,000円', '精算 140/180', '2026/10/01〜2027/03/31', '0.5・1.0・1.5・2.0・2.5'];
   const fpLink = BENIGN_LINK12.filter((t) => linkOrContactLike(t));
   check('日付・時刻・精算幅・金額は電話番号とみなさない', fpLink.length === 0, fpLink.join(' / '));
+
+  section('試運転: 受信日時の読み取り（時が1桁でも読める）');
+  const jst = (t: string) => parseJstLabel(t);
+  const jstIso = (t: string) => new Date(jst(t)).toISOString();
+  check(
+    '「8:27」と「08:27」が同じ時刻（2026-09-30T23:27:00Z）になる',
+    jst('2026/10/01 8:27') === jst('2026/10/01 08:27') && jstIso('2026/10/01 8:27') === '2026-09-30T23:27:00.000Z',
+  );
+  check(
+    '月日が1桁・秒つき・ハイフン区切りも読め、空文字・読めない文字は NaN',
+    jstIso('2026/9/30 17:49') === '2026-09-30T08:49:00.000Z' &&
+      jstIso('2026/10/01 08:27:15') === '2026-09-30T23:27:15.000Z' &&
+      jstIso('2026-10-01 08:27') === '2026-09-30T23:27:00.000Z' &&
+      Number.isNaN(jst('')) &&
+      Number.isNaN(jst('abc')),
+  );
 }
