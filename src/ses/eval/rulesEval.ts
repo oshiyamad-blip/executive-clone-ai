@@ -186,7 +186,8 @@ import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
 import { sourceBacked, profileSourceNumbers, projectExcerpt } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
-import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync } from 'fs';
+import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync } from 'fs';
+import { appendLabels, readLabelStore, latestSales, salesKeyOf, prefilterRecall, engineerHashOf, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -4303,6 +4304,7 @@ async function main(): Promise<void> {
     securityAuditRound9Checks();
     await securityAuditRound11Checks();
     securityAuditRound12Checks();
+    labelStoreChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -4747,4 +4749,59 @@ function securityAuditRound12Checks(): void {
       Number.isNaN(jst('')) &&
       Number.isNaN(jst('abc')),
   );
+}
+
+// ===== 判定ラベルの蓄積（ラベルストア）と足切りの再現率 =====
+
+function labelStoreChecks(): void {
+  section('判定ラベル: ストアの読み書き・営業の評価の変化だけ追記・足切りの再現率');
+  check(
+    'salesKeyOf: シートのIDから 要員ID|案件ID を取り出す。合わない文字列は null',
+    salesKeyOf('ownmatch_own_x_proj_0123abcd') === 'own_x|proj_0123abcd' && salesKeyOf('ownmatch_own_x_p1') === null && salesKeyOf('') === null,
+  );
+  const eng: ProperEngineer = {
+    id: 'own_t', displayName: 'T.T', skills: ['Java', 'Spring Boot', 'Oracle'], experienceYears: 5, requiredProjectRate: 60, residence: '東京都',
+    prefecture: '東京都', availableDate: '', availableFrom: null, remoteWish: 'partial', status: 'available',
+    fileId: 'f', fullName: '', proposalLabel: 'T.T', skillSheetUrl: '',
+  };
+  const judgment = (verdict: 'recommend' | 'conditional' | 'reject'): RawProperJudgment => ({
+    work: '', requirements: [], levelFit: '', preferenceFit: '', verdict, pitch: '', concerns: [], workPrefecture: '', injectionSuspected: false,
+  });
+  const hash = engineerHashOf(eng);
+  const pairOf = (projectId: string, skills: string[], verdict: 'recommend' | 'conditional' | 'reject'): LabelPair => ({
+    key: `${eng.id}|${projectId}`, engineerId: eng.id, engineerLabel: 'T.T', projectId, runId: 'run_t', judgedAt: NOW.toISOString(), engineerHash: hash,
+    project: project({ id: projectId, requiredSkills: skills, rateMax: 70, receivedAt: daysAgo(1) }), judgment: judgment(verdict), priority: '',
+  });
+  const sale = (key: string, over: Partial<LabelSales> = {}): LabelSales => ({
+    key, seenAt: '2026-10-01T00:00:00.000Z', tab: '全体', status: '未着手', skipReason: '', check: '', checkMemo: '', priority: 'A', ...over,
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'ses-labels-eval-'));
+  try {
+    const p1 = pairOf('proj_0000000a', ['Java', 'Spring Boot'], 'recommend');
+    const first = appendLabels(dir, { pairs: [p1], engineers: [{ hash, engineerId: eng.id, engineer: eng }], sales: [sale(p1.key)] });
+    const again = appendLabels(dir, { pairs: [{ ...p1, runId: 'run_later' }], engineers: [{ hash, engineerId: eng.id, engineer: eng }], sales: [sale(p1.key, { seenAt: '2026-10-02T00:00:00.000Z' })] });
+    check('同じ key の組・同じ hash の要員・値が同じ営業の評価は2回書いても1行', first.pairs === 1 && first.engineers === 1 && first.sales === 1 && again.pairs === 0 && again.engineers === 0 && again.sales === 0, show([first, again]));
+    const changed = appendLabels(dir, { sales: [sale(p1.key, { seenAt: '2026-10-03T00:00:00.000Z', check: '◎ 妥当' })] });
+    const store = readLabelStore(dir);
+    check('精度チェックが変わったら営業の評価を1行足し、latestSales は新しい方を返す',
+      changed.sales === 1 && store.sales.length === 2 && latestSales(store.sales).get(p1.key)?.check === '◎ 妥当');
+    const both = appendLabels(dir, { sales: [sale('o|proj_1', { tab: '全体' }), sale('o|proj_1', { tab: 'クローズ済み' })] });
+    check('同じ組が全体とクローズ済みの両方にあるときはクローズ済みを1行だけ書く', both.sales === 1 && latestSales(readLabelStore(dir).sales).get('o|proj_1')?.tab === 'クローズ済み');
+    appendFileSync(join(dir, 'pairs.jsonl'), '{壊れた行\n');
+    const broken = readLabelStore(dir);
+    check('壊れた行が混じっていても残りを読み、読めない行を skipped に数える', broken.skipped === 1 && broken.pairs.length === 1 && broken.engineers.length === 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const pairs = [
+    pairOf('proj_00000001', ['Java', 'Spring Boot'], 'recommend'),
+    pairOf('proj_00000002', ['COBOL', 'RPG'], 'recommend'),
+    pairOf('proj_00000003', ['COBOL', 'RPG'], 'reject'),
+  ];
+  const recall = prefilterRecall(pairs, new Map([[hash, eng]]));
+  check('足切りの再現率: 必須の技術が合う正例は通り、技術がまったく合わない正例は落ちる（キーを返す）',
+    recall.ai.total === 2 && recall.ai.kept === 1 && same(recall.ai.missed, [`${eng.id}|proj_00000002`]), show(recall.ai));
+  check('負例（reject）の通過数も数える（技術が合わない負例は通らない）', recall.negative.total === 1 && recall.negative.kept === 0);
+  const noEngineer = prefilterRecall(pairs, new Map());
+  check('要員の控えが無い組は評価から除いて件数を返す', noEngineer.noEngineer === 3 && noEngineer.ai.total === 0);
 }
