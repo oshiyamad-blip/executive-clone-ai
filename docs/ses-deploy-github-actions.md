@@ -466,7 +466,7 @@ Variables は **Settings → Secrets and variables → Actions → Variables** �
 | `SES_ALLOW_GEMINI_API` | `paid` | `gemini` を使う場合は**必須** | `LLM_PROVIDER=gemini` では、メール本文・添付・社員のスキルシートを Google AI Studio に送ります。無料枠は送った内容が品質改善や人による確認に使われ得るため、**課金を有効にしたプロジェクトで利用条件を確認したうえで** `paid` を登録します（未登録なら事前確認が ❌ で止め、バッチも始めません） |
 | `SES_NOTIFY_ALLOW_EXTERNAL` | `false` | 任意 | `true` のときだけ、`SES_NOTIFY_TO` の自社ドメイン以外の宛先にもサマリを送ります（既定では送らず、事前確認が ❌ で知らせます） |
 | `SES_RETENTION_DAYS` | `180` | 任意 | 個人データの保存期間（日。既定 180、30〜3650）。4-2 の「保存期間」を参照 |
-| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_NOTIFY_ALWAYS`（既定 false＝新しい候補がある回だけサマリを送る） `SES_MAX_FETCH_PER_RUN`（既定1500） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `PROPER_JUDGE_PER_ENGINEER`（既定50＝社員ごとに新しくAI判定する組の上限。判定の控えにある組は数えない） `PROPER_RATE_TOLERANCE_MAN`（既定5＝必要案件単価の5万円下まで単価交渉として候補に残す） `PROPER_ROSTER_TAB`（既定「要員」） `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
+| その他の調整値 | — | 任意 | `SKILL_MATCH_THRESHOLD` `SKILL_MATCH_STRONG_THRESHOLD` `MAX_CANDIDATES_PER_ITEM` `MAX_PROJECTS_PER_ENGINEER` `SES_STALE_DAYS` `MATCH_MIN_LLM_SCORE` `MATCH_REJECT_LLM_SCORE` `SES_JUDGE_BUDGET_JPY` `MATCH_TIMING_GRACE_DAYS` `HOURLY_TO_MONTHLY_HOURS` `ENABLE_NEGOTIATION` `SES_MATCH_LOOKBACK_DAYS` `SES_MATCH_POOL_LIMIT` `SES_TARGET`（既定 projects＝案件だけ） `SES_NOTIFY_ALWAYS`（既定 false＝新しい候補がある回だけサマリを送る） `SES_MAX_FETCH_PER_RUN`（既定1500） `SES_RESEND_WINDOW_DAYS` `SES_RESEND_SIMILARITY` `SES_COLLECT_OWN_DOMAIN` `SES_HEAL_ENABLED` `SES_HEAL_BUDGET_JPY` `SES_HEAL_MAX_ATTEMPTS` `SES_REPAIR_ENABLED` `SES_REPAIR_BUDGET_JPY` `PROPER_MAX_EXTRACT_PER_RUN` `PROPER_PROJECT_LOOKBACK_DAYS` `PROPER_JUDGE_PER_ENGINEER`（既定150＝社員ごとに新しくAI判定する組の上限で安全弁。判定の控えにある組は数えない） `PROPER_RATE_TOLERANCE_MAN`（既定5＝必要案件単価の5万円下まで単価交渉として候補に残す） `PROPER_ROSTER_TAB`（既定「要員」） `ANTHROPIC_MODEL_EXTRACT` `ANTHROPIC_MODEL_MATCH` `ANTHROPIC_MODEL_REPAIR` `JPY_PER_USD`（意味は `.env.example`） |
 
 **Secrets に移した設定**: 以前の手順で `SES_OWN_DOMAINS` `SES_ALLOWED_SENDER_DOMAINS` `SHEETS_DB_IMPERSONATE` `PROPER_GOOGLE_IMPERSONATE`
 `MIN_GROSS_MARGIN_*` `NEGOTIATION_MAX_*` を Variables に登録していた場合は、Secrets に登録し直し（価格の方針は `SES_PRICING_POLICY_JSON` にまとめる）、Variables から削除してください
@@ -827,7 +827,7 @@ AI の月額の目安（1ドル=160円、抽出=Claude Haiku 4.5・判定と文�
 - 単価は Claude Haiku 4.5 = $1/$5、Claude Sonnet 5 = $2/$10（per MTok。2026-09-23 確認）。プロンプトキャッシュは入力単価の
   1.25倍（5分の書き込み）・2倍（1時間の書き込み）・0.1倍（読み込み）で計上します
 - **プロパー候補のAI判定**（Claude Sonnet 5.5）: 1組あたり約3〜5円（経歴を含む入力 約4千トークン・出力 約2千トークン）。
-  1回の実行で判定するのは社員1人あたり `PROPER_JUDGE_PER_ENGINEER`（既定50組。判定の控えにある組は数えず、上限で見送った組は次の回に回る）まで。同じ社員×案件は控えを使うため、2回目以降は新しい組の分だけかかります
+  1回の実行で判定するのは社員1人あたり `PROPER_JUDGE_PER_ENGINEER`（既定150組、最大300。判定の控えにある組は数えず、上限で見送った組は次の回に回る）まで。同じ社員×案件は控えを使うため、2回目以降は新しい組の分だけかかります
   （例: 営業中5名 × 12組 × 1日2回 = 1日最大120組 ≒ 約430円／日・約9千円／月）
 - 上のほか、失敗時の自動修復は1回あたり最大 `SES_HEAL_BUDGET_JPY`（既定50円）、プロパーのスキルシートの読み取りは
   更新されたファイルだけ（1ファイル数円程度）かかります

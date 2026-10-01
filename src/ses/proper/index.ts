@@ -363,7 +363,8 @@ export function judgmentFit(j: ProperJudgment | undefined): number {
 }
 
 function logJudge(s: JudgeStats): void {
-  console.log(
+  const log = s.overCap > 0 ? console.warn : console.log;
+  log(
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );

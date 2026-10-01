@@ -202,7 +202,7 @@ if (phase === 'prompts') {
   const { projects } = projectsOf(rows);
   const carriedIds = new Set(projectsOf(prevRows).projects.map((p) => p.id));
   const kept = dedupeProjects(projects).kept;
-  const perEngineer = Number(process.env.PROPER_JUDGE_PER_ENGINEER ?? 50);
+  const perEngineer = Number(process.env.PROPER_JUDGE_PER_ENGINEER ?? 150);
   const done = previouslyJudged(list);
   const canonical = legacyCanonical(list);
   // すでにシートにある組・クローズした組は判定し直さない（本番の判定の控えの代わり）
@@ -240,7 +240,7 @@ if (phase === 'prompts') {
   // prep と同じ選び方にするため、前の回で判定済みの組を控えとして扱う
   __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
   // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
-  process.env.PROPER_JUDGE_PER_ENGINEER = '100';
+  process.env.PROPER_JUDGE_PER_ENGINEER = '300';
   const { candidates, stats } = await buildProperCandidates(list, projects, now);
   // この回で判定した組だけを載せる（判定していない組は失敗扱いになるため除く。シートにある組は下の差分で残る）
   const fresh = candidates.filter((c) => judged.has(`${c.ownEngineerId}|${c.projectId}`)).map((c) => salesRowOf(c, projects.find((p) => p.id === c.projectId)));

@@ -803,9 +803,9 @@ export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
 }
 
-// プロパー候補のAI判定に回す組の上限（社員ごと・案件ごと）。ルールの並びの上位からこの件数まで判定し、超えた分はログに出す
+// プロパー候補のAI判定に回す組の上限（社員ごと）。上限は安全弁（通常は足切りを通った組をすべて判定する）。超えた組は次の回に回る（判定の控えは数えない）
 export function properJudgePerEngineer(): number {
-  return envNum('PROPER_JUDGE_PER_ENGINEER', 50, { min: 1, max: 100, int: true });
+  return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
 }
 
 // プロパー候補の突合対象にする案件の受信日の遡り日数

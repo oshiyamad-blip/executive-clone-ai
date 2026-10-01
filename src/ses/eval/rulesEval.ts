@@ -4008,9 +4008,9 @@ async function properJudgeChecks(): Promise<void> {
     check('選び方: 案件ごとの上限も未判定の組だけを数える', selProject.length === 2);
     const savedDefault = process.env.PROPER_JUDGE_PER_ENGINEER;
     delete process.env.PROPER_JUDGE_PER_ENGINEER;
-    check('AI判定の上限の既定値は社員ごとに50組', properJudgePerEngineer() === 50);
-    process.env.PROPER_JUDGE_PER_ENGINEER = '100';
-    check('AI判定の上限は100組まで指定できる', properJudgePerEngineer() === 100);
+    check('AI判定の上限の既定値は社員ごとに150組', properJudgePerEngineer() === 150);
+    process.env.PROPER_JUDGE_PER_ENGINEER = '300';
+    check('AI判定の上限は300組まで指定できる', properJudgePerEngineer() === 300);
     if (savedDefault === undefined) delete process.env.PROPER_JUDGE_PER_ENGINEER;
     else process.env.PROPER_JUDGE_PER_ENGINEER = savedDefault;
     __setProperJudgeForTest(async (e) => {
