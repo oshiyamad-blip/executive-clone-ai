@@ -12,6 +12,7 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
+import type { EngineerLevel } from '../level.js';
 import type { OwnEngineer, Project, ProperEngineer, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
 // 指示文・照合の規則を変えたら上げる（控えの判定を使わずに判定し直す）
@@ -204,9 +205,26 @@ export function pitchWithVerifiedYears(pitch: string, profile: string): string {
     .trim();
 }
 
+// 必須の「N年以上」に対する社員の年数（社員側の値だけ。AIの根拠の文からは読まない）。条件を読めない・年数が分からないときは null
+function shortOfRequiredYears(label: string, text: string, opts: { level?: EngineerLevel; experienceYears?: number | null }): { have: number } | null {
+  const need = Number(text.normalize('NFKC').match(/(\d+(?:\.\d+)?)\s*年\s*以上/)?.[1]);
+  if (!Number.isFinite(need)) return null;
+  const techs = techNamesIn(label).length > 0 ? techNamesIn(label) : techNamesIn(text);
+  let have: number | null = null;
+  if (techs.length > 0) {
+    for (const y of opts.level?.skillYears ?? []) {
+      if (techs.some((t) => (skillMatch([t], [y.skill])?.rate ?? 0) > 0)) have = Math.max(have ?? 0, y.years);
+    }
+  } else if (/経験|実務|IT/.test(text.normalize('NFKC'))) {
+    have = opts.experienceYears ?? null;
+  }
+  return have !== null && have < need ? { have } : null;
+}
+
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
-export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string }): ProperJudgment {
+export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string },
+  opts: { level?: EngineerLevel; experienceYears?: number | null } = {}): ProperJudgment {
   const hay = norm(profile);
   const met: string[] = [];
   const gaps: string[] = [];
@@ -243,6 +261,15 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
       status = 'unmet';
       weak += 1;
     }
+    // 必須の「N年以上」は、技術名の一致だけで満たすとせず、社員側の年数が足りなければ近い経験にする
+    let shortYears: number | null = null;
+    if (status === 'met' && !optional) {
+      const short = shortOfRequiredYears(label, r.quote?.trim() || r.requirement, opts);
+      if (short) {
+        status = 'close';
+        shortYears = short.have;
+      }
+    }
     checks.push({ kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status });
     if (status === 'unmet') {
       if (!optional) unmetCount += 1;
@@ -257,7 +284,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     if (status === 'met') metCount += 1;
     if (!isGenericRequirement(label)) substantive += 1;
     met.push(`${label}${status === 'close' ? '（近い経験）' : ''} ← ${ev}`);
-    if (status === 'close') gaps.push(`${label}（近い経験のみ）`);
+    if (status === 'close') gaps.push(shortYears !== null ? `${label}（経歴は約${shortYears.toFixed(1)}年）` : `${label}（近い経験のみ）`);
   }
   if (weak > 0) concerns.push(`近い経験とされた${weak}件は根拠に技術の記載が無いため、満たさない扱いにしました`);
   if (unverified > 0) reviewNotes.push(`AIが根拠に挙げた記載のうち${unverified}件が経歴に見当たらないため、満たさない扱いにしました`);
@@ -412,7 +439,7 @@ export async function judgeProperPairs(
         const { project } = pairs[i];
         try {
           const raw = await callJudge(engineer, project);
-          const j = verifyJudgment(raw, profileTextOf(engineer), project);
+          const j = verifyJudgment(raw, profileTextOf(engineer), project, { level: engineer.level, experienceYears: engineer.experienceYears ?? null });
           out[i] = { judgment: j, cached: false };
           cache[project.id] = j;
         } catch (err) {
