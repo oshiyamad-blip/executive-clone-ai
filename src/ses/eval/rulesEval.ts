@@ -4140,6 +4140,21 @@ function salesListChecks(): void {
     SALES_COLUMNS.find((c) => c.name === '見送り理由')?.human === true && fmt.some((r) => r.setDataValidation?.range?.startColumnIndex === col('見送り理由')));
   check('優先度: 上限を超えてAIが見送らなかった組は「D 参考」（要確認が先）',
     salesPriorityOf({ ...base, reference: true }).startsWith('D') && salesPriorityOf({ ...review, reference: true }).startsWith('C'));
+  const jd = (verdict: 'recommend' | 'conditional', checks?: Array<{ kind: '必須' | '尚可'; requirement: string; status: 'met' | 'close' | 'unmet' }>) =>
+    ({ verdict, work: '', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks: checks?.map((k) => ({ ...k, quote: k.requirement })) });
+  const unmetReq = { kind: '必須' as const, requirement: 'React', status: 'unmet' as const };
+  const withJ = (verdict: 'recommend' | 'conditional', checks?: Parameters<typeof jd>[1], over: Record<string, unknown> = {}) =>
+    ({ ...base, ...over, judgment: jd(verdict, checks) }) as ProperCandidate;
+  const condUnmet = withJ('conditional', [unmetReq, { kind: '必須', requirement: 'Java', status: 'met' }]);
+  check('優先度: 条件付きで経験の無い必須があればC（要確認）・確認事項の先頭に要件名',
+    salesPriorityOf(condUnmet).startsWith('C') && String(salesRowOf(condUnmet, undefined)[col('確認事項')]).startsWith('要確認: 経験の無い必須があります（React）'));
+  check('優先度: 条件付きでも必須がすべて met/close（尚可だけ unmet）ならB・checks の無い古い判定もB',
+    salesPriorityOf(withJ('conditional', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('B') &&
+      salesPriorityOf(withJ('conditional')).startsWith('B'));
+  check('優先度: 推奨なら必須に unmet があってもCにせず今の規則（単価を満たせばA・満たさなければB）',
+    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('A') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 必須 unmet の条件付きでも reference はD・needsReview はC（今の優先のまま）',
+    salesPriorityOf({ ...condUnmet, reference: true }).startsWith('D') && salesPriorityOf({ ...condUnmet, needsReview: true, reference: true }).startsWith('C'));
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
   check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
   const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);
