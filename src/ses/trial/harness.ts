@@ -11,6 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
+import { parseJstLabel } from './jstLabel.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, type RawProperJudgment } from '../proper/judge.js';
@@ -193,7 +194,7 @@ if (phase === 'prompts') {
   const stillOpen = (id: string, prev: Array<string | number>) => {
     const c = canonical(id);
     const e = list.find((x) => c.startsWith(`ownmatch_${x.id}_`));
-    const received = Date.parse(String(prev[COL['受信日時']]).replace(/\//g, '-').replace(' ', 'T') + ':00+09:00');
+    const received = parseJstLabel(String(prev[COL['受信日時']]));
     return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
   };
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)));
