@@ -186,8 +186,8 @@ import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
 import { sourceBacked, profileSourceNumbers, projectExcerpt } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
-import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync } from 'fs';
-import { appendLabels, readLabelStore, latestSales, salesKeyOf, prefilterRecall, engineerHashOf, type LabelPair, type LabelSales } from './labels.js';
+import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
+import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -4787,6 +4787,8 @@ function labelStoreChecks(): void {
       changed.sales === 1 && store.sales.length === 2 && latestSales(store.sales).get(p1.key)?.check === '◎ 妥当');
     const both = appendLabels(dir, { sales: [sale('o|proj_1', { tab: '全体' }), sale('o|proj_1', { tab: 'クローズ済み' })] });
     check('同じ組が全体とクローズ済みの両方にあるときはクローズ済みを1行だけ書く', both.sales === 1 && latestSales(readLabelStore(dir).sales).get('o|proj_1')?.tab === 'クローズ済み');
+    const again2 = appendLabels(dir, { pairs: [p1] });
+    check('appendLabels の addedPairs: 初回はその組、2回目は空', first.addedPairs.length === 1 && first.addedPairs[0]?.key === p1.key && again.addedPairs.length === 0 && again2.addedPairs.length === 0);
     appendFileSync(join(dir, 'pairs.jsonl'), '{壊れた行\n');
     const broken = readLabelStore(dir);
     check('壊れた行が混じっていても残りを読み、読めない行を skipped に数える', broken.skipped === 1 && broken.pairs.length === 1 && broken.engineers.length === 1);
@@ -4804,4 +4806,58 @@ function labelStoreChecks(): void {
   check('負例（reject）の通過数も数える（技術が合わない負例は通らない）', recall.negative.total === 1 && recall.negative.kept === 0);
   const noEngineer = prefilterRecall(pairs, new Map());
   check('要員の控えが無い組は評価から除いて件数を返す', noEngineer.noEngineer === 3 && noEngineer.ai.total === 0);
+  labelBackupChecks(pairOf, judgment);
+}
+
+function labelBackupChecks(
+  pairOf: (projectId: string, skills: string[], verdict: 'recommend' | 'conditional' | 'reject') => LabelPair,
+  judgment: (verdict: 'recommend' | 'conditional' | 'reject') => RawProperJudgment,
+): void {
+  section('判定ラベル: Drive への控え（1行ごとのチェックサム・写し間違いの検出・読み戻しの突き合わせ）');
+  const req = (kind: '必須' | '尚可' | undefined, status: 'met' | 'close' | 'unmet') => ({ requirement: 'r', kind, quote: 'q', status, evidence: '', note: '' });
+  const base = pairOf('proj_000000b1', ['Java'], 'conditional');
+  const p1: LabelPair = {
+    ...base, priority: 'B 通常', project: { ...base.project, sourceMailId: 'sesmail_t1' },
+    judgment: { ...judgment('conditional'), rateReason: 'unclear', requirements: [req('必須', 'met'), req('必須', 'close'), req('尚可', 'unmet'), req(undefined, 'unmet')] },
+  };
+  const p2: LabelPair = { ...pairOf('proj_000000b2', ['Java'], 'reject'), priority: '', judgment: judgment('reject') };
+  const line = backupLineOf(p1);
+  const parsed = parseBackup(`${BACKUP_HEADER}\n\n${line}\n`);
+  const row = parsed.rows[0];
+  check('backupLineOf → parseBackup の往復で同じ値（req は必須 met・close／尚可 unmet／kind 無しは必須）',
+    parsed.bad === 0 && parsed.rows.length === 1 && row?.key === p1.key && row.sourceMailId === 'sesmail_t1' && row.runId === 'run_t' && row.judgedAt === p1.judgedAt &&
+      row.verdict === 'conditional' && row.priority === 'B' && row.req === 'MCuU' && row.rateReason === 'unclear', show(row));
+  const row2 = parseBackup(backupLineOf(p2)).rows[0];
+  check('候補外の priority と空の requirements・rateReason 無しは - になる', row2?.priority === '-' && row2.req === '-' && row2.rateReason === '-', show(row2));
+  const flipped = line.replace('conditional', 'conditionaL');
+  const cut = line.split('\t').slice(0, 6).join('\t');
+  const mix = parseBackup(`${flipped}\n${cut}\n${line}\n${line}\n`);
+  check('1文字変えた行・列の足りない行は bad として捨て、同じ key は最初の行を採る', mix.bad === 2 && mix.rows.length === 1);
+  const tabbed = backupLineOf({ ...p1, runId: 'run\tx\ny' });
+  const tabRow = parseBackup(tabbed).rows[0];
+  check('値に含まれるタブ・改行は空白に置き換わり、行は壊れない', tabbed.split('\t').length === 10 && !tabbed.includes('\n') && tabRow?.runId === 'run x y');
+  const dir = mkdtempSync(join(tmpdir(), 'ses-labels-backup-'));
+  try {
+    const first = appendLabels(dir, { pairs: [p1, p2] });
+    const second = appendLabels(dir, { pairs: [p1, p2] });
+    check('appendLabels の addedPairs: 1回目は2組、2回目は空', first.addedPairs.length === 2 && second.addedPairs.length === 0);
+    const w = writeBackupFiles(dir, first.addedPairs, false);
+    check('増えた組が無ければ控えは書かない', writeBackupFiles(dir, second.addedPairs, false).files.length === 0 && w.files.length === 1 && w.lines === 2);
+    const many = Array.from({ length: 200 }, (_, i) => pairOf(`proj_${String(i).padStart(8, '0')}`, ['Java'], 'recommend'));
+    const split = writeBackupFiles(join(dir, 'all'), many, true);
+    const sizes = split.files.map((f) => readFileSyncB(join(dir, 'all', f)).length);
+    const total = split.files.reduce((n, f) => n + parseBackup(readFileSyncB(join(dir, 'all', f), 'utf8')).rows.length, 0);
+    check('全件の控えは15000バイトごとに分け、各ファイルに見出し行があり、全行が読める', split.files.length > 1 && sizes.every((n) => n <= 15000) && total === 200 && split.files[0] === 'labels_backup_01.tsv', show(sizes));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const written = parseBackup(`${line}\n${backupLineOf(p2)}\n`).rows;
+  const ok = compareBackup(written, [...written].reverse());
+  check('compareBackup: 全部戻れば ok', ok.ok && ok.written === 2 && ok.readBack === 2 && ok.missing.length === 0 && ok.bad === 0);
+  const lost = compareBackup(written, written.slice(0, 1));
+  check('compareBackup: 1行欠ければ missing にその key が出て ok でない', !lost.ok && lost.missing.length === 1 && lost.missing[0] === p2.key);
+  const changed = compareBackup(written, [{ ...(written[0] as BackupRow), verdict: 'reject' }, written[1] as BackupRow]);
+  check('compareBackup: 値が違って戻った行も missing', !changed.ok && changed.missing[0] === p1.key);
+  const withBad = compareBackup(written, written, 1);
+  check('compareBackup: 読み戻しに壊れた行があれば（全行そろっていても）ok でない', !withBad.ok && withBad.bad === 1);
 }

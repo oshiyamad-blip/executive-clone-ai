@@ -8,12 +8,14 @@
 //   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）
 //   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
 //   PHASE=score    取り込み・判定・営業の入力の数字（score.json）
-//   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）
+//   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
+//                  増えた組は labels_backup.tsv に書く（LABELS_BACKUP_ALL=1 でストア全体を labels_backup_NN.tsv に分けて書く）
+//   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { parseJstLabel } from './jstLabel.js';
-import { appendLabels, engineerHashOf, labelsDir, readLabelStore, salesKeyOf, type LabelPair, type LabelSales } from '../eval/labels.js';
+import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
@@ -350,7 +352,23 @@ if (phase === 'prompts') {
     sales,
   });
   const total = readLabelStore(store);
-  console.log(JSON.stringify({ ...added, missingProject, store: { pairs: total.pairs.length, sales: total.sales.length } }));
+  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1');
+  const { addedPairs: _added, ...counts } = added;
+  console.log(JSON.stringify({ ...counts, missingProject, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
+} else if (phase === 'labels_verify') {
+  const written: BackupRow[] = [];
+  for (const f of readdirSync(dir).filter((n) => /^labels_backup.*\.tsv$/.test(n)).sort()) written.push(...parseBackup(readFileSync(join(dir, f), 'utf8')).rows);
+  const readBack: BackupRow[] = [];
+  let bad = 0;
+  const backDir = join(dir, 'backup_readback');
+  for (const f of existsSync(backDir) ? readdirSync(backDir).filter((n) => n.endsWith('.txt')).sort() : []) {
+    const r = parseBackup(readFileSync(join(backDir, f), 'utf8'));
+    readBack.push(...r.rows);
+    bad += r.bad;
+  }
+  const result = compareBackup(written, readBack, bad);
+  console.log(JSON.stringify(result));
+  if (!result.ok) process.exitCode = 1;
 } else if (phase === 'side') {
   const list = engineers();
   // 行の残っている要員（営業から外れても、人の入力がある行は残る）のタブも作る
