@@ -8,16 +8,18 @@
 //   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）
 //   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
 //   PHASE=score    取り込み・判定・営業の入力の数字（score.json）
+//   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { parseJstLabel } from './jstLabel.js';
+import { appendLabels, engineerHashOf, labelsDir, readLabelStore, salesKeyOf, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
-import { planSalesUpdate, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, SALES_COLUMNS, SALES_CLOSED_STATUS } from '../proper/salesList.js';
+import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, SALES_COLUMNS, SALES_CLOSED_STATUS } from '../proper/salesList.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
 const dir = process.env.RUN_DIR as string;
@@ -191,6 +193,30 @@ function sheetValues(rows: SheetRow[]): string[][] {
   return [HEADER, ...rows.map((r) => HEADER.map((h) => r[h] ?? ''))];
 }
 
+// この回の判定結果（judged_*.json）を差し替えの判定器に入れ、本番と同じ組み立て（足切り・検証・優先度の元）で候補にする。final と labels で共有
+async function judgedCandidates() {
+  const list = engineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const done = previouslyJudged(list);
+  const judged = new Map<string, RawProperJudgment>();
+  for (const e of list) {
+    const label = e.proposalLabel || e.displayName;
+    if (!has(`judged_${label}.json`)) continue;
+    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, r.judgment);
+  }
+  __setProperJudgeForTest(async (e, p) => {
+    const j = judged.get(`${e.id}|${p.id}`);
+    if (!j) throw new Error('この回では判定していない組');
+    return j;
+  });
+  // prep と同じ選び方にするため、前の回で判定済みの組を控えとして扱う
+  __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
+  // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
+  process.env.PROPER_JUDGE_PER_ENGINEER = '300';
+  const { candidates, stats } = await buildProperCandidates(list, projects, now);
+  return { list, projects, judged, candidates, stats };
+}
+
 // ===== 段 =====
 if (phase === 'prompts') {
   writeFileSync(join(dir, 'extract_system.txt'), EXTRACT_SYSTEM);
@@ -223,25 +249,7 @@ if (phase === 'prompts') {
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
   console.log(JSON.stringify({ engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size }));
 } else if (phase === 'final') {
-  const list = engineers();
-  const { projects } = projectsOf(carriedRows().rows);
-  const done = previouslyJudged(list);
-  const judged = new Map<string, RawProperJudgment>();
-  for (const e of list) {
-    const label = e.proposalLabel || e.displayName;
-    if (!has(`judged_${label}.json`)) continue;
-    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, r.judgment);
-  }
-  __setProperJudgeForTest(async (e, p) => {
-    const j = judged.get(`${e.id}|${p.id}`);
-    if (!j) throw new Error('この回では判定していない組');
-    return j;
-  });
-  // prep と同じ選び方にするため、前の回で判定済みの組を控えとして扱う
-  __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
-  // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
-  process.env.PROPER_JUDGE_PER_ENGINEER = '300';
-  const { candidates, stats } = await buildProperCandidates(list, projects, now);
+  const { list, projects, judged, candidates, stats } = await judgedCandidates();
   // この回で判定した組だけを載せる（判定していない組は失敗扱いになるため除く。シートにある組は下の差分で残る）
   const fresh = candidates.filter((c) => judged.has(`${c.ownEngineerId}|${c.projectId}`)).map((c) => salesRowOf(c, projects.find((p) => p.id === c.projectId)));
   const existing = existingRows();
@@ -298,6 +306,51 @@ if (phase === 'prompts') {
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
   console.log(JSON.stringify({ judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, chunks: chunks.length }));
+} else if (phase === 'labels') {
+  const { list, projects, judged, candidates } = await judgedCandidates();
+  const store = labelsDir();
+  const nowIso = now.toISOString();
+  const startSec = has('start.txt') ? Number(readFileSync(join(dir, 'start.txt'), 'utf8').trim()) : NaN;
+  const judgedAt = Number.isFinite(startSec) && startSec > 0 ? new Date(startSec * 1000).toISOString() : nowIso;
+  const deduped = dedupeProjects(projects);
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  const priorityOf = new Map(candidates.map((c) => [`${c.ownEngineerId}|${c.projectId}`, salesPriorityOf(c)]));
+  const engineerById = new Map(list.map((e) => [e.id, e]));
+  const hashOf = new Map(list.map((e) => [e.id, engineerHashOf(e)]));
+  const pairs: LabelPair[] = [];
+  let missingProject = 0;
+  for (const [key, judgment] of judged) {
+    const [engineerId, projectId] = key.split('|');
+    const e = engineerById.get(engineerId);
+    const found = projectById.get(projectId) ?? projectById.get(deduped.aliasOf.get(projectId) ?? '');
+    if (!e || !found) {
+      missingProject += 1;
+      continue;
+    }
+    const { replyTarget: _drop, ...project } = found;
+    pairs.push({
+      key, engineerId, engineerLabel: e.proposalLabel || e.displayName, projectId: found.id, runId: basename(resolve(dir)), judgedAt,
+      engineerHash: hashOf.get(engineerId) as string, project: project as Project, judgment, priority: priorityOf.get(key) ?? '',
+    });
+  }
+  const canonical = legacyCanonical(list);
+  const closedRows = has('closed_rows.json') ? read<SheetRow[]>('closed_rows.json') : [];
+  const sales: LabelSales[] = [];
+  // 全体 → クローズ済みの順に並べる（同じ組が両方にあるときは appendLabels があとの方を採る）
+  for (const [tab, rows] of [['全体', existingRows()], ['クローズ済み', closedRows]] as const) {
+    for (const r of rows) {
+      const key = salesKeyOf(canonical(r.ID ?? ''));
+      if (!key) continue;
+      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '' });
+    }
+  }
+  const added = appendLabels(store, {
+    pairs,
+    engineers: list.map((e) => ({ hash: hashOf.get(e.id) as string, engineerId: e.id, engineer: e })),
+    sales,
+  });
+  const total = readLabelStore(store);
+  console.log(JSON.stringify({ ...added, missingProject, store: { pairs: total.pairs.length, sales: total.sales.length } }));
 } else if (phase === 'side') {
   const list = engineers();
   // 行の残っている要員（営業から外れても、人の入力がある行は残る）のタブも作る

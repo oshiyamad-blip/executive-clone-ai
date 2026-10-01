@@ -51,6 +51,7 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 - `src/ses/level.ts` — 案件と要員のレベル照合（技術ごとの経験年数・工程・立場を別の軸として比べ、最も弱い軸で除外/経験交渉を決める）
 - `src/ses/proper/judge.ts` — プロパー×案件のAI判定（案件の作業内容とスキルシートの経歴を読み比べ、必須ごとの根拠を経歴と機械照合。一般的な語だけの一致は見送り）
 - `src/ses/proper/salesList.ts` — 営業に渡すプロパー提案候補リスト（別スプレッドシート。「全体」＋要員別タブ、優先度・対応状況の色分け、人の入力列はIDで引き継ぐ。案件詳細のメール本文の必須・尚可の行に ○△× を付ける）
+- `src/ses/eval/labels.ts` — 判定ラベルの蓄積（AI判定と営業の評価を `SES_LABELS_DIR` にためる。足切りの再現率・優先度の妥当率は `labelsEval.ts`）
 - `src/ses/proper/roster.ts` — 営業用の要員リスト（「要員」タブのサマリ＋「スキルシート_<名前>」タブ）から社員を読む
 - `src/data/executiveProfile.ts` — 経営者プロファイル（価値観・15の意思決定ルール・
   成功/失敗パターン）の単一の真実の源。要件3.3初期設定 / 3.4経営理念プロンプトに対応
