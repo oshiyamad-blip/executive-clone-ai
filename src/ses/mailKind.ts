@@ -38,8 +38,10 @@ const PROJECT_HEADINGS = heading(['案件名', '必須スキル', '必須', '尚
 function countLines(body: string, re: RegExp): number {
   let n = 0;
   for (const line of body.normalize('NFKC').split(/\r?\n/)) {
-    // 改行が潰れて1行に見出しが並ぶメールがある。長い行だけ見出しの始まりの前で分ける（短い行は今までどおり）
-    const pieces = line.length > 200 ? line.split(/(?=[【［\[◆◇■□●○★☆▼▽])/) : [line];
+    // 改行が潰れて1行に見出しが並ぶメールがある。長い行だけ見出しの始まりの前で分ける（短い行は今までどおり）。
+    // 全角空白で字下げした見出しは NFKC 後に半角空白の連続になる。値の直後（コロンが続かない）の2つ以上の空白だけで区切り、
+    // 「最寄駅　　：」の字間の空白や地の文の空白1つでは区切らない
+    const pieces = line.length > 200 ? line.split(/(?=[【［\[◆◇■□●○★☆▼▽])|(?<=\S)(?=\s{2,}[^\s:：])/) : [line];
     for (const piece of pieces) {
       // 見出しは行頭の短い範囲にある。長い行をそのまま正規表現にかけない（空白の連続で遅くならないように）
       const head = piece.slice(0, 80);
