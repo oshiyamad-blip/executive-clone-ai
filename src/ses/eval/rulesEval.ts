@@ -127,7 +127,7 @@ import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt } from '../schedule.js';
 import { shouldSendSummary } from '../notify.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
-import { classifyMailKind, splitByKind, isClosedNotice, mentionsTitle } from '../mailKind.js';
+import { classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
@@ -3507,6 +3507,11 @@ function mailKindChecks(): void {
   const sp = splitByKind([mk('m_eng', ENG), mk('m_proj', PROJ), mk('m_mix', ENG + PROJ)], true);
   check('案件だけモードでは要員メールだけ外し、案件・混在は抽出する', sp.skippedEngineerMailIds.join() === 'm_eng' && sp.extract.map((m) => m.id).join() === 'm_proj,m_mix');
   check('全件モードでは何も外さない', splitByKind([mk('m_eng', ENG)], false).extract.length === 1);
+  const engs = [{ id: 'e1' }, { id: 'e2' }];
+  const dropRes = engineersToKeep(engs, true);
+  check('案件だけモードでは抽出された要員を残さず、落とした数を返す', dropRes.kept.length === 0 && dropRes.dropped === 2);
+  const keepRes = engineersToKeep(engs, false);
+  check('全件モードでは抽出された要員をそのまま残す', keepRes.kept === engs && keepRes.dropped === 0);
 }
 
 // ===== 要員管理表: 手で追加した要員（スキルシートなし）とパートナー区分 =====

@@ -77,6 +77,13 @@ export function splitByKind(mails: SesRawMail[], projectsOnly: boolean): KindSpl
   return { extract, skippedEngineerMailIds };
 }
 
+// 案件だけモードでは、振り分けを抜けて抽出された要員も保存・突合に使わない（使う要員は名簿のプロパーだけ）。
+// 元メールは呼び出し側で処理済みにするため、ここでは要員だけを落とす
+export function engineersToKeep<T>(engineers: T[], projectsOnly: boolean): { kept: T[]; dropped: number } {
+  if (!projectsOnly) return { kept: engineers, dropped: 0 };
+  return { kept: [], dropped: engineers.length };
+}
+
 // 募集終了・充足の連絡か（抽出せず、同じ送信元の募集中の案件を閉じる）。
 // 件名の先頭のタグか、本文の完了形の文だけで判定する（「★1名参画決定★」「決定実績あり」は募集中の案件、
 // 「募集終了となった場合はご容赦」「スキル充足度」は通常の案件メールの定型文のため当てない）
