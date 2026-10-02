@@ -3948,6 +3948,13 @@ async function properJudgeChecks(): Promise<void> {
     yl3.checks?.[0].status === 'close' && yl3.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(yl3.checks) + JSON.stringify(yl3.gaps));
   check('案件のレベルが Java 2年なら満たすまま', yLv([{ skill: 'Java', years: 2 }]).checks?.[0].status === 'met');
   check('案件のレベルの年数が別の技術（PHP 3年）なら満たすまま', yLv([{ skill: 'PHP', years: 3 }]).checks?.[0].status === 'met');
+  const yLong = (skill: string) => verifyJudgment(raw({ requirements: [
+    { requirement: 'JavaによるWebアプリ開発', kind: '必須', quote: 'JavaによるWebアプリ開発', status: 'met', evidence: 'Java でのWeb開発', note: '' },
+  ] }), yrsProfileFull, { requiredSkills: ['JavaによるWebアプリ開発'], level: lvOf([{ skill, years: 5 }]) }, { level: yrsLevel, experienceYears: 3 });
+  const yLongJava = yLong('Javaまたはその他Web系でのWebアプリ開発');
+  check('案件のレベルの技術名が長い文（Javaまたはその他Web系…5年）でも文中の技術名で照合し、経歴2.6年は近い経験にする',
+    yLongJava.checks?.[0].status === 'close' && yLongJava.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(yLongJava.checks) + JSON.stringify(yLongJava.gaps));
+  check('案件のレベルの技術名が別の技術（PHP）の長い文なら満たすまま', yLong('PHPまたはその他Web系でのWebアプリ開発').checks?.[0].status === 'met');
   const yTot = (total: number | null, years: number | null) => verifyJudgment(raw({ requirements: [
     { requirement: '実務経験', kind: '必須', quote: '実務経験', status: 'met', evidence: 'Java でのWeb開発', note: '' },
     { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
