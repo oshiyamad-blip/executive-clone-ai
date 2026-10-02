@@ -3896,6 +3896,16 @@ async function properJudgeChecks(): Promise<void> {
     { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
   ] }), yrsProfileFull, yrsProj, { experienceYears: years }).checks?.[0].status;
   check('技術名の無い「実務経験5年以上」は経験年数3なら近い経験・不明（null）なら満たすまま', yExp(3) === 'close' && yExp(null) === 'met', `${yExp(3)} ${yExp(null)}`);
+  const yCap = (requirement: string, years: number | null, level?: typeof yrsLevel, kind: '必須' | '尚可' = '必須') => verifyJudgment(yrsRaw(requirement, kind), yrsProfileFull, yrsProj, { level, experienceYears: years });
+  const yCap1 = yCap('Java 5年以上', 2.6);
+  check('技術ごとの年数が無くても経験年数の合計2.6年が条件に満たなければ近い経験にし、足りない点に年数を出す',
+    yCap1.checks?.[0].status === 'close' && yCap1.gaps.some((g) => g.includes('経歴は約2.6年')), JSON.stringify(yCap1.checks) + JSON.stringify(yCap1.gaps));
+  check('技術名として読めない「Web開発5年以上」も経験年数の合計3.1年なら近い経験にする', yCap('Web開発5年以上', 3.1).checks?.[0].status === 'close');
+  check('経験年数の合計が足りていても技術の年数は不明なので満たすまま', yCap('Java 5年以上', 6).checks?.[0].status === 'met');
+  const yCapSkill = yCap('Java（5年以上）', 2, { skillYears: [{ skill: 'Java', years: 6 }], phaseYears: [], role: null });
+  check('技術ごとの年数があればそちらを優先する（合計が少なくても下げない）', yCapSkill.checks?.[0].status === 'met', JSON.stringify(yCapSkill.checks));
+  check('経験年数が不明（null）なら「Web開発5年以上」は満たすまま', yCap('Web開発5年以上', null).checks?.[0].status === 'met');
+  check('尚可の「Java 5年以上」は経験年数の合計が少なくても下げない', yCap('Java 5年以上', 2, undefined, '尚可').checks?.[0].status === 'met');
   const yOpt = verifyJudgment(yrsRaw('Java（5年以上）', '尚可'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
   check('尚可の「N年以上」は下げない', yOpt.checks?.[0].status === 'met', JSON.stringify(yOpt.checks));
   const yMe = verifyJudgment(yrsRaw('Java 3年目のメンバー'), yrsProfileFull, yrsProj, { level: yrsLevel, experienceYears: 3 });
