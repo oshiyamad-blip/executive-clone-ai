@@ -220,6 +220,8 @@ function shortOfRequiredYears(label: string, text: string, opts: { level?: Engin
   } else if (/経験|実務|IT/.test(text.normalize('NFKC'))) {
     have = opts.experienceYears ?? null;
   }
+  // 技術ごとの年数が分からないときは、経験年数の合計を上限に比べる（ある技術の年数は合計を超えない。合計が足りてもその技術が足りるとは言えないので何もしない）
+  if (have === null && typeof opts.experienceYears === 'number' && opts.experienceYears < need) have = opts.experienceYears;
   return have !== null && have < need ? { have } : null;
 }
 
