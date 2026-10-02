@@ -14,6 +14,8 @@ const LEAD = String.raw`^[\s　]*(?:[【\[［■◆◇●○▼▽★☆・\-*]|
 // 行頭の飾りの記号（LEAD と同じ。数字の見出しは含めない）。◆氏名◆ のように閉じの飾りで終わる見出しは、行頭にも飾りがある行だけ読む
 const DECO = String.raw`[【\[［■◆◇●○▼▽★☆・\-*]`;
 const CLOSE_DECO = String.raw`[◆◇■□●○★☆▼▽]`;
+// 空白だけで値が続く見出し（◆名前 A.B）の行頭の飾り。地の文に出やすい・や - * 数字は含めない
+const OPEN_DECO = String.raw`[◆◇■□●○★☆▼▽]`;
 
 function heading(words: string[]): RegExp {
   const spaced = words.map((w) => [...w].join('[\\s　]*')).join('|');
@@ -22,22 +24,28 @@ function heading(words: string[]): RegExp {
   // 括弧で始まる見出しだけ、見出し語の前に短い語＋区切りを1つまで許す（【年齢・性別】【住所／最寄り駅】）。上限つきで入れ子の量指定子は作らない
   const bracketed = String.raw`^[\s　]*(?:${DECO})*[【\[［][\s　]*(?:[^】\]］\n]{1,6}[・／/、][\s　]*)?${word}${tail}`;
   const closedByDeco = String.raw`^[\s　]*(?:${DECO})+[\s　]*${word}[\s　]*${CLOSE_DECO}`;
-  return new RegExp(`${LEAD}${word}${tail}|${bracketed}|${closedByDeco}`, 'm');
+  // コロンも閉じの飾りも無い「◆名前 A.B」。値が空の「◆名前」だけ・飾りの無い「名前 山田」・中黒の「・稼働 中です」は数えない
+  const spacedValue = String.raw`^[\s　]*(?:${OPEN_DECO})+[\s　]*${word}[\s　]+\S`;
+  return new RegExp(`${LEAD}${word}${tail}|${bracketed}|${closedByDeco}|${spacedValue}`, 'm');
 }
 
 // 所属・稼働・住まい・並行状況は要員の紹介の定型（【氏名】【所属】【稼働】【単金】の並び）。案件にも書かれうるが、
 // 案件の見出しが2つ以上あるメールは要員とみなさないため、1行の紛れで案件を取りこぼすことはない
-const ENGINEER_HEADINGS = heading(['氏名', '名前', 'イニシャル', '最寄駅', '最寄り駅', '最寄り', '最寄', '住まい', '所属', '稼働', '稼動', '並行状況', '技術者番号', '希望単価', '希望単金', '稼働開始日', '稼働可能日', '性別']);
+const ENGINEER_HEADINGS = heading(['氏名', '名前', '要員名', 'イニシャル', '最寄駅', '最寄り駅', '最寄り', '最寄', '住まい', '所属', '稼働', '稼動', '並行状況', '技術者番号', '希望単価', '希望単金', '稼働開始日', '稼働可能日', '性別']);
 const PROJECT_HEADINGS = heading(['案件名', '必須スキル', '必須', '尚可スキル', '尚可', '募集人数', '人数', '面談回数', '面談', '精算', '精算幅', '商流', '作業内容', '業務内容', '開発環境', '予算']);
 
 // 見出しの行数（引用行は数えない）
 function countLines(body: string, re: RegExp): number {
   let n = 0;
   for (const line of body.normalize('NFKC').split(/\r?\n/)) {
-    // 見出しは行頭の短い範囲にある。長い行をそのまま正規表現にかけない（空白の連続で遅くならないように）
-    const head = line.slice(0, 80);
-    if (/^\s*(>|＞)/.test(head)) continue;
-    if (re.test(head)) n += 1;
+    // 改行が潰れて1行に見出しが並ぶメールがある。長い行だけ見出しの始まりの前で分ける（短い行は今までどおり）
+    const pieces = line.length > 200 ? line.split(/(?=[【［\[◆◇■□●○★☆▼▽])/) : [line];
+    for (const piece of pieces) {
+      // 見出しは行頭の短い範囲にある。長い行をそのまま正規表現にかけない（空白の連続で遅くならないように）
+      const head = piece.slice(0, 80);
+      if (/^\s*(>|＞)/.test(head)) continue;
+      if (re.test(head)) n += 1;
+    }
   }
   return n;
 }
