@@ -88,7 +88,7 @@ import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS, pickForExtraction
 import { redactable, safeErr, logId } from './redact.js';
 import { acquireRunLease, releaseRunLease } from './lease.js';
 import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
-import { splitByKind, isClosedNotice, mentionsTitle } from './mailKind.js';
+import { splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from './mailKind.js';
 import { marketLabelOf, recordMarketHighlights, resetMarketHighlights, MARKET_LOOKBACK_DAYS, type MarketLabel } from './marketRate.js';
 import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
 import type { MatchLedger } from '../database/sheets.js';
@@ -405,6 +405,8 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   ]);
   let saveFailures = 0;
   let markFailed = false;
+  let droppedEngineers = 0;
+  const projectsOnly = sesTarget() === 'projects';
 
   const flush: ExtractFlush = async ({ items, processedMailIds }) => {
     const extracted = await withStableIds(
@@ -412,7 +414,9 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
       items.filter(isEngineerItem).map((i) => i.engineer),
     );
     const projects = withoutResentProjects(knownProjects, dedupeProjects(extracted.projects));
-    const engineers = withoutResentEngineers(knownEngineers, dedupeEngineers(extracted.engineers));
+    const { kept, dropped } = engineersToKeep(extracted.engineers, projectsOnly);
+    droppedEngineers += dropped;
+    const engineers = withoutResentEngineers(knownEngineers, dedupeEngineers(kept));
     const failedMailIds = new Set<string>();
     const [pr, er] = [await saveProjects(projects), await saveEngineers(engineers)];
     for (const p of projects) {
@@ -457,6 +461,9 @@ async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
   } catch (err) {
     console.error(`SES抽出: 失敗: ${safeErr(err)}（未保存のメールは処理済みにせず次回再処理します）`);
     recordFatal('抽出段が例外で停止しました');
+  }
+  if (droppedEngineers > 0) {
+    console.log(`SES抽出: 案件だけモードのため、抽出で見つかった要員${droppedEngineers}名は保存しません（振り分けの漏れ）`);
   }
   if (saveFailures > 0) {
     recordFatal(`抽出した案件・要員${saveFailures}件を保存できませんでした（元のメールは処理済みにせず次回再処理します）`);
