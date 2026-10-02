@@ -44,7 +44,8 @@ export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリ�
 - 単金（金額）は原文の単位をそのまま rateUnit / desiredRateUnit で指定してください
   （万円/月表記は manYenPerMonth、円/時給表記は yenPerHour、円/月表記は yenPerMonth、「700千円」のような千円表記は thousandYenPerMonth）
 - 金額の書かれ方と値: 「〜85万円」「〜75万円程度」「100万円（超える場合は要相談）」は rateMax のみ。「60万円」のような単一の金額は
-  rateMin と rateMax の両方に同じ値。「80〜85万」は rateMin 80・rateMax 85。
+  rateMin と rateMax の両方に同じ値。「60万円以上」「95万円〜」「80万〜」のように下限だけが書かれたときは rateMin のみ（rateMax は null）。
+  波線の位置で区別する（「〜85万円」は上限、「85万円〜」は下限）。「80〜85万」は rateMin 80・rateMax 85。
   「90万円（スキル見合い）」「〜100万円 ※スキル見合い」のように金額と「スキル見合い」が並ぶときは、その金額を使ってください
 - 金額がまったく書かれず「スキル見合い」「応相談」だけの場合は rateMin/rateMax/desiredRate を null にし、
   rateUnit/desiredRateUnit は manYenPerMonth を設定してください（nullなら単位は無視されます）

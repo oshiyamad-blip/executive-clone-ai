@@ -3623,6 +3623,7 @@ function rateFormatChecks(): void {
   check('「万」の脱字（〜100円/月）は既存の補正で100万円', verifiedRate(100, 'yenPerMonth', sourceNumbers('単金：～100円/月')) === 100);
   check('抽出の指示: 金額と「スキル見合い」が並ぶときは金額を使う', EXTRACT_SYSTEM.includes('金額と「スキル見合い」が並ぶときは、その金額を使って'));
   check('抽出の指示: 単一の金額は下限・上限の両方に入れる', EXTRACT_SYSTEM.includes('単一の金額は\n  rateMin と rateMax の両方'));
+  check('抽出の指示: 下限だけの単価は rateMin のみ', EXTRACT_SYSTEM.includes('下限だけが書かれたときは rateMin のみ（rateMax は null）'));
   check('抽出の指示: 役割ごとの単価は別の案件に分ける', EXTRACT_SYSTEM.includes('役割ごとに別の案件として出力'));
   check('抽出の指示: 参画の条件を商流メモに入れる', EXTRACT_SYSTEM.includes('businessFlow（商流メモ）には、参画の条件を'));
 }
