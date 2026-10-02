@@ -277,7 +277,9 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
       // 案件の必須スキルにも年数が無いときは、抽出した案件のレベル（技術ごとの年数・IT経験の合計）から読む
       if (!hasYearsCondition(yearsText)) {
         const lv = project.level;
-        const hit = labelTech.length > 0 ? lv?.skillYears.find((y) => labelTech.some((l) => (skillMatch([l], [y.skill])?.rate ?? 0) > 0)) : undefined;
+        // 抽出の技術名が「Javaまたはその他Web系…の開発」のような長い文のときは、文中の技術名でも照合する
+        const sameTech = (l: string, skill: string) => (skillMatch([l], [skill])?.rate ?? 0) > 0 || techNamesIn(skill).some((t) => (skillMatch([l], [t])?.rate ?? 0) > 0);
+        const hit = labelTech.length > 0 ? lv?.skillYears.find((y) => labelTech.some((l) => sameTech(l, y.skill))) : undefined;
         if (hit) yearsText = `${own} ${hit.years}年以上`;
         else if (labelTech.length === 0 && lv?.totalYears) yearsText = `${own} ${lv.totalYears}年以上`;
       }
