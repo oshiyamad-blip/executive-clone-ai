@@ -482,6 +482,8 @@ export interface RequirementCheck {
   quote: string; // メール本文の記載（原文のまま。本文に無ければ空か抽出の表記）
   status: 'met' | 'close' | 'unmet';
   shortYears?: number; // 必須の年数条件に経歴の年数が足りず close にしたときの、経歴側の年数
+  evidence?: string; // met/close の根拠（経歴の文。経歴との照合を通ったものだけ）。営業リストの「判定の理由」用
+  note?: string; // AIの補足（unmet の理由など）
 }
 export interface ProperJudgment {
   verdict: ProperVerdict;

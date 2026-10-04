@@ -191,6 +191,15 @@ function legacyCanonical(list: ProperEngineer[]) {
   };
 }
 
+// シートの1行目（existing_header.json）が今の列の並びでなければ止める。見出しが古いまま書くと、増えた列から右の値が1列ずつずれて入る
+function assertSheetHeader(): void {
+  if (!has('existing_header.json')) return;
+  const sheet = read<string[]>('existing_header.json');
+  if (sheet.length !== HEADER.length || sheet.some((h, i) => h !== HEADER[i])) {
+    throw new Error(`営業リストの見出しが今の列の並びと違います（シート ${sheet.length}列・今の並び ${HEADER.length}列）。runbook の「列が増えたとき」の手順で先に列を挿入してください`);
+  }
+}
+
 function sheetValues(rows: SheetRow[]): string[][] {
   return [HEADER, ...rows.map((r) => HEADER.map((h) => r[h] ?? ''))];
 }
@@ -278,6 +287,7 @@ if (phase === 'prompts') {
     const received = parseJstLabel(String(prev[COL['受信日時']]));
     return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
   };
+  assertSheetHeader();
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)));
   if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
   // 書き込み: 既存の行は人の入力の列の両側だけ、新しい行は下に足す。コネクタで書ける大きさ（約15KB）に分ける
