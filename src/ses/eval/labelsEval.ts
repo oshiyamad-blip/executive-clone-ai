@@ -10,7 +10,7 @@ import { __setProperJudgeForTest, __setCachedProjectIdsForTest } from '../proper
 import { salesPriorityOf } from '../proper/salesList.js';
 import { jstDateOf } from '../dates.js';
 import {
-  labelsDir, readLabelStore, latestSales, prefilterRecall, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
+  labelsDir, readLabelStore, latestSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
   type LabelPair, type PrefilterRecall,
 } from './labels.js';
 import type { ProperEngineer } from '../../types/index.js';
@@ -29,7 +29,8 @@ export interface LabelsEvalResult {
     sales: { total: number; kept: number; ratePct: number | null; missed: string[] };
     negative: { total: number; kept: number; ratePct: number | null };
   };
-  priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number } | null;
+  // rows・checks・validityPct は営業の評価だけ（Claude確認を除く）。以前の基準 JSON は Claude 分を含んでいた
+  priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number; claude: { checked: number; good: number; validityPct: number | null } } | null;
 }
 
 const pct = (a: number, b: number): number | null => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
@@ -98,6 +99,7 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
     const rows: Record<string, PriorityRow> = {};
     let changed = 0;
     let compared = 0;
+    const claude = { checked: 0, good: 0, validityPct: null as number | null };
     for (const p of rated) {
       const prio = now.get(p.key);
       if (prio === undefined) continue;
@@ -108,7 +110,10 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
       const row = (rows[prio] ??= { n: 0, checks: {}, checked: 0, validityPct: null, reasons: {}, proposed: 0 });
       row.n += 1;
       const mark = MARKS.find((m) => s.check.trim().startsWith(m));
-      if (mark) {
+      if (mark && isClaudeCheck(s.checkMemo)) {
+        claude.checked += 1;
+        if (mark === '◎' || mark === '○') claude.good += 1;
+      } else if (mark) {
         bump(row.checks, mark);
         row.checked += 1;
       }
@@ -116,7 +121,8 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
       if (PROPOSED_OR_LATER.includes(s.status)) row.proposed += 1;
     }
     for (const row of Object.values(rows)) row.validityPct = pct((row.checks['◎'] ?? 0) + (row.checks['○'] ?? 0), row.checked);
-    priority = { rows, changedFromStored: changed, compared };
+    claude.validityPct = pct(claude.good, claude.checked);
+    priority = { rows, changedFromStored: changed, compared, claude };
   }
   return { counts, recall, priority };
 }
@@ -141,11 +147,13 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
   if (!res.priority) {
     lines.push('  まだありません');
   } else {
-    lines.push('  優先度 | 組 | ◎ | ○ | △ | × | 妥当率(◎○÷チェック済み) | 提案済以降');
+    lines.push('  （◎○△×・妥当率は営業の評価だけ。Claude確認は下の1行）', '  優先度 | 組 | ◎ | ○ | △ | × | 妥当率(◎○÷チェック済み) | 提案済以降');
     for (const [prio, row] of Object.entries(res.priority.rows).sort(([a], [b]) => a.localeCompare(b))) {
       lines.push(`  ${prio} | ${row.n} | ${MARKS.map((m) => row.checks[m] ?? 0).join(' | ')} | ${fmt(row.validityPct)}（${row.checked}件） | ${row.proposed}`);
       for (const [reason, n] of Object.entries(row.reasons).sort(([a], [b]) => a.localeCompare(b))) lines.push(`      見送り理由 ${reason}: ${n}`);
     }
+    const cl = res.priority.claude;
+    lines.push(`  Claude確認: チェック${cl.checked}件・妥当率${fmt(cl.validityPct)}`);
     lines.push(`  保存時と優先度が違う組: ${res.priority.changedFromStored}/${res.priority.compared}`);
   }
   return lines;

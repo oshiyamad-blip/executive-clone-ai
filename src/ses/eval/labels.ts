@@ -274,6 +274,11 @@ export const GOOD_STATUSES = ['提案済', '面談調整', '面談済', '成約'
 export const PROPOSED_OR_LATER = GOOD_STATUSES;
 export const PRIORITY_NONE = '（候補外）';
 export const isGoodCheck = (check: string) => /^[◎○]/.test(check.trim());
+// 試運転で Claude が付けたチェックか（精度メモの先頭の印。salesList.ts の CLAUDE_CHECK_MEMO_PREFIX と同じ）
+export const isClaudeCheck = (checkMemo: string) => checkMemo.trim().startsWith('（Claude確認）');
+// 営業正例: 営業の◎○か提案済以降の対応状況。Claude の◎○は営業の評価ではないので数えない
+export const isSalesPositive = (s: Pick<LabelSales, 'check' | 'checkMemo' | 'status'> | undefined): boolean =>
+  Boolean(s) && ((!isClaudeCheck(s?.checkMemo ?? '') && isGoodCheck(s?.check ?? '')) || GOOD_STATUSES.includes(s?.status ?? ''));
 
 export interface RecallTally { total: number; kept: number; missed: string[]; }
 export interface PrefilterRecall { ai: RecallTally; sales: RecallTally; negative: RecallTally; noEngineer: number; }
@@ -313,7 +318,7 @@ export function prefilterRecall(
     }
     const s = salesByKey.get(p.key);
     const aiPositive = p.judgment.verdict === 'recommend' || p.judgment.verdict === 'conditional';
-    const salesPositive = Boolean(s) && (isGoodCheck(s?.check ?? '') || GOOD_STATUSES.includes(s?.status ?? ''));
+    const salesPositive = isSalesPositive(s);
     const negative = p.judgment.verdict === 'reject';
     if (!aiPositive && !salesPositive && !negative) continue;
     const kept = passesPrefilter(p, engineer);

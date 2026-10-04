@@ -3,10 +3,12 @@
 //       案件スプレッドシートの「プロパー候補」タブへ保存（提案の全員に返信文面つき。担当者メールで次回バッチが下書きにする）
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
-import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, maxCandidatesPerItem } from '../config.js';
+import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
-import { ownPairsForJudge, signedMan } from '../ownMatch.js';
+import { ownPairsForJudge, auditPairsForJudge, signedMan } from '../ownMatch.js';
+import { getLlmUsageLog } from '../../llm/usage.js';
+import { usageCostJpy } from '../../llm/pricing.js';
 import { judgeProperPairs, cachedProjectIdsFor } from './judge.js';
 import { techNamesIn } from '../skillDict.js';
 import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
@@ -50,6 +52,9 @@ export interface JudgeStats {
   outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
+  audited: number; // 足切りで落とした組から監視のために判定した組（上の judged には含めない）
+  auditHits: number; // うち、候補になった組（見送りでない組）
+  auditTokens: { input: number; output: number; costJpy: number }; // 監視の判定に使った量（キャッシュの分は入力に含む）
 }
 
 const SKILL_TENTATIVE_NOTE = '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。';
@@ -239,6 +244,22 @@ export function selectPairsForJudge<T extends { match: { ownEngineerId: string; 
   });
 }
 
+// 足切りの監視に回す組。ルールの足切りで落ちた「惜しい組」から PROPER_AUDIT_SAMPLE 組まで。通常の判定に回す組・控えにある組は除く
+export function pickAuditPairs(
+  engineers: ProperEngineer[],
+  projects: Project[],
+  now: Date,
+  regular: Array<{ match: OwnMatch }>,
+  cachedIdsOf: (engineerId: string) => Set<string> | undefined,
+): Array<{ match: OwnMatch; rulePass: boolean }> {
+  const n = properAuditSample();
+  if (n <= 0) return [];
+  const taken = new Set(regular.map((p) => p.match.id));
+  return auditPairsForJudge(engineers, projects, Number.MAX_SAFE_INTEGER, now)
+    .filter((p) => !taken.has(p.match.id) && !cachedIdsOf(p.match.ownEngineerId)?.has(p.match.projectId))
+    .slice(0, n);
+}
+
 // 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
 export async function buildProperCandidates(
   engineers: ProperEngineer[],
@@ -254,38 +275,59 @@ export async function buildProperCandidates(
   const cachedByEngineer = new Map<string, Set<string>>();
   for (const e of engineers) cachedByEngineer.set(e.id, await cachedProjectIdsFor(e));
   const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
-  const stats: JudgeStats = { prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length };
-  const outcomes = await judgeProperPairs(
-    pairs.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project })),
-    projects,
-  );
+  const stats: JudgeStats = {
+    prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length,
+    audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 },
+  };
   const judged: OwnMatch[] = [];
-  pairs.forEach((p, i) => {
-    const o = outcomes[i];
-    if (!o.judgment) {
-      stats.failed += 1;
-      // AI判定に失敗した組は、ルールだけの基準も満たすときに限り要確認で残す
-      if (p.rulePass) judged.push({ ...p.match, needsReview: true, reason: `AI判定に失敗したため要確認です。${p.match.reason}` });
-      return;
+  // 判定結果を候補の元（judged）に反映する。監視の組は別の集計に数える
+  const consume = (list: typeof pairs, outcomes: Awaited<ReturnType<typeof judgeProperPairs>>, st: JudgeStats): OwnMatch[] => {
+    const out: OwnMatch[] = [];
+    list.forEach((p, i) => {
+      const o = outcomes[i];
+      if (!o.judgment) {
+        st.failed += 1;
+        // AI判定に失敗した組は、ルールだけの基準も満たすときに限り要確認で残す
+        if (p.rulePass) out.push({ ...p.match, needsReview: true, reason: `AI判定に失敗したため要確認です。${p.match.reason}` });
+        return;
+      }
+      st.judged += 1;
+      if (o.cached) st.cached += 1;
+      // 勤務地をルールで読めなかった案件は、AIが読んだ出社先の地方で判定する（本人と違う地方の出社は候補にしない）
+      const project = projectById.get(p.match.projectId) as Project;
+      const engineer = engineerById.get(p.match.ownEngineerId) as ProperEngineer;
+      const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
+      const aiRegion = wideRegionOf(o.judgment.workPrefecture ?? null);
+      const ownRegion = wideRegionOf(engineer.prefecture);
+      if (!project.prefecture && !fullRemote && aiRegion && ownRegion && aiRegion !== ownRegion) {
+        st.outOfArea += 1;
+        return;
+      }
+      const m = applyJudgment(p.match, o.judgment);
+      const dup = deduped.others.get(p.match.projectId);
+      if (m && dup) m.reason = `［確認］同じ案件が別のメールでも届いています${dup.length > 0 ? `（${dup.join('、')}）` : ''}。${m.reason}`;
+      if (m) out.push(m);
+      else st.rejected += 1;
+    });
+    return out;
+  };
+  const toJudge = (list: typeof pairs) => list.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project }));
+  judged.push(...consume(pairs, await judgeProperPairs(toJudge(pairs), projects), stats));
+  // 足切りの監視: 落とした組から少しだけ判定し、良い組を落としていないかを見る。使った量は呼び出し前後のログの差で数える
+  const audit = pickAuditPairs(engineers, projects, now, pairs, (id) => cachedByEngineer.get(id));
+  if (audit.length > 0) {
+    const logStart = getLlmUsageLog().length;
+    const scratch: JudgeStats = { ...stats, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0 };
+    const hits = consume(audit, await judgeProperPairs(toJudge(audit), projects), scratch);
+    judged.push(...hits.filter((m) => m.judgment));
+    stats.audited = scratch.judged;
+    stats.auditHits = hits.filter((m) => m.judgment).length;
+    for (const u of getLlmUsageLog().slice(logStart)) {
+      stats.auditTokens.input += u.inputTokens + (u.cacheCreationInputTokens ?? 0) + (u.cacheReadInputTokens ?? 0);
+      stats.auditTokens.output += u.outputTokens;
+      stats.auditTokens.costJpy += usageCostJpy(u);
     }
-    stats.judged += 1;
-    if (o.cached) stats.cached += 1;
-    // 勤務地をルールで読めなかった案件は、AIが読んだ出社先の地方で判定する（本人と違う地方の出社は候補にしない）
-    const project = projectById.get(p.match.projectId) as Project;
-    const engineer = engineerById.get(p.match.ownEngineerId) as ProperEngineer;
-    const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
-    const aiRegion = wideRegionOf(o.judgment.workPrefecture ?? null);
-    const ownRegion = wideRegionOf(engineer.prefecture);
-    if (!project.prefecture && !fullRemote && aiRegion && ownRegion && aiRegion !== ownRegion) {
-      stats.outOfArea += 1;
-      return;
-    }
-    const m = applyJudgment(p.match, o.judgment);
-    const dup = deduped.others.get(p.match.projectId);
-    if (m && dup) m.reason = `［確認］同じ案件が別のメールでも届いています${dup.length > 0 ? `（${dup.join('、')}）` : ''}。${m.reason}`;
-    if (m) judged.push(m);
-    else stats.rejected += 1;
-  });
+  }
   // 並び: AIの推奨 → 条件つき → 要確認、同じ区分の中はAIの見立ての合い方（必須の満たす・近い経験・経験なしの重みづけ）→ ルールの並び。
   // 社員ごと・案件ごとの上限を掛ける（上限の中にAIが良いと見た組から入るように）
   const cat = (m: OwnMatch) => (m.needsReview ? 2 : m.band === 'strong' ? 0 : 1);
@@ -368,6 +410,11 @@ function logJudge(s: JudgeStats): void {
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
+  if (s.audited > 0) {
+    console.log(
+      `足切りの監視: ${s.audited}組判定・うち当たり${s.auditHits}組 / 監視の判定: 入力${s.auditTokens.input}・出力${s.auditTokens.output}トークン（約${Math.round(s.auditTokens.costJpy * 10) / 10}円）`,
+    );
+  }
 }
 
 function logCounts(prefix: string, r: ProperRunResult): void {

@@ -99,7 +99,7 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge } from '../ownMatch.js';
 import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
@@ -188,7 +188,7 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { sourceBacked, profileSourceNumbers, projectExcerpt } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
-import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
+import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -1018,6 +1018,25 @@ function ownMatchChecks(): void {
   check('5万円を超えて下回る案件は除外', under(64.5) === null);
   check('必要案件単価以上は単価充足（交渉の注記なし）', under(72)?.meetsRate === true && !under(72)!.reason.includes('単価交渉'));
   check('PROPER_RATE_TOLERANCE_MAN=0 なら必要案件単価未満は除外', withEnv({ PROPER_RATE_TOLERANCE_MAN: '0' }, () => under(69.5)) === null);
+
+  // 足切りの監視: ルールで落ちた「技術が1つ以上合う組」だけを、日付で決まった順に n 組まで選ぶ
+  const auditor = own('o_audit', { skills: ['Java'], requiredProjectRate: 80 });
+  const dropped = [1, 2, 3, 4, 5].map((i) => project({ id: `p_low${i}`, requiredSkills: ['Java'], rateMax: 50, receivedAt: daysAgo(1) }));
+  const noTech = project({ id: 'p_notech', requiredSkills: ['COBOL'], rateMax: 50, receivedAt: daysAgo(1) });
+  const passing = project({ id: 'p_pass', requiredSkills: ['Java'], rateMax: 90, receivedAt: daysAgo(1) });
+  const closed = project({ id: 'p_closed', requiredSkills: ['Java'], rateMax: 50, receivedAt: daysAgo(1), status: 'closed' });
+  const pool = [passing, noTech, closed, ...dropped];
+  const audit = auditPairsForJudge([auditor], pool, 3, NOW);
+  const auditIds = audit.map((a) => a.match.projectId);
+  const passIds = ownPairsForJudge([auditor], pool, 100, NOW).map((a) => a.match.projectId);
+  check('足切りの監視: 足切りで落ちた組だけを返す（通る組・技術が合わない組・募集中でない案件は返さない）',
+    auditIds.length === 3 && auditIds.every((id) => id.startsWith('p_low')) && !auditIds.some((id) => passIds.includes(id)) && passIds.includes('p_pass'), auditIds.join(','));
+  check('足切りの監視: n を超えない・0 以下は空・候補が少なければある分だけ',
+    auditPairsForJudge([auditor], pool, 2, NOW).length === 2 && auditPairsForJudge([auditor], pool, 0, NOW).length === 0 && auditPairsForJudge([auditor], pool, 99, NOW).length === 5);
+  check('足切りの監視: 同じ入力・同じ日付なら同じ結果、日付が変わると選ぶ組が変わりうる（再現できる並び）',
+    same(auditIds, auditPairsForJudge([auditor], [...pool].reverse(), 3, NOW).map((a) => a.match.projectId)) &&
+      Array.from({ length: 10 }, (_, d) => auditPairsForJudge([auditor], pool, 1, new Date(NOW.getTime() + d * 86400000))[0]?.match.projectId).some((id) => id !== audit[0]?.match.projectId));
+  check('足切りの監視: 返す match は要確認で、案件・社員のIDと単価の差を持つ', audit.every((a) => a.match.needsReview && a.match.ownEngineerId === 'o_audit' && a.match.rateGapMan === -30 && !a.rulePass));
 }
 
 // ===== 14. AI最終判定の関門（区分の決め方・値の整え方・入力） =====
@@ -3640,6 +3659,10 @@ function rateFormatChecks(): void {
   check('抽出の指示: 金額と「スキル見合い」が並ぶときは金額を使う', EXTRACT_SYSTEM.includes('金額と「スキル見合い」が並ぶときは、その金額を使って'));
   check('抽出の指示: 単一の金額は下限・上限の両方に入れる', EXTRACT_SYSTEM.includes('単一の金額は\n  rateMin と rateMax の両方'));
   check('抽出の指示: 下限だけの単価は rateMin のみ', EXTRACT_SYSTEM.includes('下限だけが書かれたときは rateMin のみ（rateMax は null）'));
+  check('抽出の指示: 本文に単価が無ければ件名の金額を使う・食い違えば本文・決められなければ使わない',
+    EXTRACT_SYSTEM.includes('件名に金額が書かれているとき') && EXTRACT_SYSTEM.includes('食い違うときは本文を使います') && EXTRACT_SYSTEM.includes('決められないときは使いません'));
+  check('単価の原文照合は件名の数字も対象（本文に無く件名だけの「80」でも通る）',
+    verifiedRate(80, 'manYenPerMonth', sourceNumbers('【Java】〜80万 案件のご紹介\n本文に金額はありません')) === 80);
   check('抽出の指示: 役割ごとの単価は別の案件に分ける', EXTRACT_SYSTEM.includes('役割ごとに別の案件として出力'));
   check('抽出の指示: 参画の条件を商流メモに入れる', EXTRACT_SYSTEM.includes('businessFlow（商流メモ）には、参画の条件を'));
 }
@@ -4197,6 +4220,18 @@ function salesListChecks(): void {
     sv[1][2].includes("'全体'!") && sv[1][2].includes("'クローズ済み'!") && sv[1][3].includes("'全体'!") && sv[1][3].includes("'クローズ済み'!") &&
       (sv[2][2].match(/COUNTIFS\('(全体|クローズ済み)'!B2:B,"A\*"/g) ?? []).length === 2 && sv[2][2].includes("'クローズ済み'!B2:B,\"A*\"") &&
       sv.slice(1, 7).every((r) => !r[1].includes('クローズ済み')), JSON.stringify(sv[1]));
+  const memoCol = String.fromCharCode(65 + col('精度メモ'));
+  const memoCond = `'全体'!${memoCol}2:${memoCol},"<>（Claude確認）*"`;
+  check('精度集計: 右に「営業の評価だけ」の列（精度メモが「（Claude確認）」で始まらない行）。既存の列と見送り理由の表の位置は変わらない',
+    sv[0].length === 14 && sv[0][8] === 'チェック済（営業）' && sv[0][13] === '妥当率（営業）' && sv[2][9].includes(memoCond) && sv[2][9].includes("'クローズ済み'!") &&
+      sv[2][9].includes(`'全体'!${accCol}2:${accCol},"◎*"`) && !sv[2][3].includes('Claude確認') && sv[3][13] === '=IFERROR((J4+K4)/I4,"")' && sv[8][0] === '見送り理由（クローズ済みを含む）', JSON.stringify(sv[2]));
+  const sideReq = sideTabFormatRequests(1, 2, 7);
+  const pctCols = sideReq.filter((r) => r.repeatCell?.cell?.userEnteredFormat?.numberFormat?.type === 'PERCENT').map((r) => r.repeatCell?.range?.startColumnIndex);
+  check('精度集計の書式: ％表示は「すべて」と「営業」の両方の妥当率の列', pctCols.join(',') === '7,13', show(pctCols));
+  const sale = (over: Partial<LabelSales>): LabelSales => ({ key: 'k', seenAt: '', tab: '全体', status: '', skipReason: '', check: '', checkMemo: '', priority: '', ...over });
+  check('営業正例: 営業の◎○か提案済以降。Claude確認の◎○は営業正例にしない（対応状況が提案済以降なら営業正例）',
+    isSalesPositive(sale({ check: '◎ 妥当' })) && !isSalesPositive(sale({ check: '◎ 妥当', checkMemo: '（Claude確認）Javaの経歴あり' })) &&
+      isSalesPositive(sale({ check: '◎ 妥当', checkMemo: '（Claude確認）x', status: '提案済' })) && !isSalesPositive(sale({ check: '△ 微妙' })) && !isSalesPositive(undefined));
   const sl = staffListValues([
     { proposalLabel: 'N.H', displayName: 'N.H', availableDate: '即日', requiredProjectRate: 40, experienceYears: 0.1, skills: ['kintone'], wish: 'ヘルプデスク希望' },
     { proposalLabel: 'A"A', displayName: 'A"A', availableDate: '10月', requiredProjectRate: null, experienceYears: null, skills: [] },
