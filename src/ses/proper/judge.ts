@@ -225,6 +225,8 @@ function shortOfRequiredYears(label: string, text: string, opts: { level?: Engin
   return have !== null && have < need ? { have } : null;
 }
 
+const CHECK_TEXT_MAX = 200;
+
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
 export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string; level?: ProjectLevel },
@@ -289,7 +291,16 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
         shortYears = short.have;
       }
     }
-    checks.push({ kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status, ...(shortYears !== null ? { shortYears } : {}) });
+    // セルが大きくなりすぎないよう1件200文字まで。照合を通らず unmet にした根拠は経歴に無いので残さない
+    const clip = (t: string) => (t.length > CHECK_TEXT_MAX ? `${t.slice(0, CHECK_TEXT_MAX - 1)}…` : t);
+    const keepEvidence = status !== 'unmet' && ev.length > 0;
+    const noteText = r.note.trim();
+    checks.push({
+      kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status,
+      ...(shortYears !== null ? { shortYears } : {}),
+      ...(keepEvidence ? { evidence: clip(ev) } : {}),
+      ...(noteText ? { note: clip(noteText) } : {}),
+    });
     if (status === 'unmet') {
       if (!optional) unmetCount += 1;
       gaps.push(r.note.trim() ? `${label}（${r.note.trim()}）` : label);

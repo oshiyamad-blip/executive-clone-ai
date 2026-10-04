@@ -4014,6 +4014,17 @@ async function properJudgeChecks(): Promise<void> {
   check('尚可の要件は「尚可: 」を付けて足りない点に出す', withOpt.gaps.includes('尚可: COBOL'), JSON.stringify(withOpt.gaps));
   check('要件ごとの照合結果を必須・尚可つきで残す',
     JSON.stringify(withOpt.checks?.map((c) => `${c.kind}${c.requirement}${c.status}`)) === JSON.stringify(['必須Oraclemet', '尚可COBOLunmet', '尚可PostgreSQLclose']), JSON.stringify(withOpt.checks));
+  const ck = (n: string) => withOpt.checks?.find((c) => c.requirement === n);
+  check('要件ごとの根拠（met/close の経歴の文）を残し、空の補足・unmet の根拠は残さない',
+    ck('Oracle')?.evidence === 'Oracle DB上でのデータ作成、削除対応' && ck('PostgreSQL')?.evidence === 'orderby・groupbyなどのSQL対応' &&
+      ck('COBOL')?.evidence === undefined && ck('COBOL')?.note === undefined, JSON.stringify(withOpt.checks));
+  const longEv = `Oracle DB上でのデータ作成、削除対応${'あ'.repeat(300)}`;
+  const longJ = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', kind: '必須', quote: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: 'N'.repeat(300) },
+    { requirement: 'Java', kind: '必須', quote: 'Java', status: 'met', evidence: '経歴に無い記載です', note: '' },
+  ] }), profile, { requiredSkills: ['Oracle'] });
+  check('根拠・補足は1件200文字まで。経歴に無い根拠で unmet に下げた要件には根拠を入れない',
+    (longJ.checks?.[0].note?.length ?? 0) === 200 && longEv.length > 200 && longJ.checks?.[1].status === 'unmet' && longJ.checks?.[1].evidence === undefined, JSON.stringify(longJ.checks));
   const mail = '案件名：Oracle保守\n【必須スキル】\n・Oracle DBの運用経験\n【尚可スキル】\n・COBOL開発経験\n場所：新川';
   const marked = markRequirementsInMail(mail, withOpt.checks ?? []);
   check('メール本文の必須・尚可の行の先頭に ○△× を付ける', marked.includes('\n○ ・Oracle DBの運用経験') && marked.includes('\n× ・COBOL開発経験'), marked);
@@ -4021,12 +4032,13 @@ async function properJudgeChecks(): Promise<void> {
   check('本文に見つからない要件は冒頭の一覧に回す', marked.split('\n').slice(0, 3).includes('△ 尚可: PostgreSQL'), marked);
   const oneLine = markRequirementsInMail('【必須スキル】PL/SQL、JP1、Java', [
     { kind: '必須', requirement: 'PL/SQL', quote: 'PL/SQL', status: 'close' }, { kind: '必須', requirement: 'Java', quote: 'Java', status: 'unmet' }]);
-  check('1行に複数の要件がある行は行末に要件ごとの記号を添える', oneLine.endsWith('【必須スキル】PL/SQL、JP1、Java　→ △PL/SQL　×Java'), oneLine);
+  check('1行に複数の要件がある行は行末に記号だけを要件の順に添える（要件名は書かない）', oneLine.endsWith('【必須スキル】PL/SQL、JP1、Java　→ △×') && !oneLine.split('\n').slice(-1)[0].includes('→ △PL'), oneLine);
   const banner = markRequirementsInMail('◆Java詳細設計-海浜幕張◆\n≪必須≫\n・SpringBoot,Oracleの経験', [
     { kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }, { kind: '必須', requirement: 'Oracle', quote: 'Oracle', status: 'met' }]);
   check('要件の範囲の外にしか無い語は見出しの飾りに付けず冒頭の一覧に回す', !banner.includes('○ ◆') && banner.includes('○ 必須: Java') && banner.includes('○ ・SpringBoot'), banner);
   const noHead = markRequirementsInMail('◆Java詳細設計◆\n≪全て該当の方のみ≫\n・Java で詳細設計から対応できる方', [{ kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }]);
   check('同じ語が見出しの飾りと箇条書きにあれば箇条書きの行に付ける', noHead.includes('○ ・Java で詳細設計') && !noHead.includes('○ ◆'), noHead);
+  check('凡例に理由の列の案内を添える', marked.split('\n')[0].includes('判定の理由'), marked.split('\n')[0]);
   check('照合結果が無ければ本文はそのまま', markRequirementsInMail(mail, []) === mail);
   check('本文が無くても要件の一覧は出す', markRequirementsInMail('', withOpt.checks ?? []).includes('○ 必須: Oracle'));
 
@@ -4204,7 +4216,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AD,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AE,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const prevAcc = header.map(() => '');
   prevAcc[col('ID')] = 'ownmatch_a_p1'; prevAcc[col('精度チェック')] = '× ズレ'; prevAcc[col('精度メモ')] = 'Javaは研修のみ';
   const accMerged = mergeSalesRows([salesRowOf(base, undefined)], [header, prevAcc]);
@@ -4213,7 +4225,7 @@ function salesListChecks(): void {
   const sv = summaryValues(['A"A']);
   const accCol = String.fromCharCode(65 + col('精度チェック'));
   check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
-    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AD2:AD)" && sv[5][0] === '優先度 D' &&
+    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AE2:AE)" && sv[5][0] === '優先度 D' &&
       sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")+COUNTIFS('クローズ済み'!B2:B,"A*",'クローズ済み'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
       sv[6][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
   check('精度集計: チェック済・◎は全体とクローズ済みの両方を数え（優先度の行も両方で優先度列を条件にし）、候補数はクローズ済みを見ない',
@@ -4363,6 +4375,44 @@ function salesListChecks(): void {
   check('入力しない列・要員のタブを触ると確認が出る（止めない）。2回目以降は付け足さない',
     prot.length === 2 && prot.every((r) => r.addProtectedRange?.protectedRange?.warningOnly === true) &&
       formatRequests(8, 0, false).filter((r) => r.addProtectedRange).length === 1 && formatRequests(7, 0, true, false).every((r) => !r.addProtectedRange));
+  const reasonCol = col('判定の理由');
+  check('列の並び: 案件詳細の右が判定の理由・最後が ID・判定の理由は人の入力の列ではない',
+    reasonCol === col('案件詳細（メール本文より）') + 1 && col('提案文面（案）') === reasonCol + 1 && header[header.length - 1] === 'ID' &&
+      header.length === 31 && SALES_COLUMNS[reasonCol].human !== true && SALES_COLUMNS[reasonCol].width === 320 && SALES_COLUMNS[reasonCol].wrap === false);
+  const reasonOf = (checks: Parameters<typeof jd>[1] & object, extra: Record<string, unknown>[] = []) =>
+    String(salesRowOf({ ...base, judgment: { ...jd('recommend'), checks: checks.map((k, i) => ({ ...k, quote: k.requirement, ...(extra[i] ?? {}) })) } } as ProperCandidate, undefined)[reasonCol]);
+  const reasonLines = reasonOf(
+    [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'met' }, { kind: '必須', requirement: 'Spring 5年以上', status: 'close' },
+      { kind: '尚可', requirement: 'AWS', status: 'close' }, { kind: '尚可', requirement: 'COBOL', status: 'unmet' }, { kind: '必須', requirement: 'React', status: 'unmet' }],
+    [{ evidence: 'Javaで受注管理の開発' }, {}, { shortYears: 3.5 }, { evidence: 'GCPでの構築' }, { note: '経歴に無い' }, {}],
+  ).split('\n');
+  check('判定の理由: met（経歴の根拠・無ければ経験あり）/ close（年数不足あり・なし）/ unmet（補足あり・なし）を要件ごとに1行',
+    reasonLines.join('|') === [
+      '○ 必須 Java ― 経歴「Javaで受注管理の開発」', '○ 必須 SQL ― 経験あり', '△ 必須 Spring 5年以上 ― 近い経験（経歴は約3.5年）',
+      '△ 尚可 AWS ― 近い経験（経歴「GCPでの構築」）', '× 尚可 COBOL ― 経験なし（経歴に無い）', '× 必須 React ― 経歴に記載なし',
+    ].join('|'), reasonLines.join('|'));
+  check('判定の理由: 判定が無い候補・要件ごとの結果が無い判定は空',
+    String(salesRowOf(base, undefined)[reasonCol]) === '' && String(salesRowOf(withJ('recommend'), undefined)[reasonCol]) === '');
+  // 判定の理由の列が増える前の見出し（30列）のシートから移行しても、人の入力は ID で引き継がれる
+  const oldHeader = header.filter((h) => h !== '判定の理由');
+  const oldRow = oldHeader.map(() => '');
+  const oldAt = (n: string) => oldHeader.indexOf(n);
+  oldRow[oldAt('ID')] = base.id; oldRow[oldAt('対応状況')] = '提案済'; oldRow[oldAt('見送り理由')] = '単価が安い'; oldRow[oldAt('担当営業')] = '佐藤';
+  oldRow[oldAt('メモ')] = '面談調整中'; oldRow[oldAt('精度チェック')] = '○ 概ね妥当'; oldRow[oldAt('精度メモ')] = '妥当'; oldRow[oldAt('案件名')] = base.projectTitle;
+  oldRow[oldAt('提案文面（案）')] = '旧文面';
+  const oldGone = oldHeader.map(() => '');
+  oldGone[oldAt('ID')] = 'ownmatch_old'; oldGone[oldAt('メモ')] = '残す'; oldGone[oldAt('案件単価(万)')] = '60';
+  check('営業リストの更新: 判定の理由が無い古い見出しは差分で書かず全体を書き直す', planSalesUpdate([salesRowOf(base, undefined)], [oldHeader, oldRow]) === null);
+  const migrated = mergeSalesRows([salesRowOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }]), undefined)], [oldHeader, oldRow, oldGone]);
+  const mById = new Map(migrated.map((r) => [String(r[col('ID')]), r]));
+  const mm = mById.get(base.id);
+  check('古い見出し（判定の理由なし）からの移行: 人の入力の列をIDで引き継ぎ、新しい列は今回の値で埋め、機械の列は新しい値にする',
+    mm !== undefined && mm.length === header.length && mm[col('対応状況')] === '提案済' && mm[col('見送り理由')] === '単価が安い' && mm[col('担当営業')] === '佐藤' &&
+      mm[col('メモ')] === '面談調整中' && mm[col('精度チェック')] === '○ 概ね妥当' && mm[col('精度メモ')] === '妥当' &&
+      mm[reasonCol] === '○ 必須 Java ― 経験あり' && mm[col('提案文面（案）')] === '' && mm[col('ID')] === base.id,
+    JSON.stringify(mm));
+  check('古い見出しからの移行: 候補から外れても人の入力がある行は残り、列がずれない',
+    mById.get('ownmatch_old')?.[col('メモ')] === '残す' && mById.get('ownmatch_old')?.[col('案件単価(万)')] === 60 && mById.get('ownmatch_old')?.[reasonCol] === '');
   const legacyHeader = ['No', '優先度', '要員', '案件名', '対応状況', '担当営業', 'メモ'];
   const fromOld = mergeSalesRows([salesRowOf(nego, undefined)], [], [legacyHeader, ['1', 'B', 'A.A', 'Java 開発', '提案済', '田中', '返信待ち']]);
   check('以前の営業リスト（ID列なし）の入力を要員＋案件名で引き継ぐ',

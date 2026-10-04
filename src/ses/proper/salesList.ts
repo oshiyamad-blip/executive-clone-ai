@@ -68,6 +68,7 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: 'メール件名', width: 280, wrap: false },
   { name: '受信日時', width: 108 },
   { name: '案件詳細（メール本文より）', width: 320, wrap: false },
+  { name: '判定の理由', width: 320, wrap: false },
   { name: '提案文面（案）', width: 320, wrap: false },
   { name: 'ID', width: 40, hidden: true },
 ];
@@ -132,10 +133,10 @@ function jstLabel(d: Date): string {
 
 const CHECK_MARKS: Record<RequirementCheck['status'], string> = { met: '○', close: '△', unmet: '×' };
 const BULLET = /^\s*(?:[・\-*●○◯◎►▶>＞]|\d+[.．)）])/;
-export const CHECK_LEGEND = '【要件の照合】○ 経験あり　△ 近い経験　× 経験なし（AIの判定を経歴と照合した結果）';
+export const CHECK_LEGEND = '【要件の照合】○ 経験あり　△ 近い経験　× 経験なし（AIの判定を経歴と照合した結果。理由は右の「判定の理由」列）';
 
-// メール本文の必須・尚可の行の先頭に ○△× を付ける。1行に複数の要件がある行は行末に要件ごとの記号を添え、
-// 本文に見つからない要件は冒頭の一覧に回す
+// メール本文の必須・尚可の行の先頭に ○△× を付ける。1行に複数の要件がある行は行末に記号だけを要件の順に添え、
+// 本文に見つからない要件は冒頭の一覧に回す。要件名と理由は隣の「判定の理由」列に出すため、ここには書かない
 export function markRequirementsInMail(detail: string, checks: RequirementCheck[]): string {
   if (checks.length === 0) return detail;
   const lines = detail.split('\n');
@@ -166,13 +167,27 @@ export function markRequirementsInMail(detail: string, checks: RequirementCheck[
     const cs = byLine.get(i);
     if (!cs) return line;
     if (cs.length === 1) return `${CHECK_MARKS[cs[0].status]} ${line}`;
-    return `${line}　→ ${cs.map((c) => `${CHECK_MARKS[c.status]}${c.requirement}`).join('　')}`;
+    return `${line}　→ ${cs.map((c) => CHECK_MARKS[c.status]).join('')}`;
   });
   const head = [CHECK_LEGEND];
   if (unplaced.length > 0) {
     head.push(...unplaced.map((c) => `${CHECK_MARKS[c.status]} ${c.kind}: ${c.requirement}`));
   }
   return [...head, '', ...(detail.trim() ? marked : [])].join('\n').trimEnd();
+}
+
+// 「判定の理由」: 要件ごとに1行。メール本文側は記号だけにしているため、名前と理由はここで読む
+export function checkReasonLines(checks: RequirementCheck[]): string {
+  return checks
+    .map((k) => {
+      const ev = k.evidence ? `経歴「${k.evidence}」` : '';
+      const why =
+        k.status === 'met' ? ev || '経験あり'
+        : k.status === 'close' ? (typeof k.shortYears === 'number' ? `近い経験（経歴は約${k.shortYears.toFixed(1)}年）` : `近い経験${ev ? `（${ev}）` : ''}`)
+        : k.note ? `経験なし（${k.note}）` : '経歴に記載なし';
+      return `${CHECK_MARKS[k.status]} ${k.kind} ${k.requirement} ― ${why}`;
+    })
+    .join('\n');
 }
 
 // 案件単価が希望単価をこの額（万円）以上上回る組には、AIが見立てた高い理由（商流が浅い／求める水準が高い）を出す
@@ -214,6 +229,7 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   const unmet = c.needsReview || c.reference ? [] : unmetRequiredOf(c);
   row[COL['確認事項']] = unmet.length > 0 ? [`要確認: 経験の無い必須があります（${unmet.join('、')}）`, confirm].filter(Boolean).join('\n') : confirm;
   row[COL['提案文面（案）']] = c.draftToProject?.body ?? '';
+  row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {
     row[COL['勤務地']] = project.location;
@@ -583,7 +599,8 @@ function conditionalRules(sheetId: number): sheets_v4.Schema$Request[] {
 
 // タブ1枚分の見た目（見出し・固定・列幅・折り返し・色・隠し列）。既存の条件付き書式は消してから付け直す
 // layout: 列幅・非表示・固定・フィルタも付ける（作ったばかりのタブだけ。毎回付け直すと、営業が変えた列幅や絞り込みが消える）
-export function formatRequests(sheetId: number, existingRuleCount: number, isAll: boolean, layout = true): sheets_v4.Schema$Request[] {
+// protect: 入力しない場所の確認の設定を付ける（既定は layout と同じ。列を組み替えて書き直すときは古い設定が残っているため付け足さない）
+export function formatRequests(sheetId: number, existingRuleCount: number, isAll: boolean, layout = true, protect = layout): sheets_v4.Schema$Request[] {
   const reqs: sheets_v4.Schema$Request[] = [];
   for (let i = existingRuleCount - 1; i >= 0; i--) reqs.push({ deleteConditionalFormatRule: { sheetId, index: i } });
   if (layout) reqs.push({
@@ -662,7 +679,7 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
     });
     if (layout) reqs.push({ setBasicFilter: { filter: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0, endColumnIndex: SALES_COLUMNS.length } } } });
   }
-  if (layout) reqs.push(...protectRequests(sheetId, isAll));
+  if (protect) reqs.push(...protectRequests(sheetId, isAll));
   return reqs;
 }
 
@@ -730,7 +747,7 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number, su
 
 // ===== 書き出し =====
 
-// 新しいタブの既定は26列で、29列の表を書くと枠を超えて弾かれるため列を足して作る
+// 新しいタブの既定は26列で、それを超える列数の表を書くと枠を超えて弾かれるため列を足して作る
 const WIDE_GRID = { columnCount: SALES_COLUMNS.length + 1 };
 
 export function salesListConfigured(): boolean {
@@ -919,6 +936,15 @@ export async function writeSalesList(
     ];
   });
   if (grow.length > 0) await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: grow } }));
+  // 「クローズ済み」の見出しが今の列の並びでない（列が増える前に作られた）ときは、見出しの名前で並べ直して書き直す。
+  // そのまま足すと新しい行だけ列がずれ、ID 列が読めなくなる。行数は同じで列が増えるだけなので、先に消さずに上から書く（書き込みに失敗しても控えを失わない）
+  const closedHeader = closedValues[0] ?? [];
+  if (closedHeader.length > 0 && (closedHeader.length !== HEADER.length || closedHeader.some((h, i) => h !== HEADER[i]))) {
+    const remapped = [HEADER, ...closedValues.slice(1).map((r) => HEADER.map((name) => (closedHeader.indexOf(name) >= 0 ? (r[closedHeader.indexOf(name)] ?? '') : '')))];
+    await withGoogleRetry(() =>
+      api.spreadsheets.values.update({ spreadsheetId, range: `${closedTab}!A1`, valueInputOption: 'RAW', requestBody: { values: remapped } }),
+    );
+  }
   // クローズの行は先に控えへ移す（全体から消すのはその後。途中で失敗しても行が失われないように）
   if (planned.closedRows.length > 0) {
     const data = closedValues.length === 0 ? [HEADER, ...planned.closedRows] : planned.closedRows;
@@ -1021,9 +1047,11 @@ export async function writeSalesList(
   const all = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
   const summary = tabs.find((t) => t.title === SALES_SUMMARY_TAB);
   const staffListTab = tabs.find((t) => t.title === SALES_STAFF_LIST_TAB);
+  // 全体を書き直した（見出しが既定の並びでなかった）ときは列の位置が変わるため、列幅・隠す列も付け直す
+  const rewritten = plan === null;
   const format = [
-    ...formatRequests(all.sheetId, all.rules, true, created.has(SALES_ALL_TAB)),
-    ...staffTabs.flatMap((t) => formatRequests(t.sheetId, t.rules, false, created.has(t.title))),
+    ...formatRequests(all.sheetId, all.rules, true, created.has(SALES_ALL_TAB) || rewritten, created.has(SALES_ALL_TAB)),
+    ...staffTabs.flatMap((t) => formatRequests(t.sheetId, t.rules, false, created.has(t.title) || rewritten, created.has(t.title))),
     ...(summary && staffListTab ? sideTabFormatRequests(summary.sheetId, staffListTab.sheetId, summaryTopRows(labels)) : []),
   ];
   await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: format } }));
