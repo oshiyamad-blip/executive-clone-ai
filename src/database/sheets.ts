@@ -58,6 +58,8 @@ export const DRAFT_REQUEST_COLUMNS = [
 ];
 
 export const PROPER_CANDIDATE_TAB = 'プロパー候補';
+// プロパー × 案件のAI判定の控え（1行1組）。社員ごとに1セルへ詰める方式では1セルの上限で溢れ、溢れた組を毎回判定し直していた
+export const PROPER_JUDGE_TAB = '_プロパー判定';
 
 // 突合済 = その案件・要員の候補ペアを判定してマッチタブに保存し終えた日時。空欄の間は次回以降のバッチでも突合する
 // （実行が時間切れ・失敗で途中終了しても、判定し損ねたペアを取りこぼさないため）
@@ -125,6 +127,8 @@ const TABS: Record<string, string[]> = {
     '適合スコア', '根拠', '案件ID', '営業元メール', '検出日時', 'ステータス',
     '担当者メール', '案件側下書き状態', '案件側文面', '下書きデータ',
   ],
+  // キー = <社員の控えキー>|<案件ID>。判定JSONは1セルに収まる大きさ（超えた組は控えない）
+  [PROPER_JUDGE_TAB]: ['キー', '社員キー', '案件ID', '受信日時', '判定JSON', '更新日時'],
 };
 
 const book = new SheetBook({
@@ -1660,6 +1664,74 @@ export async function writeStateJson(key: string, value: unknown): Promise<void>
     throw new SafeLogError(`SheetsDB: 状態「${key}」が大きすぎます（${json.length}文字 > ${STATE_JSON_MAX_CHARS}）`);
   }
   await upsertRow('_状態', 'キー', key, () => [key, json, new Date().toISOString()]);
+}
+
+// 「_状態」の1キーを空にする（キー行は残す。読み側は空を未保存として扱う）。移行済みの古い控えを手放すのに使う
+export async function clearStateJson(key: string): Promise<void> {
+  if (!configured()) return;
+  await book.writeCellsByKey('_状態', 'キー', [{ key, cells: [['JSON', ''], ['更新日時', new Date().toISOString()]] }]);
+}
+
+// ===== プロパー判定の控え（_プロパー判定） =====
+
+export interface ProperJudgeRow {
+  projectId: string;
+  receivedAt: string;
+  json: string; // 判定JSON（読み側で解釈する）
+}
+
+// 社員の控えキーの行を読む。タブ全体は1回の実行で1回だけ読み（以後は行キャッシュ）、社員キーで絞る
+export async function readProperJudgeRowsSheets(engineerKey: string): Promise<ProperJudgeRow[]> {
+  if (!configured()) return [];
+  const tab = PROPER_JUDGE_TAB;
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  return (await readRows(tab))
+    .filter((r) => c(r.cells, '社員キー') === engineerKey && c(r.cells, '判定JSON') !== '')
+    .map((r) => ({ projectId: c(r.cells, '案件ID'), receivedAt: c(r.cells, '受信日時'), json: c(r.cells, '判定JSON') }))
+    .filter((r) => r.projectId !== '');
+}
+
+// 1社員の判定をまとめて保存する（新しい組は追記・変わった組は1回の一括更新。1組ずつ呼ばない）。
+// 1セルに収まらない判定は保存しない。保存した行数と、大きすぎて保存しなかった組数を返す
+export async function writeProperJudgeRowsSheets(
+  engineerKey: string,
+  rows: Array<{ projectId: string; receivedAt: string; json: string }>,
+): Promise<{ written: number; tooLarge: number }> {
+  if (!configured() || rows.length === 0) return { written: 0, tooLarge: 0 };
+  const tab = PROPER_JUDGE_TAB;
+  await readRows(tab); // タブの自動生成とヘッダー検証を先に済ませる
+  const now = new Date().toISOString();
+  const fresh: Cell[][] = [];
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  let tooLarge = 0;
+  for (const r of rows) {
+    if (r.json.length > STATE_JSON_MAX_CHARS) {
+      tooLarge += 1;
+      continue;
+    }
+    const key = `${engineerKey}|${r.projectId}`;
+    const hit = await findRow(tab, 'キー', key);
+    if (!hit) {
+      fresh.push([key, engineerKey, r.projectId, r.receivedAt, r.json, now]);
+    } else if (cellStr(hit.cells, colIndex(tab, '判定JSON')) !== r.json) {
+      updates.push({ key, cells: [['受信日時', r.receivedAt], ['判定JSON', r.json], ['更新日時', now]] });
+    }
+  }
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) await appendRows(tab, fresh.slice(i, i + APPEND_CHUNK));
+  const updated = updates.length > 0 ? await book.writeCellsByKey(tab, 'キー', updates) : 0;
+  return { written: fresh.length + updated, tooLarge };
+}
+
+// 受信日時が before より前の行を消す（日時を読めない行は消さない）。消した行数を返す
+export async function pruneProperJudgeRowsSheets(before: Date): Promise<number> {
+  if (!configured()) return 0;
+  const tab = PROPER_JUDGE_TAB;
+  const col = colIndex(tab, '受信日時');
+  const isOld = (r: CachedRow) => {
+    const t = Date.parse(cellStr(r.cells, col));
+    return Number.isFinite(t) && t < before.getTime();
+  };
+  return deleteRowsIfAny(tab, isOld);
 }
 
 // ===== 同時実行の防止（バッチの実行中の印） =====

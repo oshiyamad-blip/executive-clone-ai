@@ -3,13 +3,15 @@
 //       案件スプレッドシートの「プロパー候補」タブへ保存（提案の全員に返信文面つき。担当者メールで次回バッチが下書きにする）
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
-import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, properFailGatePct, maxCandidatesPerItem } from '../config.js';
+import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, properFailGatePct, properJudgeBudgetJpy, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
 import { ownPairsForJudge, auditPairsForJudge, signedMan } from '../ownMatch.js';
 import { getLlmUsageLog } from '../../llm/usage.js';
 import { usageCostJpy } from '../../llm/pricing.js';
-import { judgeProperPairs, cachedProjectIdsFor } from './judge.js';
+import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, properBudgetExhausted } from './judge.js';
+import { startJudgeBudget } from '../match.js';
+import { pastRunDeadline } from '../schedule.js';
 import { techNamesIn } from '../skillDict.js';
 import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
@@ -39,6 +41,7 @@ export interface ProperRunResult {
   added: number; // 今回初めて見つかった候補（サマリを送るかの判断に使う）
   retired: number; // 稼働可でなくなった社員の候補として退役させた行数
   salesRows: number | null; // 営業リストに書き出した行数（未設定・失敗・見送りは null）
+  deferred?: number; // 費用の上限・実行の期限で次回に回したAI判定の組数
   skipped?: string[]; // 書き込みを見送った理由（サマリに載せる固定文言。氏名・案件名・組のキーは含めない）
 }
 
@@ -53,6 +56,9 @@ export interface JudgeStats {
   outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
+  deferred: number; // 費用の上限・実行の期限で判定せず次回に回した組（失敗に数えない。下の2つの合計）
+  deferredBudget: number;
+  deferredDeadline: number;
   audited: number; // 足切りで落とした組から監視のために判定した組（上の judged には含めない）
   auditHits: number; // うち、候補になった組（見送りでない組）
   auditTokens: { input: number; output: number; costJpy: number }; // 監視の判定に使った量（キャッシュの分は入力に含む）
@@ -288,15 +294,25 @@ export async function buildProperCandidates(
   const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
   const stats: JudgeStats = {
     prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length,
+    deferred: 0, deferredBudget: 0, deferredDeadline: 0,
     audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 }, gated: false,
   };
   const auditHitKeys: string[] = [];
   const judged: OwnMatch[] = [];
+  // 本体の判定予算と同じ考え方で、プロパー判定の開始からのLLM費用に上限を掛ける（監視の判定も同じ上限の中）
+  const budget = startJudgeBudget(properJudgeBudgetJpy());
   // 判定結果を候補の元（judged）に反映する。監視の組は別の集計に数える
   const consume = (list: typeof pairs, outcomes: Awaited<ReturnType<typeof judgeProperPairs>>, st: JudgeStats): OwnMatch[] => {
     const out: OwnMatch[] = [];
     list.forEach((p, i) => {
       const o = outcomes[i];
+      // 先送りの組は失敗ではない（候補にも要確認にもしない。営業リストの既存の行は残り、次の回の判定が続く）
+      if (o.deferred) {
+        st.deferred += 1;
+        if (o.deferReason === 'budget') st.deferredBudget += 1;
+        else st.deferredDeadline += 1;
+        return;
+      }
       if (!o.judgment) {
         st.failed += 1;
         // AI判定に失敗した組は、ルールだけの基準も満たすときに限り要確認で残す
@@ -324,15 +340,16 @@ export async function buildProperCandidates(
     return out;
   };
   const toJudge = (list: typeof pairs) => list.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project }));
-  judged.push(...consume(pairs, await judgeProperPairs(toJudge(pairs), projects), stats));
+  judged.push(...consume(pairs, await judgeProperPairs(toJudge(pairs), projects, { budget }), stats));
   // 失敗の多い回（監視の判定は含めない）は、呼び出し側が候補の保存と営業リストの書き込みを見送る
   stats.gated = failGateTripped(stats.failed, stats.judged);
   // 足切りの監視: 落とした組から少しだけ判定し、良い組を落としていないかを見る。使った量は呼び出し前後のログの差で数える
   const audit = pickAuditPairs(engineers, projects, now, pairs, (id) => cachedByEngineer.get(id));
-  if (audit.length > 0) {
+  // 費用の上限に達した回・期限を過ぎた回は監視をしない（判定の続きを優先する）
+  if (audit.length > 0 && !properBudgetExhausted(budget) && !pastRunDeadline()) {
     const logStart = getLlmUsageLog().length;
-    const scratch: JudgeStats = { ...stats, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0 };
-    const hits = consume(audit, await judgeProperPairs(toJudge(audit), projects), scratch);
+    const scratch: JudgeStats = { ...stats, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, deferred: 0, deferredBudget: 0, deferredDeadline: 0 };
+    const hits = consume(audit, await judgeProperPairs(toJudge(audit), projects, { budget }), scratch);
     // 監視の当たりはルール上は候補外の組なので、営業リストの候補には入れない（数えて、試運転ではキーをラベルに残す）
     const auditHit = hits.filter((m) => m.judgment);
     auditHitKeys.push(...auditHit.map((m) => `${m.ownEngineerId}|${m.projectId}`));
@@ -421,11 +438,16 @@ export function judgmentFit(j: ProperJudgment | undefined): number {
 }
 
 function logJudge(s: JudgeStats): void {
-  const log = s.overCap > 0 ? console.warn : console.log;
+  const log = s.overCap > 0 || s.deferred > 0 ? console.warn : console.log;
   log(
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
+  if (s.deferred > 0) {
+    console.warn(
+      `プロパー判定: 判定${s.judged - s.cached}組（控え${s.cached}組）・先送り${s.deferred}組（費用の上限${s.deferredBudget}／時間${s.deferredDeadline}。次回の実行で続きを判定します）`,
+    );
+  }
   if (s.gated) {
     console.warn(`プロパー判定: AI判定の失敗が多いため（${s.judged + s.failed}組中${s.failed}組）、今回は候補の保存と営業リストの書き込みを見送りました`);
   }
@@ -553,8 +575,11 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   if (!canWriteSales && !stats.gated) console.warn('営業リスト: 要員リストか案件を読めなかったため、今回は書き出しません（前回のまま残します）');
   const sales = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjects) : { rows: null };
   if (sales.skipped) skipped.push(sales.skipped);
+  const pruned = await pruneJudgeCache();
+  if (pruned > 0) console.log(`プロパー判定: 古い判定の控え${pruned}行を片付けました`);
   const result: ProperRunResult = {
     demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows: sales.rows,
+    ...(stats.deferred > 0 ? { deferred: stats.deferred } : {}),
     ...(skipped.length > 0 ? { skipped } : {}),
   };
   logCounts('プロパー候補', result);
@@ -599,6 +624,7 @@ export function properSummaryLines(r: ProperRunResult | null, forMail: boolean):
       : `プロパー候補: ${r.candidates.length}件（詳細は案件スプシの『${PROPER_CANDIDATE_TAB}』タブ）`,
   );
   for (const m of r.skipped ?? []) lines.push(`■${m}`);
+  if ((r.deferred ?? 0) > 0) lines.push(`・AI判定${r.deferred}組は費用の上限・時間の都合で次回の実行に回しました（営業リストの既存の行はそのまま残ります）`);
   const s = r.sync;
   if (s) {
     lines.push(

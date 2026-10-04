@@ -20,6 +20,7 @@ import {
   pricingSettingsInvalid,
   retentionDays,
   properJudgePerEngineer,
+  properJudgeBudgetJpy,
 } from '../config.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
@@ -126,7 +127,7 @@ import {
   type RawEngineer,
 } from '../extract.js';
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
-import { pickForExtraction, nextRunAt } from '../schedule.js';
+import { pickForExtraction, nextRunAt, startRunClock, stopRunClock } from '../schedule.js';
 import { shouldSendSummary } from '../notify.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
@@ -4181,6 +4182,52 @@ async function properJudgeChecks(): Promise<void> {
     if (savedGate === undefined) delete process.env.PROPER_FAIL_GATE_PCT;
     else process.env.PROPER_FAIL_GATE_PCT = savedGate;
     check('PROPER_FAIL_GATE_PCT=0 ではゲートが働かない・閾値ちょうど（30%）は止めない', !gOff.gated && !failGateTripped(6, 14, 30) && failGateTripped(6, 13, 30) && !failGateTripped(6, 4, 0));
+    // 費用の上限・実行の期限: 超えた後の組は判定せず「先送り」にする（失敗に数えず、候補にも要確認にもしない）
+    const deferProjects = Array.from({ length: 6 }, (_, i) => project({ id: `p_defer${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, agentCompany: `D${i}社`, location: ['品川', '新宿', '渋谷', '池袋', '上野', '大手町'][i], receivedAt: daysAgo(1) }));
+    const savedBudget = process.env.PROPER_JUDGE_BUDGET_JPY;
+    const costly = async () => {
+      recordLlmUsage('claude-sonnet-5', 1_000_000, 100_000); // 1組で上限を超える費用（呼び出しの先頭で記録し、同時に走る次の組の判定前に反映する）
+      return raw();
+    };
+    try {
+      process.env.PROPER_JUDGE_BUDGET_JPY = '1';
+      __setProperJudgeForTest(costly);
+      const bd = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], deferProjects, NOW);
+      check('費用の上限に達した後の組は先送り（失敗に数えない・候補に入れない・失敗率のゲートも働かない）',
+        bd.stats.judged === 1 && bd.stats.deferred === 5 && bd.stats.deferredBudget === 5 && bd.stats.deferredDeadline === 0 && bd.stats.failed === 0 &&
+          bd.candidates.length === 1 && !bd.stats.gated, JSON.stringify(bd.stats));
+      process.env.PROPER_JUDGE_BUDGET_JPY = '0';
+      const bu = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], deferProjects, NOW);
+      check('PROPER_JUDGE_BUDGET_JPY=0 は上限なし（全部判定する）', bu.stats.judged === 6 && bu.stats.deferred === 0 && bu.candidates.length === 6, JSON.stringify(bu.stats));
+      delete process.env.PROPER_JUDGE_BUDGET_JPY;
+      check('費用の上限の既定値は300円', properJudgeBudgetJpy() === 300);
+      // 上限に達した回は足切りの監視の判定もしない（上限の中で行う）
+      process.env.PROPER_JUDGE_BUDGET_JPY = '1';
+      const lowRate2 = project({ id: 'p_audit_low2', title: '基盤更新の低単価案件', agentCompany: 'L社', requiredSkills: ['Oracle'], rateMax: 30, location: '品川', receivedAt: daysAgo(1) });
+      __setProperJudgeForTest(costly);
+      const ba = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], [pj, lowRate2], NOW);
+      check('費用の上限に達した回は足切りの監視の判定をしない', ba.stats.judged === 1 && ba.stats.audited === 0, JSON.stringify(ba.stats));
+    } finally {
+      if (savedBudget === undefined) delete process.env.PROPER_JUDGE_BUDGET_JPY;
+      else process.env.PROPER_JUDGE_BUDGET_JPY = savedBudget;
+    }
+    try {
+      startRunClock(Date.now() - 24 * 60 * 60 * 1000);
+      __setProperJudgeForTest(async () => raw());
+      const dl = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], deferProjects, NOW);
+      check('実行の期限を過ぎていれば全部先送り（失敗に数えない・候補にしない）',
+        dl.stats.judged === 0 && dl.stats.deferred === 6 && dl.stats.deferredDeadline === 6 && dl.stats.failed === 0 && dl.candidates.length === 0 && !dl.stats.gated, JSON.stringify(dl.stats));
+      stopRunClock();
+      __setProperJudgeForTest(async () => {
+        startRunClock(Date.now() - 24 * 60 * 60 * 1000); // 1組目の判定中に期限を過ぎる
+        return raw();
+      });
+      const dm = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], deferProjects, NOW);
+      check('期限を過ぎた後の組だけを先送りにする（それまでに判定した組は候補にする）',
+        dm.stats.judged === 1 && dm.stats.deferred === 5 && dm.stats.deferredDeadline === 5 && dm.candidates.length === 1, JSON.stringify(dm.stats));
+    } finally {
+      stopRunClock();
+    }
     // 監視の当たり: 単価がルールの足切りに掛かる組をAIが推奨しても、候補には入れず数える（キーは返すだけでログには出さない）
     const lowRate = project({ id: 'p_audit_low', title: '基盤更新の低単価案件', agentCompany: 'L社', requiredSkills: ['Oracle'], rateMax: 30, location: '品川', receivedAt: daysAgo(1) });
     __setProperJudgeForTest(async () => raw());

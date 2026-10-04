@@ -828,6 +828,12 @@ export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
 }
 
+// プロパー候補のAI判定に1回の実行で使ってよいLLMコストの目安（円）。超えたら残りの組は判定せず次回へ先送りする
+// （失敗には数えない。足切りの監視の判定も同じ上限の中で行う）。0で上限なし
+export function properJudgeBudgetJpy(): number {
+  return envNum('PROPER_JUDGE_BUDGET_JPY', 300, { min: 0 });
+}
+
 // AI判定の失敗率（失敗 ÷ 判定した組＋失敗）がこの割合（%）を超え、かつ失敗が一定数以上の回は、API障害・レート制限とみなして
 // 候補の保存と営業リストの書き込みを見送る（要確認の行が一度に大量に載るのを防ぐ）。0 で無効
 export function properFailGatePct(): number {

@@ -22,6 +22,7 @@ import {
   saveMatchFeedbackSheets,
   checkSheetsTabs,
   PROPER_CANDIDATE_TAB,
+  PROPER_JUDGE_TAB,
   DRAFT_REQUEST_COLUMNS,
   MATCHED_COLUMN,
   JUDGE_COLUMN,
@@ -70,6 +71,7 @@ import {
 } from '../proper/master.js';
 import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
 import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
+import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, cacheKeyOf, __setProperJudgeForTest, type RawProperJudgment } from '../proper/judge.js';
 import { collectSesMail } from '../collect.js';
 import { markMailProcessed, loadFingerprintRecords, touchLastSeen, loadProcessedMailIds } from '../store.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from '../mail/ownMail.js';
@@ -98,7 +100,7 @@ import {
 } from '../googleCreds.js';
 import { properGoogleAuth, properMasterAuth, properUsesDedicatedAccount } from '../proper/auth.js';
 import { FakeSheets, FakeDrive, FakeMailTransport, type FakeDriveFile } from './fakeGoogle.js';
-import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail } from '../../types/index.js';
+import type { Project, Engineer, MatchResult, MatchCategory, ReplyTarget, SesRawMail, ProperEngineer, ProperJudgment } from '../../types/index.js';
 
 // ===== 実行環境の隔離（外部の設定・鍵を一切拾わない） =====
 
@@ -1486,6 +1488,90 @@ async function testProperCandidates(): Promise<void> {
   const back = sheets.record(SES_BOOK, tab, 'ID', idB);
   check('稼働可に戻れば候補の行も「未作成」に戻る', back?.['案件側下書き状態'] === '未作成' && back?.['プロパー'] !== '（対象外）' && Boolean(back?.['下書きデータ']), JSON.stringify(back));
   sheets.setByKey(PROPER_BOOK, PROPER_MASTER_TAB, 'ファイルID', 'fileH', '稼働状況', '稼働可');
+}
+
+// ===== プロパー判定の控え（_プロパー判定。1組1行） =====
+
+async function testProperJudgeCache(): Promise<void> {
+  section('プロパー判定の控え（「_プロパー判定」タブに1組1行・社員ごとに分け、古い受信は片付け、古い「_状態」の控えから移す）');
+  const eng = (id: string, tag: string): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills: ['Java'], experienceYears: 5, requiredProjectRate: 60,
+    residence: '', prefecture: '東京都', availableDate: '', availableFrom: null, remoteWish: 'unknown', status: 'available', profileText: `経歴${tag}`,
+  });
+  // 判定1件が数千文字（要件ごとの根拠・メモを含む）になるよう、未充足のメモを長くする
+  const rawJudgment = (): RawProperJudgment => ({
+    work: '検証用', levelFit: '', preferenceFit: '記載なし', verdict: 'recommend', pitch: '', concerns: [], workPrefecture: '', rateReason: 'none', injectionSuspected: false,
+    requirements: ['A', 'B', 'C'].map((r) => ({ requirement: `要件${r}`, kind: '必須' as const, quote: `要件${r}`, status: 'unmet' as const, evidence: '', note: 'あ'.repeat(800) })),
+  });
+  const calls: string[] = [];
+  __setProperJudgeForTest(async (e, p) => {
+    calls.push(`${e.id}|${p.id}`);
+    return rawJudgment();
+  }, { useCache: true });
+  try {
+    const e1 = eng('E_c1', '1');
+    const e2 = eng('E_c2', '2');
+    const e3 = eng('E_c3', '3');
+    const fresh = Array.from({ length: 100 }, (_, i) => project(`pjc${i}`, { title: `案件${i}`, receivedAt: new Date(NOW.getTime() - i * 60_000) }));
+    const rows = () => sheets.records(SES_BOOK, PROPER_JUDGE_TAB);
+    newRun();
+    const callsBefore = sheets.callCount(SES_BOOK);
+    const first = await judgeProperPairs(fresh.map((p) => ({ engineer: e1, project: p })), fresh);
+    const used = sheets.callCount(SES_BOOK) - callsBefore;
+    const perJudgment = JSON.stringify(first[0].judgment).length;
+    check(`1セル（45,000文字）に詰める方式では溢れる量（100案件・1件約${perJudgment}文字）の判定がすべて控えに残る`,
+      calls.length === 100 && rows().length === 100 && perJudgment * 100 > 45_000 && first.every((o) => o.judgment !== null), `${calls.length}回 / ${rows().length}行`);
+    check(`100組の判定を書くAPI呼び出しは少ない（${used}回）`, used <= 8, `${used}回`);
+
+    newRun();
+    calls.length = 0;
+    const writesBefore = sheets.writeCount(SES_BOOK, PROPER_JUDGE_TAB);
+    const callsBefore2 = sheets.callCount(SES_BOOK);
+    const second = await judgeProperPairs(fresh.map((p) => ({ engineer: e1, project: p })), fresh);
+    check('次の回は控えを読むだけで判定せず、書き込みもしない（読みはタブ全体で1回）',
+      calls.length === 0 && second.every((o) => o.cached && o.judgment !== null) && sheets.writeCount(SES_BOOK, PROPER_JUDGE_TAB) === writesBefore &&
+        sheets.callCount(SES_BOOK) - callsBefore2 <= 3, `${calls.length}回・API${sheets.callCount(SES_BOOK) - callsBefore2}回`);
+
+    newRun();
+    const ids1 = await cachedProjectIdsFor(e1);
+    const ids2Before = await cachedProjectIdsFor(e2);
+    await judgeProperPairs(fresh.slice(0, 3).map((p) => ({ engineer: e2, project: p })), fresh.slice(0, 3));
+    newRun();
+    check('別の社員の行は返さない（社員ごとの控えキーで分ける）',
+      ids1.size === 100 && ids2Before.size === 0 && (await cachedProjectIdsFor(e1)).size === 100 && (await cachedProjectIdsFor(e2)).size === 3 && rows().length === 103);
+    check('控えの行は社員キー・案件IDと受信日時を持つ', rows().every((r) => r['キー'] === `${r['社員キー']}|${r['案件ID']}` && !Number.isNaN(Date.parse(r['受信日時']))));
+
+    // 受信が遡り期間（14日）＋7日より古い行は、実行の最後にまとめて消す
+    const stale = [project('pjc_old1', { receivedAt: new Date(NOW.getTime() - 40 * DAY_MS) }), project('pjc_old2', { receivedAt: new Date(NOW.getTime() - 25 * DAY_MS) }), project('pjc_edge', { receivedAt: new Date(NOW.getTime() - 20 * DAY_MS) })];
+    newRun();
+    await judgeProperPairs(stale.map((p) => ({ engineer: e2, project: p })), stale);
+    check('古い受信の案件の判定も、書いた直後は控えにある', rows().length === 106);
+    newRun();
+    const pruned = await pruneJudgeCache(NOW);
+    const left = new Set(rows().map((r) => r['案件ID']));
+    check('受信が21日より古い行（2行）だけを片付け、20日前の行と新しい行は残す',
+      pruned === 2 && rows().length === 104 && !left.has('pjc_old1') && !left.has('pjc_old2') && left.has('pjc_edge') && left.has('pjc0'), `${pruned}行 / ${rows().length}行`);
+    newRun();
+    check('片付けるものが無ければ何もしない（削除の呼び出しなし）', (await pruneJudgeCache(NOW)) === 0);
+
+    // 移行: 行が無く「_状態」に古い控え（社員ごとの1セル）があれば、それを使い、次の書き込みで行の形に移す
+    const old = (w: string): ProperJudgment => ({ verdict: 'recommend', work: w, met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [] });
+    const legacyKey = cacheKeyOf(e3);
+    await writeStateJson(legacyKey, { pjc0: old('旧0'), pjc1: old('旧1') });
+    newRun();
+    const legacyIds = await cachedProjectIdsFor(e3);
+    calls.length = 0;
+    const mig = await judgeProperPairs(fresh.slice(0, 3).map((p) => ({ engineer: e3, project: p })), fresh.slice(0, 3));
+    check('行が無ければ「_状態」の古い控えを使う（控えにある組は判定し直さず、無い組だけ判定する）',
+      legacyIds.size === 2 && calls.length === 1 && calls[0] === 'E_c3|pjc2' && mig[0].cached && mig[0].judgment?.work === '旧0' && mig[2].cached === false);
+    newRun();
+    const afterMig = (await readStateJson<Record<string, unknown>>(legacyKey)) ?? null;
+    check('移したあとは古い控えを空にし、次の回は行から読む（3組とも行にある）',
+      afterMig === null && rows().filter((r) => r['社員キー'] === legacyKey).length === 3 && (await cachedProjectIdsFor(e3)).size === 3);
+  } finally {
+    __setProperJudgeForTest(null);
+    newRun();
+  }
 }
 
 // ===== 9. 見出しの名前による列の対応付けと、特定できない見出し =====
@@ -3051,6 +3137,7 @@ async function main(): Promise<void> {
     await testProperMaster();
     await testDriveShortcuts();
     await testProperCandidates();
+    await testProperJudgeCache();
     await testHeaderByName();
     await testResumeAndDurability();
     await testReviewRegressions();
