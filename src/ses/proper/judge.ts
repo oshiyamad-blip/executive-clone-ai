@@ -2,12 +2,18 @@
 // 「案件で実際にやる作業」と「社員の経歴（スキルシートの本文）」を読み比べて判定する。
 // スキル名の一致だけでは決めない（「運用保守」「Excel」だけが重なる組を提案しない）。
 // AIの出力は信用しきらず、根拠に挙げた記載が経歴の本文に本当にあるかをコードで照合し、無いものは満たさない扱いにする。
-// 同じ社員（経歴が同じ）× 同じ案件の判定は「_状態」に控え、毎回の実行で判定し直さない
+// 同じ社員（経歴が同じ）× 同じ案件の判定は「_プロパー判定」タブに1組1行で控え、毎回の実行で判定し直さない。
+// 1回の実行の費用の上限と実行の期限を超える分は判定せず「先送り」にする（失敗ではない。次回の実行がそこから続く）
 import { createHash } from 'crypto';
 import { generateJson } from '../../llm/index.js';
-import { matchModel, isDemo } from '../config.js';
-import { callLimits } from '../schedule.js';
-import { readStateJson, writeStateJson, sheetsDbConfigured, STATE_JSON_MAX_CHARS } from '../../database/sheets.js';
+import { matchModel, isDemo, properProjectLookbackDays } from '../config.js';
+import { judgeBudgetExhausted } from '../match.js';
+import { callLimits, pastRunDeadline } from '../schedule.js';
+import { totalLlmCostJpy } from '../../llm/pricing.js';
+import {
+  readStateJson, clearStateJson, sheetsDbConfigured, readProperJudgeRowsSheets, writeProperJudgeRowsSheets, pruneProperJudgeRowsSheets,
+} from '../../database/sheets.js';
+import type { JudgeBudget } from '../match.js';
 import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
@@ -346,10 +352,13 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
 // ===== 呼び出し =====
 
 let judgeOverride: ((e: OwnEngineer, p: Project) => Promise<RawProperJudgment>) | null = null;
+let overrideKeepsCache = false;
 
-// 自己検証（ses:flow:check・rulesEval）用の差し替え。null で元に戻す
-export function __setProperJudgeForTest(fn: ((e: OwnEngineer, p: Project) => Promise<RawProperJudgment>) | null): void {
+// 自己検証（ses:flow:check・rulesEval）用の差し替え。null で元に戻す。差し替え中は控えを読み書きしない
+// （偽の判定を本物の控えに残さないため）。useCache は偽のGoogleに対して控えの読み書きを検証するときだけ true にする
+export function __setProperJudgeForTest(fn: ((e: OwnEngineer, p: Project) => Promise<RawProperJudgment>) | null, opts: { useCache?: boolean } = {}): void {
   judgeOverride = fn;
+  overrideKeepsCache = fn !== null && opts.useCache === true;
 }
 
 let cachedIdsOverride: ((e: OwnEngineer) => Promise<Set<string>>) | null = null;
@@ -392,7 +401,7 @@ async function callJudge(e: OwnEngineer, p: Project): Promise<RawProperJudgment>
   });
 }
 
-function cacheKeyOf(e: OwnEngineer): string {
+export function cacheKeyOf(e: OwnEngineer): string {
   const h = createHash('sha256')
     .update(`${JUDGE_VERSION}\n${matchModel()}\n${e.requiredProjectRate ?? ''}\n${profileTextOf(e)}`)
     .digest('hex')
@@ -402,52 +411,103 @@ function cacheKeyOf(e: OwnEngineer): string {
 
 type JudgeCache = Record<string, ProperJudgment>;
 
-async function readCache(key: string): Promise<JudgeCache> {
-  if (isDemo() || judgeOverride || !sheetsDbConfigured()) return {};
+function cacheActive(): boolean {
+  return !isDemo() && (!judgeOverride || overrideKeepsCache) && sheetsDbConfigured();
+}
+
+// 控えの行（無ければ移行元の「_状態」の古い控え）。読めなければ空（今回は判定し直す）。
+// legacy=true は行が1つも無く古い控えから読んだ状態（次の書き込みで行の形に移し、古い控えを空にする）
+async function readCache(key: string): Promise<{ cache: JudgeCache; legacy: boolean }> {
+  if (!cacheActive()) return { cache: {}, legacy: false };
   try {
-    return (await readStateJson<JudgeCache>(key)) ?? {};
+    const cache: JudgeCache = {};
+    for (const r of await readProperJudgeRowsSheets(key)) {
+      try {
+        cache[r.projectId] = JSON.parse(r.json) as ProperJudgment;
+      } catch {
+        // 壊れた行は無いものとして判定し直す（次の書き込みで上書きされる）
+      }
+    }
+    if (Object.keys(cache).length > 0) return { cache, legacy: false };
+    const old = (await readStateJson<JudgeCache>(key)) ?? {};
+    return { cache: old, legacy: Object.keys(old).length > 0 };
   } catch (err) {
     console.warn(`プロパー判定: 判定の控えを読めませんでした（今回は判定し直します）: ${safeErr(err)}`);
-    return {};
+    return { cache: {}, legacy: false };
   }
 }
 
-// 今回の案件の分だけを残し、上限を超えるときは古い受信の案件から落とす
-async function writeCache(key: string, cache: JudgeCache, projects: Project[]): Promise<void> {
-  if (isDemo() || judgeOverride || !sheetsDbConfigured()) return;
-  const order = [...projects].sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()).map((p) => p.id);
-  const kept: JudgeCache = {};
-  for (const id of order) {
-    if (!cache[id]) continue;
-    kept[id] = cache[id];
-    if (JSON.stringify(kept).length > STATE_JSON_MAX_CHARS) {
-      delete kept[id];
-      break;
-    }
+// 社員ごとの新しい判定（と移行する古い控え）を1回でまとめて書く。今回の遡り期間の案件の分だけ（受信日時が分からない案件は控えない）
+async function writeCache(key: string, entries: JudgeCache, projects: Project[], legacy: boolean): Promise<void> {
+  if (!cacheActive()) return;
+  const receivedOf = new Map(projects.map((p) => [p.id, p.receivedAt]));
+  const rows: Array<{ projectId: string; receivedAt: string; json: string }> = [];
+  for (const [projectId, j] of Object.entries(entries)) {
+    const at = receivedOf.get(projectId);
+    if (at === undefined) continue;
+    const t = new Date(at).getTime();
+    rows.push({ projectId, receivedAt: new Date(Number.isFinite(t) ? t : Date.now()).toISOString(), json: JSON.stringify(j) });
   }
   try {
-    await writeStateJson(key, kept);
+    const { tooLarge } = await writeProperJudgeRowsSheets(key, rows);
+    if (tooLarge > 0) console.warn(`プロパー判定: 1セルに収まらない判定${tooLarge}組は控えませんでした（次回判定し直します）`);
+    if (legacy) await clearStateJson(key);
   } catch (err) {
     console.warn(`プロパー判定: 判定の控えを書けませんでした: ${safeErr(err)}`);
   }
 }
 
-// 社員ごとの判定の控えにある案件ID（読めなければ空）。上限の数え方で「判定済みの組」を見分けるのに使う
+// 受信が遡り期間＋7日より古い控えの行をまとめて消す（実行の最後に1回）。消した行数を返す
+export async function pruneJudgeCache(now = new Date()): Promise<number> {
+  if (isDemo() || !sheetsDbConfigured()) return 0;
+  try {
+    return await pruneProperJudgeRowsSheets(new Date(now.getTime() - (properProjectLookbackDays() + 7) * 24 * 60 * 60 * 1000));
+  } catch (err) {
+    console.warn(`プロパー判定: 古い控えを片付けられませんでした: ${safeErr(err)}`);
+    return 0;
+  }
+}
+
+// 社員ごとの判定の控えにある案件ID（読めなければ空）。上限の数え方で「判定済みの組」を見分けるのに使う（判定JSONは解釈しない）
 export async function cachedProjectIdsFor(engineer: ProperEngineer): Promise<Set<string>> {
   if (cachedIdsOverride) return cachedIdsOverride(engineer);
-  return new Set(Object.keys(await readCache(cacheKeyOf(engineer))));
+  if (!cacheActive()) return new Set();
+  const key = cacheKeyOf(engineer);
+  try {
+    const ids = (await readProperJudgeRowsSheets(key)).map((r) => r.projectId);
+    if (ids.length > 0) return new Set(ids);
+    return new Set(Object.keys((await readStateJson<JudgeCache>(key)) ?? {}));
+  } catch (err) {
+    console.warn(`プロパー判定: 判定の控えを読めませんでした（今回は判定し直します）: ${safeErr(err)}`);
+    return new Set();
+  }
 }
+
+export type DeferReason = 'budget' | 'deadline';
 
 export interface JudgeOutcome {
-  judgment: ProperJudgment | null; // null = 判定に失敗
+  judgment: ProperJudgment | null; // null = 判定に失敗、または先送り（deferred）
   cached: boolean;
+  deferred?: boolean; // 費用の上限・実行の期限で判定せず次回に回した組（失敗ではない）
+  deferReason?: DeferReason;
 }
 
-// 組ごとに判定する（同じ社員の組はまとめて控えを読み書きする）。失敗した組は judgment=null で返し、処理は続ける
+export interface JudgeRunOptions {
+  budget?: JudgeBudget; // プロパー判定の開始からのLLM費用の上限（省略時は費用で止めない）
+}
+
+// 費用の上限に達したか（上限0は無制限）
+export function properBudgetExhausted(budget: JudgeBudget | undefined): boolean {
+  return budget ? judgeBudgetExhausted(totalLlmCostJpy() - budget.startJpy, budget.limitJpy) : false;
+}
+
+// 組ごとに判定する（同じ社員の組はまとめて控えを読み書きする）。失敗した組は judgment=null で返し、処理は続ける。
+// 実行の期限・費用の上限を過ぎてから始まる組は判定せず deferred で返す（それまでの判定は控えに書く＝次の回はそこから続く）
 // allProjects: 控えに残す案件の範囲（今回の遡り期間の案件。省略時は今回の組の案件だけ）
 export async function judgeProperPairs(
   pairs: Array<{ engineer: OwnEngineer; project: Project }>,
   allProjects?: Project[],
+  opts: JudgeRunOptions = {},
 ): Promise<JudgeOutcome[]> {
   const out: JudgeOutcome[] = pairs.map(() => ({ judgment: null, cached: false }));
   const byEngineer = new Map<string, number[]>();
@@ -455,7 +515,8 @@ export async function judgeProperPairs(
   for (const idxs of byEngineer.values()) {
     const engineer = pairs[idxs[0]].engineer;
     const key = cacheKeyOf(engineer);
-    const cache = await readCache(key);
+    const { cache, legacy } = await readCache(key);
+    const fresh: JudgeCache = {};
     const todo = idxs.filter((i) => {
       const hit = cache[pairs[i].project.id];
       if (hit) out[i] = { judgment: hit, cached: true };
@@ -467,11 +528,16 @@ export async function judgeProperPairs(
       while (next < todo.length) {
         const i = todo[next++];
         const { project } = pairs[i];
+        const stop: DeferReason | null = pastRunDeadline() ? 'deadline' : properBudgetExhausted(opts.budget) ? 'budget' : null;
+        if (stop) {
+          out[i] = { judgment: null, cached: false, deferred: true, deferReason: stop };
+          continue;
+        }
         try {
           const raw = await callJudge(engineer, project);
           const j = verifyJudgment(raw, profileTextOf(engineer), project, { level: engineer.level, experienceYears: engineer.experienceYears ?? null });
           out[i] = { judgment: j, cached: false };
-          cache[project.id] = j;
+          fresh[project.id] = j;
         } catch (err) {
           failures += 1;
           if (failures === 1) console.warn(`プロパー判定: AI判定に失敗した組があります（ルールの判定で残せる組だけ残します）: ${safeErr(err)}`);
@@ -479,7 +545,9 @@ export async function judgeProperPairs(
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker));
-    if (todo.length > 0) await writeCache(key, cache, allProjects ?? idxs.map((i) => pairs[i].project));
+    // 古い控えから移すときは、新しい判定に加えて古い控えの組も行の形で書く
+    const toWrite = legacy ? { ...cache, ...fresh } : fresh;
+    if (Object.keys(fresh).length > 0 || legacy) await writeCache(key, toWrite, allProjects ?? idxs.map((i) => pairs[i].project), legacy);
   }
   return out;
 }
