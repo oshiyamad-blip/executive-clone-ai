@@ -828,6 +828,12 @@ export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
 }
 
+// AI判定の失敗率（失敗 ÷ 判定した組＋失敗）がこの割合（%）を超え、かつ失敗が一定数以上の回は、API障害・レート制限とみなして
+// 候補の保存と営業リストの書き込みを見送る（要確認の行が一度に大量に載るのを防ぐ）。0 で無効
+export function properFailGatePct(): number {
+  return envNum('PROPER_FAIL_GATE_PCT', 30, { min: 0, max: 100 });
+}
+
 // ルールの足切りで落とした組から、取りこぼしの監視のために AI 判定に回す組数（1回の実行あたり）。0 で無効。まず少なく入れて費用を見ながら増やす
 export function properAuditSample(): number {
   return envNum('PROPER_AUDIT_SAMPLE', 4, { min: 0, max: 20, int: true });

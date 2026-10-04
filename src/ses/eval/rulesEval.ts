@@ -102,14 +102,14 @@ import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge } from '../ownMatch.js';
 import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
+import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { rosterProfileText } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, SALES_COLUMNS, markRequirementsInMail } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, SALES_COLUMNS, markRequirementsInMail, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -4161,6 +4161,33 @@ async function properJudgeChecks(): Promise<void> {
       else process.env.PROPER_JUDGE_PER_ENGINEER = savedPerItem;
       __setCachedProjectIdsForTest(null);
     }
+    // 失敗率のゲート: 失敗が5組以上かつ失敗率が30%を超える回だけ止める（監視の判定は数えない）
+    const gateProjects = Array.from({ length: 10 }, (_, i) => project({ id: `p_gate${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, agentCompany: `G${i}社`, location: ['品川', '新宿', '渋谷', '池袋', '上野', '大手町', '横浜', '秋葉原', '五反田', '浜松町'][i], receivedAt: daysAgo(1) }));
+    const gateRun = async (failing: number, list = gateProjects) => {
+      const failIds = new Set(list.slice(0, failing).map((p) => p.id));
+      __setProperJudgeForTest(async (_e, p) => {
+        if (failIds.has(p.id)) throw new Error('overloaded');
+        return raw();
+      });
+      return (await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], list, NOW)).stats;
+    };
+    const g64 = await gateRun(6);
+    const g40 = await gateRun(4, gateProjects.slice(0, 4));
+    check('失敗率のゲート: 失敗6・成功4は止める／失敗4・成功0は件数が5未満で止めない／失敗6・成功30（約17%）は止めない',
+      g64.gated && g64.failed === 6 && g64.judged === 4 && !g40.gated && g40.failed === 4 && !failGateTripped(6, 30, 30) && failGateTripped(6, 4, 30), JSON.stringify({ g64, g40 }));
+    const savedGate = process.env.PROPER_FAIL_GATE_PCT;
+    process.env.PROPER_FAIL_GATE_PCT = '0';
+    const gOff = await gateRun(6);
+    if (savedGate === undefined) delete process.env.PROPER_FAIL_GATE_PCT;
+    else process.env.PROPER_FAIL_GATE_PCT = savedGate;
+    check('PROPER_FAIL_GATE_PCT=0 ではゲートが働かない・閾値ちょうど（30%）は止めない', !gOff.gated && !failGateTripped(6, 14, 30) && failGateTripped(6, 13, 30) && !failGateTripped(6, 4, 0));
+    // 監視の当たり: 単価がルールの足切りに掛かる組をAIが推奨しても、候補には入れず数える（キーは返すだけでログには出さない）
+    const lowRate = project({ id: 'p_audit_low', title: '基盤更新の低単価案件', agentCompany: 'L社', requiredSkills: ['Oracle'], rateMax: 30, location: '品川', receivedAt: daysAgo(1) });
+    __setProperJudgeForTest(async () => raw());
+    const au = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], [pj, lowRate], NOW);
+    check('足切りの監視の当たりは候補に入れない（件数は数え、組のキーは別に返す）',
+      !au.candidates.some((c) => c.projectId === 'p_audit_low') && au.stats.audited === 1 && au.stats.auditHits === 1 && au.auditHitKeys.join() === 'E_ok|p_audit_low' && au.candidates.length === 1,
+      JSON.stringify({ stats: au.stats, keys: au.auditHitKeys, cands: au.candidates.map((c) => c.projectId) }));
     const mk = (e: string, pr: string) => ({ match: { ownEngineerId: e, projectId: pr } });
     const sel = selectPairsForJudge([mk('a', 'p1'), mk('a', 'p2'), mk('a', 'p3'), mk('a', 'p4'), mk('b', 'p1')], (id) => (id === 'a' ? new Set(['p1', 'p3']) : undefined), 1, Number.MAX_SAFE_INTEGER);
     check('選び方: 判定済みの組は常に選び、未判定の組だけを上限で数える（並びは入力のまま）',
@@ -4187,6 +4214,93 @@ async function properJudgeChecks(): Promise<void> {
     check('営業リストの判定理由に「やること」「レベル」', String(row[header.indexOf('判定理由')]) === 'やること: Oracle のデータ保守\nレベル: 年数は足りる');
   } finally {
     __setProperJudgeForTest(null);
+  }
+}
+
+// 営業リストの書き込みの流れ（Googleには接続せず、書き込みを記録するだけの Sheets API に差し替える）
+async function salesListWriteChecks(): Promise<void> {
+  section('営業リストの書き込み: 見出しが今の並びと違うシートには何も書かない・空のタブは初回として書く');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const writeMethods = new Set(['batchUpdate', 'values.update', 'values.append', 'values.batchUpdate', 'values.batchClear']);
+  const makeApi = (all: string[][]) => {
+    const calls: string[] = [];
+    const tabs = ['全体', 'クローズ済み', '精度集計', '要員一覧'];
+    const api = {
+      spreadsheets: {
+        get: async () => {
+          calls.push('get');
+          return { data: { sheets: tabs.map((title, i) => ({ properties: { sheetId: i + 1, title, gridProperties: { rowCount: 1000, columnCount: header.length + 1 } } })) } };
+        },
+        batchUpdate: async () => {
+          calls.push('batchUpdate');
+          return { data: {} };
+        },
+        values: {
+          get: async (p: { range: string }) => {
+            calls.push('values.get');
+            return { data: { values: p.range.startsWith("'全体'") || p.range.startsWith('全体') ? (p.range.endsWith('1') && /A1:/.test(p.range) ? all.slice(0, 1) : all) : [] } };
+          },
+          update: async () => (calls.push('values.update'), { data: {} }),
+          append: async () => (calls.push('values.append'), { data: {} }),
+          batchUpdate: async () => (calls.push('values.batchUpdate'), { data: {} }),
+          batchClear: async () => (calls.push('values.batchClear'), { data: {} }),
+        },
+      },
+    };
+    return { api: api as unknown as import('googleapis').sheets_v4.Sheets, calls };
+  };
+  const cand = {
+    id: 'ownmatch_a_p1', ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: 'p1', projectTitle: 'Java開発', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '［条件］外国籍不可。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'A.A',
+  };
+  const savedId = process.env.PROPER_SALES_SPREADSHEET_ID;
+  process.env.PROPER_SALES_SPREADSHEET_ID = 'sheet_selftest_sales';
+  try {
+    // 営業が列を足した（見出しに無い列が増えた）シート。人の入力の列には値がある
+    const humanAdded = [...header, '営業の追加列'];
+    const humanRow = humanAdded.map(() => '');
+    humanRow[col('ID')] = cand.id; humanRow[col('対応状況')] = '提案済'; humanRow[col('メモ')] = '面談調整中';
+    const mismatch = makeApi([humanAdded, humanRow]);
+    __setSalesSheetsApiForTest(mismatch.api);
+    let caught: unknown = null;
+    try {
+      await writeSalesList([cand], [], []);
+    } catch (err) {
+      caught = err;
+    }
+    check('見出しが今の並びと違うシート（列が足されている）: 見出し不一致で止まり、書き込みは0件（タブの追加・クローズ済み・要員タブ・精度集計・要員一覧にも触れない）',
+      caught instanceof SalesHeaderMismatchError && !mismatch.calls.some((c) => writeMethods.has(c)), JSON.stringify({ calls: mismatch.calls, caught: String(caught) }));
+    check('見出し不一致の差は列名だけ（値は含めない）: 余分な列を示し、人の入力の値（面談調整中）は出ない',
+      caught instanceof SalesHeaderMismatchError && caught.diff.join() === '余分: 営業の追加列' && !caught.message.includes('面談調整中') && !caught.message.includes('提案済'), String(caught));
+    check('見出しの差: 並びだけが違うときは「列の並びが違います」・足りない列は「不足」・今の並びなら差なし',
+      salesHeaderDiff([...header].reverse()).join() === '列の並びが違います' && salesHeaderDiff(header.filter((h) => h !== '判定の理由')).join() === '不足: 判定の理由' && salesHeaderDiff(header).length === 0);
+    const reordered = makeApi([[...header].reverse(), [...humanRow].reverse()]);
+    __setSalesSheetsApiForTest(reordered.api);
+    let reorderedErr: unknown = null;
+    try {
+      await writeSalesList([cand], [], []);
+    } catch (err) {
+      reorderedErr = err;
+    }
+    check('列を並べ替えたシートも書き込み0件で止まる', reorderedErr instanceof SalesHeaderMismatchError && !reordered.calls.some((c) => writeMethods.has(c)));
+    // 空のタブ（見出しが無い）は初回の作成として全体を書く
+    const empty = makeApi([]);
+    __setSalesSheetsApiForTest(empty.api);
+    const n = await writeSalesList([cand], [], []);
+    check('空のタブは今どおり全体を書く（初回の作成）', n === 1 && empty.calls.includes('values.batchClear') && empty.calls.includes('values.batchUpdate'), JSON.stringify({ n, calls: empty.calls }));
+    // 今の並びのシートは差分で書き（全体を消さない）、人の入力の列は書かない
+    const okRow = header.map(() => '');
+    okRow[col('ID')] = cand.id; okRow[col('対応状況')] = '提案済'; okRow[col('メモ')] = '面談調整中';
+    const normal = makeApi([header, okRow]);
+    __setSalesSheetsApiForTest(normal.api);
+    const n2 = await writeSalesList([cand], [], []);
+    check('今の並びのシートは差分で更新する（全体の消去をしない）', n2 === 1 && !normal.calls.slice(0, normal.calls.indexOf('values.batchUpdate')).includes('values.batchClear'), JSON.stringify(normal.calls));
+  } finally {
+    __setSalesSheetsApiForTest(null);
+    if (savedId === undefined) delete process.env.PROPER_SALES_SPREADSHEET_ID;
+    else process.env.PROPER_SALES_SPREADSHEET_ID = savedId;
   }
 }
 
@@ -4511,6 +4625,7 @@ async function main(): Promise<void> {
     await properJudgeChecks();
     salesListChecks();
     await userOAuthChecks();
+    await salesListWriteChecks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

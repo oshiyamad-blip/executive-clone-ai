@@ -379,6 +379,30 @@ export interface SalesUpdatePlan {
   rows: Row[]; // 書いた後のシートの並び（要員のタブ・件数用）
 }
 
+// 「全体」の見出しが今の並びと違うときの差。列名だけを返し、セルの値は含めない（ログ・サマリに出してよい形）
+export function salesHeaderDiff(header: string[]): string[] {
+  const got = header.map((h) => h.trim());
+  if (got.length === HEADER.length && got.every((h, i) => h === HEADER[i])) return [];
+  const missing = HEADER.filter((h) => !got.includes(h)).map((h) => `不足: ${h}`);
+  const extra = got.filter((h) => h && !HEADER.includes(h)).map((h) => `余分: ${h}`);
+  return [...missing, ...extra, ...(missing.length === 0 && extra.length === 0 ? ['列の並びが違います'] : [])];
+}
+
+// 見出しが空（まだ何も書かれていない）なら初回の作成。見出しがあって今の並びと違うときは人が列をいじっているので、何も書かずに止める
+export class SalesHeaderMismatchError extends Error {
+  constructor(readonly diff: string[]) {
+    super(`営業リストの見出しが今の列の並びと違います（${diff.join('、')}）`);
+    this.name = 'SalesHeaderMismatchError';
+  }
+}
+
+function assertSalesHeaderOrEmpty(values: string[][]): void {
+  const header = values[0] ?? [];
+  if (header.every((h) => !String(h ?? '').trim())) return;
+  const diff = salesHeaderDiff(header);
+  if (diff.length > 0) throw new SalesHeaderMismatchError(diff);
+}
+
 export function planSalesUpdate(
   fresh: Row[],
   existing: string[][],
@@ -754,7 +778,15 @@ export function salesListConfigured(): boolean {
   return Boolean(properSalesSpreadsheetId());
 }
 
+let sheetsApiOverride: sheets_v4.Sheets | null = null;
+
+// 自己検証用: Google に接続せず、差し替えた Sheets API で書き込みの流れを確かめる
+export function __setSalesSheetsApiForTest(api: sheets_v4.Sheets | null): void {
+  sheetsApiOverride = api;
+}
+
 function sheetsApi(): sheets_v4.Sheets | null {
+  if (sheetsApiOverride) return sheetsApiOverride;
   const auth = sesMainAuth(SCOPES);
   return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
 }
@@ -812,6 +844,12 @@ export async function writeSalesList(
   const fresh = candidates.map((c) => salesRowOf(c, projectById.get(c.projectId)));
 
   let tabs = await readTabs(api, spreadsheetId);
+  // 見出しが今の並びと違うシートは、タブの追加も含めて何も書かずに止める（全体の書き直しは初回の作成だけ）
+  if (tabs.some((t) => t.title === SALES_ALL_TAB)) {
+    assertSalesHeaderOrEmpty(
+      ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A1:${LAST_COL}1` }))).data.values ?? []) as string[][],
+    );
+  }
   // 初回（「全体」タブがまだ無い）は、同じスプレッドシートにある以前の営業リストのタブから人の入力を引き継ぐ
   const legacy = tabs.some((t) => t.title === SALES_ALL_TAB) ? [] : await readLegacyList(api, spreadsheetId, tabs);
   const structural: sheets_v4.Schema$Request[] = [];
@@ -865,7 +903,7 @@ export async function writeSalesList(
   const readExisting = async () =>
     ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }))).data.values ??
       []) as string[][];
-  // 見出しの並びが違う（全体を書き直す）ときも、クローズの行は外して控えに移す
+  // 初回の作成（見出しが空）のときも、クローズの行は外して控えに移す
   const withoutClosed = (values: string[][]) => {
     const h = values[0] ?? [];
     const statusAt = h.indexOf('対応状況');
@@ -922,6 +960,7 @@ export async function writeSalesList(
   const staffTabs = tabs.filter((t) => wanted.has(t.title));
   // 書く直前に読み直す（営業の入力・行の並べ替えを取り込む）
   existingValues = await readExisting();
+  assertSalesHeaderOrEmpty(existingValues); // 読み直す間に見出しが変えられたときも、書く前に止める
   planned = planFor(existingValues);
   plan = planned.plan;
   rows = planned.rows;
@@ -1047,7 +1086,7 @@ export async function writeSalesList(
   const all = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
   const summary = tabs.find((t) => t.title === SALES_SUMMARY_TAB);
   const staffListTab = tabs.find((t) => t.title === SALES_STAFF_LIST_TAB);
-  // 全体を書き直した（見出しが既定の並びでなかった）ときは列の位置が変わるため、列幅・隠す列も付け直す
+  // plan が無いのは見出しの無い初回の作成だけ（見出し違いは上で止めている）。そのときだけ列幅・隠す列を付ける
   const rewritten = plan === null;
   const format = [
     ...formatRequests(all.sheetId, all.rules, true, created.has(SALES_ALL_TAB) || rewritten, created.has(SALES_ALL_TAB)),

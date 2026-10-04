@@ -3,7 +3,7 @@
 //       案件スプレッドシートの「プロパー候補」タブへ保存（提案の全員に返信文面つき。担当者メールで次回バッチが下書きにする）
 // demo: fixtureの自社社員 × 渡された案件で突合と文面作成だけを行う（Drive・Sheets・LLMに接続しない）
 // コンソールには件数だけを出す（氏名・案件名は出さない。詳細はサマリメールと案件スプレッドシート）
-import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, maxCandidatesPerItem } from '../config.js';
+import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, properFailGatePct, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
 import { ownPairsForJudge, auditPairsForJudge, signedMan } from '../ownMatch.js';
@@ -14,7 +14,7 @@ import { techNamesIn } from '../skillDict.js';
 import { wideRegionOf, isFullRemoteLocation } from '../prefecture.js';
 import { loadSkillEquivalences } from '../skillEquiv.js';
 import { writeDemoArtifact } from '../store.js';
-import { recordHealEvent } from '../heal/events.js';
+import { recordHealEvent, recordFatal } from '../heal/events.js';
 import { loadFixtureProperEngineers } from '../fixtures/ownEngineers.js';
 import { fetchOpenProjects } from '../../database/index.js';
 import {
@@ -26,7 +26,7 @@ import {
 } from '../../database/sheets.js';
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
-import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN } from './salesList.js';
+import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN, SalesHeaderMismatchError } from './salesList.js';
 import type { Project, ProperEngineer, ProperCandidate, OwnMatch, ProperJudgment } from '../../types/index.js';
 
 export interface ProperRunResult {
@@ -38,7 +38,8 @@ export interface ProperRunResult {
   saved: number; // 「プロパー候補」タブに追加・更新した行数
   added: number; // 今回初めて見つかった候補（サマリを送るかの判断に使う）
   retired: number; // 稼働可でなくなった社員の候補として退役させた行数
-  salesRows: number | null; // 営業リストに書き出した行数（未設定・失敗は null）
+  salesRows: number | null; // 営業リストに書き出した行数（未設定・失敗・見送りは null）
+  skipped?: string[]; // 書き込みを見送った理由（サマリに載せる固定文言。氏名・案件名・組のキーは含めない）
 }
 
 // Sheetsの案件タブは全行を読むため、直近の遡り期間に絞った上での上限は大きめでよい（Notionは100件で頭打ち）
@@ -55,6 +56,7 @@ export interface JudgeStats {
   audited: number; // 足切りで落とした組から監視のために判定した組（上の judged には含めない）
   auditHits: number; // うち、候補になった組（見送りでない組）
   auditTokens: { input: number; output: number; costJpy: number }; // 監視の判定に使った量（キャッシュの分は入力に含む）
+  gated: boolean; // AI判定の失敗が多く、この回は候補の保存と営業リストの書き込みを見送る
 }
 
 const SKILL_TENTATIVE_NOTE = '【参考提案】スキルは許容範囲内のため人によるご確認を推奨。';
@@ -260,12 +262,21 @@ export function pickAuditPairs(
     .slice(0, n);
 }
 
+// 失敗がこの組数以上のときだけ失敗率を見る（数組の失敗で回全体を止めないため）
+export const FAIL_GATE_MIN_FAILED = 5;
+
+// AI判定の失敗が多い回か（失敗数 ≥ 最小件数 かつ 失敗率 > 閾値%。閾値 0 は無効）
+export function failGateTripped(failed: number, judged: number, pct = properFailGatePct()): boolean {
+  if (pct <= 0 || failed < FAIL_GATE_MIN_FAILED) return false;
+  return (failed / (judged + failed)) * 100 > pct;
+}
+
 // 稼働可の社員 × 案件 → ルールの足切り → AI判定（根拠を経歴と照合）→ 社員ごと・案件ごとの上限で候補にする
 export async function buildProperCandidates(
   engineers: ProperEngineer[],
   projects: Project[],
   now = new Date(),
-): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats }> {
+): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats; auditHitKeys: string[] }> {
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
   const deduped = dedupeProjects(projects);
   projects = deduped.kept;
@@ -277,8 +288,9 @@ export async function buildProperCandidates(
   const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
   const stats: JudgeStats = {
     prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length,
-    audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 },
+    audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 }, gated: false,
   };
+  const auditHitKeys: string[] = [];
   const judged: OwnMatch[] = [];
   // 判定結果を候補の元（judged）に反映する。監視の組は別の集計に数える
   const consume = (list: typeof pairs, outcomes: Awaited<ReturnType<typeof judgeProperPairs>>, st: JudgeStats): OwnMatch[] => {
@@ -313,15 +325,19 @@ export async function buildProperCandidates(
   };
   const toJudge = (list: typeof pairs) => list.map((p) => ({ engineer: engineerById.get(p.match.ownEngineerId) as ProperEngineer, project: projectById.get(p.match.projectId) as Project }));
   judged.push(...consume(pairs, await judgeProperPairs(toJudge(pairs), projects), stats));
+  // 失敗の多い回（監視の判定は含めない）は、呼び出し側が候補の保存と営業リストの書き込みを見送る
+  stats.gated = failGateTripped(stats.failed, stats.judged);
   // 足切りの監視: 落とした組から少しだけ判定し、良い組を落としていないかを見る。使った量は呼び出し前後のログの差で数える
   const audit = pickAuditPairs(engineers, projects, now, pairs, (id) => cachedByEngineer.get(id));
   if (audit.length > 0) {
     const logStart = getLlmUsageLog().length;
     const scratch: JudgeStats = { ...stats, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0 };
     const hits = consume(audit, await judgeProperPairs(toJudge(audit), projects), scratch);
-    judged.push(...hits.filter((m) => m.judgment));
+    // 監視の当たりはルール上は候補外の組なので、営業リストの候補には入れない（数えて、試運転ではキーをラベルに残す）
+    const auditHit = hits.filter((m) => m.judgment);
+    auditHitKeys.push(...auditHit.map((m) => `${m.ownEngineerId}|${m.projectId}`));
     stats.audited = scratch.judged;
-    stats.auditHits = hits.filter((m) => m.judgment).length;
+    stats.auditHits = auditHit.length;
     for (const u of getLlmUsageLog().slice(logStart)) {
       stats.auditTokens.input += u.inputTokens + (u.cacheCreationInputTokens ?? 0) + (u.cacheReadInputTokens ?? 0);
       stats.auditTokens.output += u.outputTokens;
@@ -362,7 +378,7 @@ export async function buildProperCandidates(
     const draftToProject = suspicious ? undefined : buildProperProposalDraft(engineer, project, m.judgment?.pitch);
     candidates.push({ ...m, properLabel: properLabelOf(engineer), ...(draftToProject ? { draftToProject } : {}), ...(reference ? { reference: true } : {}) });
   }
-  return { candidates, stats };
+  return { candidates, stats, auditHitKeys };
 }
 
 // 件数の上限（MAX_CANDIDATES_PER_ITEM）を超えても載せる組: AIの推奨、または条件つきで経歴の裏付けのある要件が足りない要件以上。
@@ -410,6 +426,9 @@ function logJudge(s: JudgeStats): void {
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
+  if (s.gated) {
+    console.warn(`プロパー判定: AI判定の失敗が多いため（${s.judged + s.failed}組中${s.failed}組）、今回は候補の保存と営業リストの書き込みを見送りました`);
+  }
   if (s.audited > 0) {
     console.log(
       `足切りの監視: ${s.audited}組判定・うち当たり${s.auditHits}組 / 監視の判定: 入力${s.auditTokens.input}・出力${s.auditTokens.output}トークン（約${Math.round(s.auditTokens.costJpy * 10) / 10}円）`,
@@ -466,16 +485,23 @@ async function writeSalesListSafely(
   projects: Project[],
   engineers: ProperEngineer[],
   openProjects: { ids: Set<string>; aliasOf: Map<string, string> },
-): Promise<number | null> {
-  if (!salesListConfigured()) return null;
+): Promise<{ rows: number | null; skipped?: string }> {
+  if (!salesListConfigured()) return { rows: null };
   try {
     const n = await writeSalesList(candidates, projects, engineers, openProjects);
     console.log(`営業リスト: ${n ?? 0}行を書き出しました`);
-    return n;
+    return { rows: n };
   } catch (err) {
+    // 見出しが今の並びと違うときは何も書いていない。差は列名だけを出し、実行は失敗扱いにして知らせる
+    if (err instanceof SalesHeaderMismatchError) {
+      const msg = `営業リストの見出しが変わっているため書き込みを見送りました（列: ${err.diff.join('、')}）。見出しを元に戻すか、システム担当が列の並びを合わせてください`;
+      console.error(`営業リスト: ${msg}`);
+      recordFatal(msg);
+      return { rows: null, skipped: msg };
+    }
     console.error(`営業リスト: 書き出しに失敗しました: ${safeErr(err)}`);
     recordHealEvent('warn', '営業リストのスプレッドシートに書き出せませんでした（サービスアカウントへの編集者での共有とシートIDを確認してください）');
-    return null;
+    return { rows: null };
   }
 }
 
@@ -502,23 +528,35 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const deduped = dedupeProjects(projects);
   const openProjects = { ids: new Set(deduped.kept.map((p) => p.id)), aliasOf: deduped.aliasOf };
 
+  const skipped: string[] = [];
+  if (stats.gated) {
+    const msg = `AI判定の失敗が多いため（${stats.judged + stats.failed}組中${stats.failed}組）、今回は候補の保存と営業リストの書き込みを見送りました`;
+    skipped.push(msg);
+    recordFatal(msg);
+  }
   let saved = 0;
   let retired = 0;
   let added = 0;
   if (sheetsDbConfigured()) {
-    added = (await newProperCandidateIdsSheets(candidates.map((c) => c.id))).size;
-    saved = await saveProperCandidatesSheets(candidates);
+    if (!stats.gated) {
+      added = (await newProperCandidateIdsSheets(candidates.map((c) => c.id))).size;
+      saved = await saveProperCandidatesSheets(candidates);
+    }
     // 管理表を読めたとき（未設定で空に見えているのではないとき）だけ、稼働可でなくなった社員の候補を退役させる
     if (rosterReadOk && (properMasterConfigured() || rosterConfigured())) retired = await retireProperCandidatesSheets(new Set(engineers.map((e) => e.id)));
     if (retired > 0) console.log(`プロパー候補: 稼働可でなくなった社員の候補${retired}行を退役させました（氏名・必要案件単価・文面を消去）`);
-  } else if (candidates.length > 0) {
+  } else if (candidates.length > 0 && !stats.gated) {
     console.warn(`プロパー候補: 案件スプレッドシート（SHEETS_DB_SPREADSHEET_ID）が未設定のため「${PROPER_CANDIDATE_TAB}」タブに保存できません`);
   }
   // 要員リストや案件を読めなかった回に書くと、営業中の要員の行が消えるため書かない（前回のまま残す）
-  const canWriteSales = rosterReadOk && projects.length > 0;
-  if (!canWriteSales) console.warn('営業リスト: 要員リストか案件を読めなかったため、今回は書き出しません（前回のまま残します）');
-  const salesRows = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjects) : null;
-  const result: ProperRunResult = { demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows };
+  const canWriteSales = rosterReadOk && projects.length > 0 && !stats.gated;
+  if (!canWriteSales && !stats.gated) console.warn('営業リスト: 要員リストか案件を読めなかったため、今回は書き出しません（前回のまま残します）');
+  const sales = canWriteSales ? await writeSalesListSafely(candidates, projects, engineers, openProjects) : { rows: null };
+  if (sales.skipped) skipped.push(sales.skipped);
+  const result: ProperRunResult = {
+    demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows: sales.rows,
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
   logCounts('プロパー候補', result);
   return result;
 }
@@ -560,6 +598,7 @@ export function properSummaryLines(r: ProperRunResult | null, forMail: boolean):
       ? `プロパー候補: ${r.candidates.length}件（demo・fixture社員）`
       : `プロパー候補: ${r.candidates.length}件（詳細は案件スプシの『${PROPER_CANDIDATE_TAB}』タブ）`,
   );
+  for (const m of r.skipped ?? []) lines.push(`■${m}`);
   const s = r.sync;
   if (s) {
     lines.push(

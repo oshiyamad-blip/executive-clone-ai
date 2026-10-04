@@ -11,7 +11,7 @@
 //   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
 //                  増えた組は labels_backup.tsv に書く（LABELS_BACKUP_ALL=1 でストア全体を labels_backup_NN.tsv に分けて書く）
 //   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { parseJstLabel } from './jstLabel.js';
@@ -217,15 +217,19 @@ async function judgedCandidates() {
   }
   __setProperJudgeForTest(async (e, p) => {
     const j = judged.get(`${e.id}|${p.id}`);
-    if (!j) throw new Error('この回では判定していない組');
-    return j;
+    if (j) return j;
+    // 前の回で判定済みの組はこの回の判定ファイルに無いだけなので失敗に数えない（失敗率のゲートが誤って働かないように。載せる組はこの回の判定だけ）
+    if (done.get(e.id)?.has(p.id)) {
+      return { work: '', requirements: [], levelFit: '', preferenceFit: '', verdict: 'reject', pitch: '', concerns: [], workPrefecture: '', injectionSuspected: false };
+    }
+    throw new Error('この回では判定していない組');
   });
   // prep と同じ選び方にするため、前の回で判定済みの組を控えとして扱う
   __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
   // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
   process.env.PROPER_JUDGE_PER_ENGINEER = '300';
-  const { candidates, stats } = await buildProperCandidates(list, projects, now);
-  return { list, projects, judged, candidates, stats };
+  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now);
+  return { list, projects, judged, candidates, stats, auditHitKeys };
 }
 
 // ===== 段 =====
@@ -264,7 +268,14 @@ if (phase === 'prompts') {
   writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
   console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size }));
 } else if (phase === 'final') {
-  const { list, projects, judged, candidates, stats } = await judgedCandidates();
+  const { list, projects, judged, candidates, stats, auditHitKeys } = await judgedCandidates();
+  // AI判定の失敗が多い回は書き込みの元（plan.json・writes）を作らない（前の回のファイルも残さない）
+  if (stats.gated) {
+    rmSync(join(dir, 'writes'), { recursive: true, force: true });
+    rmSync(join(dir, 'plan.json'), { force: true });
+    console.log(JSON.stringify({ gated: true, failed: stats.failed, judged: stats.judged, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats }));
+    process.exit(0);
+  }
   // この回で判定した組だけを載せる（判定していない組は失敗扱いになるため除く。シートにある組は下の差分で残る）
   const fresh = candidates.filter((c) => judged.has(`${c.ownEngineerId}|${c.projectId}`)).map((c) => salesRowOf(c, projects.find((p) => p.id === c.projectId)));
   const existing = existingRows();
@@ -321,7 +332,7 @@ if (phase === 'prompts') {
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, chunks: chunks.length }));
 } else if (phase === 'labels') {
   const { list, projects, judged, candidates } = await judgedCandidates();
   const store = labelsDir();
