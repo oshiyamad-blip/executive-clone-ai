@@ -311,6 +311,11 @@ export function hourlyToMonthlyHours(): number {
   return envNum('HOURLY_TO_MONTHLY_HOURS', 160, { min: 1 });
 }
 
+// 日額→月額換算の稼働日数（日額表記は月20営業日で月額に直す）
+export function dailyToMonthlyDays(): number {
+  return envNum('DAILY_TO_MONTHLY_DAYS', 20, { min: 1 });
+}
+
 // AI最終判定のスコアがこれ未満の成立候補・交渉提案は「参考提案」に下げる（自動の紹介下書きを作らない）。0で無効
 export function matchMinLlmScore(): number {
   return envNum('MATCH_MIN_LLM_SCORE', 60, { min: 0, max: 100 });

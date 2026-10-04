@@ -1,15 +1,16 @@
 // 単金正規化（万円/月・円/時・円/月 → 万円/月）とスキル一致率の計算。extract/match の双方が参照する。
-import { hourlyToMonthlyHours } from './config.js';
+import { dailyToMonthlyDays, hourlyToMonthlyHours } from './config.js';
 import { skillCoverage, type CoverageHit } from './skillEquiv.js';
 import { parseRequirements, skillCategory, type SkillCategory } from './skillDict.js';
 import type { SkillBreakdown, PreferredMatch } from '../types/index.js';
 
-export type RateUnit = 'manYenPerMonth' | 'yenPerHour' | 'yenPerMonth' | 'thousandYenPerMonth';
+export type RateUnit = 'manYenPerMonth' | 'yenPerHour' | 'yenPerDay' | 'yenPerMonth' | 'thousandYenPerMonth';
 
 // 各種表記を「万円/月」の number に正規化する。「スキル見合い」等は抽出段で null を返す（ここには来ない）。
 export function normalizeRate(value: number, unit: RateUnit): number {
   if (unit === 'manYenPerMonth') return value;
   if (unit === 'yenPerHour') return (value * hourlyToMonthlyHours()) / 10000;
+  if (unit === 'yenPerDay') return (value * dailyToMonthlyDays()) / 10000;
   if (unit === 'thousandYenPerMonth') return value / 10; // 「700千円」= 70万円
   return value / 10000; // yenPerMonth
 }

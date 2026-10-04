@@ -58,6 +58,7 @@ import {
 } from '../skillDict.js';
 import { impliesSkill, isNotEquivalent, skillGraphTerms, IMPLIES_MAX_DEPTH } from '../skillGraph.js';
 import { skillCoverage, setSkillEquivalencesForTest, equivalenceRejection, type SkillCoverage } from '../skillEquiv.js';
+import { normalizeRate, type RateUnit } from '../pricing.js';
 import { skillMatch, assessSkills, directSkillRate, UNSTATED_VIA } from '../pricing.js';
 import {
   primarySelect,
@@ -184,7 +185,7 @@ import { lastChanceBudgetJpy } from '../matchRun.js';
 import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
 import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
-import { sourceBacked, profileSourceNumbers, projectExcerpt } from '../extract.js';
+import { sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
 import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
@@ -720,12 +721,13 @@ function rawEngineer(over: Partial<RawEngineer> = {}): RawEngineer {
   };
 }
 
-const RATE_CASES: Array<[number, 'manYenPerMonth' | 'yenPerHour' | 'yenPerMonth', number | null, string]> = [
+const RATE_CASES: Array<[number, RateUnit, number | null, string]> = [
   [65, 'manYenPerMonth', 65, '万円/月'],
   [600000, 'manYenPerMonth', 60, '円の金額を万円と表示 → /10000'],
   [60, 'yenPerMonth', 60, '万円の金額を円/月と表示 → 万円'],
   [800000, 'yenPerMonth', 80, '円/月'],
   [4500, 'yenPerHour', 72, '時給（160時間換算）'],
+  [11700, 'yenPerDay', 23.4, '日額（20日換算）'],
   [800000, 'yenPerHour', 80, '円/月の金額を時給と表示 → /10000'],
   [60, 'yenPerHour', null, '時給60円は補正しない（単位を決められない）'],
   [6000, 'manYenPerMonth', null, '6000万円は補正しない'],
@@ -739,6 +741,11 @@ function sanityChecks(): void {
     const got = verifiedRate(raw, unit, null);
     check(`${raw} ${unit} → ${want ?? 'null'}（${label}）`, got === want, `実際: ${got}`);
   }
+  check('日額 11700円/日 は月20日換算で 23.4万円/月', normalizeRate(11700, 'yenPerDay') === 23.4, `実際: ${normalizeRate(11700, 'yenPerDay')}`);
+  check('時給 3000円 は160時間換算で 48万円/月（日額の追加で変わらない）', normalizeRate(3000, 'yenPerHour') === 48);
+  const schemaUnits = JSON.stringify(EXTRACT_SCHEMA);
+  check('抽出スキーマの単位 enum に yenPerDay がある（案件・要員の両方）', (schemaUnits.match(/"yenPerDay"/g) ?? []).length >= 2);
+  check('抽出プロンプトが日額表記の yenPerDay を案内する', EXTRACT_SYSTEM.includes('yenPerDay'));
   check('補正しても原文に無い数値は通さない', verifiedRate(600000, 'manYenPerMonth', sourceNumbers('希望: 60万円')) === null);
   check('原文の「600,000円」は照合できる', verifiedRate(600000, 'manYenPerMonth', sourceNumbers('希望: 600,000円')) === 60);
 
