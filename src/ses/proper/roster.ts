@@ -15,6 +15,7 @@ import { normalizeSkills } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { safeErr } from '../redact.js';
 import { extractSkillSheet, sanitizeInitials } from './extractSkillSheet.js';
+import { properLabelOf } from './master.js';
 import {
   parseYears,
   parsePhaseYears,
@@ -169,6 +170,18 @@ export function activeRosterNames(rows: string[][]): string[] {
     .map((r) => (r[h.indexOf('名前')] ?? '').trim());
 }
 
+// 要員リストの名前がイニシャルの形でないとき（本名が入っているとき）、経歴の本文に出てくるその名前を伏せる。
+// 経歴の本文は判定・レベル抽出の LLM に渡るため、氏名をそのまま送らない
+export function scrubRosterName(text: string, name: string): string {
+  if (!text || !name.trim() || sanitizeInitials(name, '')) return text;
+  const esc = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const loose = (v: string) => [...v.replace(/[\s\u3000]+/g, '')].map(esc).join('[\\s\\u3000]*');
+  const parts = [name, name.normalize('NFKC')].flatMap((v) => [v, ...v.split(/[\s\u3000]+/)]).filter((v) => v.replace(/\s/g, '').length >= 2);
+  let out = text;
+  for (const v of [...new Set(parts)].sort((a, b) => b.length - a.length)) out = out.replace(new RegExp(loose(v), 'g'), '<氏名>');
+  return out;
+}
+
 export function rosterEngineersFromValues(input: RosterInput, now = new Date()): ProperEngineer[] {
   const { spreadsheetId: id, rows, gidOf } = input;
   const headerAt = rosterHeaderAt(rows);
@@ -183,14 +196,15 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
     const s = parseRosterSummary(r[col('サマリ')] ?? '');
     const skills = normalizeSkills(s.skills);
     const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
-    const text = input.sheetTexts.get(name) ?? '';
+    const text = scrubRosterName(input.sheetTexts.get(name) ?? '', name);
     const level = mergeLevels(input.levels?.get(name) ?? null, summaryLevel(s));
     const available = (r[col('稼働開始時期')] ?? '').trim();
     const head = s.experienceText.split(/[（(]/)[0] ?? '';
     const label = sanitizeInitials(name, '');
+    const engineerId = properEngineerIdOf(`roster:${id}:${name}`);
     out.push({
-      id: properEngineerIdOf(`roster:${id}:${name}`),
-      displayName: label || name,
+      id: engineerId,
+      displayName: properLabelOf({ proposalLabel: label, id: engineerId }),
       fullName: '',
       proposalLabel: label,
       fileId: '',
@@ -207,7 +221,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
       affiliation: s.affiliation,
       ...(s.note ? { wish: s.note } : {}),
       ...(hasEngineerLevel(level) ? { level } : {}),
-      profileText: rosterProfileText(r[col('サマリ')] ?? '', text),
+      profileText: rosterProfileText(scrubRosterName(r[col('サマリ')] ?? '', name), text),
     });
   }
   return out;
@@ -239,7 +253,7 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
     try {
       const text = skillSheetText(await tabValues(sheets, id, tab));
       sheetTexts.set(name, text);
-      levels.set(name, await sheetLevel(text));
+      levels.set(name, await sheetLevel(scrubRosterName(text, name)));
     } catch (err) {
       sheetFailures += 1;
       console.warn(`要員リスト: スキルシートのタブを読めませんでした（サマリの内容だけで照合します）: ${safeErr(err)}`);

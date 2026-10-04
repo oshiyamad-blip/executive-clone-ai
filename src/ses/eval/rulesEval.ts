@@ -104,13 +104,13 @@ import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColum
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge } from '../ownMatch.js';
 import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
-import { rosterProfileText } from '../proper/roster.js';
+import { rosterProfileText, rosterEngineersFromValues } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, closedStateOf, projectIdOf, SALES_COLUMNS, markRequirementsInMail, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, closedStateOf, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -134,7 +134,8 @@ import { classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mention
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
-import { rowToProperEngineer, PROPER_MASTER_COLUMNS } from '../proper/master.js';
+import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
+import { readRawAttachments, rawMimeOf, attachmentMaterial } from '../trial/rawAttach.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -4383,7 +4384,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AF,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AH,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const prevAcc = header.map(() => '');
   prevAcc[col('ID')] = 'ownmatch_a_p1'; prevAcc[col('精度チェック')] = '× ズレ'; prevAcc[col('精度メモ')] = 'Javaは研修のみ';
   const accMerged = mergeSalesRows([salesRowOf(base, undefined)], [header, prevAcc]);
@@ -4392,7 +4393,7 @@ function salesListChecks(): void {
   const sv = summaryValues(['A"A']);
   const accCol = String.fromCharCode(65 + col('精度チェック'));
   check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
-    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AF2:AF)" && sv[5][0] === '優先度 D' &&
+    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AH2:AH)" && sv[5][0] === '優先度 D' &&
       sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")+COUNTIFS('クローズ済み'!B2:B,"A*",'クローズ済み'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
       sv[6][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
   check('精度集計: チェック済・◎は全体とクローズ済みの両方を数え（優先度の行も両方で優先度列を条件にし）、候補数はクローズ済みを見ない',
@@ -4568,8 +4569,8 @@ function salesListChecks(): void {
   const mergedStamp = mergeSalesRows([cand('A.A', 'proj_a1', T), cand('A.A', 'proj_a3', '決済基盤の刷新案件')], [header, sheetRow('ownmatch_a.a_proj_a1', { 追加日時: '2026/09/30 10:00' })], [], () => false, (id) => id, stamp);
   check('追加日時（全体の書き直し）: 前の行の値を引き継ぎ、新しい行は今回の日時',
     mergedStamp.find((r) => r[col('ID')] === 'ownmatch_a.a_proj_a1')?.[col('追加日時')] === '2026/09/30 10:00' && mergedStamp.find((r) => r[col('ID')] === 'ownmatch_a.a_proj_a3')?.[col('追加日時')] === stamp);
-  check('列名: 営業元担当者・営業元メール（旧「担当者」「担当者メール」は営業リストに無い）・位置は変えず・32列・ID が最後',
-    col('営業元担当者') === col('営業元会社') + 1 && col('営業元メール') === col('営業元担当者') + 1 && col('担当者') < 0 && col('担当者メール') < 0 && header.length === 32 && header[31] === 'ID' &&
+  check('列名: 営業元担当者・営業元メール（旧「担当者」「担当者メール」は営業リストに無い）・位置は変えず・34列・ID が最後',
+    col('営業元担当者') === col('営業元会社') + 1 && col('営業元メール') === col('営業元担当者') + 1 && col('担当者') < 0 && col('担当者メール') < 0 && header.length === 34 && header[33] === 'ID' &&
       String(salesRowOf(base, { ...({} as Project), location: '', remote: 'unknown', startPeriod: '', requiredSkills: [], agentCompany: 'S社', agentContact: '山田', agentEmail: 'y@example.com', receivedAt: new Date(NaN), detail: '' } as Project)[col('営業元メール')]) === 'y@example.com');
   const validations = fmt.filter((r) => r.setDataValidation);
   check('入力規則: 対応状況・見送り理由・精度チェックは選択肢以外を拒否する（strict）', validations.length === 3 && validations.every((r) => r.setDataValidation?.rule?.strict === true));
@@ -4619,7 +4620,7 @@ function salesListChecks(): void {
   const reasonCol = col('判定の理由');
   check('列の並び: 案件詳細の右が判定の理由・最後が ID・判定の理由は人の入力の列ではない',
     reasonCol === col('案件詳細（メール本文より）') + 1 && col('提案文面（案）') === reasonCol + 1 && header[header.length - 1] === 'ID' &&
-      header.length === 32 && SALES_COLUMNS[reasonCol].human !== true && SALES_COLUMNS[reasonCol].width === 320 && SALES_COLUMNS[reasonCol].wrap === false);
+      header.length === 34 && SALES_COLUMNS[reasonCol].human !== true && SALES_COLUMNS[reasonCol].width === 320 && SALES_COLUMNS[reasonCol].wrap === false);
   const reasonOf = (checks: Parameters<typeof jd>[1] & object, extra: Record<string, unknown>[] = []) =>
     String(salesRowOf({ ...base, judgment: { ...jd('recommend'), checks: checks.map((k, i) => ({ ...k, quote: k.requirement, ...(extra[i] ?? {}) })) } } as ProperCandidate, undefined)[reasonCol]);
   const reasonLines = reasonOf(
@@ -4665,6 +4666,256 @@ function salesListChecks(): void {
     ex0 === '■案件名\nJava開発A\n単価：55万' && ex1 === '■案件名\nPython開発B\n単価：60万', JSON.stringify([ex0, ex1]));
   check('本文抜粋: 案件名が見つからない1件だけのメールは先頭から・長文は切る',
     projectExcerpt('本文です\n単価50万', ['見つからない案件名'], 0) === '本文です\n単価50万' && projectExcerpt('あ'.repeat(3000), ['x'], 0).endsWith('（以下略）'));
+}
+
+// 営業リストの設計見直し（最終更新・前回優先度／期限切れの控え／ID の付け替え）と、氏名を外に出さない確認、試運転の添付読み取り
+async function salesListRound2Checks(): Promise<void> {
+  section('営業リスト: 最終更新・前回優先度・期限切れの控え・ID の付け替え');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const stamp = '2026/10/04 09:30';
+  const earlier = '2026/09/30 10:00';
+  const base = {
+    id: 'ownmatch_a_p1', ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: 'p1', projectTitle: 'Java開発の案件です', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '【単価交渉】必要案件単価まで5万円不足（本人の了承が前提）。【経験交渉】工程が1段不足。［確認］立場の記載なし。', agentEmail: 'x@example.com',
+    detectedAt: new Date(), properLabel: 'A.A',
+  };
+  const asSheet = (row: Array<string | number>, over: Record<string, string> = {}): string[] => {
+    const r = row.map(String);
+    for (const [k, v] of Object.entries(over)) r[col(k)] = v;
+    return r;
+  };
+  // 列の定義
+  check('列: 追加日時の右に機械の列「最終更新」「前回優先度」（人の入力の列ではない・幅108/80）・34列・ID が最後',
+    header.length === 34 && col('最終更新') === col('追加日時') + 1 && col('前回優先度') === col('最終更新') + 1 && col('案件詳細（メール本文より）') === col('前回優先度') + 1 &&
+      SALES_COLUMNS[col('最終更新')].human !== true && SALES_COLUMNS[col('前回優先度')].human !== true &&
+      SALES_COLUMNS[col('最終更新')].width === 108 && SALES_COLUMNS[col('前回優先度')].width === 80 && header[33] === 'ID');
+  // 新しい行
+  const fresh = salesRowOf(base, undefined);
+  const added = planSalesUpdate([fresh], [header], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('最終更新: 新しい行は追加日時と同じ値（この実行の日時）、前回優先度は空',
+    added !== null && added.appends.length === 1 && added.appends[0][col('最終更新')] === stamp && added.appends[0][col('追加日時')] === stamp && added.appends[0][col('前回優先度')] === '');
+  // 同じ判定から作り直した行（空白・改行コードの差だけ）は更新にならない
+  const prevSame = asSheet(fresh, {
+    ID: base.id, No: '3', 追加日時: earlier, 最終更新: earlier, 前回優先度: '',
+    交渉ポイント: `  ${String(fresh[col('交渉ポイント')]).replace(/\n/g, '\r\n')}  `, 確認事項: `${String(fresh[col('確認事項')])}\n`,
+  });
+  const same = planSalesUpdate([fresh], [header, prevSame], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('最終更新: 前後の空白・改行コードの差だけなら更新とみなさず、前の最終更新・前回優先度を引き継ぐ（毎回同じ判定から作り直した行が「更新」にならない）',
+    same !== null && same.updates.length === 1 && same.updates[0].values[col('最終更新')] === earlier && same.updates[0].values[col('前回優先度')] === '' && same.appends.length === 0,
+    JSON.stringify(same?.updates[0]?.values.slice(col('追加日時'), col('前回優先度') + 1)));
+  // 中身が変わる（優先度が変わる）と最終更新が今回になり、前の優先度が残る
+  const prevOther = asSheet(fresh, { ID: base.id, 優先度: 'A 提案推奨', 追加日時: earlier, 最終更新: earlier, 前回優先度: '' });
+  const changed = planSalesUpdate([fresh], [header, prevOther], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('最終更新・前回優先度: 優先度が変わったら最終更新が今回の日時になり、前の優先度（例「A 提案推奨」）が前回優先度に入る',
+    changed !== null && changed.updates[0].values[col('最終更新')] === stamp && changed.updates[0].values[col('前回優先度')] === 'A 提案推奨' && changed.updates[0].values[col('追加日時')] === earlier,
+    JSON.stringify(changed?.updates[0]?.values.slice(col('追加日時'), col('前回優先度') + 1)));
+  // 優先度は同じで理由だけ変わる: 最終更新は動き、前回優先度は前の値のまま
+  const prevReason = asSheet(fresh, { ID: base.id, 判定の理由: '古い理由', 追加日時: earlier, 最終更新: earlier, 前回優先度: 'C 要確認' });
+  const reasonChanged = planSalesUpdate([fresh], [header, prevReason], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('最終更新・前回優先度: 優先度が同じで理由だけ変われば最終更新は今回・前回優先度は前の値のまま引き継ぐ',
+    reasonChanged !== null && reasonChanged.updates[0].values[col('最終更新')] === stamp && reasonChanged.updates[0].values[col('前回優先度')] === 'C 要確認');
+  // 受信日時・案件詳細だけが違っても更新にしない（判定の中身の列ではない）
+  const prevMail = asSheet(fresh, { ID: base.id, 受信日時: '2026/09/01 08:00', '案件詳細（メール本文より）': '別の本文', 追加日時: earlier, 最終更新: '', 前回優先度: '' });
+  const mailOnly = planSalesUpdate([fresh], [header, prevMail], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('最終更新: 前の最終更新が空（移行直後の既存行）で判定の中身が変わらなければ空のまま。受信日時・本文の違いでは動かさない',
+    mailOnly !== null && mailOnly.updates[0].values[col('最終更新')] === '' && mailOnly.updates[0].values[col('前回優先度')] === '');
+  // 全体の書き直し（見出しが空の初回など）でも同じ規則
+  const merged = mergeSalesRows([fresh, salesRowOf({ ...base, id: 'ownmatch_a_p9', projectId: 'p9', projectTitle: '別の案件の名前です' }, undefined)], [header, prevOther], [], () => false, (id) => id, stamp);
+  const mById = new Map(merged.map((r) => [String(r[col('ID')]), r]));
+  check('最終更新（全体の書き直し）: 既存の行は判定が変われば今回・前回優先度も入り、新しい行は今回の日時で前回優先度は空',
+    mById.get(base.id)?.[col('最終更新')] === stamp && mById.get(base.id)?.[col('前回優先度')] === 'A 提案推奨' && mById.get('ownmatch_a_p9')?.[col('最終更新')] === stamp && mById.get('ownmatch_a_p9')?.[col('前回優先度')] === '');
+
+  // ===== 期限切れの控え =====
+  const dropRow = asSheet(salesRowOf({ ...base, id: 'ownmatch_a_gone', projectId: 'gone', projectTitle: '消える案件の名前です' }, undefined), { ID: 'ownmatch_a_gone', 対応状況: '未着手' });
+  const dropPlan = planSalesUpdate([fresh], [header, dropRow, asSheet(fresh, { ID: 'ownmatch_a_keep', メモ: '入力あり', 案件名: '別の案件の名前です' })]);
+  check('期限切れ: 候補から外れ人の入力も無い行は deleteIds に入り、その行そのものが dropRows に入る（入力のある行は残す）',
+    dropPlan !== null && dropPlan.deleteIds.join() === 'ownmatch_a_gone' && dropPlan.dropRows.length === 1 && dropPlan.dropRows[0][col('ID')] === 'ownmatch_a_gone' && dropPlan.rows.some((r) => r[col('ID')] === 'ownmatch_a_keep') &&
+      dropPlan.closedRows.length === 0, JSON.stringify(dropPlan?.deleteIds));
+  check('期限切れ: 精度チェックだけの行は今までどおりクローズ済みへ（expireIds）で、期限切れの控えには入らない',
+    (() => {
+      const p = planSalesUpdate([], [header, asSheet(fresh, { ID: 'ownmatch_a_acc', 精度チェック: '○ 概ね妥当' })]);
+      return p !== null && p.expireIds.join() === 'ownmatch_a_acc' && p.dropRows.length === 0 && p.closedRows.length === 1;
+    })());
+  check('期限切れの上限: 超えた分だけ古い行（上）から消す・0 なら上限なし',
+    expiredOverflow(2990, 20, 3000) === 10 && expiredOverflow(10, 5, 3000) === 0 && expiredOverflow(5000, 10, 0) === 0 && SALES_EXPIRED_TAB === '期限切れ');
+  // 書き込みの流れ: 控えへ先に足してから「全体」の行を消す・空の控えには見出しも書く・上限を超えたら上の行を消す
+  const writeLog = async (expiredColumnA: string[][], keep: string | undefined, withExpiredTab = true) => {
+    const calls: Array<{ kind: string; arg: unknown }> = [];
+    const allValues = [header, dropRow];
+    const tabs = ['全体', 'クローズ済み', '精度集計', '要員一覧', ...(withExpiredTab ? ['期限切れ'] : [])];
+    const api = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: tabs.map((title, i) => ({ properties: { sheetId: i + 1, title, gridProperties: { rowCount: 1000, columnCount: header.length + 1 } } })) } }),
+        batchUpdate: async (p: { requestBody: { requests: unknown[] } }) => (calls.push({ kind: 'batchUpdate', arg: p.requestBody.requests }), { data: {} }),
+        values: {
+          get: async (p: { range: string }) => {
+            if (p.range.startsWith("'期限切れ'")) return { data: { values: expiredColumnA } };
+            if (p.range.startsWith("'全体'")) return { data: { values: /A1:/.test(p.range) ? allValues.slice(0, 1) : allValues } };
+            return { data: { values: [] } };
+          },
+          update: async () => ({ data: {} }),
+          append: async (p: { range: string; requestBody: { values: unknown[][] } }) => (calls.push({ kind: `append:${p.range.split('!')[0]}`, arg: p.requestBody.values }), { data: {} }),
+          batchUpdate: async () => ({ data: {} }),
+          batchClear: async () => ({ data: {} }),
+        },
+      },
+    };
+    const savedId = process.env.PROPER_SALES_SPREADSHEET_ID;
+    const savedKeep = process.env.SALES_EXPIRED_KEEP;
+    process.env.PROPER_SALES_SPREADSHEET_ID = 'sheet_selftest_sales';
+    if (keep === undefined) delete process.env.SALES_EXPIRED_KEEP;
+    else process.env.SALES_EXPIRED_KEEP = keep;
+    __setSalesSheetsApiForTest(api as unknown as import('googleapis').sheets_v4.Sheets);
+    try {
+      await writeSalesList([{ ...base }], [], []);
+    } finally {
+      __setSalesSheetsApiForTest(null);
+      if (savedId === undefined) delete process.env.PROPER_SALES_SPREADSHEET_ID;
+      else process.env.PROPER_SALES_SPREADSHEET_ID = savedId;
+      if (savedKeep === undefined) delete process.env.SALES_EXPIRED_KEEP;
+      else process.env.SALES_EXPIRED_KEEP = savedKeep;
+    }
+    return calls;
+  };
+  const deleteOf = (calls: Array<{ kind: string; arg: unknown }>, sheetId: number) =>
+    calls.findIndex((c) => c.kind === 'batchUpdate' && (c.arg as Array<{ deleteDimension?: { range: { sheetId: number } } }>).some((r) => r.deleteDimension?.range.sheetId === sheetId));
+  const first = await writeLog([], undefined);
+  const firstAppend = first.findIndex((c) => c.kind === "append:'期限切れ'");
+  const firstRows = (first[firstAppend]?.arg ?? []) as string[][];
+  check('期限切れの書き込み: 消す行を「期限切れ」タブへ先に足し（空なら見出しも）、その後で「全体」の行を消す',
+    firstAppend >= 0 && deleteOf(first, 1) > firstAppend && firstRows.length === 2 && firstRows[0].join() === header.join() && firstRows[1][col('ID')] === 'ownmatch_a_gone',
+    JSON.stringify(first.map((c) => c.kind)));
+  const trimmed = await writeLog([['No'], ['1'], ['2']], '2');
+  const trimAt = deleteOf(trimmed, 5);
+  const trimReq = trimmed[trimAt]?.arg as Array<{ deleteDimension: { range: { startIndex: number; endIndex: number } } }> | undefined;
+  check('期限切れの上限（SALES_EXPIRED_KEEP）: 超えた分を上の行（2行目）から消す。見出しは書かない',
+    trimAt > trimmed.findIndex((c) => c.kind === "append:'期限切れ'") && trimReq?.[0].deleteDimension.range.startIndex === 1 && trimReq?.[0].deleteDimension.range.endIndex === 2 &&
+      ((trimmed.find((c) => c.kind === "append:'期限切れ'")?.arg ?? []) as string[][]).length === 1, JSON.stringify(trimReq));
+  const unlimited = await writeLog([['No'], ['1'], ['2']], '0');
+  check('期限切れの上限: 0 なら上限なし（古い行を消さない）', deleteOf(unlimited, 5) < 0);
+  const created = await writeLog([], undefined, false);
+  const structural = (created.find((c) => c.kind === 'batchUpdate')?.arg ?? []) as Array<{ addSheet?: { properties: { title: string; gridProperties: { frozenRowCount: number } } }; addProtectedRange?: { protectedRange: { warningOnly: boolean } } }>;
+  check('期限切れのタブが無ければ作る（見出しの行を固定・警告つきの保護）',
+    structural.some((r) => r.addSheet?.properties.title === '期限切れ' && r.addSheet.properties.gridProperties.frozenRowCount === 1) && structural.some((r) => r.addProtectedRange?.protectedRange.warningOnly === true));
+
+  // ===== ID の付け替え（試運転 → 本番） =====
+  const proj = (receivedAt: Date, subject: string, email = 'sales@partner.example') =>
+    ({ ...({} as Project), location: '', remote: 'unknown', startPeriod: '', requiredSkills: [], agentCompany: 'S社', agentContact: '山田', agentEmail: email, receivedAt, detail: '', replyTarget: { from: '', to: '', cc: '', subject, messageId: '', references: '' } }) as Project;
+  const at = new Date('2026-10-01T01:00:00Z'); // 日本時間 10:00
+  const candOf = (id: string, title: string, subject: string, when = at, email?: string) =>
+    salesRowOf({ ...base, id, projectId: id.replace(/^ownmatch_a_/, ''), projectTitle: title }, proj(when, subject, email));
+  const prevMailRow = (id: string, over: Record<string, string> = {}) =>
+    asSheet(candOf(id, '試運転での案件名です', 'Re: 【再送】Java案件のご紹介', new Date(at.getTime() - 10 * 60 * 1000)), { ID: id, No: '5', 対応状況: '提案済', メモ: '先方に連絡済', 追加日時: earlier, 最終更新: earlier, 前回優先度: 'B 条件交渉', ...over });
+  const newOne = candOf('ownmatch_a_proj_prod1', '本番での案件名の表記です', 'Java案件のご紹介');
+  const rekey = planSalesUpdate([newOne], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('ID の付け替え: 要員・営業元メール・件名（正規化）が同じで受信が30分以内の行がちょうど1つなら同じ行とみなし、人の入力・追加日時・前回優先度を引き継いで ID を新しい値にする（行の位置は同じ）',
+    rekey !== null && rekey.rekeyed === 1 && rekey.appends.length === 0 && rekey.updates.length === 1 && rekey.updates[0].row === 2 &&
+      rekey.updates[0].values[col('ID')] === 'ownmatch_a_proj_prod1' && rekey.updates[0].values[col('対応状況')] === '提案済' && rekey.updates[0].values[col('メモ')] === '先方に連絡済' &&
+      rekey.updates[0].values[col('追加日時')] === earlier && rekey.updates[0].values[col('No')] === 5 && rekey.deleteIds.length === 0,
+    JSON.stringify(rekey && { r: rekey.rekeyed, a: rekey.appends.length, u: rekey.updates.length }));
+  const two = planSalesUpdate([newOne], [header, prevMailRow('ownmatch_a_sesmail_x1'), prevMailRow('ownmatch_a_sesmail_x2')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('ID の付け替え: 同じメールの既存の行が2つ以上なら付け替えない（新しい行は足し、既存の行は入力があれば残す）',
+    two !== null && two.rekeyed === 0 && two.appends.length === 1 && two.rows.filter((r) => r[col('メモ')] === '先方に連絡済').length === 2);
+  const late = planSalesUpdate([candOf('ownmatch_a_proj_prod1', '本番での案件名の表記です', 'Java案件のご紹介', new Date(at.getTime() + 40 * 60 * 1000))], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  const otherEmail = planSalesUpdate([candOf('ownmatch_a_proj_prod1', '本番での案件名の表記です', 'Java案件のご紹介', at, 'other@partner.example')], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('ID の付け替え: 受信が30分を超えて違う・営業元メールが違う行は同じ行とみなさない',
+    late !== null && late.rekeyed === 0 && late.appends.length === 1 && otherEmail !== null && otherEmail.rekeyed === 0 && otherEmail.appends.length === 1);
+  const dupFresh = planSalesUpdate([newOne, candOf('ownmatch_a_proj_prod2', '同じメールの別の案件の表記です', 'Java案件のご紹介')], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('ID の付け替え: 同じメールの候補が2つあるとき（1通に複数案件）は、どの案件か分からないので付け替えない', dupFresh !== null && dupFresh.rekeyed === 0 && dupFresh.appends.length === 2);
+  const viaTitle = planSalesUpdate([salesRowOf({ ...base, id: 'ownmatch_a_proj_prod1', projectId: 'proj_prod1', projectTitle: '試運転での案件名です' }, proj(at, 'Java案件のご紹介'))], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
+  check('ID の付け替え: 要員＋案件名で引き当たる行は今までどおり（付け替えの件数に数えない）', viaTitle !== null && viaTitle.rekeyed === 0 && viaTitle.updates.length === 1 && viaTitle.updates[0].values[col('メモ')] === '先方に連絡済');
+  // クローズ済みの照合（メール）
+  const closedTab = [header, prevMailRow('ownmatch_a_sesmail_c1', { 対応状況: '見送り', 見送り理由: '単価が安い' })];
+  const st = closedStateOf(closedTab);
+  const keptOut = planSalesUpdate([newOne], [header], () => false, (id) => id, st.ids, { closedKeys: st.keys, closedMails: st.mails, addedAt: stamp });
+  check('クローズ済みの照合: 要員＋営業元メール＋件名＋受信日時（30分以内）が同じ組は、案件名・IDが違っても全体に戻さない',
+    st.mails.length === 1 && keptOut !== null && keptOut.appends.length === 0);
+  const notUnique = planSalesUpdate([newOne, candOf('ownmatch_a_proj_prod2', '同じメールの別の案件の表記です', 'Java案件のご紹介')], [header], () => false, (id) => id, st.ids, { closedKeys: st.keys, closedMails: st.mails, addedAt: stamp });
+  check('クローズ済みの照合: 同じメールの候補が複数ある（1通に複数案件）ときはメールでは照合しない（別の案件を巻き込まない）', notUnique !== null && notUnique.appends.length === 2);
+  const otherEngineer = planSalesUpdate([salesRowOf({ ...base, id: 'ownmatch_b_proj_prod1', properLabel: 'B.B', projectId: 'proj_prod1', projectTitle: '本番での案件名の表記です' }, proj(at, 'Java案件のご紹介'))], [header], () => false, (id) => id, st.ids, { closedKeys: st.keys, closedMails: st.mails, addedAt: stamp });
+  check('クローズ済みの照合: 要員が違えば戻る', otherEngineer !== null && otherEngineer.appends.length === 1);
+
+  // ===== 氏名を外に出さない =====
+  section('要員の氏名: displayName・営業リスト・タブ名・判定の入力に出ない');
+  const realName = '山田太郎';
+  const masterRow = (v: Record<string, string>) => PROPER_MASTER_COLUMNS.map((c) => v[c] ?? '');
+  const noLabel = rowToProperEngineer(masterRow({ 氏名: realName, 提案用表記: '', 稼働状況: '稼働可', スキル: 'Java/Spring Boot', 必要案件単価: '60', 手動ID: 'manual_abc123' }));
+  const withLabel = rowToProperEngineer(masterRow({ 氏名: realName, 提案用表記: 'T.Y.', 稼働状況: '稼働可', スキル: 'Java', 手動ID: 'manual_abc124' }));
+  const label = noLabel ? properLabelOf(noLabel) : '';
+  check('master: 提案用表記が無い社員の displayName は氏名ではなく properLabelOf のプレースホルダ（提案用表記があればそれ）',
+    noLabel !== null && noLabel.displayName === label && label.includes('提案用表記未入力') && !noLabel.displayName.includes(realName) && noLabel.proposalLabel === '' &&
+      withLabel !== null && withLabel.displayName === 'T.Y.' && !withLabel.displayName.includes(realName));
+  const noLabel2 = rowToProperEngineer(masterRow({ 氏名: '佐藤花子', 提案用表記: '', 稼働状況: '稼働可', スキル: 'Java', 手動ID: 'manual_abc125' }));
+  check('master: 提案用表記が無い社員が2人いてもラベルは別々（要員タブ・判定の控えが混ざらない）',
+    noLabel !== null && noLabel2 !== null && noLabel.displayName !== noLabel2.displayName && noLabel2.displayName.includes('提案用表記未入力') && !noLabel2.displayName.includes('佐藤'));
+  const leaks = (v: unknown) => JSON.stringify(v).includes(realName);
+  if (noLabel) {
+    const e = noLabel;
+    const shown = e.proposalLabel || e.displayName;
+    const salesRow = salesRowOf({ ...base, ownEngineerName: e.displayName, properLabel: properLabelOf(e) }, proj(at, '件名'));
+    const staffList = staffListValues([e]);
+    const planned = planSalesUpdate([salesRow], [header]);
+    check('営業リスト・要員一覧・要員タブ名・精度集計・FILTER・更新の差分のどこにも氏名が現れない（提案用表記が空の社員）',
+      !leaks(salesRow) && !leaks(staffList) && !leaks(staffTabName(shown)) && !leaks(summaryValues([shown])) && !leaks(staffFilterFormula(shown)) && !leaks(planned) && shown === label);
+    check('判定の入力（指示文＋経歴・案件の入力）に氏名が現れない', !judgeSystemFor(e).includes(realName) && !judgeSystemFor(e).includes('山田'));
+    check('提案文面にも氏名が出ない（プレースホルダに置き換わる）', !buildProperProposalBody(e, proj(at, '件名')).includes(realName));
+  }
+  // 要員リスト（roster）: 名前がイニシャルでなくても displayName・経歴の本文（LLM の入力）に出さない
+  const rosterRows = [['状況', '名前', '稼働開始時期', 'サマリ'], ['営業中', realName, '即日', '■名前：山田 太郎\n■最寄：新宿\n■単価：60万\n■スキル：Java、Spring Boot\n■経験年数：Java案件：3年']];
+  const rosterOut = rosterEngineersFromValues({
+    spreadsheetId: 'sheet_x', rows: rosterRows, gidOf: new Map(),
+    sheetTexts: new Map([[realName, `氏名\t山田 太郎\n担当: ${realName}さん\nJavaでの受注管理の開発を3年担当`]]),
+  }, new Date('2026-10-04T00:00:00Z'));
+  const rosterEng = rosterOut[0];
+  check('要員リスト: 名前が本名でも displayName はプレースホルダ・経歴の本文（判定・レベル抽出の入力）から名前を伏せる（業務の記載は残す）',
+    rosterEng !== undefined && rosterEng.displayName === properLabelOf({ proposalLabel: '', id: rosterEng.id }) && rosterEng.displayName.includes('提案用表記未入力') && !leaks(rosterEng) && !judgeSystemFor(rosterEng).includes('山田') &&
+      (rosterEng.profileText ?? '').includes('Javaでの受注管理の開発を3年担当') && (rosterEng.profileText ?? '').includes('<氏名>'), JSON.stringify(rosterEng?.profileText));
+  const rosterInitials = rosterEngineersFromValues({ spreadsheetId: 'sheet_x', rows: [rosterRows[0], ['営業中', 'N.H', '即日', '■スキル：Java']], gidOf: new Map(), sheetTexts: new Map([['N.H', 'N.H のスキルシート']]) });
+  check('要員リスト: 名前がイニシャルならそのまま使い、本文も変えない', rosterInitials[0]?.displayName === 'N.H' && rosterInitials[0]?.proposalLabel === 'N.H' && (rosterInitials[0]?.profileText ?? '').includes('N.H のスキルシート'));
+
+  // ===== 試運転: 添付ファイルの読み取り =====
+  section('試運転: 添付ファイルの読み取り（ses:trial:raw）');
+  const xlsx = zipOfEntries(minimalXlsxEntries());
+  const pdf = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n');
+  const b64 = (b: Buffer) => b.toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const mime = (withMessageId: boolean) => [
+    'From: Sales <sales@partner.example>', 'To: us@our.example', 'Subject: test', ...(withMessageId ? ['Message-ID: <synthetic-1@partner.example>'] : []), 'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="BND"', '', '--BND', 'Content-Type: text/plain; charset=utf-8', '', 'body text', '--BND',
+    'Content-Type: application/octet-stream; name="list.xlsx"', 'Content-Transfer-Encoding: base64', 'Content-Disposition: attachment; filename="list.xlsx"', '', b64(xlsx), '--BND',
+    'Content-Type: application/pdf; name="sheet.pdf"', 'Content-Transfer-Encoding: base64', 'Content-Disposition: attachment; filename="sheet.pdf"', '', b64(pdf), '--BND--', '',
+  ].join('\r\n');
+  const outDir = mkdtempSync(join(tmpdir(), 'ses-trial-raw-'));
+  try {
+    const eml = await readRawAttachments(Buffer.from(mime(true)), outDir, 'case1');
+    const sheet = eml.attachments.find((a) => a.kind === 'sheet');
+    const pdfAtt = eml.attachments.find((a) => a.kind === 'pdf');
+    check('添付の読み取り（.eml）: 表計算は文字にして kind=sheet・textChars・text（8000文字まで）、PDF は出力ディレクトリに書き出して kind=pdf・pdfPath（文字にはしない）、Message-ID の有無を返す',
+      eml.attachments.length === 2 && sheet !== undefined && sheet.name === 'list.xlsx' && sheet.textChars === (sheet.text ?? '').length && (sheet.text ?? '').length <= 8000 &&
+        pdfAtt !== undefined && pdfAtt.name === 'sheet.pdf' && pdfAtt.textChars === 0 && pdfAtt.text === undefined && fsExists(pdfAtt.pdfPath ?? '') && fsRead(pdfAtt.pdfPath ?? '').equals(pdf) && eml.messageIdHeaderPresent === true,
+      JSON.stringify({ n: eml.attachments.length, chars: sheet?.textChars }));
+    const wrapped = Buffer.from(JSON.stringify({ raw: Buffer.from(mime(false)).toString('base64url') }));
+    const viaJson = await readRawAttachments(wrapped, outDir, 'case2');
+    check('添付の読み取り（RAW の保存ファイル）: JSON の raw（base64url の MIME）も同じ結果・Message-ID が無ければ false',
+      viaJson.attachments.length === 2 && viaJson.attachments.find((a) => a.kind === 'sheet')?.textChars === sheet?.textChars && viaJson.messageIdHeaderPresent === false && rawMimeOf(wrapped).toString().startsWith('From: Sales'));
+    let bad = '';
+    try {
+      rawMimeOf(Buffer.from('{"other":1}'));
+    } catch (err) {
+      bad = err instanceof Error ? err.message : '';
+    }
+    check('添付の読み取り: raw の無い JSON は止める', bad.includes('raw'));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+  const mat = attachmentMaterial('本文の先頭', '■案件名\nJava開発A', 'あ'.repeat(9000), ['list.xlsx']);
+  check('試運転の案件の材料: 抽出の入力は本文の後ろに【添付: 名前】つきで（8000文字まで）、案件詳細は本文の抜粋の後ろに「【添付より】」で1500文字まで',
+    mat.body.startsWith('本文の先頭\n\n【添付: list.xlsx】\n') && mat.body.length === '本文の先頭\n\n【添付: list.xlsx】\n'.length + 8000 &&
+      mat.detail.startsWith('■案件名\nJava開発A\n\n【添付より】\n') && mat.detail.length === '■案件名\nJava開発A\n\n【添付より】\n'.length + 1500);
+  const none = attachmentMaterial('本文', '抜粋', undefined, undefined);
+  check('試運転の案件の材料: 添付の文字が無ければ今までどおり（本文・抜粋のまま）。抜粋が空でも添付だけで詳細になる',
+    none.body === '本文' && none.detail === '抜粋' && attachmentMaterial('本文', '', '表の文字', []).detail === '【添付より】\n表の文字');
 }
 
 async function main(): Promise<void> {
@@ -4714,6 +4965,7 @@ async function main(): Promise<void> {
     await properJudgeChecks();
     salesListChecks();
     await salesListWriteChecks();
+    await salesListRound2Checks();
     await securityAuditChecks();
     securityAuditRound2Checks();
     await securityAuditRound3Checks();

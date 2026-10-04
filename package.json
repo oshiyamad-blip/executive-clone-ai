@@ -39,6 +39,7 @@
     "ses:mail-stats": "tsx src/ses/mailStats.ts",
     "ses:mail-stats:demo": "DEMO_MODE=true tsx src/ses/mailStats.ts",
     "ses:heal:check": "DEMO_MODE=true SES_HEAL_DATA_DIR=data/ses-heal-selftest tsx src/ses/heal/selftest.ts",
+    "ses:trial:raw": "tsx src/ses/trial/rawAttach.ts",
     "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts",
     "ses:eval:labels": "tsx src/ses/eval/labelsEval.ts",
     "ses:labels:restore": "tsx src/ses/eval/labelsRestore.ts restore",

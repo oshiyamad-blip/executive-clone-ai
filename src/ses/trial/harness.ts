@@ -15,13 +15,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { parseJstLabel } from './jstLabel.js';
+import { attachmentMaterial } from './rawAttach.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
-import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, projectIdOf, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
 const dir = process.env.RUN_DIR as string;
@@ -44,6 +45,10 @@ interface OutRow {
   kind?: string;
   extraction?: { projects?: unknown[]; engineers?: unknown[]; injectionSuspected?: boolean };
   bodyHead?: string;
+  // 案件メールの添付（表計算）の文字。ses:trial:raw の出力（text）を8000文字まで。読めなかったときは attachmentUnread
+  attachmentText?: string;
+  attachmentNames?: string[];
+  attachmentUnread?: boolean;
   error?: string;
 }
 
@@ -64,6 +69,8 @@ function outRows(base = dir): OutRow[] {
   return rows;
 }
 
+const attach = (r: OutRow, excerpt = '') => attachmentMaterial(r.bodyHead ?? '', excerpt, r.attachmentText, r.attachmentNames);
+
 function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; failed: number } {
   const seen = new Set<string>();
   const projects: Project[] = [];
@@ -73,15 +80,15 @@ function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; fail
     if (seen.has(r.messageId) || !r.extraction) continue;
     seen.add(r.messageId);
     const mail = {
-      id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: r.bodyHead ?? '',
+      id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: attach(r).body,
       messageIdHeader: '', references: '', receivedAt: new Date(r.receivedAt), attachments: [], sheetLinks: [],
     } as SesRawMail;
-    if (isClosedNotice(mail)) closed += 1;
+    if (isClosedNotice({ ...mail, body: r.bodyHead ?? '' })) closed += 1;
     const ps = (r.extraction.projects ?? []) as Parameters<typeof buildProject>[0][];
     ps.forEach((raw, i) => {
       try {
         const p = buildProject(raw, mail, i, null) as Project;
-        const detail = projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i);
+        const detail = attach(r, projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i)).detail;
         if (detail) p.detail = detail;
         p.replyTarget = { from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', messageId: '', references: '' };
         if (r.extraction?.injectionSuspected) p.injectionSuspected = true;
@@ -257,11 +264,19 @@ if (phase === 'prompts') {
   const closed = closedState();
   const labelOf = new Map(list.map((e) => [e.id, e.proposalLabel || e.displayName]));
   const endedProjects = new Set([...closed.endedRowIds].map((id) => projectIdOf(legacyCanonical(list)(id))).filter(Boolean));
+  // 要員＋営業元メール＋件名＋受信日時でも照合する（切り替えで案件名の抽出結果が変わっても戻さない。final の planSalesUpdate と同じ規則）
+  const projectById = new Map(kept.map((p) => [p.id, p]));
+  const mailOfPair = (m: { projectId: string; ownEngineerId: string }) => {
+    const p = projectById.get(m.projectId);
+    return p ? mailRefOf(labelOf.get(m.ownEngineerId) ?? '', p.agentEmail, p.replyTarget?.subject ?? '', jstLabel(p.receivedAt)) : null;
+  };
+  const everyPair = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now);
+  const siblingMails = everyPair.flatMap((p) => mailOfPair(p.match) ?? []);
   const closedPair = (m: { id: string; projectId: string; ownEngineerId: string; projectTitle: string }) => {
     const key = closedKeyOf(labelOf.get(m.ownEngineerId) ?? '', m.projectTitle);
-    return skip.has(m.id) || endedProjects.has(m.projectId) || (key !== '' && closed.keys.has(key));
+    return skip.has(m.id) || endedProjects.has(m.projectId) || (key !== '' && closed.keys.has(key)) || closedByMail(mailOfPair(m), closed.mails, siblingMails);
   };
-  const all = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now).filter((p) => !closedPair(p.match));
+  const all = everyPair.filter((p) => !closedPair(p.match));
   // 前の回で判定済みの組は上限に数えず、判定もしない。未判定の組だけを上限まで選ぶ
   const selected = selectPairsForJudge(all, (id) => done.get(id), perEngineer, Number.MAX_SAFE_INTEGER);
   // 足切りの監視の組（本番と同じ選び方）は各要員の配列の後ろに足し、組のキーを audit.json に書く（final で当たりを数える）
@@ -315,6 +330,7 @@ if (phase === 'prompts') {
   const closed = closedState();
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
     closedKeys: closed.keys,
+    closedMails: closed.mails,
     endedRowIds: closed.endedRowIds,
     addedAt: jstLabel(now),
   });
@@ -345,13 +361,16 @@ if (phase === 'prompts') {
     appendCount: plan.appends.length,
     updateRows: plan.updates.map((u) => u.row),
     deleteIds: plan.deleteIds,
+    dropRows: plan.dropRows,
+    expiredTab: SALES_EXPIRED_TAB,
+    rekeyed: plan.rekeyed,
     closeIds: plan.closeIds,
     expireIds: plan.expireIds,
     endedIds: plan.endedIds,
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
 } else if (phase === 'labels') {
   const { list, projects, judged, candidates } = await judgedCandidates();
   const store = labelsDir();
