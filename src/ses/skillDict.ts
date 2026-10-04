@@ -872,7 +872,8 @@ export function parseRequirements(raw: string): SkillRequirement[] {
 // 要員のスキル・同義辞書・集計用で、選択肢や括弧の補足も1語ずつに分ける
 // 文の中に現れる辞書の技術名（正規形）。案件名の中心の技術を知るのに使う（「某企業のPowerBI研修」→ Power BI）
 export function techNamesIn(text: string): string[] {
-  const compactText = text.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+  // 「Java5年以上」は空白を消すと技術名の後ろに数字が続くため、後ろが年・月の数字なら区切りを入れる（java8・es2015 などの版番号は対象外）
+  const compactText = text.normalize('NFKC').toLowerCase().replace(/\s+/g, '').replace(/([a-z#+])(?=\d+(?:\.\d+)?(?:年|ヶ月|か月|ヵ月|カ月))/g, '$1 ');
   const out: string[] = [];
   for (const [alias, name] of ALIAS) {
     if (CANONICAL.get(name.toLowerCase())?.category !== 'skill') continue;

@@ -289,7 +289,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
         shortYears = short.have;
       }
     }
-    checks.push({ kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status });
+    checks.push({ kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status, ...(shortYears !== null ? { shortYears } : {}) });
     if (status === 'unmet') {
       if (!optional) unmetCount += 1;
       gaps.push(r.note.trim() ? `${label}（${r.note.trim()}）` : label);

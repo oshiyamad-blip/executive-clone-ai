@@ -54,6 +54,7 @@ import {
   normalizeRequirementLists,
   requirementsOf,
   requirementMembers,
+  techNamesIn,
 } from '../skillDict.js';
 import { impliesSkill, isNotEquivalent, skillGraphTerms, IMPLIES_MAX_DEPTH } from '../skillGraph.js';
 import { skillCoverage, setSkillEquivalencesForTest, equivalenceRejection, type SkillCoverage } from '../skillEquiv.js';
@@ -443,6 +444,13 @@ const IMPLIES_CASES: Array<[string, string, boolean]> = [
   ['Java', 'JavaScript', false],
   ['Spring Boot', 'Spring Boot', false],
 ];
+
+function techNamesInChecks(): void {
+  section('文中の技術名（techNamesIn）: 年数が続く形');
+  check('「Java5年以上」「Java 5年以上」で Java を読む', techNamesIn('Java5年以上').includes('Java') && techNamesIn('Java 5年以上').includes('Java'));
+  check('「PHP3ヶ月」「Python1.5年」でも読む', techNamesIn('PHP3ヶ月').includes('PHP') && techNamesIn('Python1.5年').includes('Python'));
+  check('版番号（後ろが年・月でない数字）は今までどおり一致しない', !techNamesIn('Java8').includes('Java') && !techNamesIn('Windows10').includes('Windows'));
+}
 
 function impliesChecks(): void {
   section(`含意（子の経験 ⇒ 親の必須。深さ${IMPLIES_MAX_DEPTH}まで・逆向きは不可）`);
@@ -4306,6 +4314,13 @@ function salesListChecks(): void {
     salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('A') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
   check('優先度: 必須 unmet の条件付きでも reference はD・needsReview はC（今の優先のまま）',
     salesPriorityOf({ ...condUnmet, reference: true }).startsWith('D') && salesPriorityOf({ ...condUnmet, needsReview: true, reference: true }).startsWith('C'));
+  const shortY = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, shortYears: 3.5 };
+  check('優先度: 推奨・単価を満たしても必須の年数不足（close）があればB・交渉ポイントに年数を出す',
+    salesPriorityOf(withJ('recommend', [shortY])).startsWith('B') &&
+      String(salesRowOf(withJ('recommend', [shortY]), undefined)[col('交渉ポイント')]).includes('年数: 必須Java 5年以上に対し経歴約3.5年'));
+  check('優先度: 年数不足が尚可だけならA・年数不足の無い推奨もA',
+    salesPriorityOf(withJ('recommend', [{ ...shortY, kind: '尚可' }])).startsWith('A') &&
+      salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'close' }])).startsWith('A'));
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
   check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
   const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);
@@ -4331,6 +4346,7 @@ async function main(): Promise<void> {
   console.log('=== SES 決定的ルールの回帰確認（ses:eval:rules） ===');
   try {
     tokenizeChecks();
+    techNamesInChecks();
     impliesChecks();
     coverageChecks();
     assessmentChecks();
