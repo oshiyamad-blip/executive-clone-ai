@@ -88,6 +88,11 @@ function unmetRequiredOf(c: ProperCandidate): string[] {
   return (c.judgment.checks ?? []).filter((k) => k.kind === '必須' && k.status === 'unmet').map((k) => k.requirement);
 }
 
+// 必須の年数条件に経歴の年数が足りず close にした要件（AI判定の照合で付く）
+function yearShortRequiredOf(c: ProperCandidate): Array<{ requirement: string; shortYears: number }> {
+  return (c.judgment?.checks ?? []).flatMap((k) => (k.kind === '必須' && typeof k.shortYears === 'number' ? [{ requirement: k.requirement, shortYears: k.shortYears }] : []));
+}
+
 // 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。上限超え等の参考 → D。
 // 条件付きで経験の無い必須がある組も C。
 // AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
@@ -95,7 +100,11 @@ export function salesPriorityOf(c: ProperCandidate): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
   if (c.reference) return SALES_PRIORITIES.d;
   if (unmetRequiredOf(c).length > 0) return SALES_PRIORITIES.c;
-  if (c.judgment) return c.judgment.verdict === 'recommend' && c.meetsRate ? SALES_PRIORITIES.a : SALES_PRIORITIES.b;
+  if (c.judgment) {
+    if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;
+    // 必須の年数が足りない組は交渉が要るため、A にせず B までに抑える（下げるだけで上げない）
+    return yearShortRequiredOf(c).length > 0 ? SALES_PRIORITIES.b : SALES_PRIORITIES.a;
+  }
   if (c.band === 'strong' && c.meetsRate && !/【(単価交渉|経験交渉|年数交渉|参考提案)】/.test(c.reason)) return SALES_PRIORITIES.a;
   return SALES_PRIORITIES.b;
 }
@@ -199,7 +208,9 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
     : '';
   row[COL['合っている点']] = (c.matchedSkills ?? []).join(sep);
   row[COL['足りない点']] = (c.missingSkills ?? []).join(sep);
-  row[COL['交渉ポイント']] = negotiation;
+  // 年数不足の必須は、優先度を B に抑える理由として交渉ポイントにも出す（照合由来の「年数:」の行がすでにあれば足さない）
+  const yearNotes = /^年数:/m.test(negotiation) ? [] : yearShortRequiredOf(c).map((y) => `年数: 必須${y.requirement}に対し経歴約${y.shortYears.toFixed(1)}年`);
+  row[COL['交渉ポイント']] = [negotiation, ...yearNotes].filter(Boolean).join('\n');
   const unmet = c.needsReview || c.reference ? [] : unmetRequiredOf(c);
   row[COL['確認事項']] = unmet.length > 0 ? [`要確認: 経験の無い必須があります（${unmet.join('、')}）`, confirm].filter(Boolean).join('\n') : confirm;
   row[COL['提案文面（案）']] = c.draftToProject?.body ?? '';
