@@ -4,8 +4,8 @@
 // 個人データはここに置かない（要員・メール・シートの値は実行時に RUN_DIR へ書き出したファイルから読む）。
 //
 //   PHASE=prompts  抽出の指示文とJSONの形を RUN_DIR に書く
-//   PHASE=prep     抽出結果＋要員リスト → AI判定に回す組（pairs.json・system_<要員>.txt）
-//   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）
+//   PHASE=prep     抽出結果＋要員リスト → AI判定に回す組（pairs.json・system_<要員>.txt）。足切りの監視の組も加え、audit.json に組のキーを書く
+//   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）。出力の judge に監視の audited・auditHits が出る
 //   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
 //   PHASE=score    取り込み・判定・営業の入力の数字（score.json）
 //   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
@@ -19,7 +19,7 @@ import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, re
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
-import { buildProperCandidates, dedupeProjects, selectPairsForJudge } from '../proper/index.js';
+import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, SALES_COLUMNS, SALES_CLOSED_STATUS } from '../proper/salesList.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
@@ -238,9 +238,12 @@ if (phase === 'prompts') {
   const all = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now).filter((p) => !skip.has(p.match.id));
   // 前の回で判定済みの組は上限に数えず、判定もしない。未判定の組だけを上限まで選ぶ
   const selected = selectPairsForJudge(all, (id) => done.get(id), perEngineer, Number.MAX_SAFE_INTEGER);
+  // 足切りの監視の組（本番と同じ選び方）は各要員の配列の後ろに足し、組のキーを audit.json に書く（final で当たりを数える）
+  const audit = pickAuditPairs(list, kept, now, selected, (id) => done.get(id)).filter((p) => !skip.has(p.match.id));
+  const auditKeys = audit.map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`);
   const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
   let carried = 0;
-  for (const p of selected) {
+  for (const p of [...selected, ...audit]) {
     if (done.get(p.match.ownEngineerId)?.has(p.match.projectId)) continue;
     if (carriedIds.has(p.match.projectId)) carried += 1;
     const e = list.find((x) => x.id === p.match.ownEngineerId) as ProperEngineer;
@@ -249,7 +252,8 @@ if (phase === 'prompts') {
   }
   for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
-  console.log(JSON.stringify({ engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size }));
+  writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size }));
 } else if (phase === 'final') {
   const { list, projects, judged, candidates, stats } = await judgedCandidates();
   // この回で判定した組だけを載せる（判定していない組は失敗扱いになるため除く。シートにある組は下の差分で残る）

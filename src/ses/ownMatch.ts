@@ -5,6 +5,8 @@
 // プロパー候補（proper/index.ts）はここを緩い足切り（ownPairsForJudge）として使い、合うかどうかはAI判定（proper/judge.ts）で決める。
 // 本番=自社社員DB＋案件DBを参照、demo=fixture社員＋fixture案件で外部呼び出しなし。
 // 他モジュールから import しても副作用が無いよう、CLI起動は ownMatchCli.ts に分離している。
+import { createHash } from 'node:crypto';
+import { jstDateOf } from './dates.js';
 import { flowConstraints, violatesHops } from './constraints.js';
 import { collectSesMail } from './collect.js';
 import { parseAttachments } from './parse.js';
@@ -253,6 +255,52 @@ export function matchOwnEngineersToProjects(own: OwnEngineer[], projects: Projec
 // AI判定に回す組（緩い足切り＋ルールの並び）。社員ごと・案件ごとに perItem 件まで
 export function ownPairsForJudge(own: OwnEngineer[], projects: Project[], perItem: number, now = new Date()): Array<{ match: OwnMatch; rulePass: boolean }> {
   return rankOwnPairs(own, projects, now, { forJudge: true }, perItem).map((c) => ({ match: c.match, rulePass: c.rulePass }));
+}
+
+// 足切りの監視用に、案件と社員から作る最小の match（ルールの判定を通っていないので数値は参考。要確認にして人が確かめる）
+function minimalOwnMatch(own: OwnEngineer, project: Project, now: Date): OwnMatch {
+  const rate = projectRateMan(project);
+  const required = own.requiredProjectRate;
+  const unknown = rate === null || required === null;
+  const gap = unknown ? null : roundManDown((rate as number) - (required as number));
+  return {
+    id: `ownmatch_${own.id}_${project.id}`,
+    ownEngineerId: own.id,
+    ownEngineerName: own.displayName,
+    projectId: project.id,
+    projectTitle: project.title,
+    projectRate: rate,
+    requiredProjectRate: required,
+    rateGapMan: gap,
+    meetsRate: !unknown && (rate as number) >= (required as number),
+    skillMatchRate: 0,
+    band: 'tentative',
+    locationOk: true,
+    timingOk: true,
+    needsReview: true,
+    score: 0,
+    reason: '［確認］足切りの監視で選んだ組です（単価・勤務地・時期・レベルなどのルールでは候補外でした）。',
+    agentEmail: project.agentEmail,
+    detectedAt: now,
+  };
+}
+
+// 足切りの取りこぼしを調べる監視用: ルールの足切りで落ちた組のうち、案件の技術（必須・尚可）と社員のスキルに1つ以上の一致がある「惜しい組」から
+// n 組を決まった順で選ぶ。並びは組のIDに日付（JST）を混ぜたハッシュなので、同じ日は同じ組・日が変われば別の組になる（乱数は使わない）
+export function auditPairsForJudge(own: OwnEngineer[], projects: Project[], n: number, now = new Date()): Array<{ match: OwnMatch; rulePass: boolean }> {
+  if (n <= 0) return [];
+  const day = jstDateOf(now);
+  const near: Array<{ own: OwnEngineer; project: Project; hash: string }> = [];
+  for (const engineer of own.filter((o) => o.status === 'available')) {
+    for (const project of projects.filter((p) => p.status === 'open')) {
+      if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true })) continue;
+      const techs = techNamesIn([...project.requiredSkills, ...project.preferredSkills].join(' '));
+      if (!techs.some((t) => (skillMatch([t], engineer.skills)?.rate ?? 0) > 0)) continue;
+      near.push({ own: engineer, project, hash: createHash('sha256').update(`${day}|${engineer.id}|${project.id}`).digest('hex') });
+    }
+  }
+  near.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+  return near.slice(0, n).map((c) => ({ match: minimalOwnMatch(c.own, c.project, now), rulePass: false }));
 }
 
 function rankOwnPairs(own: OwnEngineer[], projects: Project[], now: Date, opts: OwnMatchOptions, limit: number): Evaluated[] {

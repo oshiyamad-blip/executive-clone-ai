@@ -808,6 +808,11 @@ export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
 }
 
+// ルールの足切りで落とした組から、取りこぼしの監視のために AI 判定に回す組数（1回の実行あたり）。0 で無効。まず少なく入れて費用を見ながら増やす
+export function properAuditSample(): number {
+  return envNum('PROPER_AUDIT_SAMPLE', 4, { min: 0, max: 20, int: true });
+}
+
 // プロパー候補の突合対象にする案件の受信日の遡り日数
 export function properProjectLookbackDays(): number {
   return envNum('PROPER_PROJECT_LOOKBACK_DAYS', 14, { min: 1 });

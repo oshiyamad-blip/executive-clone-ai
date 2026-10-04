@@ -462,6 +462,9 @@ export function staffFilterFormula(label: string): string {
 }
 
 // 「精度集計」タブの値（数式）。優先度ごと・要員ごとに、精度チェックの件数と妥当率（◎○ ÷ チェック済み）を出す
+// 試運転で Claude が付けた精度チェックは精度メモがこの文言で始まる。営業の評価と分けて数える
+export const CLAUDE_CHECK_MEMO_PREFIX = '（Claude確認）';
+
 export function summaryValues(staffLabels: string[]): string[][] {
   const tab = quoteTab(SALES_ALL_TAB);
   const closed = quoteTab(SALES_CLOSED_TAB);
@@ -472,8 +475,13 @@ export function summaryValues(staffLabels: string[]): string[][] {
   const both = (conds: Array<[string, string]>) => [tab, closed].map((t) => `COUNTIFS(${inTab(t, conds)})`).join('+');
   const row = (label: string, cond: Array<[string, string]>, r: number): string[] => {
     const c = (mark: string) => `=${both([...cond, ['精度チェック', `${mark}*`]])}`;
+    // 営業の評価だけ（精度メモが「（Claude確認）」で始まらない行）
+    const human = (mark: string) => `=${both([...cond, ['精度チェック', `${mark}*`], ['精度メモ', `<>${CLAUDE_CHECK_MEMO_PREFIX}*`]])}`;
     const all = cond.length ? `=COUNTIFS(${inTab(tab, cond)})` : `=COUNTA(${tab}!${letter('ID')}2:${letter('ID')})`;
-    return [label, all, c('?'), c('◎'), c('○'), c('△'), c('×'), `=IFERROR((D${r}+E${r})/C${r},"")`];
+    return [
+      label, all, c('?'), c('◎'), c('○'), c('△'), c('×'), `=IFERROR((D${r}+E${r})/C${r},"")`,
+      human('?'), human('◎'), human('○'), human('△'), human('×'), `=IFERROR((J${r}+K${r})/I${r},"")`,
+    ];
   };
   const groups: Array<[string, Array<[string, string]>]> = [
     ['全体', []],
@@ -481,7 +489,8 @@ export function summaryValues(staffLabels: string[]): string[][] {
     ...staffLabels.map((l): [string, Array<[string, string]>] => [`要員 ${l}`, [['要員', l]]]),
   ];
   return [
-    ['区分', '候補数', 'チェック済（クローズ済みを含む）', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）'],
+    ['区分', '候補数', 'チェック済（クローズ済みを含む）', '◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ', '妥当率（◎＋○）',
+      'チェック済（営業）', '◎（営業）', '○（営業）', '△（営業）', '×（営業）', '妥当率（営業）'],
     ...groups.map(([label, cond], i) => row(label, cond, i + 2)),
     [],
     ['見送り理由（クローズ済みを含む）', '件数', ...staffLabels],
@@ -694,7 +703,7 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number, su
   });
   const topLeft = { horizontalAlignment: 'LEFT', verticalAlignment: 'TOP', wrapStrategy: 'WRAP' };
   const right = { horizontalAlignment: 'RIGHT', verticalAlignment: 'TOP' };
-  const summaryCols = 8;
+  const summaryCols = 14;
   const rowsOf = (req: ReturnType<typeof cells>, start: number, end: number) => ({
     repeatCell: { ...req.repeatCell, range: { ...req.repeatCell.range, startRowIndex: start, endRowIndex: end } },
   });
@@ -703,7 +712,8 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number, su
     cells(summaryId, 0, summaryCols, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment', true),
     cells(summaryId, 0, 1, topLeft, 'horizontalAlignment,verticalAlignment,wrapStrategy'),
     cells(summaryId, 1, SUMMARY_MAX_COLS, right, 'horizontalAlignment,verticalAlignment'),
-    rowsOf(cells(summaryId, summaryCols - 1, summaryCols, { numberFormat: { type: 'PERCENT', pattern: '0.0%' } }, 'numberFormat'), 1, summaryRows),
+    // 妥当率の列（すべて・営業の評価だけ）
+    ...[7, summaryCols - 1].map((i) => rowsOf(cells(summaryId, i, i + 1, { numberFormat: { type: 'PERCENT', pattern: '0.0%' } }, 'numberFormat'), 1, summaryRows)),
     // 下の見送り理由の表の見出し
     rowsOf(cells(summaryId, 0, SUMMARY_MAX_COLS, HEADER_FORMAT, 'backgroundColor,textFormat,verticalAlignment'), summaryRows + 1, summaryRows + 2),
     ...Array.from({ length: summaryCols }, (_, i) => width(summaryId, i, 110)),
