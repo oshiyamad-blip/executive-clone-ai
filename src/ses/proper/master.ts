@@ -402,8 +402,10 @@ export async function syncProperMaster(): Promise<ProperSyncResult> {
 
 // 案件スプレッドシート（営業の誰もが編集できる）の「プロパー」列とサマリメールに出す社員の表記。
 // 氏名は編集者を人事・運用担当に限ったプロパー管理表にだけ置き、ここでは提案用表記（イニシャル）だけにする
-export function properLabelOf(e: Pick<ProperEngineer, 'proposalLabel'>): string {
-  return e.proposalLabel || '（提案用表記未入力。プロパー管理表で確認）';
+// 未入力の社員が複数いても要員タブ・判定の控えが混ざらないよう、ID の末尾で見分ける
+export function properLabelOf(e: Pick<ProperEngineer, 'proposalLabel'> & { id?: string }): string {
+  if (e.proposalLabel) return e.proposalLabel;
+  return e.id ? `提案用表記未入力-${e.id.slice(-4)}` : '（提案用表記未入力。プロパー管理表で確認）';
 }
 
 // 管理表の1行 → 突合対象の自社社員。稼働状況が「稼働可」でスキルのある行だけ（それ以外は null）
@@ -419,9 +421,11 @@ export function rowToProperEngineer(cells: string[]): ProperEngineer | null {
   const fullName = c('氏名');
   // 人が手で入れた値も含め、イニシャルの形でなければ使わない（社外に出る提案文面に氏名が載らないように）
   const proposalLabel = sanitizeInitials(c('提案用表記'), fullName);
+  const id = properEngineerIdOf(key);
   return {
-    id: properEngineerIdOf(key),
-    displayName: fullName || proposalLabel,
+    id,
+    // 氏名は displayName に流さない（営業リスト・要員タブ名・ログ・判定の控えが displayName を使うため）。提案用表記が無ければプレースホルダ
+    displayName: properLabelOf({ proposalLabel, id }),
     fullName,
     proposalLabel,
     fileId,
