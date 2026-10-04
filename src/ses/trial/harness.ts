@@ -21,7 +21,7 @@ import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
-import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, SALES_COLUMNS, SALES_CLOSED_STATUS } from '../proper/salesList.js';
+import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, projectIdOf, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
 const dir = process.env.RUN_DIR as string;
@@ -181,6 +181,11 @@ function closedIds(): Set<string> {
   return new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
 }
 
+// 「クローズ済み」タブの行（closed_rows.json）から、要員＋案件名の照合と「見送り・募集終了」の行を取る（本番の writeSalesList と同じ関数）
+function closedState(): ClosedState {
+  return closedStateOf(sheetValues(has('closed_rows.json') ? read<SheetRow[]>('closed_rows.json') : []));
+}
+
 // 以前の試運転の行（own_gu のような仮のID）を、要員リストのIDに読み替える
 function legacyCanonical(list: ProperEngineer[]) {
   return (id: string): string => {
@@ -248,11 +253,19 @@ if (phase === 'prompts') {
   const canonical = legacyCanonical(list);
   // すでにシートにある組・クローズした組は判定し直さない（本番の判定の控えの代わり）
   const skip = new Set([...existingRows().map((r) => canonical(r.ID)), ...[...closedIds()].map(canonical)]);
-  const all = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now).filter((p) => !skip.has(p.match.id));
+  // 切り替えで案件IDが変わってもクローズ済み（見送り含む）の組は戻らず、募集終了の案件も候補に入らない（final と同じ照合）
+  const closed = closedState();
+  const labelOf = new Map(list.map((e) => [e.id, e.proposalLabel || e.displayName]));
+  const endedProjects = new Set([...closed.endedRowIds].map((id) => projectIdOf(legacyCanonical(list)(id))).filter(Boolean));
+  const closedPair = (m: { id: string; projectId: string; ownEngineerId: string; projectTitle: string }) => {
+    const key = closedKeyOf(labelOf.get(m.ownEngineerId) ?? '', m.projectTitle);
+    return skip.has(m.id) || endedProjects.has(m.projectId) || (key !== '' && closed.keys.has(key));
+  };
+  const all = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now).filter((p) => !closedPair(p.match));
   // 前の回で判定済みの組は上限に数えず、判定もしない。未判定の組だけを上限まで選ぶ
   const selected = selectPairsForJudge(all, (id) => done.get(id), perEngineer, Number.MAX_SAFE_INTEGER);
   // 足切りの監視の組（本番と同じ選び方）は各要員の配列の後ろに足し、組のキーを audit.json に書く（final で当たりを数える）
-  const audit = pickAuditPairs(list, kept, now, selected, (id) => done.get(id)).filter((p) => !skip.has(p.match.id));
+  const audit = pickAuditPairs(list, kept, now, selected, (id) => done.get(id)).filter((p) => !closedPair(p.match));
   const auditKeys = audit.map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`);
   const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
   let carried = 0;
@@ -299,7 +312,12 @@ if (phase === 'prompts') {
     return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
   };
   assertSheetHeader();
-  const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)));
+  const closed = closedState();
+  const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
+    closedKeys: closed.keys,
+    endedRowIds: closed.endedRowIds,
+    addedAt: jstLabel(now),
+  });
   if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
   // 書き込み: 既存の行は人の入力の列の両側だけ、新しい行は下に足す。コネクタで書ける大きさ（約15KB）に分ける
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
@@ -329,10 +347,11 @@ if (phase === 'prompts') {
     deleteIds: plan.deleteIds,
     closeIds: plan.closeIds,
     expireIds: plan.expireIds,
+    endedIds: plan.endedIds,
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
 } else if (phase === 'labels') {
   const { list, projects, judged, candidates } = await judgedCandidates();
   const store = labelsDir();

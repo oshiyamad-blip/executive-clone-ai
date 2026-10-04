@@ -4,6 +4,7 @@
 // - 要員ごとのタブ: 「全体」を FILTER で映す閲覧用（入力は「全体」で行う）。候補が0件の営業中の要員にも作り、要員の増減に合わせてバッチが足し引きする
 // - 色: 優先度（A=緑/B=黄/C=灰）と対応状況（提案済=青/面談調整=紫/面談済=橙/成約=緑/見送り=灰）を条件付き書式で
 // - 人が入力する列（対応状況・担当営業・メモ・精度チェック・精度メモ）は毎回の書き直しでも ID で引き継ぎ、今回の候補から外れた行も入力があれば残す
+// - 「見送り」「クローズ」の行は次の更新で「クローズ済み」へ移す（成約は全体に残す）。見送り理由「募集終了」はその案件の他の要員の行にも及ぶ
 // - 要員一覧: いま営業している要員（稼働可）を、候補が0件の要員も含めて1行ずつ（稼働開始・希望単価・スキル・本人の希望・候補数）
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
@@ -21,6 +22,14 @@ export const SALES_STATUSES = ['未着手', '提案済', '面談調整', '面談
 // 営業が「クローズ」にした行は次の更新で「全体」から外し、このタブへ移す（同じ案件が再送されても一覧に戻さないための控えも兼ねる）
 export const SALES_CLOSED_STATUS = 'クローズ';
 export const SALES_CLOSED_TAB = 'クローズ済み';
+// 見送りは結果を残したまま片付ける（クローズに変えると見送りの記録が消えるため）。見送り理由が募集終了なら案件ごと終わりとして扱う
+export const SALES_SKIPPED_STATUS = '見送り';
+export const SALES_ENDED_REASON = '募集終了';
+// 次の更新で「全体」から「クローズ済み」へ移す対応状況
+export const isClosingStatus = (status: string): boolean => {
+  const v = status.trim();
+  return v === SALES_CLOSED_STATUS || v === SALES_SKIPPED_STATUS;
+};
 // 精度チェックの選択肢（先頭の記号で集計する）。◎○を「妥当」として妥当率に数える
 export const ACCURACY_MARKS = ['◎ 妥当', '○ 概ね妥当', '△ 微妙', '× ズレ'] as const;
 export const SALES_SUMMARY_TAB = '精度集計';
@@ -63,15 +72,19 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '確認事項', width: 220, wrap: true },
   { name: '必須スキル', width: 160, wrap: true },
   { name: '営業元会社', width: 140, wrap: true },
-  { name: '担当者', width: 72 },
-  { name: '担当者メール', width: 160 },
+  // 下書き依頼の「担当者メール」（営業が自分のアドレスを入れる列）と取り違えないよう、営業元（相手先）の連絡先だと名前で分ける
+  { name: '営業元担当者', width: 72 },
+  { name: '営業元メール', width: 160 },
   { name: 'メール件名', width: 280, wrap: false },
   { name: '受信日時', width: 108 },
+  { name: '追加日時', width: 108 }, // バッチがこの行を足した日時（新着の見分け用。機械の列で、既存の行は引き継ぐ）
   { name: '案件詳細（メール本文より）', width: 320, wrap: false },
   { name: '判定の理由', width: 320, wrap: false },
   { name: '提案文面（案）', width: 320, wrap: false },
   { name: 'ID', width: 40, hidden: true },
 ];
+// 列名を変えた列の旧名（古い控えの見出しを読み替える）
+const RENAMED_FROM: Record<string, string> = { 営業元担当者: '担当者', 営業元メール: '担当者メール' };
 const COL = Object.fromEntries(SALES_COLUMNS.map((c, i) => [c.name, i])) as Record<string, number>;
 const HEADER = SALES_COLUMNS.map((c) => c.name);
 const LAST_COL = columnLetter(SALES_COLUMNS.length - 1);
@@ -124,7 +137,7 @@ export function salesNotesOf(reason: string): { negotiation: string; confirm: st
   return { negotiation: negotiation.join('\n'), confirm: confirm.join('\n') };
 }
 
-function jstLabel(d: Date): string {
+export function jstLabel(d: Date): string {
   if (!Number.isFinite(d.getTime())) return '';
   const j = new Date(d.getTime() + 9 * 60 * 60 * 1000);
   const p = (n: number) => String(n).padStart(2, '0');
@@ -237,8 +250,8 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
     row[COL['開始']] = project.startPeriod;
     row[COL['必須スキル']] = project.requiredSkills.join('、');
     row[COL['営業元会社']] = project.agentCompany;
-    row[COL['担当者']] = project.agentContact;
-    row[COL['担当者メール']] = project.agentEmail;
+    row[COL['営業元担当者']] = project.agentContact;
+    row[COL['営業元メール']] = project.agentEmail;
     row[COL['メール件名']] = project.replyTarget?.subject ?? '';
     row[COL['受信日時']] = jstLabel(project.receivedAt);
     row[COL['案件詳細（メール本文より）']] = markRequirementsInMail((project.detail ?? '').replace(/&nbsp;/g, ' ').trim(), c.judgment?.checks ?? []);
@@ -268,6 +281,39 @@ function hasSalesInput(row: Row): boolean {
 
 const legacyKey = (engineer: string, title: string) => `${engineer}|${title}`.replace(/\s+/g, '');
 
+// 案件名での照合は、短い名前だと別の募集を取り違えやすいため一定の長さ以上だけにする（短いときは ID だけで見る）
+const CLOSED_KEY_MIN_TITLE = 6;
+export function closedKeyOf(engineer: string, title: string): string {
+  return title.replace(/\s+/g, '').length < CLOSED_KEY_MIN_TITLE ? '' : legacyKey(engineer, title);
+}
+
+// 行ID（ownmatch_<要員ID>_<案件ID>）の案件ID部分。案件IDは proj_ で始まる（それ以外の形は最初の要員IDを除いた残り）
+export function projectIdOf(rowId: string): string {
+  return (/_(proj_.+)$/.exec(rowId) ?? /^ownmatch_[^_]+_(.+)$/.exec(rowId))?.[1] ?? '';
+}
+
+// 「クローズ済み」タブの照合用の集合。ID は同じ候補、keys は要員＋案件名（切り替え前後で ID が変わっても戻さないため）、
+// endedRowIds は「見送り」かつ見送り理由が募集終了の行（その案件を以後の候補に入れない根拠）
+export interface ClosedState {
+  ids: Set<string>;
+  keys: Set<string>;
+  endedRowIds: Set<string>;
+}
+export function closedStateOf(values: string[][]): ClosedState {
+  const header = (values[0] ?? []).map((h) => String(h ?? '').trim());
+  const at = (name: string) => header.indexOf(name);
+  const state: ClosedState = { ids: new Set(), keys: new Set(), endedRowIds: new Set() };
+  for (const cells of values.slice(1)) {
+    const cell = (name: string) => (at(name) >= 0 ? String(cells[at(name)] ?? '').trim() : '');
+    const id = cell('ID');
+    if (id) state.ids.add(id);
+    const key = closedKeyOf(cell('要員'), cell('案件名'));
+    if (key) state.keys.add(key);
+    if (id && cell('対応状況') === SALES_SKIPPED_STATUS && cell('見送り理由') === SALES_ENDED_REASON) state.endedRowIds.add(id);
+  }
+  return state;
+}
+
 // ID列の無い以前のリスト（バッチ導入前に手で作った営業リスト）の人の入力を、要員＋案件名で引ける形にする
 function legacyInputs(legacy: string[][]): Map<string, string[]> {
   const header = legacy[0] ?? [];
@@ -293,6 +339,7 @@ export function mergeSalesRows(
   legacy: string[][] = [],
   stillOpen: (id: string, previous: Row) => boolean = () => false,
   canonical: (id: string) => string = (id) => id,
+  addedAt = '',
 ): Row[] {
   const fromLegacy = legacyInputs(legacy);
   const header = existing[0] ?? [];
@@ -341,6 +388,8 @@ export function mergeSalesRows(
     HUMAN_COLS.forEach((i, k) => {
       merged[i] = prev ? prev[i] : (old?.[k] ?? '');
     });
+    // 追加日時は人の入力ではないが、書き直しで消さないよう前の値を引き継ぐ（前が空なら空のまま。前の行が無ければ今回の日時）
+    merged[COL['追加日時']] = prev ? prev[COL['追加日時']] : addedAt;
     if (merged[COL['対応状況']] === '') merged[COL['対応状況']] = SALES_STATUSES[0];
     out.push(merged);
   }
@@ -373,9 +422,10 @@ export interface SalesUpdatePlan {
   updates: Array<{ row: number; values: Row }>; // row はシートの行番号（1始まり、見出しが1行目）
   appends: Row[];
   deleteIds: string[];
-  closeIds: string[]; // 営業が「クローズ」にした行（「クローズ済み」へ移して「全体」から消す）
+  closeIds: string[]; // 営業が「クローズ」「見送り」にした行（「クローズ済み」へ移して「全体」から消す）
   expireIds: string[]; // 精度チェック・精度メモだけの行が期限切れになったもの（「クローズ済み」へ移して「全体」から消す）
-  closedRows: Row[]; // クローズにした行＋期限切れの行
+  endedIds: string[]; // 募集終了の案件の、営業の入力が無い他の要員の行（対応状況は空のまま「クローズ済み」へ移して「全体」から消す）
+  closedRows: Row[]; // クローズ・見送りにした行＋期限切れの行＋募集終了の行
   rows: Row[]; // 書いた後のシートの並び（要員のタブ・件数用）
 }
 
@@ -403,12 +453,20 @@ function assertSalesHeaderOrEmpty(values: string[][]): void {
   if (diff.length > 0) throw new SalesHeaderMismatchError(diff);
 }
 
+// 控え（「クローズ済み」タブ）由来の追加の照合と、新しい行に入れる日時
+export interface SalesPlanOptions {
+  closedKeys?: Set<string>; // 要員＋案件名（closedStateOf の keys）
+  endedRowIds?: Set<string>; // 控えにある「見送り・募集終了」の行ID（closedStateOf の endedRowIds）
+  addedAt?: string; // 新しい行の「追加日時」（受信日時と同じ書式）
+}
+
 export function planSalesUpdate(
   fresh: Row[],
   existing: string[][],
   stillOpen: (id: string, previous: Row) => boolean = () => false,
   canonical: (id: string) => string = (id) => id,
   closedIds: Set<string> = new Set(),
+  opts: SalesPlanOptions = {},
 ): SalesUpdatePlan | null {
   const header = existing[0] ?? [];
   if (header.length !== HEADER.length || header.some((h, i) => h !== HEADER[i])) return null;
@@ -418,14 +476,24 @@ export function planSalesUpdate(
       return NUMERIC_COLS.has(name) && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v;
     });
   const current = existing.slice(1).map(toRow);
-  const isClosed = (r: Row) => String(r[COL['対応状況']]).trim() === SALES_CLOSED_STATUS;
+  const isClosed = (r: Row) => isClosingStatus(String(r[COL['対応状況']]));
   const closedRows = current.filter((r) => isClosed(r) && String(r[COL['ID']]).trim());
   const closedNow = new Set([...closedIds, ...closedRows.map((r) => String(r[COL['ID']]).trim())]);
-  // クローズした候補は、同じ案件の別メール（代表の読み替え）で届いても戻さない
+  // クローズ・見送りにした候補は、同じ案件の別メール（代表の読み替え）で届いても戻さない
   const closedCanon = new Set([...closedNow].map(canonical));
+  // 試運転と本番で案件IDが変わる（スレッドID由来とMessage-ID由来）ため、要員＋案件名でも照合する
+  const closedKeys = new Set([...(opts.closedKeys ?? []), ...closedRows.map((r) => closedKeyOf(String(r[COL['要員']]), String(r[COL['案件名']])))]);
+  closedKeys.delete('');
+  // 「見送り・募集終了」の行は、その案件そのものが終わった印として扱う（代表の読み替えを含む）
+  const endedRowIds = new Set([
+    ...(opts.endedRowIds ?? []),
+    ...closedRows.filter((r) => String(r[COL['対応状況']]).trim() === SALES_SKIPPED_STATUS && String(r[COL['見送り理由']]).trim() === SALES_ENDED_REASON).map((r) => String(r[COL['ID']]).trim()),
+  ]);
+  const endedProjects = new Set([...endedRowIds].map((id) => projectIdOf(canonical(id))).filter(Boolean));
+  const projectEnded = (id: string) => endedProjects.has(projectIdOf(canonical(id)));
   fresh = fresh.filter((r) => {
     const id = String(r[COL['ID']]);
-    return !closedNow.has(id) && !closedCanon.has(canonical(id));
+    return !closedNow.has(id) && !closedCanon.has(canonical(id)) && !projectEnded(id) && !closedKeys.has(closedKeyOf(String(r[COL['要員']]), String(r[COL['案件名']])));
   });
   const freshById = new Map(fresh.map((r) => [String(r[COL['ID']]), r]));
   const freshByKey = new Map<string, string>();
@@ -438,6 +506,8 @@ export function planSalesUpdate(
   const deleteIds: string[] = [];
   const expireIds: string[] = [];
   const expiredRows: Row[] = [];
+  const endedIds: string[] = [];
+  const endedRows: Row[] = [];
   const rows: Row[] = [];
   current.forEach((prev, i) => {
     const id = String(prev[COL['ID']]).trim();
@@ -446,6 +516,12 @@ export function planSalesUpdate(
       return;
     }
     if (isClosed(prev)) return;
+    // 募集終了の案件の行は、営業の入力が無ければ控えへ移す（入力がある行は下の通常の扱いで残る）
+    if (projectEnded(id) && !hasSalesInput(prev)) {
+      endedIds.push(id);
+      endedRows.push(prev);
+      return;
+    }
     const byId = [id, canonical(id)].find((x) => freshById.has(x) && !used.has(x));
     const byKey = freshByKey.get(legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']])));
     const match = byId ?? (byKey && !used.has(byKey) ? byKey : undefined);
@@ -453,6 +529,7 @@ export function planSalesUpdate(
       used.add(match);
       const next = [...(freshById.get(match) as Row)];
       next[COL['No']] = prev[COL['No']];
+      next[COL['追加日時']] = prev[COL['追加日時']];
       HUMAN_COLS.forEach((c) => {
         next[c] = prev[c];
       });
@@ -471,6 +548,7 @@ export function planSalesUpdate(
   const appends = sortSalesRows(fresh.filter((r) => !used.has(String(r[COL['ID']])))).map((r, k) => {
     const next = [...r];
     next[COL['No']] = maxNo + k + 1;
+    next[COL['追加日時']] = opts.addedAt ?? '';
     if (next[COL['対応状況']] === '') next[COL['対応状況']] = SALES_STATUSES[0];
     return next;
   });
@@ -480,7 +558,8 @@ export function planSalesUpdate(
     deleteIds,
     closeIds: closedRows.map((r) => String(r[COL['ID']]).trim()),
     expireIds,
-    closedRows: [...closedRows, ...expiredRows],
+    endedIds,
+    closedRows: [...closedRows, ...expiredRows, ...endedRows],
     rows: [...rows, ...appends],
   };
 }
@@ -623,13 +702,13 @@ function conditionalRules(sheetId: number): sheets_v4.Schema$Request[] {
 
 // タブ1枚分の見た目（見出し・固定・列幅・折り返し・色・隠し列）。既存の条件付き書式は消してから付け直す
 // layout: 列幅・非表示・固定・フィルタも付ける（作ったばかりのタブだけ。毎回付け直すと、営業が変えた列幅や絞り込みが消える）
-// protect: 入力しない場所の確認の設定を付ける（既定は layout と同じ。列を組み替えて書き直すときは古い設定が残っているため付け足さない）
+// protect: 入力しない場所の保護の設定を付ける（既定は layout と同じ。列を組み替えて書き直すときは古い設定が残っているため付け足さない）
 export function formatRequests(sheetId: number, existingRuleCount: number, isAll: boolean, layout = true, protect = layout): sheets_v4.Schema$Request[] {
   const reqs: sheets_v4.Schema$Request[] = [];
   for (let i = existingRuleCount - 1; i >= 0; i--) reqs.push({ deleteConditionalFormatRule: { sheetId, index: i } });
   if (layout) reqs.push({
     updateSheetProperties: {
-      properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: COL['要員'] + 1 } },
+      properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: FROZEN_COLS } },
       fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount',
     },
   });
@@ -677,7 +756,7 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
         rule: {
           condition: { type: 'ONE_OF_LIST', values: SALES_STATUSES.map((s) => ({ userEnteredValue: s })) },
           showCustomUi: true,
-          strict: false,
+          strict: true,
         },
       },
     });
@@ -687,7 +766,7 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
         rule: {
           condition: { type: 'ONE_OF_LIST', values: SALES_SKIP_REASONS.map((s) => ({ userEnteredValue: s })) },
           showCustomUi: true,
-          strict: false,
+          strict: true,
         },
       },
     });
@@ -697,7 +776,7 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
         rule: {
           condition: { type: 'ONE_OF_LIST', values: ACCURACY_MARKS.map((s) => ({ userEnteredValue: s })) },
           showCustomUi: true,
-          strict: false,
+          strict: true,
         },
       },
     });
@@ -707,16 +786,18 @@ export function formatRequests(sheetId: number, existingRuleCount: number, isAll
   return reqs;
 }
 
-// 入力しない場所を触ると確認が出るようにする（止めはしない）。バッチが毎回書き直す列・FILTERで映すだけの要員のタブへの入力は消えるため
+// 入力しない場所の保護。バッチが毎回書き直す列・FILTERで映すだけの要員のタブへの入力は消えるため。
+// 全体タブの機械の列は営業が誤って触っても止めず確認だけ出す（行の並べ替え・削除などの操作を妨げないため）。
+// 要員のタブは入力しても次の更新で消えるだけなので、警告ではなく編集不可にする（作成者＝バッチのサービスアカウントだけが編集できる）
 export function protectRequests(sheetId: number, isAll: boolean): sheets_v4.Schema$Request[] {
-  const protect = (range: sheets_v4.Schema$GridRange, description: string) => ({
-    addProtectedRange: { protectedRange: { range, description, warningOnly: true } },
+  const protect = (range: sheets_v4.Schema$GridRange, description: string, warningOnly: boolean) => ({
+    addProtectedRange: { protectedRange: { range, description, warningOnly } },
   });
-  if (!isAll) return [protect({ sheetId }, '全体タブから自動で映しています。対応状況・メモなどは全体タブに入力してください')];
+  if (!isAll) return [protect({ sheetId }, '全体タブから自動で映しています（編集できません）。対応状況・メモなどは全体タブに入力してください', false)];
   const note = 'バッチが更新のたびに書き直す列です。入力は「対応状況」〜「精度メモ」の列へ';
   return [
-    protect({ sheetId, startColumnIndex: 0, endColumnIndex: HUMAN_FIRST }, note),
-    protect({ sheetId, startColumnIndex: HUMAN_LAST + 1, endColumnIndex: SALES_COLUMNS.length }, note),
+    protect({ sheetId, startColumnIndex: 0, endColumnIndex: HUMAN_FIRST }, note, true),
+    protect({ sheetId, startColumnIndex: HUMAN_LAST + 1, endColumnIndex: SALES_COLUMNS.length }, note, true),
   ];
 }
 
@@ -737,7 +818,8 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number, su
     },
   });
   const frozen = (sheetId: number) => ({
-    updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' },
+    // 1列目（区分・要員のラベル）も固定して、右へスクロールしても何の行か分かるようにする
+    updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1, frozenColumnCount: 1 } }, fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount' },
   });
   const width = (sheetId: number, index: number, pixelSize: number) => ({
     updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: index, endIndex: index + 1 }, properties: { pixelSize }, fields: 'pixelSize' },
@@ -772,6 +854,8 @@ export function sideTabFormatRequests(summaryId: number, staffListId: number, su
 // ===== 書き出し =====
 
 // 新しいタブの既定は26列で、それを超える列数の表を書くと枠を超えて弾かれるため列を足して作る
+// 横にスクロールしても No・優先度・要員・案件名が見えるよう、行の見出しとここまでを固定する（全体・要員・クローズ済みで共通）
+const FROZEN_COLS = COL['案件名'] + 1;
 const WIDE_GRID = { columnCount: SALES_COLUMNS.length + 1 };
 
 export function salesListConfigured(): boolean {
@@ -872,7 +956,7 @@ export async function writeSalesList(
       },
     });
   }
-  if (!tabs.some((t) => t.title === SALES_CLOSED_TAB)) structural.push({ addSheet: { properties: { title: SALES_CLOSED_TAB, gridProperties: WIDE_GRID } } });
+  if (!tabs.some((t) => t.title === SALES_CLOSED_TAB)) structural.push({ addSheet: { properties: { title: SALES_CLOSED_TAB, gridProperties: { ...WIDE_GRID, frozenRowCount: 1, frozenColumnCount: FROZEN_COLS } } } });
   if (structural.length > 0) {
     await withGoogleRetry(() => api.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: structural } }));
     tabs = await readTabs(api, spreadsheetId);
@@ -880,8 +964,9 @@ export async function writeSalesList(
   const closedTab = quoteTab(SALES_CLOSED_TAB);
   const closedValues = ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${closedTab}!A:${LAST_COL}` }))).data.values ??
     []) as string[][];
-  const closedIdAt = (closedValues[0] ?? []).indexOf('ID');
-  const closedIds = new Set(closedIdAt >= 0 ? closedValues.slice(1).map((r) => (r[closedIdAt] ?? '').trim()).filter(Boolean) : []);
+  const closedState = closedStateOf(closedValues);
+  const closedIds = closedState.ids;
+  const addedAt = jstLabel(new Date()); // この実行で足す行の「追加日時」
 
   // 要員の希望単価が変わった行は前回の判定のまま残さない（今回の候補に入っていれば新しい単価で書き直される）
   const stillOpen = (id: string, previous: Row) =>
@@ -908,22 +993,29 @@ export async function writeSalesList(
     const h = values[0] ?? [];
     const statusAt = h.indexOf('対応状況');
     const idAt = h.indexOf('ID');
-    const closed = values.slice(1).filter((r) => statusAt >= 0 && (r[statusAt] ?? '').trim() === SALES_CLOSED_STATUS);
+    const closed = values.slice(1).filter((r) => statusAt >= 0 && isClosingStatus(r[statusAt] ?? ''));
     const ids = new Set(idAt >= 0 ? closed.map((r) => (r[idAt] ?? '').trim()).filter(Boolean) : []);
+    const now = closedStateOf([h, ...closed]);
+    const ended = new Set([...closedState.endedRowIds, ...now.endedRowIds]);
+    const endedProjects = new Set([...ended].map((id) => projectIdOf(canonical(id))).filter(Boolean));
     return {
       kept: [h, ...values.slice(1).filter((r) => !closed.includes(r))],
       closedRows: closed.map((r) => HEADER.map((name) => (h.indexOf(name) >= 0 ? (r[h.indexOf(name)] ?? '') : ''))) as Row[],
       fresh: fresh.filter((r) => {
         const id = String(r[COL['ID']]);
-        return !closedIds.has(id) && !ids.has(id) && !closedIds.has(canonical(id)) && ![...ids].some((x) => canonical(x) === canonical(id));
+        const key = closedKeyOf(String(r[COL['要員']]), String(r[COL['案件名']]));
+        return (
+          !closedIds.has(id) && !ids.has(id) && !closedIds.has(canonical(id)) && ![...ids].some((x) => canonical(x) === canonical(id)) &&
+          !endedProjects.has(projectIdOf(canonical(id))) && !(key && (closedState.keys.has(key) || now.keys.has(key)))
+        );
       }),
     };
   };
   const planFor = (values: string[][]) => {
-    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds);
+    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, endedRowIds: closedState.endedRowIds, addedAt });
     if (p) return { plan: p, rows: p.rows, closedRows: p.closedRows };
     const w = withoutClosed(values);
-    return { plan: null, rows: mergeSalesRows(w.fresh, w.kept, legacy, stillOpen, canonical), closedRows: w.closedRows };
+    return { plan: null, rows: mergeSalesRows(w.fresh, w.kept, legacy, stillOpen, canonical, addedAt), closedRows: w.closedRows };
   };
   let existingValues = await readExisting();
   let planned = planFor(existingValues);
@@ -979,7 +1071,9 @@ export async function writeSalesList(
   // そのまま足すと新しい行だけ列がずれ、ID 列が読めなくなる。行数は同じで列が増えるだけなので、先に消さずに上から書く（書き込みに失敗しても控えを失わない）
   const closedHeader = closedValues[0] ?? [];
   if (closedHeader.length > 0 && (closedHeader.length !== HEADER.length || closedHeader.some((h, i) => h !== HEADER[i]))) {
-    const remapped = [HEADER, ...closedValues.slice(1).map((r) => HEADER.map((name) => (closedHeader.indexOf(name) >= 0 ? (r[closedHeader.indexOf(name)] ?? '') : '')))];
+    // 列名を変えた2列（営業元担当者・営業元メール）は、旧名の列からも値を引き継ぐ（控えの連絡先を失わないため）
+    const colOf = (name: string) => (closedHeader.indexOf(name) >= 0 ? closedHeader.indexOf(name) : closedHeader.indexOf(RENAMED_FROM[name] ?? '\u0000'));
+    const remapped = [HEADER, ...closedValues.slice(1).map((r) => HEADER.map((name) => (colOf(name) >= 0 ? (r[colOf(name)] ?? '') : '')))];
     await withGoogleRetry(() =>
       api.spreadsheets.values.update({ spreadsheetId, range: `${closedTab}!A1`, valueInputOption: 'RAW', requestBody: { values: remapped } }),
     );
@@ -1009,11 +1103,11 @@ export async function writeSalesList(
     await withGoogleRetry(() =>
       api.spreadsheets.values.batchUpdate({ spreadsheetId, requestBody: { valueInputOption: 'RAW', data: [...machine, ...appends, ...staffHeaders] } }),
     );
-    if (plan.deleteIds.length > 0 || plan.closeIds.length > 0 || plan.expireIds.length > 0) {
+    if (plan.deleteIds.length > 0 || plan.closeIds.length > 0 || plan.expireIds.length > 0 || plan.endedIds.length > 0) {
       // 消す直前にもう一度読み、その間に入力が入った行・並べ替えで動いた行・クローズを戻した行を取り違えない
       const drop = new Set(plan.deleteIds);
       const close = new Set(plan.closeIds);
-      const expire = new Set(plan.expireIds);
+      const expire = new Set([...plan.expireIds, ...plan.endedIds]);
       const now = await readExisting();
       const allTab = tabs.find((t) => t.title === SALES_ALL_TAB) as TabInfo;
       const rowsToDelete = now
@@ -1021,7 +1115,7 @@ export async function writeSalesList(
         .filter(({ cells, i }) => {
           const id = (cells[COL['ID']] ?? '').trim();
           if (i === 0) return false;
-          return (drop.has(id) && !hasHumanInput(cells)) || (expire.has(id) && !hasSalesInput(cells)) || (close.has(id) && (cells[COL['対応状況']] ?? '').trim() === SALES_CLOSED_STATUS);
+          return (drop.has(id) && !hasHumanInput(cells)) || (expire.has(id) && !hasSalesInput(cells)) || (close.has(id) && isClosingStatus(cells[COL['対応状況']] ?? ''));
         })
         .map(({ i }) => i)
         .sort((a, b) => b - a);

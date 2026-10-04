@@ -110,7 +110,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, SALES_COLUMNS, markRequirementsInMail, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, closedStateOf, projectIdOf, SALES_COLUMNS, markRequirementsInMail, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -4384,7 +4384,7 @@ function salesListChecks(): void {
   check('候補から外れても人の入力がある行は残し、未着手のままの行は消す', byId.has('ownmatch_old') && !byId.has('ownmatch_stale') && byId.get('ownmatch_old')?.[col('案件単価(万)')] === 60);
   check('並びは優先度→要員の順・Noを振り直す',
     merged.map((r) => String(r[col('優先度')])[0]).join('') === 'ABBC' && merged.map((r) => r[col('No')]).join(',') === '1,2,3,4', merged.map((r) => r[col('ID')]).join(','));
-  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AE,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
+  check('要員タブは全体をFILTERで映す（引用符をエスケープ）', staffFilterFormula('A"A') === `=IFERROR(FILTER('全体'!A2:AF,'全体'!C2:C="A""A"),"")` && staffTabName('全体') !== '全体' && staffTabName('K/N') === 'KN', staffFilterFormula('A"A'));
   const prevAcc = header.map(() => '');
   prevAcc[col('ID')] = 'ownmatch_a_p1'; prevAcc[col('精度チェック')] = '× ズレ'; prevAcc[col('精度メモ')] = 'Javaは研修のみ';
   const accMerged = mergeSalesRows([salesRowOf(base, undefined)], [header, prevAcc]);
@@ -4393,7 +4393,7 @@ function salesListChecks(): void {
   const sv = summaryValues(['A"A']);
   const accCol = String.fromCharCode(65 + col('精度チェック'));
   check('精度集計: 全体・優先度A/B/C・要員ごとに件数と妥当率（◎＋○ ÷ チェック済み）の数式',
-    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AE2:AE)" && sv[5][0] === '優先度 D' &&
+    sv.length === 16 && sv[0][7] === '妥当率（◎＋○）' && sv[1][1] === "=COUNTA('全体'!AF2:AF)" && sv[5][0] === '優先度 D' &&
       sv[2][3] === `=COUNTIFS('全体'!B2:B,"A*",'全体'!${accCol}2:${accCol},"◎*")+COUNTIFS('クローズ済み'!B2:B,"A*",'クローズ済み'!${accCol}2:${accCol},"◎*")` && sv[6][0] === '要員 A"A' &&
       sv[6][1] === `=COUNTIFS('全体'!C2:C,"A""A")` && sv[3][7] === '=IFERROR((D4+E4)/C4,"")', JSON.stringify(sv[2]));
   check('精度集計: チェック済・◎は全体とクローズ済みの両方を数え（優先度の行も両方で優先度列を条件にし）、候補数はクローズ済みを見ない',
@@ -4507,6 +4507,80 @@ function salesListChecks(): void {
     expiring !== null && expiring.expireIds.join() === 'ownmatch_exp_a' && expIds(expiring.closedRows) === 'ownmatch_exp_e,ownmatch_exp_a' &&
       expIds(expiring.rows) === 'ownmatch_exp_b,ownmatch_exp_d' && expiring.deleteIds.join() === 'ownmatch_exp_c' &&
       expiring.closeIds.join() === 'ownmatch_exp_e', JSON.stringify(expiring?.expireIds));
+  // 見送りの自動片付け・募集終了の反映・追加日時・切り替え時の照合
+  const cand = (engineer: string, projId: string, title: string) =>
+    salesRowOf({ ...base, id: `ownmatch_${engineer.toLowerCase()}_${projId}`, ownEngineerId: engineer.toLowerCase(), properLabel: engineer, projectId: projId, projectTitle: title }, undefined);
+  const T = '在庫管理システムの開発案件';
+  const skipped = planSalesUpdate(
+    [cand('A.A', 'proj_s1', T), cand('A.A', 'proj_s2', '販売管理システムの保守案件')],
+    [header, sheetRow('ownmatch_a.a_proj_s1', { 案件名: T, 対応状況: '見送り', 見送り理由: '単価が安い', メモ: '先方と調整済み' }), sheetRow('ownmatch_a.a_proj_win', { 対応状況: '成約' })],
+  );
+  check('見送りの行: 次の更新で closeIds に入り、対応状況・見送り理由のまま控えへ移す。同じ組は戻さず、成約は全体に残す',
+    skipped !== null && skipped.closeIds.join() === 'ownmatch_a.a_proj_s1' && skipped.closedRows.length === 1 &&
+      skipped.closedRows[0][col('対応状況')] === '見送り' && skipped.closedRows[0][col('見送り理由')] === '単価が安い' && skipped.closedRows[0][col('メモ')] === '先方と調整済み' &&
+      skipped.appends.map((r) => r[col('ID')]).join() === 'ownmatch_a.a_proj_s2' && skipped.rows.some((r) => r[col('ID')] === 'ownmatch_a.a_proj_win'),
+    JSON.stringify(skipped?.closeIds));
+  const endRows = [
+    header,
+    sheetRow('ownmatch_a.a_proj_x1', { 案件名: T, 対応状況: '見送り', 見送り理由: '募集終了' }),
+    sheetRow('ownmatch_b.b_proj_x1', { 要員: 'B.B', 案件名: T }),
+    sheetRow('ownmatch_c.c_proj_x1', { 要員: 'C.C', 案件名: T, メモ: '面談を打診中' }),
+    sheetRow('ownmatch_a.a_proj_y1', { 案件名: '別の案件の名前です' }),
+  ];
+  const ended = planSalesUpdate([cand('D.D', 'proj_x1', T), cand('D.D', 'proj_z1', '決済基盤の刷新案件')], endRows, () => true);
+  check('募集終了: 見送り・募集終了の行の案件の、入力の無い他の要員の行は控えへ移し（対応状況はそのまま）、入力のある行・別の案件の行は残す。その案件は新しい候補に入れない',
+    ended !== null && ended.closeIds.join() === 'ownmatch_a.a_proj_x1' && ended.endedIds.join() === 'ownmatch_b.b_proj_x1' &&
+      ended.closedRows.map((r) => r[col('ID')]).join() === 'ownmatch_a.a_proj_x1,ownmatch_b.b_proj_x1' && ended.closedRows[1][col('対応状況')] === '未着手' &&
+      ended.rows.map((r) => r[col('ID')]).sort().join() === ['ownmatch_a.a_proj_y1', 'ownmatch_c.c_proj_x1', 'ownmatch_d.d_proj_z1'].sort().join() &&
+      ended.appends.map((r) => r[col('ID')]).join() === 'ownmatch_d.d_proj_z1', JSON.stringify(ended && { c: ended.closeIds, e: ended.endedIds, a: ended.appends.map((r) => r[col('ID')]) }));
+  const aliased = planSalesUpdate([cand('D.D', 'proj_x2', T)], endRows.slice(0, 3), () => false, (id) => id.replace('proj_x2', 'proj_x1'));
+  check('募集終了: 代表の読み替え（同じ案件の別メール）の候補にも及ぶ', aliased !== null && aliased.appends.length === 0 && aliased.endedIds.join() === 'ownmatch_b.b_proj_x1');
+  // 控え（クローズ済みタブ）に移った後の回: 見送り・募集終了の行が控えにあれば案件は引き続き候補に入らない
+  const tab = [header, sheetRow('ownmatch_a.a_proj_x1', { 案件名: T, 対応状況: '見送り', 見送り理由: '募集終了' })];
+  const st = closedStateOf(tab);
+  const later = planSalesUpdate(
+    [cand('D.D', 'proj_x1', T), cand('D.D', 'proj_z1', '決済基盤の刷新案件')],
+    [header, sheetRow('ownmatch_b.b_proj_x1', { 要員: 'B.B', 案件名: T })], () => false, (id) => id, st.ids, { closedKeys: st.keys, endedRowIds: st.endedRowIds },
+  );
+  check('募集終了（控えから）: 控えの見送り・募集終了の行から案件を引き、次の回以降も新しい候補に入れず、入力の無い他の要員の行は移す',
+    st.endedRowIds.size === 1 && projectIdOf('ownmatch_a.a_proj_x1') === 'proj_x1' && later !== null && later.appends.map((r) => r[col('ID')]).join() === 'ownmatch_d.d_proj_z1' && later.endedIds.length === 1);
+  // 切り替え: 試運転と本番で案件IDが変わっても、要員＋案件名が同じクローズ済みの組は戻さない。案件名が短いときは ID だけで見る
+  const tabKey = [header, sheetRow('ownmatch_a.a_proj_old', { 案件名: T, 対応状況: 'クローズ' }), sheetRow('ownmatch_a.a_proj_oldshort', { 案件名: '在庫管理', 対応状況: 'クローズ' })];
+  const stKey = closedStateOf(tabKey);
+  const switched = planSalesUpdate(
+    [cand('A.A', 'proj_new', T), cand('A.A', 'proj_new2', '在庫管理'), cand('B.B', 'proj_new3', T)], [header], () => false, (id) => id, stKey.ids, { closedKeys: stKey.keys },
+  );
+  check('切り替え: ID が違っても要員＋案件名が同じクローズ済みの組は戻さない（別の要員は戻る）。案件名が6文字未満なら名前では照合しない',
+    switched !== null && switched.appends.map((r) => r[col('ID')]).join() === 'ownmatch_a.a_proj_new2,ownmatch_b.b_proj_new3' && stKey.keys.size === 1, JSON.stringify(switched?.appends.map((r) => r[col('ID')])));
+  const keyClosedNow = planSalesUpdate(
+    [cand('A.A', 'proj_new', T)], [header, sheetRow('ownmatch_a.a_proj_old', { 案件名: T, 対応状況: '見送り', 見送り理由: '単価が安い' })],
+  );
+  check('切り替え: 今回クローズ・見送りにした行の要員＋案件名も、別IDの同じ組を戻さない', keyClosedNow !== null && keyClosedNow.appends.length === 0 && keyClosedNow.closeIds.length === 1);
+  // 追加日時: 新しい行にはこの実行の日時、既存の行は前の値を引き継ぐ（空なら空のまま）
+  const stamp = '2026/10/04 09:30';
+  const withStamp = planSalesUpdate(
+    [cand('A.A', 'proj_a1', T), cand('A.A', 'proj_a2', '販売管理システムの保守案件'), cand('A.A', 'proj_a3', '決済基盤の刷新案件')],
+    [header, sheetRow('ownmatch_a.a_proj_a1', { 追加日時: '2026/09/30 10:00' }), sheetRow('ownmatch_a.a_proj_a2')], () => false, (id) => id, new Set(), { addedAt: stamp },
+  );
+  check('追加日時: 新しい行にはこの実行の日時を入れ、既存の行は前の値を引き継ぐ（前が空なら空のまま）。人の入力の列ではない',
+    withStamp !== null && withStamp.appends.length === 1 && withStamp.appends[0][col('追加日時')] === stamp &&
+      withStamp.updates[0].values[col('追加日時')] === '2026/09/30 10:00' && withStamp.updates[1].values[col('追加日時')] === '' &&
+      SALES_COLUMNS[col('追加日時')].human !== true && col('追加日時') === col('受信日時') + 1);
+  const mergedStamp = mergeSalesRows([cand('A.A', 'proj_a1', T), cand('A.A', 'proj_a3', '決済基盤の刷新案件')], [header, sheetRow('ownmatch_a.a_proj_a1', { 追加日時: '2026/09/30 10:00' })], [], () => false, (id) => id, stamp);
+  check('追加日時（全体の書き直し）: 前の行の値を引き継ぎ、新しい行は今回の日時',
+    mergedStamp.find((r) => r[col('ID')] === 'ownmatch_a.a_proj_a1')?.[col('追加日時')] === '2026/09/30 10:00' && mergedStamp.find((r) => r[col('ID')] === 'ownmatch_a.a_proj_a3')?.[col('追加日時')] === stamp);
+  check('列名: 営業元担当者・営業元メール（旧「担当者」「担当者メール」は営業リストに無い）・位置は変えず・32列・ID が最後',
+    col('営業元担当者') === col('営業元会社') + 1 && col('営業元メール') === col('営業元担当者') + 1 && col('担当者') < 0 && col('担当者メール') < 0 && header.length === 32 && header[31] === 'ID' &&
+      String(salesRowOf(base, { ...({} as Project), location: '', remote: 'unknown', startPeriod: '', requiredSkills: [], agentCompany: 'S社', agentContact: '山田', agentEmail: 'y@example.com', receivedAt: new Date(NaN), detail: '' } as Project)[col('営業元メール')]) === 'y@example.com');
+  const validations = fmt.filter((r) => r.setDataValidation);
+  check('入力規則: 対応状況・見送り理由・精度チェックは選択肢以外を拒否する（strict）', validations.length === 3 && validations.every((r) => r.setDataValidation?.rule?.strict === true));
+  const frozenOf = (reqs: typeof fmt) => reqs.find((r) => r.updateSheetProperties)?.updateSheetProperties?.properties?.gridProperties;
+  const sideFrozen = sideTabFormatRequests(1001, 2001).filter((r) => r.updateSheetProperties).map((r) => r.updateSheetProperties?.properties?.gridProperties);
+  check('固定: 全体・要員のタブは1行目と案件名までの列（No・優先度・要員・案件名）、精度集計・要員一覧は1行目と1列目',
+    frozenOf(fmt)?.frozenRowCount === 1 && frozenOf(fmt)?.frozenColumnCount === col('案件名') + 1 && frozenOf(formatRequests(8, 0, false))?.frozenColumnCount === col('案件名') + 1 &&
+      sideFrozen.length === 2 && sideFrozen.every((g) => g?.frozenRowCount === 1 && g?.frozenColumnCount === 1));
+  const staffProt = formatRequests(8, 0, false).filter((r) => r.addProtectedRange);
+  check('要員のタブの保護は警告だけでなく編集不可（全体タブの機械の列は確認だけ）', staffProt.length === 1 && staffProt[0].addProtectedRange?.protectedRange?.warningOnly === false);
   check('精度集計: 見送り理由ごと・要員ごとの件数を、全体とクローズ済みの両方から数える',
     sv[8][0].startsWith('見送り理由') && sv[9][0] === 'ハードルが高い（スキル・経験不足）' &&
       sv[9][2] === `=COUNTIFS('全体'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'全体'!C2:C,"A""A")+COUNTIFS('クローズ済み'!${String.fromCharCode(65 + col('見送り理由'))}2:${String.fromCharCode(65 + col('見送り理由'))},"ハードルが高い（スキル・経験不足）",'クローズ済み'!C2:C,"A""A")`,
@@ -4546,7 +4620,7 @@ function salesListChecks(): void {
   const reasonCol = col('判定の理由');
   check('列の並び: 案件詳細の右が判定の理由・最後が ID・判定の理由は人の入力の列ではない',
     reasonCol === col('案件詳細（メール本文より）') + 1 && col('提案文面（案）') === reasonCol + 1 && header[header.length - 1] === 'ID' &&
-      header.length === 31 && SALES_COLUMNS[reasonCol].human !== true && SALES_COLUMNS[reasonCol].width === 320 && SALES_COLUMNS[reasonCol].wrap === false);
+      header.length === 32 && SALES_COLUMNS[reasonCol].human !== true && SALES_COLUMNS[reasonCol].width === 320 && SALES_COLUMNS[reasonCol].wrap === false);
   const reasonOf = (checks: Parameters<typeof jd>[1] & object, extra: Record<string, unknown>[] = []) =>
     String(salesRowOf({ ...base, judgment: { ...jd('recommend'), checks: checks.map((k, i) => ({ ...k, quote: k.requirement, ...(extra[i] ?? {}) })) } } as ProperCandidate, undefined)[reasonCol]);
   const reasonLines = reasonOf(
