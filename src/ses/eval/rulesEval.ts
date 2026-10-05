@@ -3534,7 +3534,7 @@ function mailKindChecks(): void {
   check('改行が潰れ、全角空白で字下げした見出し（　最寄駅　：）が並ぶ1行（200文字超）の要員紹介は engineer',
     k(`${GREET}--------------------- ○A.B（30歳）男性 　最寄駅　：○○駅 　時期　　：即日 　単金　　：60万円 　所属　　：弊社社員 　スキル　：Java`) === 'engineer');
   check('同じ形でも200文字以下の1行は分けない（unknown のまま）',
-    k('○A.B（30歳）男性 　最寄駅　：○○駅 　時期　　：即日 　単金　　：60万円 　所属　　：弊社社員 　スキル　：Java') === 'unknown');
+    k('○ご紹介 　最寄駅　：○○駅 　時期　　：即日 　単金　　：60万円 　所属　　：弊社社員 　スキル　：Java') === 'unknown');
   check('改行が潰れ、全角空白で字下げした案件名・必須スキル・尚可が並ぶ1行（200文字超）の案件は project',
     k(`${GREET} 　案件名　：在庫管理 　必須スキル：Java 　尚可　：AWS 　面談　：1回`) === 'project');
   check('半角空白1つ区切りの地の文は、見出し語を含んでも（コロン無し）分けない',
@@ -3556,6 +3556,13 @@ function mailKindChecks(): void {
   check('案件だけモードでは抽出された要員を残さず、落とした数を返す', dropRes.kept.length === 0 && dropRes.dropped === 2);
   const keepRes = engineersToKeep(engs, false);
   check('全件モードでは抽出された要員をそのまま残す', keepRes.kept === engs && keepRes.dropped === 0);
+  const BODY_TAIL = '■開発フェーズ\n要件定義 : 3年\n';
+  check('見出しの無い「☆A.B（25歳／男性）」の名乗りは engineer', k('☆A.B（25歳／男性）\n' + BODY_TAIL) === 'engineer');
+  check('全角の「Ｃ．Ｄ（31歳）」も engineer', k('Ｃ．Ｄ（31歳）\n' + BODY_TAIL) === 'engineer');
+  check('案件の見出しが2行以上あれば本文中の「A.B（25歳）」があっても engineer にしない（unknown として抽出に回る）',
+    k('【案件名】在庫管理システム改修\n【必須スキル】Java 3年以上\n【作業内容】改修\nA.B（25歳）\n') !== 'engineer'); // 要員の名乗りと案件の見出しが混ざるメールは unknown（抽出に回る）
+  check('3文字の「ABC（25歳）」は数えない', k('ABC（25歳）\n' + BODY_TAIL) !== 'engineer');
+  check('行の途中の「担当はA.B（25歳）です」は数えない', k('担当はA.B（25歳）です\n' + BODY_TAIL) !== 'engineer');
 }
 
 // ===== 要員管理表: 手で追加した要員（スキルシートなし）とパートナー区分 =====
@@ -3668,6 +3675,7 @@ function rateFormatChecks(): void {
   check('抽出の指示: 金額と「スキル見合い」が並ぶときは金額を使う', EXTRACT_SYSTEM.includes('金額と「スキル見合い」が並ぶときは、その金額を使って'));
   check('抽出の指示: 単一の金額は下限・上限の両方に入れる', EXTRACT_SYSTEM.includes('単一の金額は\n  rateMin と rateMax の両方'));
   check('抽出の指示: 下限だけの単価は rateMin のみ', EXTRACT_SYSTEM.includes('下限だけが書かれたときは rateMin のみ（rateMax は null）'));
+  check('抽出の指示: 複数人の合計（グロス等）は1人あたりにせず null・businessFlow へ', EXTRACT_SYSTEM.includes('「グロス」「総額」') && EXTRACT_SYSTEM.includes('rateMin・rateMax を null にし、金額は businessFlow に書いてください'));
   check('抽出の指示: 本文に単価が無ければ件名の金額を使う・食い違えば本文・決められなければ使わない',
     EXTRACT_SYSTEM.includes('件名に金額が書かれているとき') && EXTRACT_SYSTEM.includes('食い違うときは本文を使います') && EXTRACT_SYSTEM.includes('決められないときは使いません'));
   check('単価の原文照合は件名の数字も対象（本文に無く件名だけの「80」でも通る）',
