@@ -137,6 +137,8 @@ import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
+import { fixRunDir } from '../trial/bodyFix.js';
+import { mkdirSync as mkdirSyncBf, readdirSync as readdirSyncBf } from 'fs';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -5008,6 +5010,62 @@ function minimalTextPdf(text: string): Buffer {
   return Buffer.from(out, 'latin1');
 }
 
+// 試運転の bodyFix: 作業記録の get_thread の結果から bodyHead を機械で差し替える（作り物のデータだけ）
+function bodyFixChecks(): void {
+  const dir = mkdtempSync(join(tmpdir(), 'ses-bodyfix-'));
+  const logs: string[] = [];
+  const origLog = console.log;
+  try {
+    const tdir = join(dir, 'sub', 'nested');
+    mkdirSyncBf(tdir, { recursive: true });
+    mkdirSyncBf(join(dir, 'run', 'out'), { recursive: true });
+    const longA = 'あ'.repeat(1700);
+    const longOld = 'OLD'.repeat(300);
+    const thread = (id: string, msgs: Array<{ d: string; b: string }>) =>
+      JSON.stringify({ id, messageCount: msgs.length, messages: msgs.map((m, i) => ({ id: `m${i}`, internalDate: m.d, plaintextBody: m.b })) });
+    const userLine = (content: unknown) => JSON.stringify({ type: 'user', message: { role: 'user', content } });
+    const lines = [
+      userLine([{ type: 'tool_result', tool_use_id: 't1', content: thread('thA', [{ d: '1000', b: longOld }, { d: '2000', b: `${longA}\r\nX` }]) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: thread('thE', [{ d: '5', b: 'い'.repeat(900) }]) }] }]),
+      userLine([{ type: 'tool_result', tool_use_id: 't3', content: thread('thL', [{ d: '5', b: 'https://example.invalid/x' }]) }]),
+      '{ broken json line tool_result "messages"',
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'x' }] } }),
+      userLine([{ type: 'tool_result', tool_use_id: 't4', content: thread('thA', [{ d: '1000', b: 'short' }]) }]),
+    ];
+    writeFileSyncForEval(join(tdir, 'agent-x.jsonl'), lines.join('\n'));
+    const rows = [
+      { threadId: 'thA', messageId: 'thA', kind: 'project', bodyHead: 'hand copy' },
+      { threadId: 'thE', messageId: 'thE', kind: 'engineer', bodyHead: 'hand' },
+      { threadId: 'thL', messageId: 'thL', kind: 'project', bodyHead: 'kept copy' },
+      { threadId: 'thZ', messageId: 'thZ', kind: 'project', bodyHead: 'not in transcript' },
+      { threadId: 'thErr', messageId: 'thErr', error: 'fail' },
+    ];
+    const outFile = join(dir, 'run', 'out', 'c01.jsonl');
+    const original = `${rows.map((r) => JSON.stringify(r)).join('\n')}\nnot json\n`;
+    writeFileSyncForEval(outFile, original);
+    console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
+    const res = fixRunDir(join(dir, 'run'), join(dir, 'sub'));
+    console.log = origLog;
+    const after = readFileSyncB(outFile, 'utf8').split('\n');
+    const [a, e, l, z] = [0, 1, 2, 3].map((i) => JSON.parse(after[i] ?? '{}') as { bodyHead?: string });
+    check('bodyFix: 案件の行は plaintextBody の先頭1500文字（改行は \\n にそろう）、messages が2通なら internalDate が大きい方（同じスレッドは messages が多い方）',
+      a.bodyHead === longA.slice(0, 1500) && !(a.bodyHead ?? '').includes('OLD'), show(a.bodyHead?.length));
+    check('bodyFix: engineer の行は先頭500文字（tool_result の text 配列も読む）', e.bodyHead === 'い'.repeat(500), show(e.bodyHead?.length));
+    check('bodyFix: リンクだけの本文は差し替えない', l.bodyHead === 'kept copy');
+    check('bodyFix: transcript に無いスレッドはそのまま・error の行と壊れた行は触らない・壊れた行があっても止まらない',
+      z.bodyHead === 'not in transcript' && after[4] === JSON.stringify(rows[4]) && after[5] === 'not json');
+    check('bodyFix: 件数は rows 4・replaced 2・notFound 1・skippedLinkOnly 1・transcripts 1', res.rows === 4 && res.replaced === 2 && res.notFound === 1 && res.skippedLinkOnly === 1 && res.transcripts === 1, show(res));
+    check('bodyFix: 書き換え前の元が out_backup に残る（2回目の実行でも元のまま）',
+      (() => { fixRunDir(join(dir, 'run'), join(dir, 'sub')); return readFileSyncB(join(dir, 'run', 'out_backup', 'c01.jsonl'), 'utf8') === original && readdirSyncBf(join(dir, 'run', 'out_backup')).length === 1; })());
+    const cli = JSON.stringify(res);
+    check('bodyFix: 標準出力に出す内容は件数の JSON だけ（本文・件名・スレッドIDを含まない）',
+      cli === JSON.stringify({ rows: 4, replaced: 2, notFound: 1, skippedLinkOnly: 1, transcripts: 1 }) && logs.length === 0 && !cli.includes('thA') && !cli.includes('あ'));
+  } finally {
+    console.log = origLog;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -5067,6 +5125,7 @@ async function main(): Promise<void> {
     await securityAuditRound11Checks();
     securityAuditRound12Checks();
     labelStoreChecks();
+    bodyFixChecks();
   } finally {
     setDemoOverride(null);
   }
