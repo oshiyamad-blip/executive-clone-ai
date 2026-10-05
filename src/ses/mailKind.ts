@@ -143,3 +143,15 @@ export function mentionsTitle(notice: Pick<SesRawMail, 'subject' | 'body'>, titl
   if (t.length < 6) return false;
   return norm(`${notice.subject}\n${notice.body.slice(0, 5000)}`).includes(t);
 }
+
+// 件名だけで明らかな要員メールを抽出の前に外す（試運転の抽出費用を減らす）。本文の見出しで見分ける classifyMailKind とは別で、
+// 件名に要員の語・イニシャル・年齢があり、案件側の語が無いときだけ true。迷うものは抽出に回す。
+// 年齢は「45歳まで」のような案件の条件を除く。語は実メールで測って決めた（広げると案件を取りこぼした）
+const SUBJECT_ENGINEER_RE = /【要員】|【人材】|【技術者】|要員情報|要員紹介|要員のご紹介|人材情報|人材紹介|人材のご紹介|技術者情報|技術者紹介|技術者のご紹介|エンジニア紹介|エンジニアのご紹介|男性|女性|(?<![A-Za-z])[A-Z]\.\s?[A-Z]\.?(?![A-Za-z])|\d{2}歳(?!まで|以下|以上|迄|~|〜)/;
+const SUBJECT_PROJECT_RE = /案件|募集|急募|求人|枠|増員|ポジション/;
+
+export function engineerBySubject(subject: string): boolean {
+  const s = subject.normalize('NFKC');
+  if (SUBJECT_PROJECT_RE.test(s)) return false;
+  return SUBJECT_ENGINEER_RE.test(s);
+}

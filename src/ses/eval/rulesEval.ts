@@ -130,7 +130,7 @@ import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt, startRunClock, stopRunClock } from '../schedule.js';
 import { shouldSendSummary } from '../notify.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
-import { classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
+import { engineerBySubject, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
@@ -138,6 +138,9 @@ import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../pr
 import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { fixRunDir } from '../trial/bodyFix.js';
+import { chunkRunDir } from '../trial/chunks.js';
+import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
+import { contentKeyOf, indexJudgedByContent, splitReused, judgmentFor } from '../trial/reuse.js';
 import { mkdirSync as mkdirSyncBf, readdirSync as readdirSyncBf } from 'fs';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
@@ -5066,6 +5069,112 @@ function bodyFixChecks(): void {
   }
 }
 
+// 試運転の使用量の削減: 件名の要員判定・チャンク分け・書き込みの差分・再送の判定の使い回し（作り物のデータだけ）
+function trialUsageChecks(): void {
+  section('試運転: 件名の要員判定・チャンク・書き込みの差分・判定の使い回し');
+  check('engineerBySubject: 要員の語（【要員】・要員紹介・イニシャル・NN歳・男性）は true',
+    engineerBySubject('【要員】Java経験者のご紹介') && engineerBySubject('人材のご紹介（Ｔ.Ｋ）') && engineerBySubject('ご提案 Y.S. 34歳 Java') && engineerBySubject('男性 インフラ 即日') && engineerBySubject('技術者紹介のお願い'));
+  check('engineerBySubject: 案件・募集・求人・急募・枠・増員・ポジションを含めば false（要員の語があっても）',
+    !engineerBySubject('【要員】案件のご相談') && !engineerBySubject('要員紹介 募集中') && !engineerBySubject('人材紹介 求人') && !engineerBySubject('急募 人材情報') && !engineerBySubject('要員情報 1名枠') && !engineerBySubject('男性 増員') && !engineerBySubject('人材紹介 PMポジション'));
+  check('engineerBySubject: 「45歳まで」「以下」「以上」「〜」の年齢条件・語の無い件名は false',
+    !engineerBySubject('Java開発 45歳まで') && !engineerBySubject('Java 50歳以下') && !engineerBySubject('Java 30歳〜') && !engineerBySubject('在庫管理システム改修') && !engineerBySubject('ABC社 システム') && engineerBySubject('Ｋ.Ｓ 　３５歳'));
+
+  const dir = mkdtempSync(join(tmpdir(), 'ses-chunks-'));
+  try {
+    mkdirSyncBf(join(dir, 'list'), { recursive: true });
+    const row = (t: string, m: string, d: number, from: string, subj: string, n: number) => [t, m, String(d), from, subj, String(n)].join('\t');
+    writeFileSyncForEval(join(dir, 'list', 'w00.tsv'), [
+      row('t3', 'm3', 3000, 'a@example.invalid', '在庫管理システム改修', 1),
+      row('t1', 'm1', 1000, 'b@example.invalid', '【要員】ご紹介', 1),
+      row('t2', '', 2000, 'c@example.invalid', '案件のご案内', 7),
+      row('t2', 'm2b', 2500, 'c@example.invalid', '案件のご案内', 8),
+    ].join('\n') + '\n');
+    writeFileSyncForEval(join(dir, 'list', 'w01.tsv'), 't4\tt4\t4000\td@example.invalid\n');
+    const res = chunkRunDir(dir, 2);
+    const c0 = readFileSyncB(join(dir, 'chunks', 'c00'), 'utf8').trim().split('\n');
+    const c1 = readFileSyncB(join(dir, 'chunks', 'c01'), 'utf8').replace(/\n$/, '').split('\n');
+    const skip = readFileSyncB(join(dir, 'out', 'skip.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: スレッドIDの重複は internalDate が大きい行・受信時刻の順・件名で外した分は抽出に回さない（件数 threads 4・skippedBySubject 1・chunks 2）',
+      res.threads === 4 && res.skippedBySubject === 1 && res.chunks === 2 && c0.length === 2 && c1.length === 1 && c0[0].startsWith('t2\t') && c0[1].startsWith('t3\t') && c1[0].startsWith('t4\t'), show(res));
+    check('chunks: チャンクの行は スレッドID・ISO日時・最新メッセージID・メッセージ数（古い形の行は最新メッセージIDが空）',
+      c0[0] === `t2\t${new Date(2500).toISOString()}\tm2b\t8` && c1[0] === `t4\t${new Date(4000).toISOString()}\t\t`, show(c0[0]));
+    check('chunks: skip.jsonl の行は kind engineer・bodyHead 空・skippedBySubject true',
+      skip.length === 1 && skip[0].threadId === 't1' && skip[0].kind === 'engineer' && skip[0].bodyHead === '' && skip[0].skippedBySubject === true && skip[0].messageId === 'm1' && skip[0].receivedAt === new Date(1000).toISOString());
+    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）', JSON.stringify(res) === '{"threads":4,"skippedBySubject":1,"chunks":2}');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // 書き込みの差分
+  const cols = SALES_COLUMNS.length;
+  const mk = (tag: string): Array<string | number> => Array.from({ length: cols }, (_, i) => `${tag}${i}`);
+  const newRow = mk('n');
+  newRow[14] = '';
+  const existingRow = mk('e');
+  const sheetRow = mk('e');
+  sheetRow[3] = ` ${existingRow[3]} `;
+  existingRow[4] = 60;
+  sheetRow[4] = '60';
+  existingRow[5] = 'changed5';
+  existingRow[6] = 'changed6';
+  existingRow[12] = 'changed12';
+  existingRow[20] = 'changed20';
+  existingRow[26] = 'changed26';
+  sheetRow[14] = '対応中';
+  sheetRow[15] = 'memo';
+  const writes = [
+    { range: "'全体'!A9", values: [newRow] },
+    { range: "'全体'!A3:N3", values: [existingRow.slice(0, 14)] },
+    { range: "'全体'!U3:AH3", values: [existingRow.slice(20)] },
+  ];
+  const sheet = new Map<number, unknown[]>([[3, sheetRow]]);
+  const plan = planWrites(writes, sheet);
+  const ranges = plan.elements.map((e) => e.range);
+  check('writePlan: 新しい行（34列）は A:O（O は 未着手）と U:AH の2つ。P〜T は書かない',
+    ranges[0] === "'全体'!A9:O9" && ranges[1] === "'全体'!U9:AH9" && plan.elements[0].values[0].length === 15 && plan.elements[0].values[0][14] === '未着手' && plan.elements[1].values[0].length === 14, show(ranges.slice(0, 2)));
+  check('writePlan: 既存の行は違うセルだけを連続する列ごとの範囲にする（NBSP・前後の空白・数値の表記の違いは同じ。連続する F・G は1つの範囲）',
+    ranges.length === 6 && ranges[2] === "'全体'!F3:G3" && ranges[3] === "'全体'!M3" && ranges[4] === "'全体'!U3" && ranges[5] === "'全体'!AA3" && plan.elements[2].values[0][1] === 'changed6', show(ranges));
+  check('writePlan: 件数は appendRows 1・updateRows 1・cellsWritten 34・cellsSkippedSame 23（O〜T は書かず数えない）',
+    plan.appendRows === 1 && plan.updateRows === 1 && plan.cellsWritten === 34 && plan.cellsSkippedSame === 23, show(plan));
+  const sameOnly = planWrites([{ range: "'全体'!A3:N3", values: [sheetRow.slice(0, 14)] }], sheet);
+  check('writePlan: 全部同じ行は何も書かない', sameOnly.elements.length === 0 && sameOnly.updateRows === 0);
+  const big = Array.from({ length: 10 }, (_, i) => ({ range: `'全体'!A${i + 1}`, values: [['x'.repeat(100)]] }));
+  const packed = packElements(big, 450);
+  check('writePlan: 要素は fileBytes 以下のファイルにまとめる', packed.length > 1 && packed.every((f) => JSON.stringify(f).length <= 450) && packed.flat().length === 10, show(packed.map((f) => f.length)));
+  const joined = joinSheetRows(sheetRowsOf({ range: "'全体'!A2:AD3", values: [['a'], ['b', 'c']] }), sheetRowsOf({ range: "'全体'!AE2:AH3", values: [['z']] }));
+  check('writePlan: 2つの読み取りは range の開始行から数え、30列＋AE:AH の34列にそろえる', joined.get(2)?.length === 31 && joined.get(2)?.[30] === 'z' && joined.get(3)?.[1] === 'c' && joined.get(3)?.length === 30);
+  const after = new Map<number, unknown[]>([[9, [...newRow.slice(0, 14).map(String), '未着手', '', '', '', '', '', ...newRow.slice(20).map(String)]]]);
+  after.get(9)![20] = 'WRONG';
+  after.get(9)![26] = 'different date';
+  const ver = verifyWrites(plan.elements.slice(0, 2), after);
+  check('writePlan verify: 書いた後のシートと比べ、違うセルだけ1セルの書き直しにする（受信日時・追加日時・最終更新の列は除く）',
+    ver.checked === 26 && ver.fixes.length === 1 && ver.fixes[0].range === "'全体'!U9" && ver.fixes[0].values[0][0] === 'n20', show({ checked: ver.checked, fixes: ver.fixes.map((f) => f.range) }));
+
+  // 再送の判定の使い回し
+  const proj = (over: Partial<Parameters<typeof contentKeyOf>[0]> = {}) => ({
+    title: '在庫管理システム改修', requiredSkills: ['Java', 'SQL'], rateMin: 60, rateMax: 70, prefecture: '東京都', startDate: '2026-11-01', startPeriod: '11月', ...over,
+  });
+  const k = contentKeyOf(proj());
+  check('contentKey: 表記ゆれ・必須の並び順・開始の日は同じキー、必須・単価が違えば違うキー',
+    k === contentKeyOf(proj({ title: '在庫管理　システム改修', requiredSkills: ['sql', 'java'], startDate: '2026-11-15' })) && k !== contentKeyOf(proj({ requiredSkills: ['Java'] })) && k !== contentKeyOf(proj({ rateMax: 80 })) && k !== contentKeyOf(proj({ prefecture: '大阪府' })));
+  const projects = new Map([
+    ['proj_old', proj()],
+    ['proj_new', proj()],
+    ['proj_other', proj({ requiredSkills: ['Java', 'SQL', 'AWS'], rateMax: 85 })],
+  ]);
+  const index = indexJudgedByContent([{ engineer: 'KS', projectId: 'proj_old' }], projects);
+  const split = splitReused(
+    [{ engineer: 'KS', projectId: 'proj_new' }, { engineer: 'KS', projectId: 'proj_other' }, { engineer: 'TM', projectId: 'proj_new' }],
+    index,
+    projects,
+  );
+  check('再送の使い回し: 中身が同じで ID が違う案件は reused になり判定に回らない。中身（必須・単価）が違う案件・別の要員は判定に回る',
+    split.reused.length === 1 && split.reused[0].fromProjectId === 'proj_old' && split.reused[0].projectId === 'proj_new' && split.reused[0].engineer === 'KS' && split.toJudge.map((p) => `${p.engineer}|${p.projectId}`).join(',') === 'KS|proj_other,TM|proj_new', show(split));
+  const judgedMap = new Map([['proj_old', { verdict: 'propose' }]]);
+  check('再送の使い回し: final では projectId で引けないとき reused の fromProjectId の判定をそのまま使う（引けるならそれを優先・reused が無ければ undefined）',
+    judgmentFor(judgedMap, 'proj_new', split.reused, 'KS')?.verdict === 'propose' && judgmentFor(judgedMap, 'proj_new', split.reused, 'TM') === undefined && judgmentFor(new Map([['proj_new', { verdict: 'own' }], ...judgedMap]), 'proj_new', split.reused, 'KS')?.verdict === 'own');
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -5126,6 +5235,7 @@ async function main(): Promise<void> {
     securityAuditRound12Checks();
     labelStoreChecks();
     bodyFixChecks();
+    trialUsageChecks();
   } finally {
     setDemoOverride(null);
   }
