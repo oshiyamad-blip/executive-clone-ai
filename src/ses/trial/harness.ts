@@ -7,7 +7,7 @@
 //   PHASE=prep     抽出結果＋要員リスト → AI判定に回す組（pairs.json・system_<要員>.txt）。足切りの監視の組も加え、audit.json に組のキーを書く
 //   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）。出力の judge に監視の audited・auditHits が出る
 //   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
-//   PHASE=score    取り込み・判定・営業の入力の数字（score.json）
+//   PHASE=score    取り込み・判定・営業の入力の数字（score.json。本文の写しのずれ bodyHeadShortPct・quoteMissingPct を含む）
 //   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
 //                  増えた組は labels_backup.tsv に書く（LABELS_BACKUP_ALL=1 でストア全体を labels_backup_NN.tsv に分けて書く）
 //   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
@@ -23,6 +23,7 @@ import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedPr
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
 const dir = process.env.RUN_DIR as string;
@@ -459,15 +460,22 @@ if (phase === 'prompts') {
   const statuses: Record<string, number> = {};
   for (const r of existing) statuses[r['対応状況'] || '（空）'] = (statuses[r['対応状況'] || '（空）'] ?? 0) + 1;
   const verdicts: Record<string, number> = {};
+  const judgments: GapJudgment[] = [];
   for (const f of readdirSync(dir).filter((x) => /^judged_.+\.json$/.test(x))) {
-    for (const r of read<Array<{ judgment: RawProperJudgment }>>(f)) verdicts[r.judgment.verdict] = (verdicts[r.judgment.verdict] ?? 0) + 1;
+    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(f)) {
+      verdicts[r.judgment.verdict] = (verdicts[r.judgment.verdict] ?? 0) + 1;
+      judgments.push(r);
+    }
   }
+  const mailIdOfProject = new Map(projects.map((p) => [p.id, p.sourceMailId]));
   const score = {
     mails: rows.length, engineerMails, extractErrors: errors, closedNotices: closed, buildFailures: failed,
     projects: projects.length, keptAfterDedupe: kept.length, dedupeRemoved: projects.length - kept.length,
     rateMissingPct: pct(projects.filter((p) => p.rateMax === null && p.rateMin === null).length, projects.length),
     requiredEmptyPct: pct(projects.filter((p) => p.requiredSkills.length === 0).length, projects.length),
     prefectureMissingPct: pct(projects.filter((p) => p.remote !== 'full' && !p.prefecture).length, projects.filter((p) => p.remote !== 'full').length),
+    bodyHeadShortPct: bodyHeadShortPct(rows),
+    quoteMissingPct: quoteMissingPct(carriedRows().rows, judgments, mailIdOfProject),
     verdicts,
     sheet: { rows: existing.length, priorities: Object.fromEntries(['A', 'B', 'C', 'D'].map((p) => [p, count('優先度', p)])), statuses, reasons, checked, goodRatePct: pct(good, checked) },
   };

@@ -57,6 +57,7 @@
     "mailparser": "^3.9.14",
     "mammoth": "^1.12.3",
     "nodemailer": "^10.0.10",
+    "unpdf": "^1.8.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {

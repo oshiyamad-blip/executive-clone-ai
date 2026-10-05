@@ -1,13 +1,15 @@
 // 試運転で案件メールの添付（表計算・PDF）を読む CLI。Gmail の get_message(messageFormat=RAW) の結果を、本番と同じ解析にかける。
 //   npm run ses:trial:raw -- <入力> <出力ディレクトリ>
 // 入力は RAW の保存ファイル（JSON の raw に base64url の MIME）か .eml。出力ディレクトリに次を書く:
-//   attach_<入力のファイル名>.json = { attachments: [{ name, kind: 'sheet'|'pdf'|'other', textChars, text?, pdfPath? }], messageIdHeaderPresent }
-//   PDF は <入力のファイル名>_<番号>.pdf（読むのは呼び出し側。コードでは文字にしない。本番も Claude に文書として渡している）
+//   attach_<入力のファイル名>.json = { attachments: [{ name, kind: 'sheet'|'pdf'|'other', textChars, text?, textError?, pdfPath? }], messageIdHeaderPresent }
+//   PDF は unpdf で文字にして text に入れる（試運転のコンテナには PDF を画像にする道具が無いため。本番は文字にせず Claude に文書として渡している）。
+//   文字にできない PDF（画像だけ・暗号化・壊れている）は text を空にして textError: true。<入力のファイル名>_<番号>.pdf も今までどおり書く
 // 標準出力には件数と文字数だけを出す（添付の名前・中身・Message-ID の値は出さない。ファイルの JSON にだけ書く）。
 // 実行モード（DEMO_MODE）に左右されないよう、parseAttachments は通さず、本番の parseRawMail と表計算の文字化を直接呼ぶ
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractText, getDocumentProxy } from 'unpdf';
 import { attachmentKind } from '../../collectors/email.js';
 import { MAX_ATTACHMENT_CHARS } from '../extract.js';
 import { parseRawMail } from '../mail/xserver.js';
@@ -21,6 +23,7 @@ export interface RawAttachment {
   kind: 'sheet' | 'pdf' | 'other';
   textChars: number;
   text?: string;
+  textError?: boolean;
   pdfPath?: string;
 }
 
@@ -55,6 +58,17 @@ export function rawMimeOf(file: Buffer): Buffer {
   return file;
 }
 
+// PDF のバイト列 → 文字。文字が取れない（画像だけ・暗号化・壊れている）ときは空文字
+export async function pdfBufferToText(data: Buffer): Promise<string> {
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(data));
+    const { text } = await extractText(pdf, { mergePages: true });
+    return text.trim();
+  } catch {
+    return '';
+  }
+}
+
 export async function readRawAttachments(file: Buffer, outDir: string, baseName: string): Promise<RawAttachResult> {
   const { mail } = await parseRawMail(rawMimeOf(file), 'trial_raw', new Date());
   const attachments: RawAttachment[] = [];
@@ -75,7 +89,8 @@ export async function readRawAttachments(file: Buffer, outDir: string, baseName:
       pdfs += 1;
       const pdfPath = join(outDir, `${baseName}_${pdfs}.pdf`);
       writeFileSync(pdfPath, data);
-      attachments.push({ name: a.filename, kind: 'pdf', textChars: 0, pdfPath });
+      const text = await pdfBufferToText(data);
+      attachments.push({ name: a.filename, kind: 'pdf', textChars: text.length, ...(text ? { text: text.slice(0, ATTACH_TEXT_MAX) } : { textError: true }), pdfPath });
     } else {
       attachments.push({ name: a.filename, kind: 'other', textChars: 0 });
     }
@@ -104,6 +119,8 @@ async function main(): Promise<void> {
       pdfs: count('pdf'),
       others: count('other'),
       textChars: result.attachments.filter((a) => a.kind === 'sheet').map((a) => a.textChars),
+      pdfTextChars: result.attachments.filter((a) => a.kind === 'pdf').map((a) => a.textChars),
+      pdfTextErrors: result.attachments.filter((a) => a.textError).length,
       messageIdHeaderPresent: result.messageIdHeaderPresent,
       outFile,
     }),

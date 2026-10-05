@@ -36,7 +36,7 @@ function heading(words: string[]): RegExp {
 const ENGINEER_GROUPS = [
   { key: 'name', words: ['氏名', '名前', '要員名', 'イニシャル'] },
   { key: 'station', words: ['最寄駅', '最寄り駅', '最寄り', '最寄'] },
-  { key: 'home', words: ['住まい'] },
+  { key: 'home', words: ['住まい', '居住地'] },
   { key: 'affil', words: ['所属'] },
   { key: 'work', words: ['稼働', '稼動'] },
   { key: 'parallel', words: ['並行状況'] },

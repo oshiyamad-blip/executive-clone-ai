@@ -235,6 +235,19 @@ const CHECK_TEXT_MAX = 200;
 
 // AIの判定を照合して確定する。根拠が経歴に無い met/close は満たさない扱い、要件の技術名が根拠に無い met は近い経験に、
 // 一般的な語だけの一致は見送り
+// 要件の技術名が1つ以上あり、そのすべてが経歴の本文にあるとき、技術名を含む経歴の行（60文字まで、経歴のまま）。無ければ null
+function profileLineHolding(techs: string[], profile: string, hay: string): string | null {
+  if (techs.length === 0) return null;
+  const profileTechs = new Set(techNamesIn(profile).map((t) => t.toLowerCase()));
+  // 「C」「Go」のような短い技術名は部分一致だと別の語に当たるので、経歴から取り出した技術名との一致だけで見る
+  const has = (t: string) => profileTechs.has(t.toLowerCase()) || (t.length >= 3 && hay.includes(norm(t)));
+  if (!techs.every(has)) return null;
+  const lines = profile.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const holds = (l: string, t: string) => (t.length >= 3 && norm(l).includes(norm(t))) || techNamesIn(l).some((x) => x.toLowerCase() === t.toLowerCase());
+  const line = lines.find((l) => techs.every((t) => holds(l, t))) ?? lines.find((l) => techs.some((t) => holds(l, t)));
+  return line ? line.slice(0, 60) : null;
+}
+
 export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string; level?: ProjectLevel },
   opts: { level?: EngineerLevel; experienceYears?: number | null } = {}): ProperJudgment {
   const hay = norm(profile);
@@ -260,9 +273,19 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     const label = optional && !/^尚可/.test(name) ? `尚可: ${name}` : name;
     const labelTech = techNamesIn(label);
     if (!optional) labelTech.forEach((t) => askedTech.add(t.toLowerCase()));
-    const ev = r.evidence.trim();
-    const found = ev.length > 0 && norm(ev).length >= 4 && hay.includes(norm(ev));
+    let ev = r.evidence.trim();
+    let noteText = r.note.trim();
     let status = r.status;
+    // AIが「経験なし」とした要件でも、要件の技術名がすべて経歴にあれば近い経験に上げる（要件の技術名を取り出せない・一部しか無いものは変えない）
+    if (status === 'unmet') {
+      const held = profileLineHolding(labelTech, profile, hay);
+      if (held !== null) {
+        status = 'close';
+        ev = held;
+        noteText = '経歴に記載あり（AIの判定は経験なし。要確認）';
+      }
+    }
+    const found = ev.length > 0 && norm(ev).length >= 4 && hay.includes(norm(ev));
     if (status !== 'unmet' && !found) {
       status = 'unmet';
       unverified += 1;
@@ -300,7 +323,6 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     // セルが大きくなりすぎないよう1件200文字まで。照合を通らず unmet にした根拠は経歴に無いので残さない
     const clip = (t: string) => (t.length > CHECK_TEXT_MAX ? `${t.slice(0, CHECK_TEXT_MAX - 1)}…` : t);
     const keepEvidence = status !== 'unmet' && ev.length > 0;
-    const noteText = r.note.trim();
     checks.push({
       kind, requirement: name.replace(/^尚可[:：]\s*/, ''), quote: (r.quote ?? '').trim(), status,
       ...(shortYears !== null ? { shortYears } : {}),
@@ -309,7 +331,7 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
     });
     if (status === 'unmet') {
       if (!optional) unmetCount += 1;
-      gaps.push(r.note.trim() ? `${label}（${r.note.trim()}）` : label);
+      gaps.push(noteText ? `${label}（${noteText}）` : label);
       continue;
     }
     labelTech.forEach((t) => heldTech.add(t.toLowerCase()));
