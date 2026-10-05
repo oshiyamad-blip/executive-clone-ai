@@ -9,11 +9,12 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachmentKind } from '../../collectors/email.js';
+import { MAX_ATTACHMENT_CHARS } from '../extract.js';
 import { parseRawMail } from '../mail/xserver.js';
 import { spreadsheetBufferToTextIsolated } from '../spreadsheetIsolated.js';
 
-// 試運転の抽出の行に載せる添付の文字の上限（harness の attachmentText と同じ）
-export const ATTACH_TEXT_MAX = 8000;
+// 試運転の抽出の行に載せる添付の文字の上限（本番の抽出が添付1件で読む上限と同じ。harness の attachmentText も同じ）
+export const ATTACH_TEXT_MAX = MAX_ATTACHMENT_CHARS;
 
 export interface RawAttachment {
   name: string;

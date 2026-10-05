@@ -107,7 +107,7 @@ const MAX_PDF_PAGES = 100;
 
 // テキスト化した添付・本文の上限（文字）。巨大な表計算や配信メールでコンテキスト上限を超えないように
 const MAX_BODY_CHARS = 50_000;
-const MAX_ATTACHMENT_CHARS = 40_000;
+export const MAX_ATTACHMENT_CHARS = 40_000;
 const MAX_ATTACHMENT_TOTAL_CHARS = 80_000;
 
 // 基盤起因（認証・レート制限・障害・通信）の失敗がこの件数続いたら、残りのメールの抽出を打ち切る

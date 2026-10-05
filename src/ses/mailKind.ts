@@ -31,16 +31,28 @@ function heading(words: string[]): RegExp {
 
 // 所属・稼働・住まい・並行状況は要員の紹介の定型（【氏名】【所属】【稼働】【単金】の並び）。案件にも書かれうるが、
 // 案件の見出しが2つ以上あるメールは要員とみなさないため、1行の紛れで案件を取りこぼすことはない
-const ENGINEER_HEADINGS = heading(['氏名', '名前', '要員名', 'イニシャル', '最寄駅', '最寄り駅', '最寄り', '最寄', '住まい', '所属', '稼働', '稼動', '並行状況', '技術者番号', '希望単価', '希望単金', '稼働開始日', '稼働可能日', '性別']);
+// 要員の見出しは「違う見出し語の数」で数える（同じ語が何行あっても1つ）。案件を並べたメールは各案件に「最寄駅：」が出るため。
+// 表記ゆれは同じ語にまとめる（最寄駅・最寄り駅・最寄り・最寄／稼働・稼動／希望単価・希望単金／氏名・名前・要員名・イニシャル／稼働開始日・稼働可能日）
+const ENGINEER_GROUPS = [
+  { key: 'name', words: ['氏名', '名前', '要員名', 'イニシャル'] },
+  { key: 'station', words: ['最寄駅', '最寄り駅', '最寄り', '最寄'] },
+  { key: 'home', words: ['住まい'] },
+  { key: 'affil', words: ['所属'] },
+  { key: 'work', words: ['稼働', '稼動'] },
+  { key: 'parallel', words: ['並行状況'] },
+  { key: 'number', words: ['技術者番号'] },
+  { key: 'price', words: ['希望単価', '希望単金'] },
+  { key: 'start', words: ['稼働開始日', '稼働可能日'] },
+  { key: 'sex', words: ['性別'] },
+].map((g) => ({ key: g.key, re: heading(g.words) }));
 const PROJECT_HEADINGS = heading(['案件名', '必須スキル', '必須', '尚可スキル', '尚可', '募集人数', '人数', '面談回数', '面談', '精算', '精算幅', '商流', '作業内容', '業務内容', '開発環境', '予算']);
 
-// 見出しの無い要員紹介の名乗りの行（「☆A.B（25歳…」）。イニシャルと年齢を兼ねるので要員の見出し2行と数える。
+// 見出しの無い要員紹介の名乗りの行（「☆A.B（25歳…」）。イニシャルと年齢を兼ねるので要員の見出し2語と数える。
 // 3文字以上の英字（ABC）や行の途中の「担当はA.B（25歳）です」は当てない
 const INITIAL_AGE = new RegExp(String.raw`^\s*(?:${DECO})*\s*[A-Z]\.?\s*[A-Z]\.?\s*[(]\s*\d{2}\s*歳`);
 
-// 見出しの行数（引用行は数えない）。extra に当たる行は extraWeight 行と数える
-function countLines(body: string, re: RegExp, extra?: RegExp, extraWeight = 1): number {
-  let n = 0;
+// 本文の各行（長い行は見出しの始まりで区切った片）の先頭80文字を onHead に渡す。引用行は渡さない
+function eachHead(body: string, onHead: (head: string) => void): void {
   for (const line of body.normalize('NFKC').split(/\r?\n/)) {
     // 改行が潰れて1行に見出しが並ぶメールがある。長い行だけ見出しの始まりの前で分ける（短い行は今までどおり）。
     // 全角空白で字下げした見出しは NFKC 後に半角空白の連続になる。値の直後（コロンが続かない）の2つ以上の空白だけで区切り、
@@ -50,16 +62,37 @@ function countLines(body: string, re: RegExp, extra?: RegExp, extraWeight = 1): 
       // 見出しは行頭の短い範囲にある。長い行をそのまま正規表現にかけない（空白の連続で遅くならないように）
       const head = piece.slice(0, 80);
       if (/^\s*(>|＞)/.test(head)) continue;
-      if (re.test(head)) n += 1;
-      else if (extra?.test(head)) n += extraWeight;
+      onHead(head);
     }
   }
+}
+
+// 見出しの行数（引用行は数えない）
+function countLines(body: string, re: RegExp): number {
+  let n = 0;
+  eachHead(body, (head) => {
+    if (re.test(head)) n += 1;
+  });
   return n;
+}
+
+// 要員の見出しの違う語の数。イニシャル＋（NN歳）の行は「名前」と「年齢」の2語と数える
+function countEngineerWords(body: string): number {
+  const seen = new Set<string>();
+  eachHead(body, (head) => {
+    const hit = ENGINEER_GROUPS.find((g) => g.re.test(head));
+    if (hit) seen.add(hit.key);
+    else if (INITIAL_AGE.test(head)) {
+      seen.add('name');
+      seen.add('age');
+    }
+  });
+  return seen.size;
 }
 
 export function classifyMailKind(mail: Pick<SesRawMail, 'body'>): MailKind {
   const body = mail.body.slice(0, 20_000);
-  const eng = countLines(body, ENGINEER_HEADINGS, INITIAL_AGE, 2);
+  const eng = countEngineerWords(body);
   const proj = countLines(body, PROJECT_HEADINGS);
   // 要員の見出しが2つ以上あり、案件の見出しがほとんど無いものだけを要員とする（一覧や混在メールは抽出側へ）
   if (eng >= 2 && proj <= 1) return 'engineer';

@@ -135,7 +135,7 @@ import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
-import { readRawAttachments, rawMimeOf, attachmentMaterial } from '../trial/rawAttach.js';
+import { readRawAttachments, rawMimeOf, attachmentMaterial, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -187,7 +187,7 @@ import { lastChanceBudgetJpy } from '../matchRun.js';
 import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
 import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
-import { sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
+import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
 import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
@@ -3543,6 +3543,11 @@ function mailKindChecks(): void {
   check('中黒の地の文「・稼働 中の案件があります」「・名前 未定」は数えない', k('・稼働 中の案件があります\n・名前 未定') === 'unknown');
   check('値の無い「◆名前」「◆稼働」だけは数えない', k('◆名前\n◆稼働') === 'unknown');
   check('【要員名】は要員の見出し', k('【要員名】A.I\n【所属】弊社') === 'engineer');
+  const PROJ3 = [1, 2, 3].map((n) => `■案件${n}\n最寄駅：フルリモート\n単価：60万\n`).join('\n');
+  check('案件を3件並べ、各案件に「最寄駅：フルリモート」がある本文（案件の見出しは0行）は engineer にしない', k(PROJ3) !== 'engineer');
+  check('違う見出し語（氏名・最寄駅・稼働）が並ぶ要員紹介は engineer', k('氏名：A.B\n最寄駅：○○\n稼働：即日\n') === 'engineer');
+  check('「最寄駅」「最寄り駅」だけは同じ語なので1つと数え engineer にしない', k('最寄駅：○○\n最寄り駅：○○\n') !== 'engineer');
+  check('稼働・稼動／氏名・名前も同じ語として1つ', k('稼働：即日\n稼動：即日\n') !== 'engineer' && k('氏名：A.B\n名前：A.B\n') !== 'engineer');
   const t0 = Date.now();
   k(' '.repeat(50_000) + '\n' + '【'.repeat(50_000));
   check('空白・飾りの長い行でも遅くならない', Date.now() - t0 < 500, `${Date.now() - t0}ms`);
@@ -4899,8 +4904,8 @@ async function salesListRound2Checks(): Promise<void> {
     const eml = await readRawAttachments(Buffer.from(mime(true)), outDir, 'case1');
     const sheet = eml.attachments.find((a) => a.kind === 'sheet');
     const pdfAtt = eml.attachments.find((a) => a.kind === 'pdf');
-    check('添付の読み取り（.eml）: 表計算は文字にして kind=sheet・textChars・text（8000文字まで）、PDF は出力ディレクトリに書き出して kind=pdf・pdfPath（文字にはしない）、Message-ID の有無を返す',
-      eml.attachments.length === 2 && sheet !== undefined && sheet.name === 'list.xlsx' && sheet.textChars === (sheet.text ?? '').length && (sheet.text ?? '').length <= 8000 &&
+    check('添付の読み取り（.eml）: 表計算は文字にして kind=sheet・textChars・text（40000文字まで）、PDF は出力ディレクトリに書き出して kind=pdf・pdfPath（文字にはしない）、Message-ID の有無を返す',
+      eml.attachments.length === 2 && sheet !== undefined && sheet.name === 'list.xlsx' && sheet.textChars === (sheet.text ?? '').length && (sheet.text ?? '').length <= ATTACH_TEXT_MAX &&
         pdfAtt !== undefined && pdfAtt.name === 'sheet.pdf' && pdfAtt.textChars === 0 && pdfAtt.text === undefined && fsExists(pdfAtt.pdfPath ?? '') && fsRead(pdfAtt.pdfPath ?? '').equals(pdf) && eml.messageIdHeaderPresent === true,
       JSON.stringify({ n: eml.attachments.length, chars: sheet?.textChars }));
     const wrapped = Buffer.from(JSON.stringify({ raw: Buffer.from(mime(false)).toString('base64url') }));
@@ -4918,9 +4923,13 @@ async function salesListRound2Checks(): Promise<void> {
     rmSync(outDir, { recursive: true, force: true });
   }
   const mat = attachmentMaterial('本文の先頭', '■案件名\nJava開発A', 'あ'.repeat(9000), ['list.xlsx']);
-  check('試運転の案件の材料: 抽出の入力は本文の後ろに【添付: 名前】つきで（8000文字まで）、案件詳細は本文の抜粋の後ろに「【添付より】」で1500文字まで',
-    mat.body.startsWith('本文の先頭\n\n【添付: list.xlsx】\n') && mat.body.length === '本文の先頭\n\n【添付: list.xlsx】\n'.length + 8000 &&
+  check('試運転の案件の材料: 抽出の入力は本文の後ろに【添付: 名前】つきで（40000文字まで）、案件詳細は本文の抜粋の後ろに「【添付より】」で1500文字まで',
+    mat.body.startsWith('本文の先頭\n\n【添付: list.xlsx】\n') && mat.body.length === '本文の先頭\n\n【添付: list.xlsx】\n'.length + 9000 &&
       mat.detail.startsWith('■案件名\nJava開発A\n\n【添付より】\n') && mat.detail.length === '■案件名\nJava開発A\n\n【添付より】\n'.length + 1500);
+  const over = attachmentMaterial('本文', '', 'い'.repeat(MAX_ATTACHMENT_CHARS + 500), ['big.xlsx']);
+  check('試運転の添付の上限は本番の抽出と同じ（40000文字）。9000文字は切れずに材料に入り、超えると切れる',
+    ATTACH_TEXT_MAX === MAX_ATTACHMENT_CHARS && MAX_ATTACHMENT_CHARS === 40_000 && mat.body.endsWith('あ'.repeat(9000)) &&
+      over.body.length === '本文\n\n【添付: big.xlsx】\n'.length + MAX_ATTACHMENT_CHARS);
   const none = attachmentMaterial('本文', '抜粋', undefined, undefined);
   check('試運転の案件の材料: 添付の文字が無ければ今までどおり（本文・抜粋のまま）。抜粋が空でも添付だけで詳細になる',
     none.body === '本文' && none.detail === '抜粋' && attachmentMaterial('本文', '', '表の文字', []).detail === '【添付より】\n表の文字');
