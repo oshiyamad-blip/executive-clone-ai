@@ -135,7 +135,8 @@ import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
 import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
-import { readRawAttachments, rawMimeOf, attachmentMaterial, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
+import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
+import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { buildProperProposalBody } from '../proper/proposal.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import { fingerprintOf, splitResends, serializeFingerprint, parseFingerprint, type FingerprintRecord } from '../resend.js';
@@ -3513,6 +3514,9 @@ function mailKindChecks(): void {
   check('全角空白で字間を空けた見出し・行頭の飾りも読む', k('■氏　名：Y.T.\n◆最 寄 駅：横浜\n1) 希望単金：60万\n') === 'engineer');
   check('案件と要員の見出しが両方ある（混在・一覧）は unknown（抽出する側）', k(ENG + '\n' + PROJ) === 'unknown');
   check('見出しの無い短い本文は unknown', k('ご確認をお願いいたします。') === 'unknown');
+  check('【時　期】【単　価】【居住地】【最　寄】【スキル】【備　考】の要員紹介は engineer（居住地は住まいと同じ語・最寄と合わせて2語）',
+    k('【時　期】即日\n【単　価】65万円\n【居住地】神奈川県\n【最　寄】横浜\n【スキル】Java/Spring Boot\n【備　考】面談可\n') === 'engineer');
+  check('案件の見出し（案件名・必須スキル）が2つあれば【居住地】があっても engineer にしない', k('【案件名】在庫管理システム改修\n【必須スキル】Java 3年以上\n【居住地】関東圏\n') !== 'engineer');
   check('引用部分の見出しは数えない', k('> 【氏名】A.B.\n> 【最寄駅】品川\n> 【希望単価】60万\nご提案ありがとうございます。') === 'unknown');
   check('件名は使わない（件名が「要員募集」でも本文が案件なら project）', k(PROJ) === 'project');
   check('【氏名】【所属】【稼働】【単金】の要員紹介の定型も engineer', k('【氏名】FI(27歳_男性_泉岳寺駅)\n【所属】弊社個人事業主\n【稼働】9月～\n【単金】75万\n【スキル】Java\n') === 'engineer');
@@ -3857,6 +3861,24 @@ async function properJudgeChecks(): Promise<void> {
     ok.verdict === 'recommend' && ok.met[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応' && ok.reviewNotes.length === 0, JSON.stringify(ok));
   const spaced = verifyJudgment(raw({ requirements: [{ requirement: 'Oracle', status: 'met', evidence: 'Oracle DB 上でのデータ作成､削除対応', note: '' }] }), profile, { requiredSkills: ['Oracle'] });
   check('空白・全角半角の違いは同じ記載とみなす', spaced.verdict === 'recommend' && spaced.reviewNotes.length === 0, JSON.stringify(spaced));
+  const springProfile = '【スキルシート】\nECサイトの注文画面\nSpring BootとThymeleafで画面を開発\n顧客管理の運用保守';
+  const springReq = (requirement: string, status: 'met' | 'close' | 'unmet', kind?: '必須' | '尚可') => raw({ requirements: [{ requirement, ...(kind ? { kind } : {}), status, evidence: '', note: '経歴に記載なし' }] });
+  const rescued = verifyJudgment(springReq('Thymeleaf、Spring Bootでの開発', 'unmet', '必須'), springProfile, { requiredSkills: ['Thymeleaf、Spring Bootでの開発'] });
+  const rescuedCheck = rescued.checks?.[0];
+  check('AIが「経験なし」とした必須でも、要件の技術名がすべて経歴にあれば close（evidence は経歴のその行・note は要確認）',
+    rescuedCheck?.status === 'close' && rescuedCheck.evidence === 'Spring BootとThymeleafで画面を開発' && rescuedCheck.note === '経歴に記載あり（AIの判定は経験なし。要確認）' && rescued.verdict !== 'reject', JSON.stringify(rescuedCheck));
+  const partial = verifyJudgment(springReq('Thymeleaf、Spring Bootでの開発', 'unmet', '必須'), 'ECサイトの注文画面\tThymeleafで画面を開発', { requiredSkills: ['Thymeleaf、Spring Bootでの開発'] });
+  check('経歴に技術名の一部（Thymeleaf だけ）しか無い要件は unmet のまま', partial.checks?.[0]?.status === 'unmet', JSON.stringify(partial.checks?.[0]));
+  const soft = verifyJudgment(springReq('コミュニケーション能力', 'unmet', '必須'), `${springProfile}\nコミュニケーション能力を活かしたチーム開発`, { requiredSkills: ['コミュニケーション能力'] });
+  check('技術名を取り出せない要件（コミュニケーション能力）の unmet はそのまま', soft.checks?.[0]?.status === 'unmet', JSON.stringify(soft.checks?.[0]));
+  const optRescued = verifyJudgment(raw({ requirements: [
+    { requirement: 'Oracle', kind: '必須', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
+    { requirement: 'Thymeleaf', kind: '尚可', status: 'unmet', evidence: '', note: '経歴に記載なし' },
+  ] }), `${profile}\nSpring BootとThymeleafで画面を開発`, { requiredSkills: ['Oracle'] });
+  const optCheck = optRescued.checks?.find((c) => c.requirement === 'Thymeleaf');
+  check('尚可も同じ扱い（経歴に技術名があれば close）', optCheck?.status === 'close' && optCheck.evidence === 'Spring BootとThymeleafで画面を開発', JSON.stringify(optCheck));
+  const shortName = verifyJudgment(springReq('Go言語での開発', 'unmet', '必須'), '【スキルシート】\nGoogle Workspaceの運用\nCategory管理画面の保守', { requiredSkills: ['Go言語での開発'] });
+  check('「Go」のような短い技術名は経歴の別の語（Google・Category）への部分一致で close にしない', shortName.checks?.[0]?.status === 'unmet', JSON.stringify(shortName.checks?.[0]));
   const fake = verifyJudgment(raw({ requirements: [
     { requirement: 'Oracle', status: 'met', evidence: 'Oracle DB上でのデータ作成、削除対応', note: '' },
     { requirement: 'Java', status: 'met', evidence: 'Javaで基幹システムを5年開発', note: '' },
@@ -4919,9 +4941,38 @@ async function salesListRound2Checks(): Promise<void> {
       bad = err instanceof Error ? err.message : '';
     }
     check('添付の読み取り: raw の無い JSON は止める', bad.includes('raw'));
+    check('添付の読み取り: 文字にできない PDF（壊れている）は text を空にして textError: true・pdfPath は書く',
+      pdfAtt !== undefined && pdfAtt.textError === true && pdfAtt.textChars === 0 && pdfAtt.text === undefined && fsExists(pdfAtt.pdfPath ?? ''));
+    const goodPdf = minimalTextPdf('Synthetic Java project list 12345');
+    const okMime = ['From: Sales <sales@partner.example>', 'To: us@our.example', 'Subject: test', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="BND"', '', '--BND',
+      'Content-Type: text/plain; charset=utf-8', '', 'body text', '--BND', 'Content-Type: application/pdf; name="ok.pdf"', 'Content-Transfer-Encoding: base64',
+      'Content-Disposition: attachment; filename="ok.pdf"', '', b64(goodPdf), '--BND--', ''].join('\r\n');
+    const withText = await readRawAttachments(Buffer.from(okMime), outDir, 'case3');
+    const okAtt = withText.attachments.find((a) => a.kind === 'pdf');
+    check('添付の読み取り: PDF は unpdf で文字にして text・textChars に入れる（textError なし）',
+      okAtt !== undefined && (okAtt.text ?? '').includes('Synthetic Java project list') && okAtt.textChars === (okAtt.text ?? '').length && okAtt.textError === undefined && fsExists(okAtt.pdfPath ?? ''),
+      JSON.stringify({ chars: okAtt?.textChars }));
+    check('PDF の文字化: 小さな PDF から文字が取れ、壊れた PDF・空のバイト列は空文字',
+      (await pdfBufferToText(goodPdf)).includes('12345') && (await pdfBufferToText(pdf)) === '' && (await pdfBufferToText(Buffer.alloc(0))) === '');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
+  const gapRows = [
+    { messageId: 'm1', kind: 'project', extraction: { projects: [{}] }, bodyHead: 'あ'.repeat(1500) },
+    { messageId: 'm2', kind: 'project', extraction: { projects: [{}, {}] }, bodyHead: 'い'.repeat(999), attachmentText: '【必須】Ｊａｖａ ３年以上' },
+    { messageId: 'm3', kind: 'project', extraction: { projects: [{}] }, bodyHead: 'う'.repeat(1000) },
+    { messageId: 'm4', kind: 'project', extraction: { projects: [] }, bodyHead: '短い' },
+    { messageId: 'm5', kind: 'engineer', bodyHead: '短い' },
+  ];
+  check('本文の写しのずれ: bodyHead が1000文字未満の割合は、案件が1件以上の案件メールだけで数える（1000文字ちょうどは短くない）', bodyHeadShortPct(gapRows) === 33.3 && bodyHeadShortPct([]) === null);
+  const gapProj = new Map([['p1', 'sesmail_m1'], ['p2', 'sesmail_m2'], ['p3', 'sesmail_m3']]);
+  const gapJudged = [
+    { projectId: 'p1', judgment: { requirements: [{ quote: 'ああ' }, { quote: 'あ あ\nあ' }, { quote: '' }, { quote: '写し間違い' }] } },
+    { projectId: 'p2', judgment: { requirements: [{ quote: '【必須】Java 3年以上' }, { quote: '尚可 AWS' }] } },
+    { projectId: 'pX', judgment: { requirements: [{ quote: '案件のメール不明' }] } },
+  ];
+  check('本文の写しのずれ: quote が bodyHead（＋attachmentText）に無い割合（空白・改行・全角半角は無視。空の quote・メール不明は数えない）',
+    quoteMissingPct(gapRows, gapJudged, gapProj) === 40 && quoteMissingPct(gapRows, [], gapProj) === null);
   const mat = attachmentMaterial('本文の先頭', '■案件名\nJava開発A', 'あ'.repeat(9000), ['list.xlsx']);
   check('試運転の案件の材料: 抽出の入力は本文の後ろに【添付: 名前】つきで（40000文字まで）、案件詳細は本文の抜粋の後ろに「【添付より】」で1500文字まで',
     mat.body.startsWith('本文の先頭\n\n【添付: list.xlsx】\n') && mat.body.length === '本文の先頭\n\n【添付: list.xlsx】\n'.length + 9000 &&
@@ -4933,6 +4984,28 @@ async function salesListRound2Checks(): Promise<void> {
   const none = attachmentMaterial('本文', '抜粋', undefined, undefined);
   check('試運転の案件の材料: 添付の文字が無ければ今までどおり（本文・抜粋のまま）。抜粋が空でも添付だけで詳細になる',
     none.body === '本文' && none.detail === '抜粋' && attachmentMaterial('本文', '', '表の文字', []).detail === '【添付より】\n表の文字');
+}
+
+// テスト用の最小の PDF（1ページ・Helvetica で1行の文字）。xref は byte offset で正しく組む
+function minimalTextPdf(text: string): Buffer {
+  const stream = `BT /F1 12 Tf 20 100 Td (${text}) Tj ET`;
+  const objs = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objs.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
 }
 
 async function main(): Promise<void> {
