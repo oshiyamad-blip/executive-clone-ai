@@ -45,7 +45,7 @@ interface OutRow {
   kind?: string;
   extraction?: { projects?: unknown[]; engineers?: unknown[]; injectionSuspected?: boolean };
   bodyHead?: string;
-  // 案件メールの添付（表計算）の文字。ses:trial:raw の出力（text）を8000文字まで。読めなかったときは attachmentUnread
+  // 案件メールの添付（表計算）の文字。ses:trial:raw の出力（text）を40000文字まで。読めなかったときは attachmentUnread
   attachmentText?: string;
   attachmentNames?: string[];
   attachmentUnread?: boolean;
