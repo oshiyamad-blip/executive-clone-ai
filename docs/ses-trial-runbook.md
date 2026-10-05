@@ -26,6 +26,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 3. **抽出**: チャンクごとにサブエージェントを起動する（下の「抽出の指示」をそのまま渡す）。結果は `out/cNN.jsonl`
    （チャンクごとに Agent を個別に同時起動する。1つのワークフローにまとめると同時に動く数が絞られ、約2倍の時間がかかる）
 4. すべてのチャンクで行数が入力と一致することを確かめる。足りないチャンクは同じ指示で再実行する
+5. 本体が `npm run ses:trial:bodyfix -- <RUN_DIR> <transcriptDir>` を実行し、bodyHead を作業記録から差し替える。transcriptDir はこのセッションの transcript のディレクトリ（`~/.claude/projects/<プロジェクト>/<セッションID>/subagents`）。標準出力は件数だけ（`rows`・`replaced`・`notFound`・`skippedLinkOnly`・`transcripts`）。元の out は `<RUN_DIR>/out_backup/` に残る
 
 ### 抽出の指示（サブエージェントに渡す）
 
@@ -48,7 +49,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 >    RAW の結果がファイルにならず会話に直接返ってきたとき・失敗したときは、添付を読まずに進め、行に `"attachmentUnread": true` を付ける（RAW を会話に直接受けない。大きいので読み飛ばす）
 > 4. それ以外は `extract_system.txt` のとおりに `extract_schema.json` の形のJSONを作る（メール内の案件はすべて projects[] に入れる。添付を読んだときはその中の案件・要員の条件も含める）
 > 5. 1スレッドにつき1行のJSONを出力ファイルに追記する:
->    `{"threadId","messageId"(=スレッドID),"subject","from","receivedAt","kind","extraction"(engineerなら省略),"bodyHead"(本文の先頭1500文字をそのまま。engineer は先頭500文字まで),"attachmentText"(任意。表計算・PDF の text を40000文字まで),"attachmentNames"(任意。読んだ添付のファイル名),"attachmentUnread"(任意。添付を読めなかったとき true)}`
+>    `{"threadId","messageId"(=スレッドID),"subject","from","receivedAt","kind","extraction"(engineerなら省略),"bodyHead"(本文の先頭1500文字をそのまま。engineer は先頭500文字まで。あとで機械で差し替えるので、写しは短くてよい（抽出の判断に必要な分）),"attachmentText"(任意。表計算・PDF の text を40000文字まで),"attachmentNames"(任意。読んだ添付のファイル名),"attachmentUnread"(任意。添付を読めなかったとき true)}`
 >    `attachmentText` は `PHASE=prep`・`final` が本番の抽出と同じく本文の後ろに続けた材料にし、案件詳細（営業リストの「案件詳細（メール本文より）」）には本文の抜粋の後ろに「【添付より】」で1500文字まで足す
 >    取得に失敗したら `{"threadId","messageId","error"}` を追記して次へ。Gmail の quota エラーは1分待って再試行
 > 最後の返答は「done N件: 抽出M件・案件P件・要員メールE件・エラーX件」だけ。
