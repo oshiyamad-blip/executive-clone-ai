@@ -34,8 +34,12 @@ function heading(words: string[]): RegExp {
 const ENGINEER_HEADINGS = heading(['氏名', '名前', '要員名', 'イニシャル', '最寄駅', '最寄り駅', '最寄り', '最寄', '住まい', '所属', '稼働', '稼動', '並行状況', '技術者番号', '希望単価', '希望単金', '稼働開始日', '稼働可能日', '性別']);
 const PROJECT_HEADINGS = heading(['案件名', '必須スキル', '必須', '尚可スキル', '尚可', '募集人数', '人数', '面談回数', '面談', '精算', '精算幅', '商流', '作業内容', '業務内容', '開発環境', '予算']);
 
-// 見出しの行数（引用行は数えない）
-function countLines(body: string, re: RegExp): number {
+// 見出しの無い要員紹介の名乗りの行（「☆A.B（25歳…」）。イニシャルと年齢を兼ねるので要員の見出し2行と数える。
+// 3文字以上の英字（ABC）や行の途中の「担当はA.B（25歳）です」は当てない
+const INITIAL_AGE = new RegExp(String.raw`^\s*(?:${DECO})*\s*[A-Z]\.?\s*[A-Z]\.?\s*[(]\s*\d{2}\s*歳`);
+
+// 見出しの行数（引用行は数えない）。extra に当たる行は extraWeight 行と数える
+function countLines(body: string, re: RegExp, extra?: RegExp, extraWeight = 1): number {
   let n = 0;
   for (const line of body.normalize('NFKC').split(/\r?\n/)) {
     // 改行が潰れて1行に見出しが並ぶメールがある。長い行だけ見出しの始まりの前で分ける（短い行は今までどおり）。
@@ -47,6 +51,7 @@ function countLines(body: string, re: RegExp): number {
       const head = piece.slice(0, 80);
       if (/^\s*(>|＞)/.test(head)) continue;
       if (re.test(head)) n += 1;
+      else if (extra?.test(head)) n += extraWeight;
     }
   }
   return n;
@@ -54,7 +59,7 @@ function countLines(body: string, re: RegExp): number {
 
 export function classifyMailKind(mail: Pick<SesRawMail, 'body'>): MailKind {
   const body = mail.body.slice(0, 20_000);
-  const eng = countLines(body, ENGINEER_HEADINGS);
+  const eng = countLines(body, ENGINEER_HEADINGS, INITIAL_AGE, 2);
   const proj = countLines(body, PROJECT_HEADINGS);
   // 要員の見出しが2つ以上あり、案件の見出しがほとんど無いものだけを要員とする（一覧や混在メールは抽出側へ）
   if (eng >= 2 && proj <= 1) return 'engineer';
