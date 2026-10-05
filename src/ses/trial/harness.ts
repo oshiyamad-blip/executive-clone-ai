@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { parseJstLabel } from './jstLabel.js';
+import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
@@ -161,6 +162,20 @@ function previouslyJudged(list: ProperEngineer[]): Map<string, Set<string>> {
   return byEngineer;
 }
 
+// 前の回とこの回の判定ファイル（judged_<要員>.json）の中身。再送で案件IDが替わった組の判定の使い回しに使う
+function judgedFilesOf(label: string): Array<{ projectId: string; judgment: RawProperJudgment }> {
+  const rows: Array<{ projectId: string; judgment: RawProperJudgment }> = [];
+  for (const d of [...carryDirs(), resolve(dir)]) {
+    const f = join(d, `judged_${label}.json`);
+    try {
+      if (existsSync(f)) rows.push(...(JSON.parse(readFileSync(f, 'utf8')) as typeof rows));
+    } catch (err) {
+      console.error(`判定を読めませんでした（飛ばします）: ${f}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return rows;
+}
+
 // ===== 要員リスト（roster.json：{ spreadsheetId, rows, gidOf, sheets: { 名前: 値 } }） =====
 interface RosterDump {
   spreadsheetId: string;
@@ -228,6 +243,17 @@ async function judgedCandidates() {
     if (!has(`judged_${label}.json`)) continue;
     for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, r.judgment);
   }
+  // 再送で代表が替わった組は、prep が reused.json に残した前の案件の判定を使う（判定の中身はそのまま。projectId だけ新しい案件）
+  const reused = has('reused.json') ? read<ReusedPair[]>('reused.json') : [];
+  for (const e of list) {
+    const label = e.proposalLabel || e.displayName;
+    const before = new Map(judgedFilesOf(label).map((r) => [r.projectId, r.judgment]));
+    for (const r of reused.filter((x) => x.engineer === label)) {
+      if (judged.has(`${e.id}|${r.projectId}`)) continue;
+      const j = judgmentFor(before, r.projectId, reused, label);
+      if (j) judged.set(`${e.id}|${r.projectId}`, j);
+    }
+  }
   __setProperJudgeForTest(async (e, p) => {
     const j = judged.get(`${e.id}|${p.id}`);
     if (j) return j;
@@ -285,8 +311,18 @@ if (phase === 'prompts') {
   const auditKeys = audit.map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`);
   const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
   let carried = 0;
-  for (const p of [...selected, ...audit]) {
-    if (done.get(p.match.ownEngineerId)?.has(p.match.projectId)) continue;
+  // 再送で代表の案件IDが替わった組は、中身（案件名・必須・単価・都道府県・開始年月）が同じ案件の前の判定を使い回し、判定に回さない
+  const labelOfId = (id: string) => labelOf.get(id) ?? '';
+  const allProjectById = new Map(projects.map((x) => [x.id, x]));
+  const judgedBefore = list.flatMap((e) => judgedFilesOf(labelOfId(e.id)).map((r) => ({ engineer: labelOfId(e.id), projectId: r.projectId })));
+  const split = splitReused(
+    [...selected, ...audit].filter((p) => !done.get(p.match.ownEngineerId)?.has(p.match.projectId)).map((p) => ({ p, engineer: labelOfId(p.match.ownEngineerId), projectId: p.match.projectId })),
+    indexJudgedByContent(judgedBefore, allProjectById),
+    allProjectById,
+  );
+  const reused: ReusedPair[] = split.reused;
+  writeFileSync(join(dir, 'reused.json'), JSON.stringify(reused, null, 1));
+  for (const { p } of split.toJudge) {
     if (carriedIds.has(p.match.projectId)) carried += 1;
     const e = list.find((x) => x.id === p.match.ownEngineerId) as ProperEngineer;
     const pj = kept.find((x) => x.id === p.match.projectId) as Project;
@@ -295,7 +331,7 @@ if (phase === 'prompts') {
   for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
   writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
-  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size }));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, reused: reused.length }));
 } else if (phase === 'final') {
   const { list, projects, judged, candidates, stats, auditHitKeys } = await judgedCandidates();
   // AI判定の失敗が多い回は書き込みの元（plan.json・writes）を作らない（前の回のファイルも残さない）
