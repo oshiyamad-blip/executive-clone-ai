@@ -138,6 +138,8 @@ import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../pr
 import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { fixRunDir } from '../trial/bodyFix.js';
+import { windowsOf } from '../trial/windows.js';
+import { planLabelSheet, packLabelElements, exportCli } from './labelSheet.js';
 import { chunkRunDir } from '../trial/chunks.js';
 import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
 import { contentKeyOf, indexJudgedByContent, splitReused, judgmentFor } from '../trial/reuse.js';
@@ -5094,9 +5096,129 @@ function bodyFixChecks(): void {
       (() => { fixRunDir(join(dir, 'run'), join(dir, 'sub')); return readFileSyncB(join(dir, 'run', 'out_backup', 'c01.jsonl'), 'utf8') === original && readdirSyncBf(join(dir, 'run', 'out_backup')).length === 1; })());
     const cli = JSON.stringify(res);
     check('bodyFix: 標準出力に出す内容は件数の JSON だけ（本文・件名・スレッドIDを含まない）',
-      cli === JSON.stringify({ rows: 4, replaced: 2, notFound: 1, skippedLinkOnly: 1, transcripts: 1 }) && logs.length === 0 && !cli.includes('thA') && !cli.includes('あ'));
+      cli === JSON.stringify({ rows: 4, replaced: 2, notFound: 1, skippedLinkOnly: 1, skippedBySubject: 0, transcripts: 1 }) && logs.length === 0 && !cli.includes('thA') && !cli.includes('あ'));
   } finally {
     console.log = origLog;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// bodyFix が get_message の結果（1通の JSON）も読む・skippedBySubject の行は触らない（作り物のデータだけ）
+function bodyFixMessageChecks(): void {
+  section('試運転: bodyFix の get_message 対応');
+  const dir = mkdtempSync(join(tmpdir(), 'ses-bodyfix-msg-'));
+  const origLog = console.log;
+  try {
+    mkdirSyncBf(join(dir, 'sub'), { recursive: true });
+    mkdirSyncBf(join(dir, 'run', 'out'), { recursive: true });
+    const userLine = (content: unknown) => JSON.stringify({ type: 'user', message: { role: 'user', content } });
+    const thread = (id: string, msgs: Array<{ d: string; b: string }>) =>
+      JSON.stringify({ id, messageCount: msgs.length, messages: msgs.map((m, i) => ({ id: `m${i}`, internalDate: m.d, plaintextBody: m.b })) });
+    const message = (threadId: string, d: string, b: string) => JSON.stringify({ id: `msg_${threadId}`, threadId, internalDate: d, plaintextBody: b });
+    const bodyM = 'M'.repeat(300);
+    const bodyT = 'T'.repeat(300);
+    const bodyN = 'N'.repeat(300);
+    const lines = [
+      userLine([{ type: 'tool_result', tool_use_id: 'a', content: thread('thB', [{ d: '1000', b: bodyT }]) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'b', content: message('thB', '3000', bodyM) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'c', content: thread('thC', [{ d: '1000', b: bodyT }, { d: '4000', b: bodyN }]) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'd', content: message('thC', '2000', bodyM) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'e', content: message('thD', '5000', bodyM) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'f', content: thread('thD', [{ d: '5000', b: bodyT }, { d: '5000', b: bodyT }]) }]),
+    ];
+    writeFileSyncForEval(join(dir, 'sub', 'agent-y.jsonl'), lines.join('\n'));
+    const rows = [
+      { threadId: 'thB', messageId: 'thB', kind: 'project', bodyHead: 'hand' },
+      { threadId: 'thC', messageId: 'thC', kind: 'project', bodyHead: 'hand' },
+      { threadId: 'thD', messageId: 'thD', kind: 'project', bodyHead: 'hand' },
+      { threadId: 'thB', messageId: 'thB', kind: 'engineer', bodyHead: '', skippedBySubject: true },
+    ];
+    const outFile = join(dir, 'run', 'out', 'c00.jsonl');
+    const original = `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`;
+    writeFileSyncForEval(outFile, original);
+    console.log = () => {};
+    const res = fixRunDir(join(dir, 'run'), join(dir, 'sub'));
+    console.log = origLog;
+    const after = readFileSyncB(outFile, 'utf8').split('\n');
+    const [b, c, d] = [0, 1, 2].map((i) => JSON.parse(after[i] ?? '{}') as { bodyHead?: string });
+    check('bodyFix: get_thread と get_message の両方があれば最新メッセージの internalDate が大きい方（get_message が新しければ get_message・get_thread が新しければ get_thread）',
+      b.bodyHead === bodyM && c.bodyHead === bodyN, show([b.bodyHead?.[0], c.bodyHead?.[0]]));
+    check('bodyFix: internalDate が同じなら messages が多い方（get_thread の2通）', d.bodyHead === bodyT, show(d.bodyHead?.[0]));
+    check('bodyFix: skippedBySubject の行は差し替えず、replaced・notFound にも数えない（skippedBySubject の件数だけ）',
+      after[3] === JSON.stringify(rows[3]) && res.rows === 4 && res.replaced === 3 && res.notFound === 0 && res.skippedBySubject === 1, show(res));
+  } finally {
+    console.log = origLog;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 一覧の区切り: 平日の昼は30分ごと・夜間と土日は続く間を1つにまとめる（JST。作り物の時刻だけ）
+function trialWindowsChecks(): void {
+  section('試運転: 一覧の区切り');
+  const jst = (d: number, h: number): number => Date.UTC(2026, 9, d, h - 9) / 1000; // 2026-10 の d 日 h 時（JST）。5日=月・9日=金・10日=土
+  const at = (w: Array<[number, number]>, i: number): [number, number] => w[i] ?? [0, 0];
+  const day = windowsOf(jst(6, 12), jst(6, 14));
+  check('windowsOf: 平日の昼の2時間は30分ごとの4区切り（前の before = 次の after）',
+    day.length === 4 && at(day, 0)[0] === jst(6, 12) && at(day, 3)[1] === jst(6, 14) && day.every((w, i) => w[1] - w[0] === 1800 && (i === 0 || at(day, i - 1)[1] === w[0])), show(day.length));
+  const ev = windowsOf(jst(6, 18), jst(7, 9));
+  const lenH = (w: [number, number]) => (w[1] - w[0]) / 3600;
+  check('windowsOf: 平日 18:00〜翌 09:00 は 18〜21 時が6区切り・21〜08 時が1区切り・08〜09 時が2区切り（計9）',
+    ev.length === 9 && ev.slice(0, 6).every((w) => lenH(w) === 0.5) && at(ev, 5)[1] === jst(6, 21) && at(ev, 6)[0] === jst(6, 21) && at(ev, 6)[1] === jst(7, 8) && lenH(at(ev, 6)) === 11 && ev.slice(7).every((w) => lenH(w) === 0.5) && at(ev, 8)[1] === jst(7, 9), show(ev.length));
+  const wk = windowsOf(jst(9, 20), jst(12, 9));
+  check('windowsOf: 金 20:00〜月 09:00 は 20〜21 時が2区切り・夜〜週末〜月 08:00 が1区切り・月 08〜09 時が2区切り',
+    wk.length === 5 && at(wk, 2)[0] === jst(9, 21) && at(wk, 2)[1] === jst(12, 8) && at(wk, 4)[1] === jst(12, 9), show(wk.map((w) => lenH(w))));
+  const sat = windowsOf(jst(10, 10), jst(10, 15));
+  check('windowsOf: 土曜の昼は1区切り・先頭と末尾は start と end のまま・start 以上 end 未満の空は空配列',
+    sat.length === 1 && at(sat, 0)[0] === jst(10, 10) && at(sat, 0)[1] === jst(10, 15) && windowsOf(jst(6, 12), jst(6, 12)).length === 0);
+  const odd = windowsOf(jst(6, 12) + 600, jst(6, 21) + 600);
+  check('windowsOf: 30分刻みは start から（08:00 にそろえなくてよい）・21:00 をまたぐ区切りは 21:00 で切る',
+    at(odd, 0)[1] === jst(6, 12) + 2400 && odd.length === 19 && at(odd, 17)[1] === jst(6, 21) && at(odd, 18)[1] === jst(6, 21) + 600, show(odd.length));
+}
+
+// ラベル控えの表計算: 読み戻しと機械で照合して足りない行・違う行だけ書く（作り物のデータだけ）
+function labelSheetChecks(): void {
+  section('ラベル控えの表計算（ses:labels:sheet）');
+  const mk = (key: string, verdict = 'recommend'): string =>
+    backupLineOf({ key, runId: 'run_t', judgedAt: '2026-10-01T00:00:00.000Z', priority: 'A', project: { sourceMailId: 'mail1' }, judgment: { verdict, requirements: [], rateReason: '' } } as unknown as LabelPair);
+  const store = ['e1|p1', 'e1|p2', 'e2|p3'].map((k) => mk(k));
+  const empty = planLabelSheet(store, []);
+  const written = empty.elements.flatMap((e) => e.values.map((v) => v[0]));
+  check('planLabelSheet: 空の表計算は見出し＋全行が append（A1 から連続1要素）',
+    empty.append === 3 && empty.rewrite === 0 && empty.inSheet === 0 && empty.elements.length === 1 && empty.elements[0]?.range === "'ラベル控え'!A1:A4" && written[0] === BACKUP_HEADER && written.slice(1).join('\n') === store.join('\n'), show(empty.elements.map((e) => e.range)));
+  const full = planLabelSheet(store, [BACKUP_HEADER, ...store]);
+  check('planLabelSheet: 全部そろっていれば要素 0', full.elements.length === 0 && full.append === 0 && full.rewrite === 0 && full.inSheet === 3);
+  const broken = store[1]?.replace(/.$/, (c) => (c === '0' ? '1' : '0')) ?? '';
+  const fix = planLabelSheet(store, [BACKUP_HEADER, store[0] ?? '', broken, store[2] ?? ''], 'シート');
+  check('planLabelSheet: crc が壊れた1行だけ rewrite（その行番号の1要素・シート名はそのまま range に入る）',
+    fix.rewrite === 1 && fix.append === 0 && fix.elements.length === 1 && fix.elements[0]?.range === "'シート'!A3:A3" && fix.elements[0]?.values[0]?.[0] === store[1], show(fix.elements.map((e) => e.range)));
+  const changed = planLabelSheet([mk('e1|p1', 'reject')], [BACKUP_HEADER, mk('e1|p1')]);
+  check('planLabelSheet: crc が合っていても中身がストアと違う行は rewrite', changed.rewrite === 1 && changed.append === 0);
+  const shuffled = planLabelSheet(store, [BACKUP_HEADER, store[2] ?? '', store[0] ?? '', store[1] ?? '']);
+  check('planLabelSheet: 行の順番がストアと違っても key で突き合わせる（要素 0）', shuffled.elements.length === 0 && shuffled.inSheet === 3);
+  const extra = planLabelSheet(store, [BACKUP_HEADER, mk('zz|only'), store[0] ?? '', '', 'memo']);
+  check('planLabelSheet: 表計算にだけある key は触らず、足す行は最後の空でない行の次から（空行をまたぐ）・range は連続する行ごと',
+    extra.append === 2 && extra.rewrite === 0 && extra.elements.length === 1 && extra.elements[0]?.range === "'ラベル控え'!A6:A7", show(extra.elements.map((e) => e.range)));
+  const sep = planLabelSheet(store, [BACKUP_HEADER, store[0] ?? '', store[2] ?? '', broken]);
+  const sep2 = planLabelSheet(store, [BACKUP_HEADER, broken, store[0] ?? '']);
+  check('planLabelSheet: 書き直し1行は1要素、書き直し（行2）と追記（行4）が離れていれば別の要素',
+    sep.elements.length === 1 && sep.rewrite === 1 && sep2.rewrite === 1 && sep2.append === 1 && sep2.elements.map((e) => e.range).join() === "'ラベル控え'!A2:A2,'ラベル控え'!A4:A4", show(sep2.elements.map((e) => e.range)));
+  const many = Array.from({ length: 40 }, (_, i) => mk(`e|p${i}`));
+  const plan = planLabelSheet(many, []);
+  const files = packLabelElements(plan.elements, 1500);
+  const sizes = files.map((f) => JSON.stringify(f).length);
+  const rowsAll = files.flatMap((f) => f.flatMap((e) => e.values.map((v) => v[0])));
+  check('packLabelElements: fileBytes を超える連続範囲は行で分けて複数ファイルにし、各ファイルは fileBytes 以下・全行が1回ずつ',
+    files.length > 1 && sizes.every((n) => n <= 1500) && rowsAll.length === 41 && rowsAll[0] === BACKUP_HEADER && new Set(rowsAll).size === 41, show(sizes));
+  const dir = mkdtempSync(join(tmpdir(), 'ses-label-sheet-'));
+  try {
+    const dump = join(dir, 'rb.json');
+    writeFileSyncForEval(dump, JSON.stringify({ range: "'ラベル控え'!A1:A100000", values: [[BACKUP_HEADER], [store[0] ?? ''], [], [store[2] ?? '']] }));
+    const ex = exportCli(dump, join(dir, 'out'));
+    const tsv = readFileSyncB(join(dir, 'out', 'labels_sheet.tsv'), 'utf8');
+    const parsed = parseBackup(tsv);
+    check('exportCli: A 列の空でない行を labels_sheet.tsv に書く（ses:labels:restore が読める形・戻り値は行数だけ）',
+      ex.lines === 3 && parsed.rows.length === 2 && parsed.bad === 0 && Object.keys(ex).join() === 'lines');
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -5268,6 +5390,9 @@ async function main(): Promise<void> {
     securityAuditRound12Checks();
     labelStoreChecks();
     bodyFixChecks();
+    bodyFixMessageChecks();
+    trialWindowsChecks();
+    labelSheetChecks();
     trialUsageChecks();
   } finally {
     setDemoOverride(null);
