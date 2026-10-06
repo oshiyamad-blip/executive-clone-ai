@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { engineerBySubject } from '../mailKind.js';
+import { engineerBySubject, subjectPriority } from '../mailKind.js';
 
 export interface ListedThread {
   threadId: string;
@@ -17,6 +17,7 @@ export interface ListedThread {
 export interface ChunksResult {
   threads: number;
   skippedBySubject: number;
+  deferred: number;
   chunks: number;
 }
 
@@ -53,11 +54,20 @@ export function readListDir(listDir: string): ListedThread[] {
   return [...byThread.values()].sort((a, b) => a.internalDate - b.internalDate || (a.threadId < b.threadId ? -1 : 1));
 }
 
-export function chunkRunDir(runDir: string, chunkSize = 30): ChunksResult {
+export function chunkRunDir(runDir: string, chunkSize = 30, keep = 1): ChunksResult {
   const size = Number.isInteger(chunkSize) && chunkSize > 0 ? chunkSize : 30;
   const threads = readListDir(join(runDir, 'list'));
   const skipped = threads.filter((t) => engineerBySubject(t.subject));
-  const rest = threads.filter((t) => !engineerBySubject(t.subject));
+  const remaining = threads.filter((t) => !engineerBySubject(t.subject));
+  const ratio = Number.isFinite(keep) ? Math.min(1, Math.max(0, keep)) : 1;
+  // 点数の高い順（同点は受信が新しい順）に上位 ceil(残り × keep) 件だけ抽出する。外した分は deferred.jsonl に残す
+  const ranked = remaining
+    .map((t) => ({ t, priority: subjectPriority(t.subject) }))
+    .sort((a, b) => b.priority - a.priority || b.t.internalDate - a.t.internalDate || (a.t.threadId < b.t.threadId ? -1 : 1));
+  const take = Math.ceil(remaining.length * ratio);
+  const kept = new Set(ranked.slice(0, take).map((r) => r.t.threadId));
+  const deferred = ranked.slice(take);
+  const rest = remaining.filter((t) => kept.has(t.threadId));
   const outDir = join(runDir, 'out');
   mkdirSync(outDir, { recursive: true });
   writeFileSync(
@@ -65,6 +75,12 @@ export function chunkRunDir(runDir: string, chunkSize = 30): ChunksResult {
     skipped
       .map((t) => JSON.stringify({ threadId: t.threadId, messageId: t.messageId, subject: t.subject, from: t.from, receivedAt: new Date(t.internalDate).toISOString(), kind: 'engineer', bodyHead: '', skippedBySubject: true }))
       .join('\n') + (skipped.length > 0 ? '\n' : ''),
+  );
+  writeFileSync(
+    join(runDir, 'deferred.jsonl'),
+    deferred
+      .map((r) => JSON.stringify({ threadId: r.t.threadId, messageId: r.t.messageId, subject: r.t.subject, from: r.t.from, receivedAt: new Date(r.t.internalDate).toISOString(), priority: r.priority }))
+      .join('\n') + (deferred.length > 0 ? '\n' : ''),
   );
   const chunkDir = join(runDir, 'chunks');
   mkdirSync(chunkDir, { recursive: true });
@@ -75,17 +91,19 @@ export function chunkRunDir(runDir: string, chunkSize = 30): ChunksResult {
     writeFileSync(join(chunkDir, `c${String(chunks).padStart(2, '0')}`), `${lines.join('\n')}\n`);
     chunks += 1;
   }
-  return { threads: threads.length, skippedBySubject: skipped.length, chunks };
+  return { threads: threads.length, skippedBySubject: skipped.length, deferred: deferred.length, chunks };
 }
 
 function main(): void {
-  const [runDirArg, sizeArg] = process.argv.slice(2);
+  const [runDirArg, sizeArg, keepArg] = process.argv.slice(2);
   if (!runDirArg) {
-    console.error('使い方: npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30]');
+    console.error('使い方: npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1]（keep は 0〜1。環境変数 SES_TRIAL_KEEP でも可。引数が優先）');
     process.exitCode = 1;
     return;
   }
-  console.log(JSON.stringify(chunkRunDir(resolve(runDirArg), sizeArg ? Number(sizeArg) : 30)));
+  const keepRaw = keepArg ?? process.env.SES_TRIAL_KEEP;
+  const keep = keepRaw !== undefined && keepRaw !== '' ? Number(keepRaw) : 1;
+  console.log(JSON.stringify(chunkRunDir(resolve(runDirArg), sizeArg ? Number(sizeArg) : 30, keep)));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
