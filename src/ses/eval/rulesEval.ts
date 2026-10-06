@@ -5263,9 +5263,16 @@ function trialUsageChecks(): void {
 
   check('subjectPriority: 技術語が多い件名が高い・一覧の件名に +2・対象外の語で下がる',
     subjectPriority('Java Spring SQL 開発') > subjectPriority('Java 開発') && subjectPriority('Java 開発') > subjectPriority('ご連絡') &&
-    subjectPriority('新着案件一覧') === subjectPriority('ご連絡') + 2 && subjectPriority('Ｊａｖａ 開発') === 2 &&
+    subjectPriority('新着案件一覧') === subjectPriority('ご連絡') + 4 && subjectPriority('Ｊａｖａ 開発') === 2 &&
     subjectPriority('Python 開発') < subjectPriority('開発') && subjectPriority('React TypeScript') === -3,
     show([subjectPriority('新着案件一覧'), subjectPriority('Python 開発'), subjectPriority('React TypeScript')]));
+
+  check('subjectPriority: 案件・募集・急募で +2・要員紹介の語だけなら -2',
+    subjectPriority('【案件】Java開発') > subjectPriority('【弊社社員】Java経験5年') &&
+    subjectPriority('人材情報 Java') === subjectPriority('Java') - 2 &&
+    subjectPriority('【案件】Java開発') === subjectPriority('Java開発') + 2 &&
+    subjectPriority('【案件】人材 Java') === subjectPriority('Java') + 2,
+    show([subjectPriority('【案件】Java開発'), subjectPriority('【弊社社員】Java経験5年'), subjectPriority('人材情報 Java')]));
 
   const dirK = mkdtempSync(join(tmpdir(), 'ses-chunks-keep-'));
   try {
