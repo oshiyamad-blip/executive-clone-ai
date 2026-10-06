@@ -43,6 +43,8 @@
     "ses:trial:bodyfix": "tsx src/ses/trial/bodyFix.ts",
     "ses:trial:chunks": "tsx src/ses/trial/chunks.ts",
     "ses:trial:writeplan": "tsx src/ses/trial/writePlan.ts",
+    "ses:trial:windows": "tsx src/ses/trial/windows.ts",
+    "ses:labels:sheet": "tsx src/ses/eval/labelSheet.ts",
     "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts",
     "ses:eval:labels": "tsx src/ses/eval/labelsEval.ts",
     "ses:labels:restore": "tsx src/ses/eval/labelsRestore.ts restore",

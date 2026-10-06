@@ -22,6 +22,7 @@ export interface BodyFixResult {
   replaced: number;
   notFound: number;
   skippedLinkOnly: number;
+  skippedBySubject: number;
   transcripts: number;
 }
 
@@ -76,7 +77,32 @@ function asThread(text: string): Thread | null {
   return { id: t.id, messages: t.messages as ThreadMessage[] };
 }
 
-// スレッドID → スレッド。同じスレッドが何度も出たら messages が一番多いもの
+// get_message の結果（1通の JSON。messages を持たない）は、threadId のスレッドの1通として扱う
+function asSingleMessage(text: string): Thread | null {
+  if (!text.includes('"threadId"') || !text.includes('"plaintextBody"')) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== 'object') return null;
+  const m = v as { threadId?: unknown; messages?: unknown; internalDate?: unknown; plaintextBody?: unknown };
+  if (typeof m.threadId !== 'string' || !m.threadId || m.messages !== undefined) return null;
+  return { id: m.threadId, messages: [{ internalDate: m.internalDate, plaintextBody: m.plaintextBody }] };
+}
+
+const newestDate = (th: Thread): number => th.messages.reduce((mx, m) => (m && typeof m === 'object' ? Math.max(mx, dateOf(m)) : mx), -Infinity);
+
+// 候補どうしの比べ: 最新メッセージの internalDate が大きい方。同じなら messages が多い方
+function isBetter(cand: Thread, prev: Thread): boolean {
+  const c = newestDate(cand);
+  const p = newestDate(prev);
+  if (c !== p) return c > p;
+  return cand.messages.length > prev.messages.length;
+}
+
+// スレッドID → スレッド。同じスレッドが何度も出たら（get_thread・get_message）最新メッセージの internalDate が一番大きいもの、同じなら messages が多いもの
 export function collectThreads(transcriptDir: string): { threads: Map<string, Thread>; transcripts: number } {
   const threads = new Map<string, Thread>();
   const files = listJsonl(transcriptDir);
@@ -98,10 +124,10 @@ export function collectThreads(transcriptDir: string): { threads: Map<string, Th
       const o = obj as { type?: unknown; message?: { content?: unknown } };
       if (!o || o.type !== 'user') continue;
       for (const text of toolResultTexts(o.message?.content)) {
-        const th = asThread(text);
+        const th = asThread(text) ?? asSingleMessage(text);
         if (!th) continue;
         const prev = threads.get(th.id);
-        if (!prev || th.messages.length > prev.messages.length) threads.set(th.id, th);
+        if (!prev || isBetter(th, prev)) threads.set(th.id, th);
       }
     }
   }
@@ -125,7 +151,7 @@ export function latestBody(th: Thread): string | null {
 
 export function fixRunDir(runDir: string, transcriptDir: string): BodyFixResult {
   const { threads, transcripts } = collectThreads(transcriptDir);
-  const result: BodyFixResult = { rows: 0, replaced: 0, notFound: 0, skippedLinkOnly: 0, transcripts };
+  const result: BodyFixResult = { rows: 0, replaced: 0, notFound: 0, skippedLinkOnly: 0, skippedBySubject: 0, transcripts };
   const outDir = join(runDir, 'out');
   if (!existsSync(outDir)) return result;
   const backupDir = join(runDir, 'out_backup');
@@ -144,6 +170,10 @@ export function fixRunDir(runDir: string, transcriptDir: string): BodyFixResult 
       }
       if (!row || typeof row !== 'object' || row.error !== undefined) return line;
       result.rows++;
+      if (row.skippedBySubject === true) {
+        result.skippedBySubject++;
+        return line;
+      }
       const id = typeof row.threadId === 'string' ? row.threadId : typeof row.messageId === 'string' ? row.messageId : '';
       const th = threads.get(id);
       if (!th) {
