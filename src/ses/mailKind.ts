@@ -150,6 +150,19 @@ export function mentionsTitle(notice: Pick<SesRawMail, 'subject' | 'body'>, titl
 const SUBJECT_ENGINEER_RE = /【要員】|【人材】|【技術者】|要員情報|要員紹介|要員のご紹介|人材情報|人材紹介|人材のご紹介|技術者情報|技術者紹介|技術者のご紹介|エンジニア紹介|エンジニアのご紹介|男性|女性|(?<![A-Za-z])[A-Z]\.\s?[A-Z]\.?(?![A-Za-z])|\d{2}歳(?!まで|以下|以上|迄|~|〜)/;
 const SUBJECT_PROJECT_RE = /案件|募集|急募|求人|枠|増員|ポジション/;
 
+// 抽出に回す順番を決める件名の点数（高いほど先）。使用量を抑えるため、上位の割合だけを抽出する。
+// 語のリストは要員のスキルに合わせて見直す（要員の顔ぶれが変わると当たる語も変わる）
+const SUBJECT_TECH_RE = /java|spring|javascript|sql|oracle|postgre|vb|\.net|c#|asp|access|jp1|linux|windows|aws|azure|サーバ|運用|保守|監視|インフラ|テスト|php|cobol|jcl|汎用機|移行|構築|ヘルプ|基盤|db|改修|開発/g;
+const SUBJECT_LIST_RE = /新着|注力|案件一覧|案件情報|案件のご連絡|案件のご案内|一覧/;
+const SUBJECT_OFF_RE = /python|golang|\bgo\b|react|vue|typescript|sap|salesforce|pmo|ios|android|kotlin|swift|ruby|unity|c\+\+|データサイエン|機械学習|セキュリティ|sre|kubernetes|フロントエンド/g;
+
+export function subjectPriority(subject: string): number {
+  const s = subject.normalize('NFKC').toLowerCase();
+  const tech = (s.match(SUBJECT_TECH_RE) ?? []).length;
+  const off = (s.match(SUBJECT_OFF_RE) ?? []).length;
+  return tech + (SUBJECT_LIST_RE.test(s) ? 2 : 0) - off * 1.5;
+}
+
 export function engineerBySubject(subject: string): boolean {
   const s = subject.normalize('NFKC');
   if (SUBJECT_PROJECT_RE.test(s)) return false;

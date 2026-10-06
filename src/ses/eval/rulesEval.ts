@@ -130,7 +130,7 @@ import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt, startRunClock, stopRunClock } from '../schedule.js';
 import { shouldSendSummary } from '../notify.js';
 import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
-import { engineerBySubject, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
+import { engineerBySubject, subjectPriority, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
 import { ageLimitOf } from '../match.js';
@@ -5254,9 +5254,40 @@ function trialUsageChecks(): void {
       c0[0] === `t2\t${new Date(2500).toISOString()}\tm2b\t8` && c1[0] === `t4\t${new Date(4000).toISOString()}\t\t`, show(c0[0]));
     check('chunks: skip.jsonl の行は kind engineer・bodyHead 空・skippedBySubject true',
       skip.length === 1 && skip[0].threadId === 't1' && skip[0].kind === 'engineer' && skip[0].bodyHead === '' && skip[0].skippedBySubject === true && skip[0].messageId === 'm1' && skip[0].receivedAt === new Date(1000).toISOString());
-    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）', JSON.stringify(res) === '{"threads":4,"skippedBySubject":1,"chunks":2}');
+    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）', JSON.stringify(res) === '{"threads":4,"skippedBySubject":1,"deferred":0,"chunks":2}');
+    check('chunks: keep=1 は今と同じ動き（deferred 0・deferred.jsonl は空）',
+      res.deferred === 0 && readFileSyncB(join(dir, 'deferred.jsonl'), 'utf8') === '');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+
+  check('subjectPriority: 技術語が多い件名が高い・一覧の件名に +2・対象外の語で下がる',
+    subjectPriority('Java Spring SQL 開発') > subjectPriority('Java 開発') && subjectPriority('Java 開発') > subjectPriority('ご連絡') &&
+    subjectPriority('新着案件一覧') === subjectPriority('ご連絡') + 2 && subjectPriority('Ｊａｖａ 開発') === 2 &&
+    subjectPriority('Python 開発') < subjectPriority('開発') && subjectPriority('React TypeScript') === -3,
+    show([subjectPriority('新着案件一覧'), subjectPriority('Python 開発'), subjectPriority('React TypeScript')]));
+
+  const dirK = mkdtempSync(join(tmpdir(), 'ses-chunks-keep-'));
+  try {
+    mkdirSyncBf(join(dirK, 'list'), { recursive: true });
+    const row = (t: string, d: number, subj: string) => [t, `m_${t}`, String(d), 'a@example.invalid', subj, '1'].join('\t');
+    writeFileSyncForEval(join(dirK, 'list', 'w00.tsv'), [
+      row('k1', 1000, 'Java Spring SQL 開発'),
+      row('k2', 2000, 'Python 機械学習'),
+      row('k3', 3000, 'ご連絡'),
+      row('k4', 4000, 'Linux 運用 保守'),
+      row('k5', 5000, 'React'),
+    ].join('\n') + '\n');
+    const resK = chunkRunDir(dirK, 10, 0.5);
+    const cK = readFileSyncB(join(dirK, 'chunks', 'c00'), 'utf8').trim().split('\n').map((l) => l.split('\t')[0]);
+    const defK = readFileSyncB(join(dirK, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: keep=0.5 は残りの半分（切り上げ 3件）だけがチャンクに入り、点数の高いものが残る（チャンクの中は受信時刻の順）',
+      resK.chunks === 1 && cK.join(',') === 'k1,k3,k4', show(cK));
+    check('chunks: 外した分は deferred.jsonl に threadId・messageId・subject・from・receivedAt・priority で入る（out/ には書かない）。件数は deferred 2',
+      resK.deferred === 2 && defK.length === 2 && defK.map((d) => d.threadId).sort().join(',') === 'k2,k5' && defK.every((d) => typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined) &&
+      JSON.stringify(resK) === '{"threads":5,"skippedBySubject":0,"deferred":2,"chunks":1}', show(resK));
+  } finally {
+    rmSync(dirK, { recursive: true, force: true });
   }
 
   // 書き込みの差分
