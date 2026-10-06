@@ -155,12 +155,16 @@ const SUBJECT_PROJECT_RE = /案件|募集|急募|求人|枠|増員|ポジショ�
 const SUBJECT_TECH_RE = /java|spring|javascript|sql|oracle|postgre|vb|\.net|c#|asp|access|jp1|linux|windows|aws|azure|サーバ|運用|保守|監視|インフラ|テスト|php|cobol|jcl|汎用機|移行|構築|ヘルプ|基盤|db|改修|開発/g;
 const SUBJECT_LIST_RE = /新着|注力|案件一覧|案件情報|案件のご連絡|案件のご案内|一覧/;
 const SUBJECT_OFF_RE = /python|golang|\bgo\b|react|vue|typescript|sap|salesforce|pmo|ios|android|kotlin|swift|ruby|unity|c\+\+|データサイエン|機械学習|セキュリティ|sre|kubernetes|フロントエンド/g;
+const SUBJECT_PROJECT_BOOST_RE = /案件|募集|急募/;
+const SUBJECT_ENGINEER_HINT_RE = /弊社|個人事業主|人材|要員|技術者|稼働可|経験\d+年|\d+年/;
 
 export function subjectPriority(subject: string): number {
   const s = subject.normalize('NFKC').toLowerCase();
   const tech = (s.match(SUBJECT_TECH_RE) ?? []).length;
   const off = (s.match(SUBJECT_OFF_RE) ?? []).length;
-  return tech + (SUBJECT_LIST_RE.test(s) ? 2 : 0) - off * 1.5;
+  // 件名に案件の語があれば先へ、要員紹介の語だけなら後ろへ回す（実データで、抽出に回した中の要員メールが36%→20%に減り、候補の残り方は同程度以上）
+  const kind = SUBJECT_PROJECT_BOOST_RE.test(s) ? 2 : SUBJECT_ENGINEER_HINT_RE.test(s) ? -2 : 0;
+  return tech + (SUBJECT_LIST_RE.test(s) ? 2 : 0) - off * 1.5 + kind;
 }
 
 export function engineerBySubject(subject: string): boolean {
