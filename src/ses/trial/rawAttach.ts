@@ -33,7 +33,7 @@ export interface RawAttachResult {
 }
 
 // 案件詳細（p.detail）の後ろに足す添付の文字の上限
-export const DETAIL_ATTACH_MAX = 1500;
+export const DETAIL_ATTACH_MAX = 600;
 
 // 試運転の抽出の行（本文の先頭＋添付の文字）→ 案件の材料。本番の抽出と同じく本文の後ろに【添付: 名前】付きで続けたものを抽出の入力にし、
 // 案件詳細は本文からの抜粋（excerpt）の後ろに「【添付より】」で DETAIL_ATTACH_MAX 文字まで足す（本番の抜粋は本文だけで、これは試運転だけの扱い）
