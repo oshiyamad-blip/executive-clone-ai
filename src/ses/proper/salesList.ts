@@ -212,6 +212,26 @@ export function checkReasonLines(checks: RequirementCheck[]): string {
     .join('\n');
 }
 
+const lf = (v: string | number | undefined) => String(v ?? '').replace(/\r\n?/g, '\n').trim();
+const DETAIL_CUT_MARK = '…（以下略）';
+
+// 短くしただけの違いは「同じ」とみなす（古い行は長いまま。短くした規則に直しても全行を書き直さないため）。
+// 案件詳細: 新しい値の末尾の「…（以下略）」を除いた部分がシートの値の先頭と一致。判定の理由: シートの経歴「…」を新しい規則で短くしたものが新しい値と一致
+export function shortenedOnlyCell(colName: string, next: string | number | undefined, prev: string | number | undefined): boolean {
+  const n = lf(next);
+  const p = lf(prev);
+  if (colName === '案件詳細（メール本文より）') {
+    if (!n.endsWith(DETAIL_CUT_MARK)) return false;
+    const body = n.slice(0, -DETAIL_CUT_MARK.length).trimEnd();
+    return body !== '' && p.length >= body.length && p.startsWith(body);
+  }
+  if (colName === '判定の理由') {
+    const re = p.replace(/経歴「(.*)」/g, (_m, ev: string) => `経歴「${clipEvidence(ev)}」`);
+    return re === n;
+  }
+  return false;
+}
+
 // 案件単価が希望単価をこの額（万円）以上上回る組には、AIが見立てた高い理由（商流が浅い／求める水準が高い）を出す
 export const HIGH_RATE_GAP_MAN = 15;
 
@@ -267,16 +287,15 @@ const NUMERIC_COLS = new Set(['No', '案件単価(万)', '希望単価(万)', '�
 const HUMAN_COLS = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
 
 // 「最終更新」を動かす判定の中身の列。受信日時・追加日時・案件詳細など、判定が同じなら変わらない列は含めない
-const JUDGMENT_COLS = ['優先度', '案件単価(万)', '希望単価(万)', '判定理由', '交渉ポイント', '確認事項', '判定の理由'].map((n) => COL[n]);
+const JUDGMENT_NAMES = ['優先度', '案件単価(万)', '希望単価(万)', '判定理由', '交渉ポイント', '確認事項', '判定の理由'];
 // 同じ判定から作り直した行が「更新」にならないよう、前後の空白と改行コードの差は無視して比べる
 const sameCell = (a: string | number | undefined, b: string | number | undefined) => {
-  const k = (v: string | number | undefined) => String(v ?? '').replace(/\r\n?/g, '\n').trim();
-  return k(a) === k(b);
+  return lf(a) === lf(b);
 };
 
 // 既存の行へ判定を書き直すときの「最終更新」「前回優先度」。判定の中身が変わったときだけ今回の日時にし、優先度が変わったら前の優先度を残す
 function carryStamps(next: Row, prev: Row, now: string): void {
-  const changed = JUDGMENT_COLS.some((c) => !sameCell(next[c], prev[c]));
+  const changed = JUDGMENT_NAMES.some((n) => !sameCell(next[COL[n]], prev[COL[n]]) && !shortenedOnlyCell(n, next[COL[n]], prev[COL[n]]));
   next[COL['最終更新']] = changed && now ? now : (prev[COL['最終更新']] ?? '');
   const was = String(prev[COL['優先度']] ?? '').trim();
   next[COL['前回優先度']] = was !== '' && !sameCell(next[COL['優先度']], prev[COL['優先度']]) ? prev[COL['優先度']] : (prev[COL['前回優先度']] ?? '');

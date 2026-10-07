@@ -5353,6 +5353,41 @@ function trialUsageChecks(): void {
     plan.appendRows === 1 && plan.updateRows === 1 && plan.cellsWritten === 31 && plan.cellsSkippedSame === 20, show(plan));
   const sameOnly = planWrites([{ range: "'全体'!A3:L3", values: [sheetRow.slice(0, 12)] }], sheet);
   check('writePlan: 全部同じ行は何も書かない', sameOnly.elements.length === 0 && sameOnly.updateRows === 0);
+  // 短くしただけの違いは書かない（案件詳細の抜粋600文字・判定の理由の根拠40文字。古い行は長いまま）
+  {
+    const hd = SALES_COLUMNS.map((c) => c.name);
+    const ci = (n: string) => hd.indexOf(n);
+    const body = '【必須スキル】\n・Java 5年以上\n・設計から\n' + '詳細な説明です。'.repeat(30);
+    const longEv = '経歴の抜き出し'.repeat(12);
+    const prevRow: string[] = hd.map(() => '');
+    prevRow[ci('ID')] = 'id1'; prevRow[ci('優先度')] = 'A 即提案'; prevRow[ci('要員')] = 'A.A'; prevRow[ci('案件名')] = 'P';
+    prevRow[ci('最終更新')] = '2026/10/01 09:00'; prevRow[ci('対応状況')] = '未着手'; prevRow[ci('No')] = '1';
+    prevRow[ci('案件詳細（メール本文より）')] = `${body}\n${'末尾の長い文。'.repeat(80)}`;
+    prevRow[ci('判定の理由')] = `○ 必須 Java ― 経歴「${longEv}」\n× 尚可 AWS ― 経歴に記載なし`;
+    const clip = (t: string) => (t.length > EVIDENCE_SHOW_MAX ? `${t.slice(0, EVIDENCE_SHOW_MAX - 1)}…` : t);
+    const mkFresh = (over: Record<string, string>): string[] => {
+      const r = [...prevRow];
+      r[ci('最終更新')] = '';
+      r[ci('案件詳細（メール本文より）')] = `${body}…（以下略）`;
+      r[ci('判定の理由')] = `○ 必須 Java ― 経歴「${clip(longEv)}」\n× 尚可 AWS ― 経歴に記載なし`;
+      for (const [k, v] of Object.entries(over)) r[ci(k)] = v;
+      return r;
+    };
+    const planOf = (fr: string[]) => {
+      const m = mergeSalesRows([fr], [hd, prevRow], [], () => false, undefined, '2026/10/07 10:00')[0];
+      const pl = planWrites([{ range: "'全体'!A3:L3", values: [m.slice(0, 12)] }, { range: "'全体'!S3:AE3", values: [m.slice(18)] }], new Map<number, unknown[]>([[3, prevRow]]));
+      return { m, pl };
+    };
+    const a = planOf(mkFresh({}));
+    check('writePlan: 案件詳細と根拠を短くしただけの既存行は書く要素0・最終更新は前の値のまま', a.pl.elements.length === 0 && a.m[ci('最終更新')] === '2026/10/01 09:00', show({ n: a.pl.elements.length, u: a.m[ci('最終更新')] }));
+    const b = planOf(mkFresh({ 優先度: 'B 条件交渉' }));
+    check('writePlan: 優先度が変わった行は書く（最終更新は今回・前回優先度に前の優先度）',
+      b.pl.elements.length > 0 && b.m[ci('最終更新')] === '2026/10/07 10:00' && b.m[ci('前回優先度')] === 'A 即提案', show(b.pl.elements.map((e) => e.range)));
+    const c = planOf(mkFresh({ 判定の理由: `△ 必須 Java ― 近い経験（経歴「${clip(longEv)}」）\n× 尚可 AWS ― 経歴に記載なし` }));
+    check('writePlan: 根拠の○△×が変わった行は書く（最終更新は今回）', c.pl.elements.length > 0 && c.m[ci('最終更新')] === '2026/10/07 10:00');
+    const d = planOf(mkFresh({ '案件詳細（メール本文より）': `${body.replace('○', '×').replace('Java', '○ Java')}…（以下略）` }));
+    check('writePlan: 案件詳細の先頭部分が違う（要件の○△×が変わった）行は書く', d.pl.elements.length > 0);
+  }
   const big = Array.from({ length: 10 }, (_, i) => ({ range: `'全体'!A${i + 1}`, values: [['x'.repeat(100)]] }));
   const packed = packElements(big, 450);
   check('writePlan: 要素は fileBytes 以下のファイルにまとめる', packed.length > 1 && packed.every((f) => JSON.stringify(f).length <= 450) && packed.flat().length === 10, show(packed.map((f) => f.length)));
