@@ -86,7 +86,6 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: '前回優先度', width: 80 }, // 優先度が変わったときの、変わる前の優先度
   { name: '案件詳細（メール本文より）', width: 320, wrap: false },
   { name: '判定の理由', width: 320, wrap: false },
-  { name: '提案文面（案）', width: 320, wrap: false },
   { name: 'ID', width: 40, hidden: true },
 ];
 // 列名を変えた列の旧名（古い控えの見出しを読み替える）
@@ -247,8 +246,6 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['交渉ポイント']] = [negotiation, ...yearNotes].filter(Boolean).join('\n');
   const unmet = c.needsReview || c.reference ? [] : unmetRequiredOf(c);
   row[COL['確認事項']] = unmet.length > 0 ? [`要確認: 経験の無い必須があります（${unmet.join('、')}）`, confirm].filter(Boolean).join('\n') : confirm;
-  // 表の列は「ご提案のポイント」の本文だけ（宛名・要員の箇条・定型文は下書き側の全文にある）。下書きを作らない候補（指示混入の疑い等）は空
-  row[COL['提案文面（案）']] = c.draftToProject ? (c.judgment?.pitch ?? '').trim() : '';
   row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {
