@@ -608,7 +608,7 @@ export function repairModel(): string {
 
 // 設定された抽出用モデル（全メール最多コール。既定Haiku）
 export function configuredExtractModel(): string {
-  return envStr('ANTHROPIC_MODEL_EXTRACT', 'claude-haiku-4-5');
+  return envStr('ANTHROPIC_MODEL_EXTRACT', 'claude-haiku-5-5');
 }
 
 // 設定された抽出用モデルが退役・提供終了で使えないと分かった後は、このプロセスの残りを判定用モデルで代替する

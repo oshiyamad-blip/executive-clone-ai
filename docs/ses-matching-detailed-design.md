@@ -48,11 +48,13 @@ Claude Opus/Sonnet の現行世代でのみ有効な設定である。SES抽出�
 Opus/Sonnet系（`matchModel()` 既定 `claude-sonnet-5-5`、グローバル既定 `claude-opus-4-8`）は従来どおり
 `adaptive` を付与する。分類+抽出は構造化出力（JSON Schema）で十分な精度が出る定型タスクのため、
 thinkingを省略しても機能要件（F3）に影響はない。
+（2026-10-07 追記: 抽出の既定を `claude-haiku-5-5` に変更。Haiku 5.5 は adaptive thinking と effort に対応するため付与し、
+Haiku 4.5 以前だけ省略する。effort も同じ分岐 `supportsEffort(model)` で付ける。）
 
 ```ts
 // src/llm/anthropic.ts（要旨）
-function supportsAdaptiveThinking(model: string): boolean {
-  return !model.includes('haiku');
+export function supportsAdaptiveThinking(model: string): boolean {
+  return !model.includes('haiku') || /haiku-[5-9]/.test(model); // 2026-10-07: Haiku 5.5 以降は対応
 }
 function thinkingParam(model: string): { type: 'adaptive' } | undefined {
   return supportsAdaptiveThinking(model) ? { type: 'adaptive' } : undefined;

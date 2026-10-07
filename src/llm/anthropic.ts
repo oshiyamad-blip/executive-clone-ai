@@ -28,11 +28,10 @@ function recordUsage(model: string, usage: Anthropic.Messages.Usage): void {
   });
 }
 
-// adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）でのみ有効で、
-// Haiku 4.5 等の旧世代モデルには存在しない設定のため付与すると 400 になりうる。
-// SES抽出（extractModel）は既定で claude-haiku-4-5 を使うため、モデル名で分岐する。
-function supportsAdaptiveThinking(model: string): boolean {
-  return !model.includes('haiku');
+// adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）と Haiku 5.5 以降でのみ有効で、
+// Haiku 4.5 以前には存在しない設定のため付与すると 400 になりうる。モデル名で分岐する
+export function supportsAdaptiveThinking(model: string): boolean {
+  return !model.includes('haiku') || /haiku-[5-9]/.test(model);
 }
 
 function thinkingParam(model: string): { type: 'adaptive' } | undefined {
@@ -40,15 +39,19 @@ function thinkingParam(model: string): { type: 'adaptive' } | undefined {
 }
 
 // effort を受け付けるモデルだけに付ける（Haiku 4.5・Sonnet 4.5 以前は 400 になるため、既知の対応モデルに限る）
-const EFFORT_MODELS = /opus-4-[5-9]|opus-5|sonnet-4-6|sonnet-5|fable|mythos/;
+const EFFORT_MODELS = /opus-4-[5-9]|opus-5|sonnet-4-6|sonnet-5|haiku-[5-9]|fable|mythos/;
+
+export function supportsEffort(model: string): boolean {
+  return EFFORT_MODELS.test(model);
+}
 
 function outputConfig(model: string, schema: object, opts: GenOptions): Anthropic.Messages.OutputConfig {
   const format = { type: 'json_schema' as const, schema: schema as Record<string, unknown> };
-  return opts.effort && EFFORT_MODELS.test(model) ? { format, effort: opts.effort } : { format };
+  return opts.effort && supportsEffort(model) ? { format, effort: opts.effort } : { format };
 }
 
 // 構造化出力の呼び出し（抽出・判定）は同じ system を1回のバッチで何百回も送るため、system の末尾でキャッシュする。
-// 5分以内に次の呼び出しが来れば読み込み（入力の約0.1倍）になる。モデルの最小長（Haiku 4.5 は4096トークン）に
+// 5分以内に次の呼び出しが来れば読み込み（入力の約0.1倍）になる。モデルの最小長（Haiku 5.5 は512・Haiku 4.5 は4096トークン）に
 // 満たない system は黙ってキャッシュされないだけで、料金は増えない（効いたかはメトリクスの「キャッシュ読込率」で分かる）
 function cachedSystem(system: string): Anthropic.Messages.TextBlockParam[] {
   return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];

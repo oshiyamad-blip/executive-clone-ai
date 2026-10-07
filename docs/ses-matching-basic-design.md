@@ -62,7 +62,7 @@ collect ─▶ parse ─▶ extract ─▶ store ─▶ match ─▶ draft ─�
 | `src/ses/config.ts` | **設定の一元読み出し**（§9）。`isDemo()`・`minGrossMarginJpy()`・`maxCandidatesPerItem()` 等をすべてここで定義。全モジュールはここ経由で設定を参照し、`process.env` を直接読まない |
 | `src/ses/collect.ts` | SES専用の収集ラッパー。本番は `collectSesMail()`（拡張した `src/collectors/email.ts` を SESクエリ・添付付きで呼ぶ）、demoは `loadFixtureMail()`（`src/ses/fixtures/` を読む）。戻り値は添付を同梱した `SesRawMail[]` |
 | `src/ses/parse.ts` | 添付・リンク展開。xlsx→テキスト化、Google スプレッドシートリンク検出→Sheets API 読取、PDFは base64 のまま次段へ受け渡す。demoは fixture テキストをそのまま返す |
-| `src/ses/extract.ts` | 分類+抽出（1メール1コール）。本番は Haiku 4.5 + 構造化出力、demoは fixture対応の**決定的スタブ**（LLM不使用）。戻り値は `ExtractedItem[]`（`Project` / `Engineer` の配列） |
+| `src/ses/extract.ts` | 分類+抽出（1メール1コール）。本番は Haiku 5.5 + 構造化出力、demoは fixture対応の**決定的スタブ**（LLM不使用）。戻り値は `ExtractedItem[]`（`Project` / `Engineer` の配列） |
 | `src/ses/match.ts` | マッチング。一次選抜（純コード・無料、§7）→ 通過ペアのみ最終判定。本番は Sonnet 5、demoはテンプレート判定（LLM不使用）。戻り値は `MatchResult[]` |
 | `src/ses/draft.ts` | 紹介メール2通生成。本番は Sonnet 5 でメール本文生成 → Gmail 下書き作成、demoはテンプレート文面 + ローカルJSON保存。戻り値は下書きIDを含む `DraftResult[]` |
 | `src/ses/notify.ts` | マッチ結果DB更新 + サマリメール。本番は Notion 保存 + Gmail サマリ送信、demoはローカルJSON（`data/ses-demo/`）+ コンソール出力 |
@@ -248,7 +248,7 @@ export function skillMatchThreshold(): number;     // 既定 0.6
 export function hourlyToMonthlyHours(): number;    // 既定 160
 export function sesTargetGmail(): string;          // 既定 ''
 export function sesNotifyTo(): string;             // 既定 ''
-export function extractModel(): string;            // ANTHROPIC_MODEL_EXTRACT ?? 'claude-haiku-4-5'（退役等で使えないと分かった後は matchModel()）
+export function extractModel(): string;            // ANTHROPIC_MODEL_EXTRACT ?? 'claude-haiku-5-5'（退役等で使えないと分かった後は matchModel()）
 export function matchModel(): string;              // ANTHROPIC_MODEL_MATCH ?? 'claude-sonnet-5'
 export function notionProjectDbId(): string;
 export function notionEngineerDbId(): string;
@@ -369,7 +369,7 @@ export async function runSesBatch(opts?: SesBatchOptions): Promise<void>;
 
 | 段階 | モデル | 呼び出し | 設定キー |
 |---|---|---|---|
-| ③ extract（分類+抽出） | **Claude Haiku 4.5** | 全メール1コール（最多） | `ANTHROPIC_MODEL_EXTRACT` |
+| ③ extract（分類+抽出） | **Claude Haiku 5.5** | 全メール1コール（最多） | `ANTHROPIC_MODEL_EXTRACT` |
 | ⑤ match 一次選抜 | **LLM不使用** | 純コード（無料） | — |
 | ⑤ match 最終判定 | **Claude Sonnet 5** | 候補ペアのみ | `ANTHROPIC_MODEL_MATCH` |
 | ⑥ draft メール生成 | **Claude Sonnet 5** | 成立マッチ×2通 | `ANTHROPIC_MODEL_MATCH` |
@@ -425,13 +425,13 @@ await generateText(DRAFT_SYSTEM, messages, { model: matchModel() });
 | .env キー | 既定値 | 使用箇所 |
 |---|---|---|
 | `ANTHROPIC_MODEL` | `claude-opus-4-8` | 既存機能のグローバル既定（無変更） |
-| `ANTHROPIC_MODEL_EXTRACT` | `claude-haiku-4-5` | `extractModel()` → extract |
+| `ANTHROPIC_MODEL_EXTRACT` | `claude-haiku-5-5` | `extractModel()` → extract |
 | `ANTHROPIC_MODEL_MATCH` | `claude-sonnet-5` | `matchModel()` → match最終判定・draft |
 
 抽出精度が不足した場合は `ANTHROPIC_MODEL_EXTRACT` を Sonnet に差し替えるだけで検証できる（要件定義 §7.1）。
 抽出モデルをAPIが「存在しない（404 not_found_error: model）・退役した」と返した場合は、`src/ses/extractModelFallback.ts` が
 そのプロセスの残りの抽出を `matchModel()` に切り替え、診断レポートに「抽出モデルが利用できないため判定モデルで代替（費用増）」を載せる
-（Haiku 4.5 は 2026-10-15 より後に退役予定。公表された退役予定は `src/llm/modelLifecycle.ts`、事前確認・doctor が表示する）。Gemini プロバイダ利用時（`LLM_PROVIDER=gemini`）は `model` 引数が Gemini モデルIDとして解釈されるため、SESで段階別を使う場合は Anthropic プロバイダを推奨（設計上は両対応、実運用はAnthropic前提）。
+（抽出は 2026-10-07 に Haiku 5.5 へ変更。Haiku 4.5 は 2026-10-15 より後に退役予定。公表された退役予定は `src/llm/modelLifecycle.ts`、事前確認・doctor が表示する）。Gemini プロバイダ利用時（`LLM_PROVIDER=gemini`）は `model` 引数が Gemini モデルIDとして解釈されるため、SESで段階別を使う場合は Anthropic プロバイダを推奨（設計上は両対応、実運用はAnthropic前提）。
 
 ---
 
@@ -588,7 +588,7 @@ export function isDemo(): boolean {
 |---|---|---|
 | ① collect | Gmail API で SESクエリ取得 + 添付DL | `src/ses/fixtures/mails.ts` の固定 `SesRawMail[]` を返す（案件メール・要員メール・添付付き・スプシリンク付きを網羅） |
 | ② parse | xlsx→テキスト / Sheets API / PDF温存 | fixture に予め添付テキスト（`attachments[].text`）を埋めておき、そのまま返す（xlsx/Sheets 展開をスキップ） |
-| ③ extract | Haiku 4.5 + 構造化出力（PDFはdocumentブロック） | **決定的スタブ**: fixtureメールIDごとに、期待抽出結果 `ExtractedItem[]` を返す固定マッピング（`fixtures/expectedExtractions.ts`）。LLM不使用 |
+| ③ extract | Haiku 5.5 + 構造化出力（PDFはdocumentブロック） | **決定的スタブ**: fixtureメールIDごとに、期待抽出結果 `ExtractedItem[]` を返す固定マッピング（`fixtures/expectedExtractions.ts`）。LLM不使用 |
 | ④ store | Notion `saveProject`/`saveEngineer` + 名寄せ | `writeDemoArtifact('projects', ...)` / `('engineers', ...)` でローカルJSON。名寄せ（`src/dedup` 相当のロジック）はコードなので実行してよい |
 | ⑤ match | `primarySelect`（純コード）→ Sonnet最終判定 | `primarySelect` は**そのまま実行**（純コード）。最終判定は §7.5 のヒューリスティックでスコア生成（LLM不使用） |
 | ⑥ draft | Sonnet生成 → Gmail下書き作成 | テンプレート文面（案件側/要員側の定型メール）を組み立て、`writeDemoArtifact('drafts', ...)` に保存。`DraftRef.url` はローカルファイルパス、`draftId` は `demo_draft_<n>` |
@@ -624,7 +624,7 @@ MATCH_TIMING_GRACE_DAYS=30            # 時期整合の猶予日数（§7.1-5）
 NOTION_PROJECT_DB_ID=                  # 案件DB
 NOTION_ENGINEER_DB_ID=                 # 要員DB
 NOTION_MATCH_DB_ID=                    # マッチ結果DB
-ANTHROPIC_MODEL_EXTRACT=claude-haiku-4-5   # 抽出用（切替可）
+ANTHROPIC_MODEL_EXTRACT=claude-haiku-5-5   # 抽出用（切替可）
 ANTHROPIC_MODEL_MATCH=claude-sonnet-5      # 最終判定・メール生成用
 USE_BATCH_API=false                    # trueでBatch API（50%割引・Phase3）
 DEMO_MODE=false                        # trueで強制demo（キー有無に関わらず）
