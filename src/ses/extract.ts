@@ -934,7 +934,8 @@ function withDetail(project: Project, detail: string): Project {
   return detail ? { ...project, detail } : project;
 }
 
-const EXCERPT_MAX = 1500;
+const EXCERPT_MAX = 600;
+const EXCERPT_CUT_MARK = '…（以下略）';
 
 // 元メール本文のうち、この案件の部分（営業リストの「案件詳細」用。LLMを使わない）。
 // 1通に複数の案件があれば、この案件名の行から次の案件名の行の手前まで。案件名が本文に見つからなければ本文の先頭から。
@@ -967,7 +968,8 @@ export function projectExcerpt(body: string, titles: string[], index: number): s
     picked.push(line.trimEnd());
   }
   const text = picked.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  return text.length > EXCERPT_MAX ? `${text.slice(0, EXCERPT_MAX)}…（以下略）` : text;
+  // 末尾の印を含めて EXCERPT_MAX 文字に収める
+  return text.length > EXCERPT_MAX ? `${text.slice(0, EXCERPT_MAX - EXCERPT_CUT_MARK.length)}${EXCERPT_CUT_MARK}` : text;
 }
 
 // 案件のレベルの条件。年数は本文に現れる数値だけを通す（単金・年齢と同じく、照合の結果を左右する数値のため）

@@ -1,8 +1,8 @@
 // 試運転の書き込みを軽くする。PHASE=final の writes/*.json を、シートの今の値と1セルずつ比べて変わったセルだけにし、
 // 大きめのファイル（既定 60KB）にまとめ直す（担当の数を減らす）。書いた後は verify で読み戻しと突き合わせる。
 // 個人データを扱うので標準出力は件数だけ。
-//   plan   <RUN_DIR> <A:AD の読み取り> <AE:AH の読み取り> [fileBytes=60000]  → <RUN_DIR>/wf/wNN.json
-//   verify <RUN_DIR> <書いた後の A:AH の読み取り>                             → <RUN_DIR>/wf/fixNN.json（1セル1ファイル）
+//   plan   <RUN_DIR> <A:AB の読み取り> <AC:AF の読み取り> [fileBytes=60000]  → <RUN_DIR>/wf/wNN.json
+//   verify <RUN_DIR> <書いた後の A:AF の読み取り>                             → <RUN_DIR>/wf/fixNN.json（1セル1ファイル）
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,8 +23,8 @@ export interface PlanResult {
 
 const NCOLS = SALES_COLUMNS.length;
 const HUMAN = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
-const HUMAN_FIRST = Math.min(...HUMAN); // O
-const HUMAN_LAST = Math.max(...HUMAN); // T
+const HUMAN_FIRST = Math.min(...HUMAN); // M
+const HUMAN_LAST = Math.max(...HUMAN); // R
 const STATUS_COL = HUMAN_FIRST; // 対応状況
 const NOT_STARTED = '未着手';
 // 読み戻しの照合で除く機械の列（受信日時・追加日時・最終更新）
@@ -77,8 +77,10 @@ export function sheetRowsOf(dump: unknown): Map<number, unknown[]> {
   return rows;
 }
 
-// A:AD と AE:AH の2つの読み取りを、1行34列に合わせる
-export function joinSheetRows(a: Map<number, unknown[]>, b: Map<number, unknown[]>, split = 30): Map<number, unknown[]> {
+// 読み取りは左（A:AB）と右（AC:AF の4列）の2つに分ける。左の列数は全列数から求める
+export const RIGHT_READ_COLS = 4;
+// A:AB と AC:AF の2つの読み取りを、1行32列に合わせる
+export function joinSheetRows(a: Map<number, unknown[]>, b: Map<number, unknown[]>, split = NCOLS - RIGHT_READ_COLS): Map<number, unknown[]> {
   const rows = new Map<number, unknown[]>();
   for (const n of new Set([...a.keys(), ...b.keys()])) {
     const left = [...(a.get(n) ?? [])];
@@ -113,7 +115,7 @@ function pushDiffRanges(out: WriteElement[], sheet: string, row: number, startCo
   return changed;
 }
 
-// 新しい行（34列）は「A:O（O は 未着手）」と「U:AH」の2つにする（P〜T は書かない）。既存の行は今の値と違うセルだけ
+// 新しい行（32列）は「A:M（M は 未着手）」と「S:AF」の2つにする（N〜R は書かない）。既存の行は今の値と違うセルだけ
 export function planWrites(writes: WriteElement[], sheet: Map<number, unknown[]>): PlanResult {
   const elements: WriteElement[] = [];
   const stat = { written: 0, same: 0 };
@@ -222,7 +224,7 @@ function main(): void {
   } else if (mode === 'verify' && runDirArg && a) {
     console.log(JSON.stringify(verifyRunDir(resolve(runDirArg), resolve(a))));
   } else {
-    console.error('使い方: npm run ses:trial:writeplan -- plan <RUN_DIR> <A:AD の読み取り> <AE:AH の読み取り> [fileBytes=60000]\n        npm run ses:trial:writeplan -- verify <RUN_DIR> <書いた後の A:AH の読み取り>');
+    console.error('使い方: npm run ses:trial:writeplan -- plan <RUN_DIR> <A:AB の読み取り> <AC:AF の読み取り> [fileBytes=60000]\n        npm run ses:trial:writeplan -- verify <RUN_DIR> <書いた後の A:AF の読み取り>');
     process.exitCode = 1;
   }
 }

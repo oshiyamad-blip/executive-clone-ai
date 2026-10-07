@@ -66,8 +66,6 @@ export const SALES_COLUMNS: SalesColumn[] = [
   { name: 'リモート', width: 56 },
   { name: '開始', width: 80, wrap: true },
   { name: '判定理由', width: 260, wrap: true },
-  { name: '合っている点', width: 260, wrap: true },
-  { name: '足りない点', width: 160, wrap: true },
   { name: '交渉ポイント', width: 220, wrap: true },
   { name: '対応状況', width: 80, human: true },
   { name: '見送り理由', width: 140, human: true },
@@ -197,11 +195,15 @@ export function markRequirementsInMail(detail: string, checks: RequirementCheck[
   return [...head, '', ...(detail.trim() ? marked : [])].join('\n').trimEnd();
 }
 
+// 「判定の理由」に出す経歴の抜き出しの長さ（営業リストへの書き込み量を抑えるため。判定に保存する根拠は切らない）
+export const EVIDENCE_SHOW_MAX = 40;
+const clipEvidence = (t: string): string => (t.length > EVIDENCE_SHOW_MAX ? `${t.slice(0, EVIDENCE_SHOW_MAX - 1)}…` : t);
+
 // 「判定の理由」: 要件ごとに1行。メール本文側は記号だけにしているため、名前と理由はここで読む
 export function checkReasonLines(checks: RequirementCheck[]): string {
   return checks
     .map((k) => {
-      const ev = k.evidence ? `経歴「${k.evidence}」` : '';
+      const ev = k.evidence ? `経歴「${clipEvidence(k.evidence)}」` : '';
       const why =
         k.status === 'met' ? ev || '経験あり'
         : k.status === 'close' ? (typeof k.shortYears === 'number' ? `近い経験（経歴は約${k.shortYears.toFixed(1)}年）` : `近い経験${ev ? `（${ev}）` : ''}`)
@@ -237,19 +239,16 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   row[COL['案件単価(万)']] = c.projectRate ?? '';
   row[COL['希望単価(万)']] = c.requiredProjectRate ?? '';
   row[COL['差(万)']] = c.rateGapMan ?? '';
-  // AI判定があれば「要件 ← 経歴の根拠」を1行ずつ、無ければ満たしたスキル名を並べる
-  const sep = c.judgment ? '\n' : '、';
   row[COL['判定理由']] = c.judgment
     ? [`やること: ${c.judgment.work}`, c.judgment.levelFit ? `レベル: ${c.judgment.levelFit}` : '', rateReasonLine(c)].filter(Boolean).join('\n')
     : '';
-  row[COL['合っている点']] = (c.matchedSkills ?? []).join(sep);
-  row[COL['足りない点']] = (c.missingSkills ?? []).join(sep);
   // 年数不足の必須は、優先度を B に抑える理由として交渉ポイントにも出す（照合由来の「年数:」の行がすでにあれば足さない）
   const yearNotes = /^年数:/m.test(negotiation) ? [] : yearShortRequiredOf(c).map((y) => `年数: 必須${y.requirement}に対し経歴約${y.shortYears.toFixed(1)}年`);
   row[COL['交渉ポイント']] = [negotiation, ...yearNotes].filter(Boolean).join('\n');
   const unmet = c.needsReview || c.reference ? [] : unmetRequiredOf(c);
   row[COL['確認事項']] = unmet.length > 0 ? [`要確認: 経験の無い必須があります（${unmet.join('、')}）`, confirm].filter(Boolean).join('\n') : confirm;
-  row[COL['提案文面（案）']] = c.draftToProject?.body ?? '';
+  // 表の列は「ご提案のポイント」の本文だけ（宛名・要員の箇条・定型文は下書き側の全文にある）。下書きを作らない候補（指示混入の疑い等）は空
+  row[COL['提案文面（案）']] = c.draftToProject ? (c.judgment?.pitch ?? '').trim() : '';
   row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {
@@ -271,7 +270,7 @@ const NUMERIC_COLS = new Set(['No', '案件単価(万)', '希望単価(万)', '�
 const HUMAN_COLS = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
 
 // 「最終更新」を動かす判定の中身の列。受信日時・追加日時・案件詳細など、判定が同じなら変わらない列は含めない
-const JUDGMENT_COLS = ['優先度', '案件単価(万)', '希望単価(万)', '判定理由', '合っている点', '足りない点', '交渉ポイント', '確認事項', '判定の理由'].map((n) => COL[n]);
+const JUDGMENT_COLS = ['優先度', '案件単価(万)', '希望単価(万)', '判定理由', '交渉ポイント', '確認事項', '判定の理由'].map((n) => COL[n]);
 // 同じ判定から作り直した行が「更新」にならないよう、前後の空白と改行コードの差は無視して比べる
 const sameCell = (a: string | number | undefined, b: string | number | undefined) => {
   const k = (v: string | number | undefined) => String(v ?? '').replace(/\r\n?/g, '\n').trim();
