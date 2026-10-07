@@ -25,6 +25,7 @@ import {
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
 import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare, uncachedModels } from '../../llm/pricing.js';
+import { supportsAdaptiveThinking, supportsEffort } from '../../llm/anthropic.js';
 import { recordLlmUsage, getLlmUsageLog } from '../../llm/usage.js';
 import { isModelUnavailableError } from '../../llm/errors.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
@@ -1458,13 +1459,17 @@ function injectionChecks(): void {
   check('メールアドレスの無い文面は通す', disclosureIssues('田中様\nK.S.をご提案します。単金はご相談させてください。', 'project', dp, de, m).length === 0);
 }
 
-// ===== 15. 料金の計算（Sonnet 5.5 / Sonnet 5 = $2/$10・Haiku 4.5 = $1/$5・キャッシュ倍率） =====
+// ===== 15. 料金の計算（Sonnet 5.5 / Sonnet 5 = $2/$10・Haiku 5.5 = $0.10/$0.50（入力10万超は $0.50/$2.50）・Haiku 4.5 = $1/$5・キャッシュ倍率） =====
 
 const PRICE_CASES: Array<[string, { input?: number; output?: number; write?: number; write1h?: number; read?: number }, number, string]> = [
   ['claude-sonnet-5-5', { input: 1_000_000 }, 2, 'Sonnet 5.5 入力1MTok = $2'],
   ['claude-sonnet-5-5', { output: 1_000_000 }, 10, 'Sonnet 5.5 出力1MTok = $10'],
   ['claude-sonnet-5', { input: 1_000_000 }, 2, 'Sonnet 5 入力1MTok = $2'],
   ['claude-sonnet-5', { output: 1_000_000 }, 10, 'Sonnet 5 出力1MTok = $10'],
+  ['claude-haiku-5-5', { input: 100_000, output: 1_000_000 }, 0.01 + 0.5, 'Haiku 5.5 入力10万（10万以下）= $0.10/MTok・出力 $0.50/MTok'],
+  ['claude-haiku-5-5', { input: 100_001 }, 100_001 * 0.5 / 1_000_000, 'Haiku 5.5 入力が10万を超えると入力 $0.50/MTok'],
+  ['claude-haiku-5-5', { input: 60_000, read: 50_000, output: 1_000_000 }, (60_000 + 5_000) * 0.5 / 1_000_000 + 2.5, 'Haiku 5.5 キャッシュ読込も入力の長さに数え、超えれば出力も $2.50/MTok'],
+  ['claude-haiku-5-5', { read: 1_000_000 }, 0.05, 'Haiku 5.5 キャッシュ読込1MTok（10万超）= $0.05'],
   ['claude-haiku-4-5', { input: 1_000_000 }, 1, 'Haiku 4.5 入力1MTok = $1'],
   ['claude-haiku-4-5', { output: 1_000_000 }, 5, 'Haiku 4.5 出力1MTok = $5'],
   ['claude-sonnet-5', { write: 1_000_000 }, 2.5, 'Sonnet 5 5分キャッシュ書込1MTok = $2.50（1.25倍）'],
@@ -1492,6 +1497,10 @@ function pricingChecks(): void {
     });
     check(label, near(got, usd), `実際: $${got}`);
   }
+  check('Haiku 5.5 には adaptive thinking・effort を付け、Haiku 4.5 には付けない',
+    supportsAdaptiveThinking('claude-haiku-5-5') && supportsEffort('claude-haiku-5-5') &&
+      !supportsAdaptiveThinking('claude-haiku-4-5') && !supportsEffort('claude-haiku-4-5') &&
+      supportsAdaptiveThinking('claude-sonnet-5-5') && supportsEffort('claude-sonnet-5-5'));
   const u = { model: 'claude-sonnet-5', inputTokens: 1234, outputTokens: 567 };
   check('円換算 = ドル × JPY_PER_USD、見積もりと実績の計算は同じ', near(usageCostJpy(u), usageCostUsd(u) * jpyPerUsd()) && near(estimateCallJpy(u.model, 1234, 567), usageCostJpy(u)));
   check('キャッシュ読込率 = 読込 ÷（入力＋書込＋読込）', near(cacheReadShare([{ model: 'm', inputTokens: 100, outputTokens: 0, cacheReadInputTokens: 300 }]) ?? -1, 0.75));

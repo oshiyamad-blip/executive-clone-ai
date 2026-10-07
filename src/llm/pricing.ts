@@ -9,7 +9,14 @@ interface UsdPerMTok {
   output: number;
 }
 
-const PRICING_USD_PER_MTOK: Array<{ match: string; price: UsdPerMTok }> = [
+// 入力（キャッシュの書き込み・読み込みを含む）がこのトークン数を超える呼び出しは、long の単価で数える（Haiku 5.5）
+interface LongPromptPrice {
+  overInputTokens: number;
+  price: UsdPerMTok;
+}
+
+const PRICING_USD_PER_MTOK: Array<{ match: string; price: UsdPerMTok; long?: LongPromptPrice }> = [
+  { match: 'haiku-5-5', price: { input: 0.1, output: 0.5 }, long: { overInputTokens: 100_000, price: { input: 0.5, output: 2.5 } } },
   { match: 'haiku-4-5', price: { input: 1, output: 5 } },
   { match: 'sonnet-5-5', price: { input: 2, output: 10 } },
   { match: 'sonnet-5', price: { input: 2, output: 10 } },
@@ -27,9 +34,10 @@ export const CACHE_WRITE_5M_MULTIPLIER = 1.25;
 export const CACHE_WRITE_1H_MULTIPLIER = 2;
 export const CACHE_READ_MULTIPLIER = 0.1;
 
-function usdPerMTok(model: string): UsdPerMTok {
+function usdPerMTok(model: string, promptTokens: number): UsdPerMTok {
   const hit = PRICING_USD_PER_MTOK.find((p) => model.includes(p.match));
-  return hit ? hit.price : FALLBACK_PRICE;
+  if (!hit) return FALLBACK_PRICE;
+  return hit.long && promptTokens > hit.long.overInputTokens ? hit.long.price : hit.price;
 }
 
 // 数値でない・0以下の値（例: '160円'）は既定に戻す（NaNで予算判定が素通りにならないように）
@@ -45,9 +53,9 @@ export function estimateCallJpy(model: string, inputTokens: number, outputTokens
 
 // 1回分の料金（米ドル）。キャッシュの書き込み（1時間の分は内数）と読み込みは入力単価の倍率で数える
 export function usageCostUsd(usage: LlmUsage): number {
-  const price = usdPerMTok(usage.model);
   const write = usage.cacheCreationInputTokens ?? 0;
   const write1h = Math.min(write, usage.cacheCreation1hInputTokens ?? 0);
+  const price = usdPerMTok(usage.model, usage.inputTokens + write + (usage.cacheReadInputTokens ?? 0));
   const inputEquivalent =
     usage.inputTokens +
     (write - write1h) * CACHE_WRITE_5M_MULTIPLIER +
