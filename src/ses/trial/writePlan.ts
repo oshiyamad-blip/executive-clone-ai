@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SALES_COLUMNS } from '../proper/salesList.js';
+import { SALES_COLUMNS, shortenedOnlyCell } from '../proper/salesList.js';
 
 export interface WriteElement {
   range: string;
@@ -90,6 +90,10 @@ export function joinSheetRows(a: Map<number, unknown[]>, b: Map<number, unknown[
   return rows;
 }
 
+// 同じセルか。短くしただけ（案件詳細・判定の理由）も同じとみなす
+const sameAt = (col: number, v: unknown, cur: unknown): boolean =>
+  normCell(v) === normCell(cur) || shortenedOnlyCell(SALES_COLUMNS[col]?.name ?? '', normCell(v), normCell(cur));
+
 function pushDiffRanges(out: WriteElement[], sheet: string, row: number, startCol: number, values: Array<string | number>, current: unknown[], stat: { written: number; same: number }): boolean {
   let changed = false;
   let i = 0;
@@ -99,13 +103,13 @@ function pushDiffRanges(out: WriteElement[], sheet: string, row: number, startCo
       i += 1;
       continue;
     }
-    if (normCell(values[i]) === normCell(current[col])) {
+    if (sameAt(col, values[i], current[col])) {
       stat.same += 1;
       i += 1;
       continue;
     }
     let j = i;
-    while (j < values.length && !(startCol + j >= HUMAN_FIRST && startCol + j <= HUMAN_LAST) && normCell(values[j]) !== normCell(current[startCol + j])) j += 1;
+    while (j < values.length && !(startCol + j >= HUMAN_FIRST && startCol + j <= HUMAN_LAST) && !sameAt(startCol + j, values[j], current[startCol + j])) j += 1;
     const from = `${colLetter(col)}${row}`;
     out.push({ range: `${sheet}!${j - i === 1 ? from : `${from}:${colLetter(startCol + j - 1)}${row}`}`, values: [values.slice(i, j)] });
     stat.written += j - i;
