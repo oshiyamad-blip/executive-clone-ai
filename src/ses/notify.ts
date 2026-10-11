@@ -452,3 +452,18 @@ async function notifySummary(summary: string, consoleSummary: string, counts: st
     return 'failed';
   }
 }
+
+// 営業リストの未着手がたまってバッチを見送り始めた回の知らせ（1文と件数だけ）。送れなくても失敗にしない
+// （定期実行を失敗に見せないため。notifySummary は宛先や送信の不備を異常終了として記録するので使わない）
+export async function notifyPaused(message: string): Promise<'sent' | 'skipped' | 'failed'> {
+  if (isDemo() || !sesNotifyTo()) return 'skipped';
+  const { to } = notifyRecipients();
+  if (!to || !sendMailReady()) return 'skipped';
+  try {
+    await sendPlainMailViaMail(to, summarySubject(), message);
+    return 'sent';
+  } catch (err) {
+    console.warn(`SES通知: 見送りの知らせを送れませんでした: ${safeErr(err)}`);
+    return 'failed';
+  }
+}

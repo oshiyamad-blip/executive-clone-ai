@@ -11,6 +11,7 @@ import { pickForRun, pastRunDeadline } from '../schedule.js';
 import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
+import { collectSinceMs, receivedSince } from './since.js';
 import { chooseMailBody, sheetLinksInHtml } from './htmlText.js';
 import { formatMailboxes, messageIdMailId, type MailboxValue } from './ownMail.js';
 import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
@@ -146,7 +147,7 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
     try {
-      const since = new Date(Date.now() - collectDays() * 24 * 60 * 60 * 1000);
+      const since = new Date(collectSinceMs(Date.now(), collectDays(), opts.sinceMs));
       const uids = searchResult(await client.search({ since }, { uid: true }), 'Xserver収集');
       if (uids.length > 0) {
         const uidValidity = String((client.mailbox as { uidValidity?: bigint }).uidValidity ?? '0');
@@ -178,7 +179,8 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
         }
         // 2) 上限まで選んだメールだけ原文を取得する（残りは次回以降。毎回全件をダウンロードしない）。
         // 1回の合計の大きさにも上限を設け、超えた分は次回に回す（上限近くのメールを大量に送られてもメモリを使い切らない）
-        const pick = pickForRun(candidates, opts.limit, collectDays(), opts.now);
+        // IMAP の SINCE は日単位のため、再開の下限（時刻）は取得した受信時刻で絞る
+        const pick = pickForRun(receivedSince(candidates, opts.sinceMs), opts.limit, collectDays(), opts.now);
         const budget = { left: maxMailMbPerRun() * 1024 * 1024 };
         const picked: Candidate[] = [];
         const overBudget: Candidate[] = [];

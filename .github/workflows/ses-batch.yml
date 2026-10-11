@@ -260,6 +260,9 @@ jobs:
           SES_MAX_MAILS_PER_RUN: ${{ vars.SES_MAX_MAILS_PER_RUN }}
           SES_MAX_FETCH_PER_RUN: ${{ vars.SES_MAX_FETCH_PER_RUN }}
           SES_MAX_MAIL_MB_PER_RUN: ${{ vars.SES_MAX_MAIL_MB_PER_RUN }}
+          SES_PAUSE_AB_UNTOUCHED: ${{ vars.SES_PAUSE_AB_UNTOUCHED }}
+          SES_RESUME_AB_UNTOUCHED: ${{ vars.SES_RESUME_AB_UNTOUCHED }}
+          SES_RESUME_LOOKBACK_HOURS: ${{ vars.SES_RESUME_LOOKBACK_HOURS }}
           SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
           # 案件だけモード（既定）。パートナーの要員メールも抽出して仲介まで行うときは Variable SES_TARGET=all
           SES_TARGET: ${{ vars.SES_TARGET || 'projects' }}

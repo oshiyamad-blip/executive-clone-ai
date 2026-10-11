@@ -14,6 +14,7 @@ import { SafeLogError } from '../redact.js';
 import { gmailDelegatedAuth, gmailCredentialsReady, gmailAuthProblem, userOAuthConfigured } from '../googleCreds.js';
 import { sesTargetGmail, collectDays, sesGmailLabel } from '../config.js';
 import { pickForRun } from '../schedule.js';
+import { collectSinceMs, receivedSince } from './since.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
 import { addressOf } from './ownMail.js';
 import type { DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
@@ -32,15 +33,17 @@ export function collectReady(): boolean {
 export async function collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
   const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
   if (!auth) throw new SafeLogError('Gmail収集: SES_TARGET_GMAIL または Gmail用のサービスアカウント鍵（SES_GMAIL_SA_KEY_JSON）が未設定です');
-  const afterEpoch = Math.floor((Date.now() - collectDays() * 24 * 60 * 60 * 1000) / 1000);
+  const afterEpoch = Math.floor(collectSinceMs(Date.now(), collectDays(), opts.sinceMs) / 1000);
   const label = sesGmailLabel();
   // 本人のOAuth（個人のGmail）では、SESのラベルが無ければ読まない（私用のメールを収集しない）
   if (userOAuthConfigured() && !label) throw new SafeLogError('Gmail収集: 本人のOAuthで収集するには SES_GMAIL_LABEL（例: SES）が必要です');
   const query = `after:${afterEpoch} -in:sent -in:drafts -in:spam -in:trash${label ? ` label:"${label.replace(/"/g, '')}"` : ''}`;
-  return collectSesRawMail(auth, query, isProcessed, {
+  const outcome = await collectSesRawMail(auth, query, isProcessed, {
     limit: opts.limit,
     pick: (items, limit) => pickForRun(items, limit, collectDays(), opts.now),
   });
+  // after: は秒単位のため念のため、受信時刻でも下限未満を落とす
+  return { ...outcome, mails: receivedSince(outcome.mails, opts.sinceMs) };
 }
 
 // 本人のOAuthは読み取り専用（下書き・送信のスコープを持たない）。下書き・サマリの送信は行わない

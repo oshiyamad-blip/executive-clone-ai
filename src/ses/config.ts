@@ -443,6 +443,27 @@ export function collectDays(): number {
   return envNum(name, 7, { min: 1, max: COLLECT_DAYS_MAX });
 }
 
+// 営業リストの A・B の未着手がこの行数以上たまったらバッチを止める（0 で止めない）
+export function pauseAbUntouched(): number {
+  return envNum('SES_PAUSE_AB_UNTOUCHED', 100, { min: 0, int: true });
+}
+
+// 止めている間、A・B の未着手がこの行数以下になったら再開する。止める値以上なら止める値−1 に丸める（止めた直後に再開しないため）
+export function resumeAbUntouched(): number {
+  return clampResume(pauseAbUntouched(), envNum('SES_RESUME_AB_UNTOUCHED', 50, { min: 0, int: true }));
+}
+
+// 再開の行数を止める行数より小さく丸める純関数（pause が 0 以下＝ゲート無効なら 0）
+export function clampResume(pause: number, resume: number): number {
+  if (pause <= 0) return 0;
+  return resume >= pause ? pause - 1 : resume;
+}
+
+// 再開した回に読むメールの遡り時間（止めていた間の古いメールは読まない）
+export function resumeLookbackHours(): number {
+  return envNum('SES_RESUME_LOOKBACK_HOURS', 24, { min: 1, max: 168, int: true });
+}
+
 // メール量の測定（npm run ses:mail-stats）で遡る日数
 export function statsDays(): number {
   return envNum('SES_STATS_DAYS', 30, { min: 1, max: 365, int: true });
