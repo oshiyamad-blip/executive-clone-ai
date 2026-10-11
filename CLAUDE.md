@@ -48,6 +48,7 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 - `src/analyzers/` — Claude APIでストーリー構築（月単位グループ → 因果関係 → 洞察）
 - `src/database/` — Notion API(v5, 2025-09-03)。database_id→data_source_id を解決し、
   レート制限(3req/s)・rich_text≤2000文字分割・children≤100分割をラップ
+- `src/ses/pauseGate.ts` — 営業リスト「全体」の A・B で未着手（空も含む）の行が `SES_PAUSE_AB_UNTOUCHED`（100）以上たまったら本番バッチの収集以降を見送り、`SES_RESUME_AB_UNTOUCHED`（50）以下で再開（状態は `_状態` の `pauseGate`、無い構成は `pause-gate.json`。再開した回は直近 `SES_RESUME_LOOKBACK_HOURS` 時間のメールだけ読む。試運転は `npm run --silent ses:trial:gate`）
 - `src/ses/level.ts` — 案件と要員のレベル照合（技術ごとの経験年数・工程・立場を別の軸として比べ、最も弱い軸で除外/経験交渉を決める）
 - `src/ses/proper/judge.ts` — プロパー×案件のAI判定（案件の作業内容とスキルシートの経歴を読み比べ、必須ごとの根拠を経歴と機械照合。一般的な語だけの一致は見送り）
 - `src/ses/proper/salesList.ts` — 営業に渡すプロパー提案候補リスト（別スプレッドシート。「全体」＋要員別タブ、優先度・対応状況の色分け、人の入力列はIDで引き継ぐ。見送り・クローズの行は次の更新で「クローズ済み」へ移し、見送り理由「募集終了」はその案件の他の要員の行にも及ぶ。候補から外れ入力の無い行は消す前に「期限切れ」タブへ控え、機械の列「最終更新」「前回優先度」で再判定の変化を示し、試運転と本番で案件IDが変わっても同じメール（要員・営業元メール・件名・受信30分以内）の行を引き継ぐ。案件詳細のメール本文の必須・尚可の行に ○△× を付ける）

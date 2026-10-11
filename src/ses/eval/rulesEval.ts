@@ -21,7 +21,13 @@ import {
   retentionDays,
   properJudgePerEngineer,
   properJudgeBudgetJpy,
+  pauseAbUntouched,
+  resumeAbUntouched,
+  resumeLookbackHours,
 } from '../config.js';
+import { countUntouchedAB, decidePause, collectFloorMs } from '../pauseGate.js';
+import { collectSinceMs, receivedSince } from '../mail/since.js';
+import { gateReport, valuesOfSavedRead } from '../trial/gate.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
 import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare, uncachedModels } from '../../llm/pricing.js';
@@ -2094,6 +2100,7 @@ function reviewRound3Checks(): void {
 const RULE_ENV_PREFIXES = [
   'SKILL_', 'MATCH_', 'MIN_GROSS_', 'MAX_CANDIDATES', 'MAX_PROJECTS_PER_ENGINEER', 'NEGOTIATION_', 'ENABLE_NEGOTIATION', 'HOURLY_',
   'SES_STALE_DAYS', 'SES_OWN_DOMAINS', 'ANTHROPIC_MODEL_', 'JPY_PER_USD', 'SES_PRICING_', 'SES_RETENTION_',
+  'SES_PAUSE_', 'SES_RESUME_',
 ];
 
 // ===== レビュー指摘（第4回）: 工程の範囲・略語・業種/役割の含意・選択肢・文面の表示名・判定の失敗の分類 等 =====
@@ -5175,6 +5182,93 @@ function trialWindowsChecks(): void {
     at(odd, 0)[1] === jst(6, 12) + 2400 && odd.length === 19 && at(odd, 17)[1] === jst(6, 21) && at(odd, 18)[1] === jst(6, 21) + 600, show(odd.length));
 }
 
+// 営業リストの A・B の未着手による見送り・再開（作り物のデータだけ）
+function pauseGateChecks(): void {
+  section('見送り: 営業リストの A・B の未着手が多いときバッチを止め、減ったら再開する');
+  const row = (priority: string, status: string): string[] => ['x', priority, 'AA', '案件', '', '', '', '', '', '', '', '', status];
+  const header = SALES_COLUMNS.slice(0, 13).map((c) => c.name);
+  const body = [
+    row('A 提案推奨', '未着手'), // 数える
+    row('B 条件交渉', ''), // 数える（空も未着手）
+    row('B 条件交渉', '提案中'), // 数えない
+    row('C 要確認', '未着手'),
+    row('D 参考', ''),
+  ];
+  check('countUntouchedAB: A未着手・B空・B提案中・C未着手・D空 → 2', countUntouchedAB([header, ...body]) === 2, show(countUntouchedAB([header, ...body])));
+  // 列の並びを変えても同じ（優先度・対応状況の列を見出しの名前で探す）
+  const swapped = [[...header].reverse(), ...body.map((r) => [...r].reverse())];
+  check('countUntouchedAB: 見出しの列の並びを逆にしても同じ 2', countUntouchedAB(swapped) === 2);
+  check('countUntouchedAB: 見出しに「優先度」「対応状況」が無ければ 0・空の読み取りも 0',
+    countUntouchedAB([['No', '要員'], ['1', 'AA']]) === 0 && countUntouchedAB([]) === 0 && countUntouchedAB([header.map((h) => (h === '対応状況' ? '状況' : h)), ...body]) === 0);
+  // B:M だけの読み取り（先頭の No 列が無い）でも見出しの名前で数える
+  const fromB = [header.slice(1), ...body.map((r) => r.slice(1))];
+  check('countUntouchedAB: B:M だけの読み取り（No 列なし）でも 2', countUntouchedAB(fromB) === 2);
+  check('countUntouchedAB: 優先度の前後の空白は無視・先頭が「A 」「B 」なら接頭辞でも数える・対応状況の前後の空白も無視',
+    countUntouchedAB([header, row(' A 提案推奨 ', ' 未着手 '), row('B 何か別の表記', ''), row('Aだけ', ''), row('B 条件交渉', '見送り')]) === 2);
+  check('countUntouchedAB: 見出しの行だけ・行が短くて対応状況の列が無い行は未着手として数える',
+    countUntouchedAB([header]) === 0 && countUntouchedAB([header, ['x', 'A 提案推奨']]) === 1);
+
+  check('decidePause: 99 行は止めず 100 行で止める（止めていない間）',
+    !decidePause(99, false, 100, 50).paused && decidePause(100, false, 100, 50).paused && !decidePause(100, false, 100, 50).resumed);
+  check('decidePause: 止めている間は 51 行なら止めたまま・50 行で再開',
+    decidePause(51, true, 100, 50).paused && !decidePause(51, true, 100, 50).resumed && !decidePause(50, true, 100, 50).paused && decidePause(50, true, 100, 50).resumed);
+  check('decidePause: pauseAt=0 は止めない（止めていた状態は resumed で解く）',
+    !decidePause(999, false, 0, 0).paused && !decidePause(999, false, 0, 0).resumed && !decidePause(999, true, 0, 0).paused && decidePause(999, true, 0, 0).resumed);
+
+  const saved: Record<string, string | undefined> = {
+    pause: process.env.SES_PAUSE_AB_UNTOUCHED,
+    resume: process.env.SES_RESUME_AB_UNTOUCHED,
+    hours: process.env.SES_RESUME_LOOKBACK_HOURS,
+  };
+  try {
+    delete process.env.SES_PAUSE_AB_UNTOUCHED;
+    delete process.env.SES_RESUME_AB_UNTOUCHED;
+    delete process.env.SES_RESUME_LOOKBACK_HOURS;
+    check('設定の既定: 止める 100・再開 50・再開時の遡り 24 時間', pauseAbUntouched() === 100 && resumeAbUntouched() === 50 && resumeLookbackHours() === 24);
+    process.env.SES_PAUSE_AB_UNTOUCHED = '40';
+    process.env.SES_RESUME_AB_UNTOUCHED = '40';
+    check('設定: 再開が止める値以上なら止める値−1 に丸める（40・40 → 39、60 → 39）', resumeAbUntouched() === 39 && (process.env.SES_RESUME_AB_UNTOUCHED = '60') === '60' && resumeAbUntouched() === 39);
+    process.env.SES_PAUSE_AB_UNTOUCHED = '0';
+    check('設定: 止める値 0 はゲート無効（再開も 0）', pauseAbUntouched() === 0 && resumeAbUntouched() === 0);
+    process.env.SES_RESUME_LOOKBACK_HOURS = '500';
+    check('設定: 再開時の遡りは 1〜168 時間（範囲外は既定の 24）', resumeLookbackHours() === 24 && (process.env.SES_RESUME_LOOKBACK_HOURS = '48') === '48' && resumeLookbackHours() === 48);
+  } finally {
+    for (const [k, name] of [['pause', 'SES_PAUSE_AB_UNTOUCHED'], ['resume', 'SES_RESUME_AB_UNTOUCHED'], ['hours', 'SES_RESUME_LOOKBACK_HOURS']] as const) {
+      if (saved[k] === undefined) delete process.env[name];
+      else process.env[name] = saved[k];
+    }
+  }
+
+  const now = Date.UTC(2026, 9, 11, 3, 0, 0);
+  check('collectFloorMs: 止めていなければ floorMs があればそれ・無い／状態が無い／未来の値は null',
+    collectFloorMs({ paused: false, floorMs: now - 3600_000 }, now, 24) === now - 3600_000 && collectFloorMs({ paused: false }, now, 24) === null && collectFloorMs(null, now, 24) === null && collectFloorMs({ paused: false, floorMs: now + 1 }, now, 24) === null);
+  check('collectFloorMs: 止めている間は max(floorMs, 今−H 時間)（floorMs なし→今−H・floorMs が新しければそれ・古ければ今−H）',
+    collectFloorMs({ paused: true }, now, 24) === now - 24 * 3600_000
+    && collectFloorMs({ paused: true, floorMs: now - 3600_000 }, now, 24) === now - 3600_000
+    && collectFloorMs({ paused: true, floorMs: now - 48 * 3600_000 }, now, 24) === now - 24 * 3600_000
+    && collectFloorMs({ paused: true }, now, 48) === now - 48 * 3600_000);
+  check('collectFloorMs: 止めている間の floorMs が未来の値・非正・数でなければ無いものとして今−H 時間',
+    collectFloorMs({ paused: true, floorMs: now + 1 }, now, 24) === now - 24 * 3600_000
+    && collectFloorMs({ paused: true, floorMs: 0 }, now, 24) === now - 24 * 3600_000
+    && collectFloorMs({ paused: true, floorMs: -5 }, now, 24) === now - 24 * 3600_000
+    && collectFloorMs({ paused: true, floorMs: Number.NaN }, now, 24) === now - 24 * 3600_000);
+  const DAY = 24 * 3600_000;
+  check('collectSinceMs: 下限が無ければ今−収集日数・下限が新しければ下限・古ければ収集日数のまま',
+    collectSinceMs(now, 7) === now - 7 * DAY && collectSinceMs(now, 7, now - DAY) === now - DAY && collectSinceMs(now, 7, now - 30 * DAY) === now - 7 * DAY);
+  const mails = [{ id: 'a', receivedAt: new Date(now - 2 * DAY) }, { id: 'b', receivedAt: new Date(now - 3600_000) }, { id: 'c', receivedAt: new Date(now - DAY) }];
+  check('receivedSince: 受信時刻が下限より古いメールが落ちる（下限ちょうどは残る）・下限が無ければそのまま',
+    receivedSince(mails, now - DAY).map((m) => m.id).join(',') === 'b,c' && receivedSince(mails).length === 3 && receivedSince(mails, now - 3600_000 + 1).length === 0);
+
+  const savedRead = JSON.stringify({ range: "'全体'!B1:M4", values: [header.slice(1), ...body.slice(0, 3).map((r) => r.slice(1))] });
+  check('valuesOfSavedRead: get_values の保存結果 {range, values} から表を取り出す・values が無ければ例外',
+    valuesOfSavedRead(savedRead).length === 4 && (() => { try { valuesOfSavedRead('{"range":"x"}'); return false; } catch { return true; } })());
+  const values = valuesOfSavedRead(savedRead);
+  check('gateReport: 件数・paused・resumed だけを返す（2 行なら pause=2 で止まる・running の既定 100 では止まらない）',
+    show(gateReport(values, false, 2, 1)) === '{"untouchedAB":2,"wasPaused":false,"paused":true,"resumed":false}' && !gateReport(values, false).paused);
+  check('gateReport: 止めている間 2 行は resume=2 なら再開（resume が pause 以上なら pause−1 に丸めるので pause=2・resume=2 は 1 行以下で再開）',
+    gateReport(values, true, 100, 2).resumed && !gateReport(values, true, 2, 2).resumed && gateReport(values, true, 2, 2).paused);
+}
+
 // ラベル控えの表計算: 読み戻しと機械で照合して足りない行・違う行だけ書く（作り物のデータだけ）
 function labelSheetChecks(): void {
   section('ラベル控えの表計算（ses:labels:sheet）');
@@ -5466,6 +5560,7 @@ async function main(): Promise<void> {
     trialWindowsChecks();
     labelSheetChecks();
     trialUsageChecks();
+    pauseGateChecks();
   } finally {
     setDemoOverride(null);
   }

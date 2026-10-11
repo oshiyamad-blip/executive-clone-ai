@@ -996,6 +996,22 @@ function sheetsApi(): sheets_v4.Sheets | null {
   return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
 }
 
+const readAllTab = async (api: sheets_v4.Sheets, spreadsheetId: string): Promise<string[][]> =>
+  ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }))).data.values ??
+    []) as string[][];
+
+// 「全体」タブの読み取り（バッチの見送りの判定用。見出しの行を含む）。設定が無い・読めない場合は null
+export async function readSalesAllValues(): Promise<string[][] | null> {
+  const spreadsheetId = properSalesSpreadsheetId();
+  if (!spreadsheetId) return null;
+  try {
+    const api = sheetsApi();
+    return api ? await readAllTab(api, spreadsheetId) : null;
+  } catch {
+    return null;
+  }
+}
+
 interface TabInfo {
   sheetId: number;
   title: string;
@@ -1141,9 +1157,7 @@ export async function writeSalesList(
     }
     return id;
   };
-  const readExisting = async () =>
-    ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_ALL_TAB)}!A:${LAST_COL}` }))).data.values ??
-      []) as string[][];
+  const readExisting = () => readAllTab(api, spreadsheetId);
   // 初回の作成（見出しが空）のときも、クローズの行は外して控えに移す
   const freshMails = fresh.flatMap((r) => mailRefOfRow(r) ?? []);
   const withoutClosed = (values: string[][]) => {

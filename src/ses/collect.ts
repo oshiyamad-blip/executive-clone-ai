@@ -6,8 +6,9 @@
 import { collectMail, collectMailReady } from './mail/index.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from './mail/ownMail.js';
 import { loadFixtureMails } from './fixtures/mails.js';
-import { isDemo, requireLive, maxFetchPerRun, collectDays } from './config.js';
+import { isDemo, requireLive, maxFetchPerRun, collectDays, resumeLookbackHours } from './config.js';
 import { loadProcessedMailIds } from './store.js';
+import { collectFloorMs, loadPauseState } from './pauseGate.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
 import { orderForRun, isLastChance } from './schedule.js';
 import { SafeLogError } from './redact.js';
@@ -35,7 +36,9 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
   // 処理済みIDの読み込み失敗は例外のまま（空集合で続行すると収集期間の全メールを再抽出してしまうため）
   const processed = await loadProcessedMailIds();
   const limit = maxFetchPerRun();
-  const fetched = await collectMail((id) => processed.has(id), { limit, now });
+  // 営業リストの未着手による見送りから再開した回以降（と、止めている間に営業リストを読めない回）は、止めていた間の古いメールを読まない
+  const sinceMs = collectFloorMs(await loadPauseState(), now.getTime(), resumeLookbackHours()) ?? undefined;
+  const fetched = await collectMail((id) => processed.has(id), { limit, now, sinceMs });
   const unprocessed = fetched.mails.filter((m) => !processed.has(m.id));
 
   // 取り込み済み（処理済み）のメールへの社内からの返信を References で見分ける（Xserver 経路のIDは Message-ID から作るため）

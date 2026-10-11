@@ -9,6 +9,7 @@ import type { SesRawMail, DraftRef, SesMailMeta } from '../../types/index.js';
 export interface CollectOptions {
   limit: number; // 本文を取得するメールの上限（1回の実行で抽出する件数）
   now?: Date;
+  sinceMs?: number; // 受信時刻の下限（営業リストの未着手による見送りから再開した回に、止めていた間の古いメールを読まない）
 }
 
 export interface CollectOutcome {

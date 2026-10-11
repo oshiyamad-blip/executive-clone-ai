@@ -12,6 +12,7 @@ import type { sheets_v4, drive_v3 } from 'googleapis';
 import type { MailTransport, CollectOptions, CollectOutcome } from '../mail/index.js';
 import { pickForRun } from '../schedule.js';
 import { collectDays } from '../config.js';
+import { receivedSince } from '../mail/since.js';
 import type { DraftRef, SesMailMeta, SesRawMail } from '../../types/index.js';
 
 type Stored = string | number | boolean;
@@ -671,6 +672,7 @@ export class FakeMailTransport implements MailTransport {
   // 原文を解析できなかったメールのID（プロバイダが「解析不可」として返す分）
   unparsable: string[] = [];
   collectCalls = 0;
+  lastSinceMs: number | undefined; // 直近の収集に渡された受信時刻の下限
   skippedAsProcessed: string[] = [];
   downloaded: string[] = []; // 本文を取得したメールID
   drafts: Array<{ ref: DraftRef; from: string }> = [];
@@ -688,8 +690,10 @@ export class FakeMailTransport implements MailTransport {
 
   async collect(isProcessed: (mailId: string) => boolean, opts: CollectOptions): Promise<CollectOutcome> {
     this.collectCalls += 1;
+    this.lastSinceMs = opts.sinceMs;
     const unprocessed: SesRawMail[] = [];
-    for (const m of this.inbox) {
+    // 実際のプロバイダと同じく、受信時刻が下限（sinceMs）未満のメールは読まない
+    for (const m of receivedSince(this.inbox, opts.sinceMs)) {
       if (isProcessed(m.id)) this.skippedAsProcessed.push(m.id);
       else unprocessed.push(m);
     }

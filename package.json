@@ -44,6 +44,7 @@
     "ses:trial:chunks": "tsx src/ses/trial/chunks.ts",
     "ses:trial:writeplan": "tsx src/ses/trial/writePlan.ts",
     "ses:trial:windows": "tsx src/ses/trial/windows.ts",
+    "ses:trial:gate": "tsx src/ses/trial/gate.ts",
     "ses:labels:sheet": "tsx src/ses/eval/labelSheet.ts",
     "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts",
     "ses:eval:labels": "tsx src/ses/eval/labelsEval.ts",

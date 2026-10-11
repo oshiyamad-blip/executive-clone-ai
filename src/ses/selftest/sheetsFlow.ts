@@ -5,7 +5,7 @@
 // 人が編集する列の保持、処理済みメールID・隔離リストの持ち越し、担当者メールによる下書き作成、
 // プロパー管理表の同期とプロパー候補の保存、ログ秘匿を検証する。
 // テストデータの氏名・会社・アドレスはすべて架空（example ドメイン）。
-import { rmSync } from 'fs';
+import { rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { __setSheetsApiForTest, SheetBook } from '../../database/sheetBook.js';
 import {
@@ -73,6 +73,8 @@ import type { SkillSheetProfile } from '../proper/extractSkillSheet.js';
 import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
 import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, cacheKeyOf, __setProperJudgeForTest, type RawProperJudgment } from '../proper/judge.js';
 import { collectSesMail } from '../collect.js';
+import { applyPauseGate } from '../pauseGate.js';
+import { SALES_COLUMNS, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { markMailProcessed, loadFingerprintRecords, touchLastSeen, loadProcessedMailIds } from '../store.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from '../mail/ownMail.js';
 import { splitResends, serializeFingerprint } from '../resend.js';
@@ -3023,6 +3025,165 @@ async function testSecurityRound11(): Promise<void> {
   }
 }
 
+// ===== 営業リストの A・B の未着手による見送り・再開 =====
+
+const SALES_BOOK = 'fakeSalesBook';
+
+// 「全体」タブを、A・B で対応状況が未着手の行が abUntouched 行（数えない行を2行足して）ある状態にする
+function seedSalesAll(abUntouched: number): void {
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const row = (priority: string, status: string, n: number): string[] => {
+    const r = header.map(() => '');
+    r[header.indexOf('優先度')] = priority;
+    r[header.indexOf('対応状況')] = status;
+    r[header.indexOf('ID')] = `ownmatch_pg_${n}`;
+    return r;
+  };
+  const rows = Array.from({ length: abUntouched }, (_, i) => row(i % 2 === 0 ? 'A 提案推奨' : 'B 条件交渉', i % 3 === 0 ? '' : '未着手', i));
+  rows.push(row('A 提案推奨', '提案済', 9001), row('C 要確認', '未着手', 9002));
+  sheets.seedTab(SALES_BOOK, '全体', [header, ...rows], header.length + 1);
+}
+
+async function testPauseGate(): Promise<void> {
+  section('見送り: 営業リストの A・B の未着手が多いとバッチを止め（状態は _状態）、減ると再開して直近だけ読む');
+  sheets.createBook(SALES_BOOK);
+  __setSalesSheetsApiForTest(sheets.asApi());
+  const HOUR_MS = 60 * 60 * 1000;
+  type GateState = { paused?: boolean; pausedAt?: string; count?: number; floorMs?: number } | null;
+  const stateNow = () => readStateJson<GateState>('pauseGate');
+  try {
+    await withEnv({ PROPER_SALES_SPREADSHEET_ID: SALES_BOOK, SES_NOTIFY_TO: `boss@${OWN_DOMAIN}` }, async () => {
+      const t0 = new Date();
+      seedSalesAll(120);
+      newRun();
+      const sentBefore = mail.sent.length;
+      const r1 = await applyPauseGate(t0);
+      const fatalAfterPause = hasFatal();
+      newRun();
+      const s1 = await stateNow();
+      const notices = mail.sent.slice(sentBefore);
+      check('A・B の未着手 120 行（既定 100 以上）で止める。数えない行（提案済・C）は含めない',
+        r1.paused && !r1.resumed && r1.count === 120, JSON.stringify(r1));
+      check('止めた状態が _状態 の pauseGate に保存される（paused・止め始めの日時・件数）',
+        s1?.paused === true && s1.pausedAt === t0.toISOString() && s1.count === 120, JSON.stringify(s1));
+      check('止め始めた回は知らせのメールが1通（件数だけ・シートのIDを含まない）。異常終了にはしない',
+        notices.length === 1 && notices[0].body.includes('120 行') && !notices[0].body.includes(SALES_BOOK) && !fatalAfterPause, notices.map((m) => m.body).join('|'));
+
+      const r2 = await applyPauseGate(new Date(t0.getTime() + HOUR_MS));
+      newRun();
+      const s2 = await stateNow();
+      check('止めたままの回は知らせを重ねて送らず、止め始めの日時も変えない', r2.paused && mail.sent.length === sentBefore + 1 && s2?.pausedAt === t0.toISOString());
+
+      seedSalesAll(70);
+      newRun();
+      const r3 = await applyPauseGate(new Date(t0.getTime() + 2 * HOUR_MS));
+      check('止めている間は 70 行（50 行を超える）なら止めたまま', r3.paused && !r3.resumed && r3.count === 70);
+
+      seedSalesAll(40);
+      newRun();
+      const tResume = new Date(t0.getTime() + 3 * HOUR_MS);
+      const r4 = await applyPauseGate(tResume);
+      newRun();
+      const s4 = await stateNow();
+      check('40 行（50 行以下）に減ると再開し、状態に収集の下限 floorMs（再開時刻の24時間前）が入る',
+        !r4.paused && r4.resumed && s4?.paused === false && s4.floorMs === tResume.getTime() - 24 * HOUR_MS, JSON.stringify(s4));
+
+      const lastGood = rawMail('sesmail_pg_new', '検証一郎 <ichiro@pg.example.jp>', '【案件】再開後の検証', 60);
+      const tooOld = rawMail('sesmail_pg_old', '検証二郎 <jiro@pg.example.jp>', '【案件】止めていた間の検証', 30 * 60);
+      mail.inbox = [tooOld, lastGood];
+      newRun();
+      const collected = await collectSesMail(tResume);
+      check('再開の次の収集は下限（sinceMs）を渡し、止めていた間（下限より前）に受信したメールは読まない',
+        mail.lastSinceMs === s4?.floorMs && collected.mails.map((m) => m.id).join() === 'sesmail_pg_new', `${mail.lastSinceMs} / ${collected.mails.map((m) => m.id).join()}`);
+      mail.inbox = [];
+
+      const r5 = await applyPauseGate(new Date(t0.getTime() + 4 * HOUR_MS));
+      check('再開後に 40 行のまま（止める値未満）なら何もせず続ける', !r5.paused && !r5.resumed && r5.count === 40);
+
+      seedSalesAll(120);
+      newRun();
+      const r6 = await applyPauseGate(new Date(t0.getTime() + 5 * HOUR_MS));
+      newRun();
+      const s6 = await stateNow();
+      check('また 120 行にたまれば止め直す（知らせも改めて1通・古い収集の下限は残さない）',
+        r6.paused && mail.sent.length === sentBefore + 2 && s6?.paused === true && s6.floorMs === undefined);
+
+      // 止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると、状態を解いて下限を入れる（古いメールを全部読まない）。100 に戻して 70 行なら止めない
+      const tOff = new Date(t0.getTime() + 6 * HOUR_MS);
+      await withEnv({ SES_PAUSE_AB_UNTOUCHED: '0' }, async () => {
+        newRun();
+        const off = await applyPauseGate(tOff);
+        newRun();
+        const sOff = await stateNow();
+        check('止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると見送りを解く（resumed・件数は数えない）。状態は paused:false で floorMs は解いた時刻の24時間前',
+          !off.paused && off.resumed && off.count === null && sOff?.paused === false && sOff.floorMs === tOff.getTime() - 24 * HOUR_MS, JSON.stringify(sOff));
+      });
+      seedSalesAll(70);
+      newRun();
+      const noticesBeforeBack = mail.sent.length;
+      const back = await applyPauseGate(new Date(t0.getTime() + 6.5 * HOUR_MS));
+      newRun();
+      const sBack = await stateNow();
+      check('100 に戻して 70 行なら止めない（残った止めの状態で止まらず、通知も出ない）',
+        !back.paused && !back.resumed && back.count === 70 && sBack?.paused === false && mail.sent.length === noticesBeforeBack);
+      await withEnv({ SES_PAUSE_AB_UNTOUCHED: '0' }, async () => {
+        newRun();
+        const off = await applyPauseGate(new Date(t0.getTime() + 6 * HOUR_MS));
+        check('SES_PAUSE_AB_UNTOUCHED=0 ならゲートは無効（120 行でも止めず、何も読まない）', !off.paused && !off.resumed && off.count === null);
+      });
+      await withEnv({ PROPER_SALES_SPREADSHEET_ID: undefined }, async () => {
+        newRun();
+        const unset = await applyPauseGate(new Date(t0.getTime() + 6 * HOUR_MS));
+        check('営業リストが未設定なら何もせず続ける', !unset.paused && unset.count === null);
+      });
+
+      sheets.deleteTab(SALES_BOOK, '全体');
+      newRun();
+      const unreadable = await applyPauseGate(new Date(t0.getTime() + 7 * HOUR_MS));
+      check('営業リストの「全体」を読めなければ止めずに続ける（異常終了にもしない）', !unreadable.paused && unreadable.count === null && !hasFatal());
+
+      // 止めている間に営業リストを読めない回: ゲートは続くが、収集は直近 H 時間より古いメールを読まない
+      seedSalesAll(120);
+      newRun();
+      const repaused = await applyPauseGate(new Date(t0.getTime() + 8 * HOUR_MS));
+      sheets.deleteTab(SALES_BOOK, '全体');
+      newRun();
+      const blind = await applyPauseGate(new Date(t0.getTime() + 9 * HOUR_MS));
+      newRun();
+      const sBlind = await stateNow();
+      check('止めている間に「全体」を読めない回は止めたまま扱い（状態は paused:true のまま・gate は何もしない）',
+        repaused.paused && !blind.paused && blind.count === null && sBlind?.paused === true, JSON.stringify(sBlind));
+      const recentMail = rawMail('sesmail_pg_recent', '検証三郎 <saburo@pg.example.jp>', '【案件】読めない回の直近', 60);
+      const staleMail = rawMail('sesmail_pg_stale', '検証四郎 <shiro@pg.example.jp>', '【案件】止めていた間の古い案件', 30 * 60);
+      mail.inbox = [staleMail, recentMail];
+      newRun();
+      const blindCollected = await collectSesMail(t0);
+      check('paused 中に全体を読めない回の収集は直近 H 時間（既定24）より古いメールを読まない',
+        mail.lastSinceMs === t0.getTime() - 24 * HOUR_MS && blindCollected.mails.map((m) => m.id).join() === 'sesmail_pg_recent',
+        `${mail.lastSinceMs} / ${blindCollected.mails.map((m) => m.id).join()}`);
+      mail.inbox = [];
+      // 以降のテストに止めの状態を残さない
+      await writeStateJson('pauseGate', { paused: false });
+      newRun();
+
+      // _状態 が使えない構成（DB_PROVIDER が sheets でない）では healDataDir() の pause-gate.json に置く
+      seedSalesAll(120);
+      await withEnv({ DB_PROVIDER: 'notion' }, async () => {
+        newRun();
+        const file = `${WORK_DIR}/heal/pause-gate.json`;
+        const f1 = await applyPauseGate(t0);
+        const saved = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf-8')) as GateState) : null;
+        check('_状態 が使えない構成では healDataDir() の pause-gate.json に状態を置く', f1.paused && saved?.paused === true && saved.count === 120, JSON.stringify(saved));
+        rmSync(file, { force: true });
+      });
+    });
+  } finally {
+    __setSalesSheetsApiForTest(null);
+    mail.inbox = [];
+    newRun();
+  }
+}
+
 // 1回分の実行の「下書きを作る前の確認」
 async function ledgerRun(): Promise<boolean> {
   newRun();
@@ -3151,6 +3312,7 @@ async function main(): Promise<void> {
     await testGoogleAccessRound6();
     await testSecurityRound9();
     await testSecurityRound11();
+    await testPauseGate();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);

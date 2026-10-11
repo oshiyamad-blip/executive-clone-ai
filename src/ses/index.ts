@@ -5,6 +5,7 @@ import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
 import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
 import { matchIncrementally, persistInjectionFlags } from './matchRun.js';
 import { loadSuppressionIndex } from './suppress.js';
+import { applyPauseGate } from './pauseGate.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
 import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
@@ -193,6 +194,14 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
 
   if (opts.matchOnly || isDemo()) {
     await runWholeBatch(opts, requestedDrafts);
+    return;
+  }
+
+  // 営業リストの A・B の未着手がたまっていたら、収集以降を見送る（定期実行を失敗に見せないため recordFatal は使わない）
+  const gate = await applyPauseGate();
+  if (gate.paused) {
+    await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
+    console.log('=== SESバッチ: 営業リストの未着手が多いため、収集・抽出・照合を見送って終了 ===');
     return;
   }
 
