@@ -1,7 +1,7 @@
 // 試運転で、営業リストの A・B の未着手がたまっていてバッチを見送るかを調べる（本番バッチの pauseGate と同じ判定）。
 // 「全体」の B1:M1000 などの読み取り（get_values の保存結果 {range, values}。見出しの行を含む）を渡す。
 // 標準出力は件数と真偽だけ（人名・件名・シートのIDは出さない）。
-//   npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=100] [resume=50]
+//   npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=50] [resume=25]
 //   → {"untouchedAB":N,"wasPaused":bool,"paused":bool,"resumed":bool}
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -24,7 +24,7 @@ export function valuesOfSavedRead(text: string): string[][] {
 }
 
 // ファイルの読み込み以外の中心の処理（純関数）。resume が pause 以上なら pause−1 に丸める（本番と同じ）
-export function gateReport(values: string[][], wasPaused: boolean, pause = 100, resume = 50): GateReport {
+export function gateReport(values: string[][], wasPaused: boolean, pause = 50, resume = 25): GateReport {
   const untouchedAB = countUntouchedAB(values);
   const decision = decidePause(untouchedAB, wasPaused, pause, clampResume(pause, resume));
   return { untouchedAB, wasPaused, ...decision };
@@ -40,12 +40,12 @@ function numberArg(arg: string | undefined, name: string, def: number): number {
 function main(): void {
   const [file, state, pauseArg, resumeArg] = process.argv.slice(2);
   if (!file || (state !== 'running' && state !== 'paused')) {
-    console.error('使い方: npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=100] [resume=50]');
+    console.error('使い方: npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=50] [resume=25]');
     process.exitCode = 1;
     return;
   }
   const values = valuesOfSavedRead(readFileSync(resolve(file), 'utf-8'));
-  console.log(JSON.stringify(gateReport(values, state === 'paused', numberArg(pauseArg, 'pause', 100), numberArg(resumeArg, 'resume', 50))));
+  console.log(JSON.stringify(gateReport(values, state === 'paused', numberArg(pauseArg, 'pause', 50), numberArg(resumeArg, 'resume', 25))));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

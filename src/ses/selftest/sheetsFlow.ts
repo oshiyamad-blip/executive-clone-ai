@@ -3054,38 +3054,43 @@ async function testPauseGate(): Promise<void> {
   try {
     await withEnv({ PROPER_SALES_SPREADSHEET_ID: SALES_BOOK, SES_NOTIFY_TO: `boss@${OWN_DOMAIN}` }, async () => {
       const t0 = new Date();
-      seedSalesAll(120);
+      seedSalesAll(49);
       newRun();
       const sentBefore = mail.sent.length;
+      const r0 = await applyPauseGate(t0);
+      check('A・B の未着手 49 行（既定 50 未満）では止めない（状態も通知も出ない）',
+        !r0.paused && !r0.resumed && r0.count === 49 && mail.sent.length === sentBefore, JSON.stringify(r0));
+      seedSalesAll(50);
+      newRun();
       const r1 = await applyPauseGate(t0);
       const fatalAfterPause = hasFatal();
       newRun();
       const s1 = await stateNow();
       const notices = mail.sent.slice(sentBefore);
-      check('A・B の未着手 120 行（既定 100 以上）で止める。数えない行（提案済・C）は含めない',
-        r1.paused && !r1.resumed && r1.count === 120, JSON.stringify(r1));
+      check('A・B の未着手 50 行（既定 50 以上）で止める。数えない行（提案済・C）は含めない',
+        r1.paused && !r1.resumed && r1.count === 50, JSON.stringify(r1));
       check('止めた状態が _状態 の pauseGate に保存される（paused・止め始めの日時・件数）',
-        s1?.paused === true && s1.pausedAt === t0.toISOString() && s1.count === 120, JSON.stringify(s1));
+        s1?.paused === true && s1.pausedAt === t0.toISOString() && s1.count === 50, JSON.stringify(s1));
       check('止め始めた回は知らせのメールが1通（件数だけ・シートのIDを含まない）。異常終了にはしない',
-        notices.length === 1 && notices[0].body.includes('120 行') && !notices[0].body.includes(SALES_BOOK) && !fatalAfterPause, notices.map((m) => m.body).join('|'));
+        notices.length === 1 && notices[0].body.includes('50 行') && !notices[0].body.includes(SALES_BOOK) && !fatalAfterPause, notices.map((m) => m.body).join('|'));
 
       const r2 = await applyPauseGate(new Date(t0.getTime() + HOUR_MS));
       newRun();
       const s2 = await stateNow();
       check('止めたままの回は知らせを重ねて送らず、止め始めの日時も変えない', r2.paused && mail.sent.length === sentBefore + 1 && s2?.pausedAt === t0.toISOString());
 
-      seedSalesAll(70);
+      seedSalesAll(26);
       newRun();
       const r3 = await applyPauseGate(new Date(t0.getTime() + 2 * HOUR_MS));
-      check('止めている間は 70 行（50 行を超える）なら止めたまま', r3.paused && !r3.resumed && r3.count === 70);
+      check('止めている間は 26 行（25 行を超える）なら止めたまま', r3.paused && !r3.resumed && r3.count === 26);
 
-      seedSalesAll(40);
+      seedSalesAll(25);
       newRun();
       const tResume = new Date(t0.getTime() + 3 * HOUR_MS);
       const r4 = await applyPauseGate(tResume);
       newRun();
       const s4 = await stateNow();
-      check('40 行（50 行以下）に減ると再開し、状態に収集の下限 floorMs（再開時刻の24時間前）が入る',
+      check('25 行（25 行以下）に減ると再開し、状態に収集の下限 floorMs（再開時刻の24時間前）が入る',
         !r4.paused && r4.resumed && s4?.paused === false && s4.floorMs === tResume.getTime() - 24 * HOUR_MS, JSON.stringify(s4));
 
       const lastGood = rawMail('sesmail_pg_new', '検証一郎 <ichiro@pg.example.jp>', '【案件】再開後の検証', 60);
@@ -3098,7 +3103,7 @@ async function testPauseGate(): Promise<void> {
       mail.inbox = [];
 
       const r5 = await applyPauseGate(new Date(t0.getTime() + 4 * HOUR_MS));
-      check('再開後に 40 行のまま（止める値未満）なら何もせず続ける', !r5.paused && !r5.resumed && r5.count === 40);
+      check('再開後に 25 行のまま（止める値未満）なら何もせず続ける', !r5.paused && !r5.resumed && r5.count === 25);
 
       seedSalesAll(120);
       newRun();
@@ -3108,7 +3113,7 @@ async function testPauseGate(): Promise<void> {
       check('また 120 行にたまれば止め直す（知らせも改めて1通・古い収集の下限は残さない）',
         r6.paused && mail.sent.length === sentBefore + 2 && s6?.paused === true && s6.floorMs === undefined);
 
-      // 止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると、状態を解いて下限を入れる（古いメールを全部読まない）。100 に戻して 70 行なら止めない
+      // 止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると、状態を解いて下限を入れる（古いメールを全部読まない）。既定（50）に戻して 49 行なら止めない
       const tOff = new Date(t0.getTime() + 6 * HOUR_MS);
       await withEnv({ SES_PAUSE_AB_UNTOUCHED: '0' }, async () => {
         newRun();
@@ -3118,14 +3123,14 @@ async function testPauseGate(): Promise<void> {
         check('止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると見送りを解く（resumed・件数は数えない）。状態は paused:false で floorMs は解いた時刻の24時間前',
           !off.paused && off.resumed && off.count === null && sOff?.paused === false && sOff.floorMs === tOff.getTime() - 24 * HOUR_MS, JSON.stringify(sOff));
       });
-      seedSalesAll(70);
+      seedSalesAll(49);
       newRun();
       const noticesBeforeBack = mail.sent.length;
       const back = await applyPauseGate(new Date(t0.getTime() + 6.5 * HOUR_MS));
       newRun();
       const sBack = await stateNow();
-      check('100 に戻して 70 行なら止めない（残った止めの状態で止まらず、通知も出ない）',
-        !back.paused && !back.resumed && back.count === 70 && sBack?.paused === false && mail.sent.length === noticesBeforeBack);
+      check('既定（50）に戻して 49 行なら止めない（残った止めの状態で止まらず、通知も出ない）',
+        !back.paused && !back.resumed && back.count === 49 && sBack?.paused === false && mail.sent.length === noticesBeforeBack);
       await withEnv({ SES_PAUSE_AB_UNTOUCHED: '0' }, async () => {
         newRun();
         const off = await applyPauseGate(new Date(t0.getTime() + 6 * HOUR_MS));

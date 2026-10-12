@@ -445,12 +445,12 @@ export function collectDays(): number {
 
 // 営業リストの A・B の未着手がこの行数以上たまったらバッチを止める（0 で止めない）
 export function pauseAbUntouched(): number {
-  return envNum('SES_PAUSE_AB_UNTOUCHED', 100, { min: 0, int: true });
+  return envNum('SES_PAUSE_AB_UNTOUCHED', 50, { min: 0, int: true });
 }
 
 // 止めている間、A・B の未着手がこの行数以下になったら再開する。止める値以上なら止める値−1 に丸める（止めた直後に再開しないため）
 export function resumeAbUntouched(): number {
-  return clampResume(pauseAbUntouched(), envNum('SES_RESUME_AB_UNTOUCHED', 50, { min: 0, int: true }));
+  return clampResume(pauseAbUntouched(), envNum('SES_RESUME_AB_UNTOUCHED', 25, { min: 0, int: true }));
 }
 
 // 再開の行数を止める行数より小さく丸める純関数（pause が 0 以下＝ゲート無効なら 0）

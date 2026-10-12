@@ -16,13 +16,13 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    今回の対象の終わりは、実行開始の時刻（epoch秒）
    - **未着手がたまっているか**（本番の `SES_PAUSE_AB_UNTOUCHED` と同じ判定）: 営業リストの「全体」の `B1:M1000` を `get_values` で読み（保存されたファイルのパスを使う）、
      実行ログの最後の行の A 列に「見送り・未着手が多い」が含まれていれば `paused`、それ以外は `running` として
-     `npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=100] [resume=50]` を実行する
-     （標準出力は件数だけ `{"untouchedAB":N,"wasPaused":bool,"paused":bool,"resumed":bool}`。A・B の優先度で対応状況が未着手（空も含む）の行を数え、100行以上で止め、止めている間は50行以下で再開する）
+     `npm run --silent ses:trial:gate -- <全体の読み取りファイル> <running|paused> [pause=50] [resume=25]` を実行する
+     （標準出力は件数だけ `{"untouchedAB":N,"wasPaused":bool,"paused":bool,"resumed":bool}`。A・B の優先度で対応状況が未着手（空も含む）の行を数え、50行以上で止め、止めている間は25行以下で再開する）
    - `paused: true` なら、メールチェック以降は行わず、実行ログに1行足して終える:
      A「<開始> （見送り・未着手が多い）」、B と C は前の行の C（対象の終わり）のまま、D〜J は 0、
-     K「A・B の未着手 N 行（100以上で停止・50以下で再開）」、P は所要時間、Q（理由・チェックの件数）は前の行の Q をそのまま写す、R（フィードバック）は必ず「対象外」、S は「0」。
+     K「A・B の未着手 N 行（50以上で停止・25以下で再開）」、P は所要時間、Q（理由・チェックの件数）は前の行の Q をそのまま写す、R（フィードバック）は必ず「対象外」、S は「0」。
      見送りの行は 3b の「実施」「起点」の行ではないので、3b の起点（増えた件数を引く行）には使わない。
-     最後の報告は「見送り（A・B の未着手 N 行。50行以下で再開）」の1行
+     最後の報告は「見送り（A・B の未着手 N 行。25行以下で再開）」の1行
    - `resumed: true` なら、今回の対象の始まりを `max(前の回の対象の終わり, 実行開始−86400)` にして続ける（止めていた間の古いメールは読まない）。実行ログの D 列に「再開（直近24時間だけ）」と添える
 3. `npm install`（未導入なら）のあと、`RUN_DIR=... PHASE=prompts npx tsx src/ses/trial/harness.ts` を実行する。
    抽出の指示文（`extract_system.txt`）とJSONの形（`extract_schema.json`）ができる
