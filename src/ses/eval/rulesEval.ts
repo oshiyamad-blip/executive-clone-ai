@@ -5208,10 +5208,10 @@ function pauseGateChecks(): void {
   check('countUntouchedAB: 見出しの行だけ・行が短くて対応状況の列が無い行は未着手として数える',
     countUntouchedAB([header]) === 0 && countUntouchedAB([header, ['x', 'A 提案推奨']]) === 1);
 
-  check('decidePause: 99 行は止めず 100 行で止める（止めていない間）',
-    !decidePause(99, false, 100, 50).paused && decidePause(100, false, 100, 50).paused && !decidePause(100, false, 100, 50).resumed);
-  check('decidePause: 止めている間は 51 行なら止めたまま・50 行で再開',
-    decidePause(51, true, 100, 50).paused && !decidePause(51, true, 100, 50).resumed && !decidePause(50, true, 100, 50).paused && decidePause(50, true, 100, 50).resumed);
+  check('decidePause: 49 行は止めず 50 行で止める（止めていない間）',
+    !decidePause(49, false, 50, 25).paused && decidePause(50, false, 50, 25).paused && !decidePause(50, false, 50, 25).resumed);
+  check('decidePause: 止めている間は 26 行なら止めたまま・25 行で再開',
+    decidePause(26, true, 50, 25).paused && !decidePause(26, true, 50, 25).resumed && !decidePause(25, true, 50, 25).paused && decidePause(25, true, 50, 25).resumed);
   check('decidePause: pauseAt=0 は止めない（止めていた状態は resumed で解く）',
     !decidePause(999, false, 0, 0).paused && !decidePause(999, false, 0, 0).resumed && !decidePause(999, true, 0, 0).paused && decidePause(999, true, 0, 0).resumed);
 
@@ -5224,7 +5224,7 @@ function pauseGateChecks(): void {
     delete process.env.SES_PAUSE_AB_UNTOUCHED;
     delete process.env.SES_RESUME_AB_UNTOUCHED;
     delete process.env.SES_RESUME_LOOKBACK_HOURS;
-    check('設定の既定: 止める 100・再開 50・再開時の遡り 24 時間', pauseAbUntouched() === 100 && resumeAbUntouched() === 50 && resumeLookbackHours() === 24);
+    check('設定の既定: 止める 50・再開 25・再開時の遡り 24 時間', pauseAbUntouched() === 50 && resumeAbUntouched() === 25 && resumeLookbackHours() === 24);
     process.env.SES_PAUSE_AB_UNTOUCHED = '40';
     process.env.SES_RESUME_AB_UNTOUCHED = '40';
     check('設定: 再開が止める値以上なら止める値−1 に丸める（40・40 → 39、60 → 39）', resumeAbUntouched() === 39 && (process.env.SES_RESUME_AB_UNTOUCHED = '60') === '60' && resumeAbUntouched() === 39);
@@ -5263,10 +5263,10 @@ function pauseGateChecks(): void {
   check('valuesOfSavedRead: get_values の保存結果 {range, values} から表を取り出す・values が無ければ例外',
     valuesOfSavedRead(savedRead).length === 4 && (() => { try { valuesOfSavedRead('{"range":"x"}'); return false; } catch { return true; } })());
   const values = valuesOfSavedRead(savedRead);
-  check('gateReport: 件数・paused・resumed だけを返す（2 行なら pause=2 で止まる・running の既定 100 では止まらない）',
+  check('gateReport: 件数・paused・resumed だけを返す（2 行なら pause=2 で止まる・running の既定 50 では止まらない）',
     show(gateReport(values, false, 2, 1)) === '{"untouchedAB":2,"wasPaused":false,"paused":true,"resumed":false}' && !gateReport(values, false).paused);
   check('gateReport: 止めている間 2 行は resume=2 なら再開（resume が pause 以上なら pause−1 に丸めるので pause=2・resume=2 は 1 行以下で再開）',
-    gateReport(values, true, 100, 2).resumed && !gateReport(values, true, 2, 2).resumed && gateReport(values, true, 2, 2).paused);
+    gateReport(values, true, 50, 2).resumed && gateReport(values, true).resumed && !gateReport(values, true, 2, 2).resumed && gateReport(values, true, 2, 2).paused);
 }
 
 // ラベル控えの表計算: 読み戻しと機械で照合して足りない行・違う行だけ書く（作り物のデータだけ）
