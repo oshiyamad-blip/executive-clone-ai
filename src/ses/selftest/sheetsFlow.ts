@@ -53,7 +53,7 @@ import {
   fetchMatchLedger,
   fetchItemsByIds,
 } from '../../database/index.js';
-import { setDemoOverride } from '../config.js';
+import { setDemoOverride, collectDays } from '../config.js';
 import { startRunClock, stopRunClock } from '../schedule.js';
 import { matchIncrementally } from '../matchRun.js';
 import { DRAFT_STATE } from '../../database/mapping.js';
@@ -3087,18 +3087,22 @@ async function testPauseGate(): Promise<void> {
       seedSalesAll(25);
       newRun();
       const tResume = new Date(t0.getTime() + 3 * HOUR_MS);
+      const windowMs = collectDays() * 24 * HOUR_MS;
+      // 窓の中のメールが既定の 1000 通に満たない（0 通）ので、下限は窓全体（今−収集日数）
+      mail.inbox = [];
+      mail.nthCalls = [];
       const r4 = await applyPauseGate(tResume);
       newRun();
       const s4 = await stateNow();
-      check('25 行（25 行以下）に減ると再開し、状態に収集の下限 floorMs（再開時刻の24時間前）が入る',
-        !r4.paused && r4.resumed && s4?.paused === false && s4.floorMs === tResume.getTime() - 24 * HOUR_MS, JSON.stringify(s4));
+      check('25 行（25 行以下）に減ると再開し、窓内のメールが 1000 通に満たなければ収集の下限 floorMs は窓全体（再開時刻の収集日数前）。数えるのは 1000 通目',
+        !r4.paused && r4.resumed && s4?.paused === false && s4.floorMs === tResume.getTime() - windowMs && mail.nthCalls.join() === '1000', `${JSON.stringify(s4)} / ${mail.nthCalls.join()}`);
 
       const lastGood = rawMail('sesmail_pg_new', '検証一郎 <ichiro@pg.example.jp>', '【案件】再開後の検証', 60);
-      const tooOld = rawMail('sesmail_pg_old', '検証二郎 <jiro@pg.example.jp>', '【案件】止めていた間の検証', 30 * 60);
+      const tooOld = rawMail('sesmail_pg_old', '検証二郎 <jiro@pg.example.jp>', '【案件】窓より前の検証', 8 * 24 * 60);
       mail.inbox = [tooOld, lastGood];
       newRun();
       const collected = await collectSesMail(tResume);
-      check('再開の次の収集は下限（sinceMs）を渡し、止めていた間（下限より前）に受信したメールは読まない',
+      check('再開の次の収集は下限（sinceMs）を渡し、窓より前に受信したメールは読まない',
         mail.lastSinceMs === s4?.floorMs && collected.mails.map((m) => m.id).join() === 'sesmail_pg_new', `${mail.lastSinceMs} / ${collected.mails.map((m) => m.id).join()}`);
       mail.inbox = [];
 
@@ -3120,8 +3124,8 @@ async function testPauseGate(): Promise<void> {
         const off = await applyPauseGate(tOff);
         newRun();
         const sOff = await stateNow();
-        check('止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると見送りを解く（resumed・件数は数えない）。状態は paused:false で floorMs は解いた時刻の24時間前',
-          !off.paused && off.resumed && off.count === null && sOff?.paused === false && sOff.floorMs === tOff.getTime() - 24 * HOUR_MS, JSON.stringify(sOff));
+        check('止めたまま SES_PAUSE_AB_UNTOUCHED=0 にすると見送りを解く（resumed・件数は数えない）。状態は paused:false で floorMs は再開と同じ決め方（窓内が 1000 通に満たなければ窓全体）',
+          !off.paused && off.resumed && off.count === null && sOff?.paused === false && sOff.floorMs === tOff.getTime() - windowMs, JSON.stringify(sOff));
       });
       seedSalesAll(49);
       newRun();
@@ -3166,6 +3170,61 @@ async function testPauseGate(): Promise<void> {
       check('paused 中に全体を読めない回の収集は直近 H 時間（既定24）より古いメールを読まない',
         mail.lastSinceMs === t0.getTime() - 24 * HOUR_MS && blindCollected.mails.map((m) => m.id).join() === 'sesmail_pg_recent',
         `${mail.lastSinceMs} / ${blindCollected.mails.map((m) => m.id).join()}`);
+      mail.inbox = [];
+
+      // 再開の下限: 新しい順に SES_RESUME_MAX_MAILS 通目の受信時刻（止めた状態にして、減らして再開する）
+      const resumeCycle = async (tResumeAt: Date): Promise<{ floor: number | undefined; resumed: boolean }> => {
+        seedSalesAll(120);
+        newRun();
+        await applyPauseGate(new Date(tResumeAt.getTime() - HOUR_MS));
+        seedSalesAll(25);
+        newRun();
+        mail.nthCalls = [];
+        const r = await applyPauseGate(tResumeAt);
+        newRun();
+        return { floor: (await stateNow())?.floorMs, resumed: r.resumed };
+      };
+      const five = ['a', 'b', 'c', 'd', 'e'].map((k, i) => rawMail(`sesmail_pgn_${k}`, `検証${k} <${k}@pgn.example.jp>`, `【案件】新しい順の検証${k}`, 10 * (i + 1)));
+      const ancient = rawMail('sesmail_pgn_ancient', '検証古 <old@pgn.example.jp>', '【案件】窓より前の検証', 8 * 24 * 60);
+      await withEnv({ SES_RESUME_MAX_MAILS: '3' }, async () => {
+        mail.inbox = [ancient, ...five];
+        const tA = new Date(t0.getTime() + 10 * HOUR_MS);
+        const a = await resumeCycle(tA);
+        const third = five[2].receivedAt.getTime();
+        check('再開の回は新しい順に SES_RESUME_MAX_MAILS（3）通目の受信時刻を数え、保存される floorMs がその時刻になる',
+          a.resumed && mail.nthCalls.join() === '3' && a.floor === third, `${a.floor} / ${third} / ${mail.nthCalls.join()}`);
+        newRun();
+        const readA = await collectSesMail(tA);
+        check('その回の収集は新しい順の3通だけを読み（3通目ちょうどを含む）、それより古いメールは読まない',
+          mail.lastSinceMs === third && readA.mails.map((m) => m.id).sort().join() === 'sesmail_pgn_a,sesmail_pgn_b,sesmail_pgn_c', readA.mails.map((m) => m.id).join());
+      });
+      await withEnv({ SES_RESUME_MAX_MAILS: '10' }, async () => {
+        mail.inbox = [ancient, ...five];
+        const tB = new Date(t0.getTime() + 11 * HOUR_MS);
+        const b = await resumeCycle(tB);
+        check('窓内のメールが SES_RESUME_MAX_MAILS（10）通に満たなければ、下限は窓全体（今−収集日数）で窓内の5通を全部読み、窓より前は読まない',
+          b.resumed && mail.nthCalls.join() === '10' && b.floor === tB.getTime() - windowMs, `${b.floor} / ${mail.nthCalls.join()}`);
+        newRun();
+        const readB = await collectSesMail(tB);
+        check('窓全体を読む回は窓内の5通を全部読む', readB.mails.length === 5 && !readB.mails.some((m) => m.id === 'sesmail_pgn_ancient'), readB.mails.map((m) => m.id).join());
+      });
+      await withEnv({ SES_RESUME_MAX_MAILS: '3' }, async () => {
+        mail.inbox = [ancient, ...five];
+        mail.failNth = true;
+        const tC = new Date(t0.getTime() + 12 * HOUR_MS);
+        const c = await resumeCycle(tC);
+        mail.failNth = false;
+        check('件数を数えるのに失敗したときは異常終了にせず、下限は今−SES_RESUME_LOOKBACK_HOURS（既定24時間）',
+          c.resumed && mail.nthCalls.join() === '3' && c.floor === tC.getTime() - 24 * HOUR_MS && !hasFatal(), `${c.floor} / ${mail.nthCalls.join()}`);
+        // 経路に実装が無い（nthNewestReceivedMs を持たない）ときも同じ
+        const own = mail as unknown as { nthNewestReceivedMs?: unknown };
+        const method = own.nthNewestReceivedMs;
+        own.nthNewestReceivedMs = undefined;
+        const tD = new Date(t0.getTime() + 13 * HOUR_MS);
+        const d = await resumeCycle(tD);
+        own.nthNewestReceivedMs = method;
+        check('経路に新しい順の件数を数える口が無いときも、下限は今−遡り時間で再開する', d.resumed && d.floor === tD.getTime() - 24 * HOUR_MS && !hasFatal(), String(d.floor));
+      });
       mail.inbox = [];
       // 以降のテストに止めの状態を残さない
       await writeStateJson('pauseGate', { paused: false });

@@ -2,10 +2,11 @@
 // 営業が手を付けないまま候補がたまるなら、収集・抽出・照合を回さず使用量を抑える。
 // 数えるもの: 「全体」タブの行のうち、優先度が A（A 提案推奨）か B（B 条件交渉）で、対応状況が未着手（空も未着手）の行数。
 // 止める: その数が SES_PAUSE_AB_UNTOUCHED 以上。再開: 止めている間に SES_RESUME_AB_UNTOUCHED 以下になったら。
-// 再開した回のメールは直近 SES_RESUME_LOOKBACK_HOURS 時間分だけ（収集の下限 floorMs を状態に残す）。
+// 再開した回のメールは新しい順に SES_RESUME_MAX_MAILS 通まで（収集の下限 floorMs を状態に残す。数えられなければ直近 SES_RESUME_LOOKBACK_HOURS 時間）。
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { healDataDir, durableStateInSheets, pauseAbUntouched, resumeAbUntouched, resumeLookbackHours } from './config.js';
+import { healDataDir, durableStateInSheets, pauseAbUntouched, resumeAbUntouched, resumeLookbackHours, resumeMaxMails, collectDays } from './config.js';
+import { nthNewestReceivedMs } from './mail/index.js';
 import { sheetsDbConfigured, readStateJson, writeStateJson } from '../database/sheets.js';
 import { readSalesAllValues, salesListConfigured, SALES_PRIORITIES, SALES_STATUSES } from './proper/salesList.js';
 import { recordHealEvent } from './heal/events.js';
@@ -58,6 +59,27 @@ export function collectFloorMs(state: PauseState | null, nowMs: number, lookback
   const stored = typeof f === 'number' && Number.isFinite(f) && f > 0 && f <= nowMs ? f : null;
   if (state?.paused !== true) return stored;
   return Math.max(stored ?? -Infinity, nowMs - lookbackHours * 60 * 60 * 1000);
+}
+
+// 再開した回の収集の下限。nth は「新しい順に n 通目の受信時刻」: 数ならその時刻（その時刻ちょうどのメールも読む）、
+// null は n 通に満たない（止めていた間のメールが少ない）ので窓全体（今−収集日数。処理済みは処理済みIDで除かれる）、
+// 'error' は数えられなかったので今−遡り時間
+export function resumeFloorMs(nth: number | null | 'error', nowMs: number, days: number, lookbackHours: number): number {
+  if (nth === 'error') return nowMs - lookbackHours * 60 * 60 * 1000;
+  if (nth === null) return nowMs - days * 24 * 60 * 60 * 1000;
+  return nth;
+}
+
+// 新しい順に SES_RESUME_MAX_MAILS 通目の時刻を数えて下限にする。失敗しても例外にせず、件数だけの警告を残して予備の下限にする
+async function resumeFloorNow(now: Date): Promise<number> {
+  let nth: number | null | 'error';
+  try {
+    nth = await nthNewestReceivedMs(resumeMaxMails(), now);
+  } catch (err) {
+    nth = 'error';
+    recordHealEvent('warn', `再開の下限: 新しい順の ${resumeMaxMails()} 通目を数えられなかったため、直近 ${resumeLookbackHours()} 時間のメールから読みます: ${safeErr(err)}`);
+  }
+  return resumeFloorMs(nth, now.getTime(), collectDays(), resumeLookbackHours());
 }
 
 // 保存された値（「_状態」タブのセルは人も編集できる）を状態として解釈する。読めなければ null
@@ -119,11 +141,10 @@ export async function applyPauseGate(now: Date = new Date()): Promise<PauseGateO
   if (pauseAt <= 0 || !salesListConfigured()) {
     // 止めたまま設定を外すと状態が残り、古いメールを全部読んだり、後で戻したときに通知なしで止まったりするため、ここで解く
     if ((await loadPauseState())?.paused === true) {
-      const hours = resumeLookbackHours();
-      const message = `見送りを解除（ゲート無効または営業リスト未設定）。直近 ${hours} 時間のメールから読む`;
+      const message = `見送りを解除（ゲート無効または営業リスト未設定）。新しい順に ${resumeMaxMails()} 通のメールから読む`;
       console.log(`SESバッチ: ${message}`);
       recordHealEvent('info', message);
-      await savePauseState({ paused: false, floorMs: now.getTime() - hours * 60 * 60 * 1000 });
+      await savePauseState({ paused: false, floorMs: await resumeFloorNow(now) });
       return { paused: false, resumed: true, count: null };
     }
     return none;
@@ -149,11 +170,10 @@ export async function applyPauseGate(now: Date = new Date()): Promise<PauseGateO
     return { paused: true, resumed: false, count };
   }
   if (decision.resumed) {
-    const hours = resumeLookbackHours();
-    const message = `再開（A・B の未着手 ${count} 行）。直近 ${hours} 時間のメールから読む`;
+    const message = `再開（A・B の未着手 ${count} 行）。新しい順に ${resumeMaxMails()} 通のメールから読む`;
     console.log(`SESバッチ: ${message}`);
     recordHealEvent('info', message);
-    await savePauseState({ paused: false, floorMs: now.getTime() - hours * 60 * 60 * 1000 });
+    await savePauseState({ paused: false, floorMs: await resumeFloorNow(now) });
     return { paused: false, resumed: true, count };
   }
   return { paused: false, resumed: false, count };

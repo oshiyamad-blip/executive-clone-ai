@@ -1,7 +1,7 @@
 // メール送受信プロバイダの抽象化。MAIL_PROVIDER=xserver（既定・IMAP/SMTP）| gmail（Google Workspace API）。
 // マッチング・確認UI・全員に返信の組み立ては共通。収集・下書き作成・サマリ送信の「口」だけを切り替える。
 // （src/llm/index.ts の LLM_PROVIDER と同じ流儀）
-import { mailProvider } from '../config.js';
+import { mailProvider, isDemo } from '../config.js';
 import * as gmail from './gmail.js';
 import * as xserver from './xserver.js';
 import type { SesRawMail, DraftRef, SesMailMeta } from '../../types/index.js';
@@ -37,6 +37,9 @@ export interface MailTransport {
   sendPlainMail(to: string, subject: string, body: string): Promise<void>;
   // メール量の測定用に、since 以降の受信メールのメタ情報だけを読み取り専用で取得する（本文・添付は取得しない）
   scanMeta(since: Date): Promise<SesMailMeta[]>;
+  // 収集と同じ窓（今−収集日数）で、新しい順に n 通目の受信時刻（ミリ秒）。n 通に満たなければ null。失敗は例外。
+  // 実装が無い経路は数えられないものとして扱う（再開の下限は今−遡り時間になる）
+  nthNewestReceivedMs?(n: number, now: Date): Promise<number | null>;
 }
 
 // オフライン自己検証（npm run ses:flow:check）用の差し替え口（本番コードからは呼ばない）
@@ -81,4 +84,13 @@ export function sendPlainMailViaMail(to: string, subject: string, body: string):
 
 export function scanMailMetaViaMail(since: Date): Promise<SesMailMeta[]> {
   return transport().scanMeta(since);
+}
+
+// 再開した回の収集の下限を決めるため、新しい順に n 通目の受信時刻を返す。n 通に満たない・デモは null。
+// 数えられない（失敗・経路に実装が無い）ときは例外（呼び出し側が予備の下限に切り替える）
+export async function nthNewestReceivedMs(n: number, now: Date = new Date()): Promise<number | null> {
+  if (isDemo()) return null;
+  const t = transport();
+  if (!t.nthNewestReceivedMs) throw new Error('このメール経路は新しい順の件数を数えられません');
+  return t.nthNewestReceivedMs(n, now);
 }

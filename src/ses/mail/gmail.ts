@@ -14,7 +14,7 @@ import { SafeLogError } from '../redact.js';
 import { gmailDelegatedAuth, gmailCredentialsReady, gmailAuthProblem } from '../googleCreds.js';
 import { sesTargetGmail, collectDays } from '../config.js';
 import { pickForRun } from '../schedule.js';
-import { collectSinceMs, receivedSince } from './since.js';
+import { collectSinceMs, receivedSince, nthFromNewest } from './since.js';
 import { buildReplyMime, buildPlainMime } from './mime.js';
 import { addressOf } from './ownMail.js';
 import type { DraftRef, SesMailMeta, SesAttachmentKind } from '../../types/index.js';
@@ -34,13 +34,39 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
   if (!auth) throw new SafeLogError('Gmail収集: SES_TARGET_GMAIL または Gmail用のサービスアカウント鍵（SES_GMAIL_SA_KEY_JSON）が未設定です');
   const afterEpoch = Math.floor(collectSinceMs(Date.now(), collectDays(), opts.sinceMs) / 1000);
-  const query = `after:${afterEpoch} -in:sent -in:drafts -in:spam -in:trash`;
+  const query = collectQuery(afterEpoch);
   const outcome = await collectSesRawMail(auth, query, isProcessed, {
     limit: opts.limit,
     pick: (items, limit) => pickForRun(items, limit, collectDays(), opts.now),
   });
   // after: は秒単位のため念のため、受信時刻でも下限未満を落とす
   return { ...outcome, mails: receivedSince(outcome.mails, opts.sinceMs) };
+}
+
+function collectQuery(afterEpoch: number): string {
+  return `after:${afterEpoch} -in:sent -in:drafts -in:spam -in:trash`;
+}
+
+// 収集と同じ検索式（下限は今−収集日数。sinceMs は付けない）で、新しい順に n 通目の受信時刻（ミリ秒）を返す。
+// n 通に満たなければ null。一覧は n 件に届いた時点で読むのをやめ、n 件目の internalDate を1回だけ取る。失敗は例外
+export async function nthNewestReceivedMs(n: number, now: Date): Promise<number | null> {
+  const auth = gmailDelegatedAuth(sesTargetGmail(), SES_GMAIL_COLLECT_SCOPES);
+  if (!auth) throw new SafeLogError('Gmail件数確認: SES_TARGET_GMAIL または Gmail用のサービスアカウント鍵（SES_GMAIL_SA_KEY_JSON）が未設定です');
+  const gmail = google.gmail({ version: 'v1', auth });
+  const q = collectQuery(Math.floor(collectSinceMs(now.getTime(), collectDays()) / 1000));
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await gmail.users.messages.list({ userId: 'me', q, maxResults: 500, pageToken });
+    for (const m of res.data.messages ?? []) if (m.id) ids.push(m.id);
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken && ids.length < n);
+  const id = nthFromNewest(ids, n);
+  if (!id) return null;
+  const res = await gmail.users.messages.get({ userId: 'me', id, format: 'minimal', fields: 'internalDate' });
+  const ms = Number(res.data.internalDate ?? NaN);
+  if (!Number.isFinite(ms)) throw new SafeLogError('Gmail件数確認: n 通目の受信時刻を読めませんでした');
+  return ms;
 }
 
 export function draftReady(): boolean {

@@ -737,4 +737,15 @@ export class FakeMailTransport implements MailTransport {
   async scanMeta(_since: Date): Promise<SesMailMeta[]> {
     return [];
   }
+
+  // 新しい順に n 通目の受信時刻（収集の窓＝今−収集日数の中で数える。処理済みも数える）。n 通に満たなければ null
+  failNth = false;
+  nthCalls: number[] = [];
+  async nthNewestReceivedMs(n: number, now: Date): Promise<number | null> {
+    this.nthCalls.push(n);
+    if (this.failNth) throw new Error('imap search failed');
+    const base = now.getTime() - collectDays() * 24 * 60 * 60 * 1000;
+    const times = this.inbox.map((m) => m.receivedAt.getTime()).filter((ms) => ms >= base).sort((a, b) => b - a);
+    return times[n - 1] ?? null;
+  }
 }

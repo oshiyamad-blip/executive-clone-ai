@@ -11,7 +11,7 @@ import { pickForRun, pastRunDeadline } from '../schedule.js';
 import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
-import { collectSinceMs, receivedSince } from './since.js';
+import { collectSinceMs, receivedSince, nthNewestUid } from './since.js';
 import { chooseMailBody, sheetLinksInHtml } from './htmlText.js';
 import { formatMailboxes, messageIdMailId, type MailboxValue } from './ownMail.js';
 import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
@@ -253,6 +253,37 @@ export async function collect(isProcessed: (mailId: string) => boolean, opts: Co
   }
   console.log(`Xserver収集: ${mails.length}件を収集${deferred.length > 0 ? `（上限超過で次回以降に回した未処理 ${deferred.length}件）` : ''}`);
   return { mails, deferred, unparsable };
+}
+
+// 収集と同じ下限（今−収集日数。sinceMs は付けない）で UID を検索し、UID の大きい順に n 番目のメールの受信時刻（INTERNALDATE。ミリ秒）を
+// 1通だけ取って返す。n 通に満たなければ null。失敗は例外
+export async function nthNewestReceivedMs(n: number, now: Date): Promise<number | null> {
+  if (!imapConfigured()) {
+    throw new SafeLogError('Xserver件数確認: IMAP設定(XSERVER_IMAP_HOST/USER/PASS)が未完了です');
+  }
+  const client = imapClient();
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX', { readOnly: true });
+    try {
+      const since = new Date(collectSinceMs(now.getTime(), collectDays()));
+      const uids = searchResult(await client.search({ since }, { uid: true }), 'Xserver件数確認');
+      const uid = nthNewestUid(uids, n);
+      if (uid === null) return null;
+      const msg = await client.fetchOne(String(uid), { internalDate: true }, { uid: true });
+      const d = msg && msg.internalDate ? new Date(msg.internalDate) : null;
+      if (!d || Number.isNaN(d.getTime())) throw new SafeLogError('Xserver件数確認: n 通目の受信時刻を読めませんでした');
+      return d.getTime();
+    } finally {
+      lock.release();
+    }
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      /* noop */
+    }
+  }
 }
 
 // メール量の測定（npm run ses:mail-stats）用。受信箱を EXAMINE（読み取り専用）で開き、

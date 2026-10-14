@@ -7,6 +7,18 @@ export function collectSinceMs(nowMs: number, days: number, sinceMs?: number): n
   return sinceMs !== undefined && Number.isFinite(sinceMs) ? Math.max(base, sinceMs) : base;
 }
 
+// 新しい順に並んだ ID（Gmail の一覧）から n 番目を選ぶ。n 件に満たなければ null
+export function nthFromNewest<T>(idsNewestFirst: readonly T[], n: number): T | null {
+  if (!Number.isInteger(n) || n < 1) return null;
+  return idsNewestFirst[n - 1] ?? null;
+}
+
+// UID（大きいほど新しく届いた）から、新しい順に n 番目の UID を選ぶ。n 件に満たなければ null
+export function nthNewestUid(uids: readonly number[], n: number): number | null {
+  if (!Number.isInteger(n) || n < 1 || uids.length < n) return null;
+  return [...uids].sort((a, b) => b - a)[n - 1];
+}
+
 // 受信時刻が下限未満のものを落とす（検索は秒・日単位のため、取ってきた後に受信時刻で絞る）
 export function receivedSince<T extends { receivedAt: Date }>(items: T[], sinceMs?: number): T[] {
   if (sinceMs === undefined || !Number.isFinite(sinceMs)) return items;
