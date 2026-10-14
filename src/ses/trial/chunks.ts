@@ -16,6 +16,7 @@ export interface ListedThread {
 
 export interface ChunksResult {
   threads: number;
+  capped: number; // 新しい順の上限（max）で外したスレッド数
   skippedBySubject: number;
   deferred: number;
   chunks: number;
@@ -54,9 +55,16 @@ export function readListDir(listDir: string): ListedThread[] {
   return [...byThread.values()].sort((a, b) => a.internalDate - b.internalDate || (a.threadId < b.threadId ? -1 : 1));
 }
 
-export function chunkRunDir(runDir: string, chunkSize = 30, keep = 1): ChunksResult {
+// max は一覧のスレッド全体（件名で要員と分かるものも含む）を新しい順に並べて上位 max 件だけを以降に回す（0 以下・不正は上限なし）。
+// 外した分は deferred.jsonl に reason: olderThanResumeCap で残す（再開した回に、届いた量に回の重さが左右されないため）
+export function chunkRunDir(runDir: string, chunkSize = 30, keep = 1, max = 0): ChunksResult {
   const size = Number.isInteger(chunkSize) && chunkSize > 0 ? chunkSize : 30;
-  const threads = readListDir(join(runDir, 'list'));
+  const listed = readListDir(join(runDir, 'list'));
+  const cap = Number.isInteger(max) && max > 0 ? max : 0;
+  const newestFirst = [...listed].sort((a, b) => b.internalDate - a.internalDate || (a.threadId < b.threadId ? -1 : 1));
+  const cappedOut = cap > 0 ? newestFirst.slice(cap) : [];
+  const cappedIds = new Set(cappedOut.map((t) => t.threadId));
+  const threads = listed.filter((t) => !cappedIds.has(t.threadId));
   const skipped = threads.filter((t) => engineerBySubject(t.subject));
   const remaining = threads.filter((t) => !engineerBySubject(t.subject));
   const ratio = Number.isFinite(keep) ? Math.min(1, Math.max(0, keep)) : 1;
@@ -76,12 +84,13 @@ export function chunkRunDir(runDir: string, chunkSize = 30, keep = 1): ChunksRes
       .map((t) => JSON.stringify({ threadId: t.threadId, messageId: t.messageId, subject: t.subject, from: t.from, receivedAt: new Date(t.internalDate).toISOString(), kind: 'engineer', bodyHead: '', skippedBySubject: true }))
       .join('\n') + (skipped.length > 0 ? '\n' : ''),
   );
-  writeFileSync(
-    join(runDir, 'deferred.jsonl'),
-    deferred
-      .map((r) => JSON.stringify({ threadId: r.t.threadId, messageId: r.t.messageId, subject: r.t.subject, from: r.t.from, receivedAt: new Date(r.t.internalDate).toISOString(), priority: r.priority }))
-      .join('\n') + (deferred.length > 0 ? '\n' : ''),
-  );
+  const deferredLine = (t: ListedThread, priority: number, reason: string): string =>
+    JSON.stringify({ threadId: t.threadId, messageId: t.messageId, subject: t.subject, from: t.from, receivedAt: new Date(t.internalDate).toISOString(), priority, reason });
+  const deferredLines = [
+    ...deferred.map((r) => deferredLine(r.t, r.priority, 'lowPriority')),
+    ...cappedOut.map((t) => deferredLine(t, subjectPriority(t.subject), 'olderThanResumeCap')),
+  ];
+  writeFileSync(join(runDir, 'deferred.jsonl'), deferredLines.join('\n') + (deferredLines.length > 0 ? '\n' : ''));
   const chunkDir = join(runDir, 'chunks');
   mkdirSync(chunkDir, { recursive: true });
   for (const f of readdirSync(chunkDir).filter((n) => /^c\d+$/.test(n))) rmSync(join(chunkDir, f));
@@ -91,19 +100,23 @@ export function chunkRunDir(runDir: string, chunkSize = 30, keep = 1): ChunksRes
     writeFileSync(join(chunkDir, `c${String(chunks).padStart(2, '0')}`), `${lines.join('\n')}\n`);
     chunks += 1;
   }
-  return { threads: threads.length, skippedBySubject: skipped.length, deferred: deferred.length, chunks };
+  return { threads: listed.length, capped: cappedOut.length, skippedBySubject: skipped.length, deferred: deferred.length, chunks };
 }
 
 function main(): void {
-  const [runDirArg, sizeArg, keepArg] = process.argv.slice(2);
+  const [runDirArg, sizeArg, keepArg, maxArg] = process.argv.slice(2);
   if (!runDirArg) {
-    console.error('使い方: npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1]（keep は 0〜1。環境変数 SES_TRIAL_KEEP でも可。引数が優先）');
+    console.error(
+      '使い方: npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1] [max=0]（keep は 0〜1。環境変数 SES_TRIAL_KEEP でも可。max は新しい順に残すスレッド数で 0 は上限なし。環境変数 SES_TRIAL_MAX_THREADS でも可。引数が優先）',
+    );
     process.exitCode = 1;
     return;
   }
   const keepRaw = keepArg ?? process.env.SES_TRIAL_KEEP;
   const keep = keepRaw !== undefined && keepRaw !== '' ? Number(keepRaw) : 1;
-  console.log(JSON.stringify(chunkRunDir(resolve(runDirArg), sizeArg ? Number(sizeArg) : 30, keep)));
+  const maxRaw = maxArg ?? process.env.SES_TRIAL_MAX_THREADS;
+  const max = maxRaw !== undefined && maxRaw !== '' ? Number(maxRaw) : 0;
+  console.log(JSON.stringify(chunkRunDir(resolve(runDirArg), sizeArg ? Number(sizeArg) : 30, keep, max)));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

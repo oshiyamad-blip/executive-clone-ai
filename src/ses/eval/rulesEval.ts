@@ -24,9 +24,10 @@ import {
   pauseAbUntouched,
   resumeAbUntouched,
   resumeLookbackHours,
+  resumeMaxMails,
 } from '../config.js';
-import { countUntouchedAB, decidePause, collectFloorMs } from '../pauseGate.js';
-import { collectSinceMs, receivedSince } from '../mail/since.js';
+import { countUntouchedAB, decidePause, collectFloorMs, resumeFloorMs } from '../pauseGate.js';
+import { collectSinceMs, receivedSince, nthFromNewest, nthNewestUid } from '../mail/since.js';
 import { gateReport, valuesOfSavedRead } from '../trial/gate.js';
 import { toInitials, maskPii, hasKnownInitials, UNKNOWN_INITIALS } from '../pii.js';
 import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../injection.js';
@@ -5251,11 +5252,28 @@ function pauseGateChecks(): void {
     pause: process.env.SES_PAUSE_AB_UNTOUCHED,
     resume: process.env.SES_RESUME_AB_UNTOUCHED,
     hours: process.env.SES_RESUME_LOOKBACK_HOURS,
+    maxMails: process.env.SES_RESUME_MAX_MAILS,
   };
   try {
     delete process.env.SES_PAUSE_AB_UNTOUCHED;
     delete process.env.SES_RESUME_AB_UNTOUCHED;
     delete process.env.SES_RESUME_LOOKBACK_HOURS;
+    delete process.env.SES_RESUME_MAX_MAILS;
+    check('設定の既定: 再開時に読むメールは新しい順に 1000 通', resumeMaxMails() === 1000);
+    process.env.SES_RESUME_MAX_MAILS = '500';
+    const at500 = resumeMaxMails();
+    process.env.SES_RESUME_MAX_MAILS = '20000';
+    const atMax = resumeMaxMails();
+    process.env.SES_RESUME_MAX_MAILS = '1';
+    const atMin = resumeMaxMails();
+    process.env.SES_RESUME_MAX_MAILS = '20001';
+    const over = resumeMaxMails();
+    process.env.SES_RESUME_MAX_MAILS = '0';
+    const under = resumeMaxMails();
+    process.env.SES_RESUME_MAX_MAILS = '12.5';
+    const frac = resumeMaxMails();
+    check('設定: 再開時の通数は 1〜20000 の整数（範囲外・小数は既定の 1000）', at500 === 500 && atMax === 20000 && atMin === 1 && over === 1000 && under === 1000 && frac === 1000, show([at500, atMax, atMin, over, under, frac]));
+    delete process.env.SES_RESUME_MAX_MAILS;
     check('設定の既定: 止める 50・再開 25・再開時の遡り 24 時間', pauseAbUntouched() === 50 && resumeAbUntouched() === 25 && resumeLookbackHours() === 24);
     process.env.SES_PAUSE_AB_UNTOUCHED = '40';
     process.env.SES_RESUME_AB_UNTOUCHED = '40';
@@ -5265,13 +5283,22 @@ function pauseGateChecks(): void {
     process.env.SES_RESUME_LOOKBACK_HOURS = '500';
     check('設定: 再開時の遡りは 1〜168 時間（範囲外は既定の 24）', resumeLookbackHours() === 24 && (process.env.SES_RESUME_LOOKBACK_HOURS = '48') === '48' && resumeLookbackHours() === 48);
   } finally {
-    for (const [k, name] of [['pause', 'SES_PAUSE_AB_UNTOUCHED'], ['resume', 'SES_RESUME_AB_UNTOUCHED'], ['hours', 'SES_RESUME_LOOKBACK_HOURS']] as const) {
+    for (const [k, name] of [['pause', 'SES_PAUSE_AB_UNTOUCHED'], ['resume', 'SES_RESUME_AB_UNTOUCHED'], ['hours', 'SES_RESUME_LOOKBACK_HOURS'], ['maxMails', 'SES_RESUME_MAX_MAILS']] as const) {
       if (saved[k] === undefined) delete process.env[name];
       else process.env[name] = saved[k];
     }
   }
 
   const now = Date.UTC(2026, 9, 11, 3, 0, 0);
+  check('resumeFloorMs: 数が返ればその時刻（n 通目ちょうどを含む）・null（n 通に満たない）は今−収集日数・失敗は今−遡り時間',
+    resumeFloorMs(now - 5000, now, 7, 24) === now - 5000 && resumeFloorMs(null, now, 7, 24) === now - 7 * 24 * 3600_000 && resumeFloorMs('error', now, 7, 24) === now - 24 * 3600_000 && resumeFloorMs('error', now, 7, 48) === now - 48 * 3600_000);
+  check('nthFromNewest: 新しい順の ID から n 番目（n 件に満たない・n が不正なら null）',
+    nthFromNewest(['a', 'b', 'c'], 1) === 'a' && nthFromNewest(['a', 'b', 'c'], 3) === 'c' && nthFromNewest(['a', 'b', 'c'], 4) === null && nthFromNewest(['a'], 0) === null && nthFromNewest([], 1) === null);
+  check('nthNewestUid: UID の大きい順に n 番目（並びは問わない・n 件に満たなければ null・元の配列は変えない）',
+    (() => {
+      const uids = [5, 9, 2, 7];
+      return nthNewestUid(uids, 1) === 9 && nthNewestUid(uids, 3) === 5 && nthNewestUid(uids, 4) === 2 && nthNewestUid(uids, 5) === null && nthNewestUid([], 1) === null && uids.join() === '5,9,2,7';
+    })());
   check('collectFloorMs: 止めていなければ floorMs があればそれ・無い／状態が無い／未来の値は null',
     collectFloorMs({ paused: false, floorMs: now - 3600_000 }, now, 24) === now - 3600_000 && collectFloorMs({ paused: false }, now, 24) === null && collectFloorMs(null, now, 24) === null && collectFloorMs({ paused: false, floorMs: now + 1 }, now, 24) === null);
   check('collectFloorMs: 止めている間は max(floorMs, 今−H 時間)（floorMs なし→今−H・floorMs が新しければそれ・古ければ今−H）',
@@ -5380,7 +5407,7 @@ function trialUsageChecks(): void {
       c0[0] === `t2\t${new Date(2500).toISOString()}\tm2b\t8` && c1[0] === `t4\t${new Date(4000).toISOString()}\t\t`, show(c0[0]));
     check('chunks: skip.jsonl の行は kind engineer・bodyHead 空・skippedBySubject true',
       skip.length === 1 && skip[0].threadId === 't1' && skip[0].kind === 'engineer' && skip[0].bodyHead === '' && skip[0].skippedBySubject === true && skip[0].messageId === 'm1' && skip[0].receivedAt === new Date(1000).toISOString());
-    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）', JSON.stringify(res) === '{"threads":4,"skippedBySubject":1,"deferred":0,"chunks":2}');
+    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）。max=0 は capped 0', JSON.stringify(res) === '{"threads":4,"capped":0,"skippedBySubject":1,"deferred":0,"chunks":2}');
     check('chunks: keep=1 は今と同じ動き（deferred 0・deferred.jsonl は空）',
       res.deferred === 0 && readFileSyncB(join(dir, 'deferred.jsonl'), 'utf8') === '');
   } finally {
@@ -5418,9 +5445,45 @@ function trialUsageChecks(): void {
       resK.chunks === 1 && cK.join(',') === 'k1,k3,k4', show(cK));
     check('chunks: 外した分は deferred.jsonl に threadId・messageId・subject・from・receivedAt・priority で入る（out/ には書かない）。件数は deferred 2',
       resK.deferred === 2 && defK.length === 2 && defK.map((d) => d.threadId).sort().join(',') === 'k2,k5' && defK.every((d) => typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined) &&
-      JSON.stringify(resK) === '{"threads":5,"skippedBySubject":0,"deferred":2,"chunks":1}', show(resK));
+      JSON.stringify(resK) === '{"threads":5,"capped":0,"skippedBySubject":0,"deferred":2,"chunks":1}', show(resK));
+    check('chunks: keep で外した行には reason lowPriority が付く', defK.every((d) => d.reason === 'lowPriority'), show(defK.map((d) => d.reason)));
   } finally {
     rmSync(dirK, { recursive: true, force: true });
+  }
+
+  // 新しい順の上限（max）: 再開した回に、届いた量に回の重さが左右されないよう新しい順に max スレッドだけを残す
+  const dirM = mkdtempSync(join(tmpdir(), 'ses-chunks-max-'));
+  try {
+    mkdirSyncBf(join(dirM, 'list'), { recursive: true });
+    const row = (t: string, d: number, subj: string) => [t, `m_${t}`, String(d), 'a@example.invalid', subj, '1'].join('\t');
+    const rows = [
+      row('x1', 1000, 'Java Spring 開発'),
+      row('x2', 2000, '【要員】ご紹介'),
+      row('x3', 3000, 'Linux 運用'),
+      row('x4', 4000, '案件のご案内'),
+      row('x5', 5000, '【要員】Java 経験者'),
+      row('x6', 6000, 'React'),
+    ].join('\n') + '\n';
+    writeFileSyncForEval(join(dirM, 'list', 'w00.tsv'), rows);
+    const resM = chunkRunDir(dirM, 10, 1, 3);
+    const cM = readFileSyncB(join(dirM, 'chunks', 'c00'), 'utf8').trim().split('\n').map((l) => l.split('\t')[0]);
+    const skipM = readFileSyncB(join(dirM, 'out', 'skip.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    const defM = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: max=3 は新しい順に3スレッド（x6・x5・x4）だけが以降に回り、外した3スレッドは deferred.jsonl に reason olderThanResumeCap で入る',
+      JSON.stringify(resM) === '{"threads":6,"capped":3,"skippedBySubject":1,"deferred":0,"chunks":1}' &&
+      cM.join(',') === 'x4,x6' && defM.length === 3 && defM.map((d) => d.threadId).sort().join(',') === 'x1,x2,x3' && defM.every((d) => d.reason === 'olderThanResumeCap' && typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined), show([resM, cM, defM.length]));
+    check('chunks: 件名で要員の判定は残った3件にだけかかる（x5 は skip.jsonl・外した x2 は skip.jsonl に入らない）',
+      skipM.length === 1 && skipM[0].threadId === 'x5', show(skipM.map((s) => s.threadId)));
+    const resM0 = chunkRunDir(dirM, 10, 1, 0);
+    check('chunks: max=0 は上限なし（今と同じ。capped 0・6スレッド全部が対象で deferred.jsonl は空）',
+      JSON.stringify(resM0) === '{"threads":6,"capped":0,"skippedBySubject":2,"deferred":0,"chunks":1}' && readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8') === '', show(resM0));
+    const resMK = chunkRunDir(dirM, 10, 0.5, 5);
+    const defMK = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: max と keep の組み合わせで数が合う（max=5 で x1 を外し、残り5のうち要員2を除いた3の半分＝切り上げ2を残し1を lowPriority で外す）',
+      resMK.threads === 6 && resMK.capped === 1 && resMK.skippedBySubject === 2 && resMK.deferred === 1 && resMK.threads - resMK.capped - resMK.skippedBySubject - resMK.deferred === 2 &&
+      defMK.length === 2 && defMK.filter((d) => d.reason === 'olderThanResumeCap').length === 1 && defMK.filter((d) => d.reason === 'lowPriority').length === 1, show([resMK, defMK.map((d) => d.reason)]));
+  } finally {
+    rmSync(dirM, { recursive: true, force: true });
   }
 
   // 書き込みの差分

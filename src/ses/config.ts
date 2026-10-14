@@ -459,7 +459,13 @@ export function clampResume(pause: number, resume: number): number {
   return resume >= pause ? pause - 1 : resume;
 }
 
-// 再開した回に読むメールの遡り時間（止めていた間の古いメールは読まない）
+// 再開した回に読むメールの数（新しい順にこの通数まで。1日に届く量に回の重さが左右されないように）
+export function resumeMaxMails(): number {
+  return envNum('SES_RESUME_MAX_MAILS', 1000, { min: 1, max: 20000, int: true });
+}
+
+// 再開した回に読むメールの遡り時間。件数（SES_RESUME_MAX_MAILS）を数えられないときの予備と、
+// 止めている間に営業リストを読めない回の下限に使う
 export function resumeLookbackHours(): number {
   return envNum('SES_RESUME_LOOKBACK_HOURS', 24, { min: 1, max: 168, int: true });
 }
