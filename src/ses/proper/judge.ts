@@ -18,6 +18,7 @@ import { safeErr } from '../redact.js';
 import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
+import { groupSimilarEngineers, adaptJudgment } from './group.js';
 import type { EngineerLevel, ProjectLevel } from '../level.js';
 import type { OwnEngineer, Project, ProperEngineer, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
@@ -512,6 +513,7 @@ export interface JudgeOutcome {
   cached: boolean;
   deferred?: boolean; // 費用の上限・実行の期限で判定せず次回に回した組（失敗ではない）
   deferReason?: DeferReason;
+  shared?: boolean; // 似た要員の代表の判定を、この要員の経歴で照合し直して使った組（AIを呼んでいない）
 }
 
 export interface JudgeRunOptions {
@@ -534,8 +536,17 @@ export async function judgeProperPairs(
   const out: JudgeOutcome[] = pairs.map(() => ({ judgment: null, cached: false }));
   const byEngineer = new Map<string, number[]>();
   pairs.forEach((p, i) => byEngineer.set(p.engineer.id, [...(byEngineer.get(p.engineer.id) ?? []), i]));
-  for (const idxs of byEngineer.values()) {
+  // 似た要員は代表から順に処理し、代表が判定したての生の判定を同じ案件の組に使い回す（控えから読んだ判定は生ではないので置かない）
+  const uniqueEngineers = [...byEngineer.values()].map((idxs) => pairs[idxs[0]].engineer);
+  const groups = groupSimilarEngineers(uniqueEngineers);
+  const groupOf = new Map<string, string>();
+  for (const g of groups) for (const m of g.members) groupOf.set(m.id, g.id);
+  const groupRaw = new Map<string, { raw: RawProperJudgment; origin: OwnEngineer }>();
+  let sharedCount = 0;
+  let mismatchCount = 0;
+  for (const idxs of groups.flatMap((g) => g.members.map((m) => byEngineer.get(m.id) as number[]))) {
     const engineer = pairs[idxs[0]].engineer;
+    const groupId = groupOf.get(engineer.id) as string;
     const key = cacheKeyOf(engineer);
     const { cache, legacy } = await readCache(key);
     const fresh: JudgeCache = {};
@@ -550,6 +561,19 @@ export async function judgeProperPairs(
       while (next < todo.length) {
         const i = todo[next++];
         const { project } = pairs[i];
+        const groupKey = `${groupId}|${project.id}`;
+        const rep = groupRaw.get(groupKey);
+        // AIを呼ばないので、期限・費用の上限を過ぎていても使い回してよい
+        if (rep && rep.origin.id !== engineer.id) {
+          const adapted = adaptJudgment(rep.raw, rep.origin, engineer, project);
+          if (adapted) {
+            out[i] = { judgment: adapted, cached: false, shared: true };
+            fresh[project.id] = adapted;
+            sharedCount += 1;
+            continue;
+          }
+          mismatchCount += 1;
+        }
         const stop: DeferReason | null = pastRunDeadline() ? 'deadline' : properBudgetExhausted(opts.budget) ? 'budget' : null;
         if (stop) {
           out[i] = { judgment: null, cached: false, deferred: true, deferReason: stop };
@@ -560,6 +584,7 @@ export async function judgeProperPairs(
           const j = verifyJudgment(raw, profileTextOf(engineer), project, { level: engineer.level, experienceYears: engineer.experienceYears ?? null });
           out[i] = { judgment: j, cached: false };
           fresh[project.id] = j;
+          if (!groupRaw.has(groupKey)) groupRaw.set(groupKey, { raw, origin: engineer });
         } catch (err) {
           failures += 1;
           if (failures === 1) console.warn(`プロパー判定: AI判定に失敗した組があります（ルールの判定で残せる組だけ残します）: ${safeErr(err)}`);
@@ -570,6 +595,9 @@ export async function judgeProperPairs(
     // 古い控えから移すときは、新しい判定に加えて古い控えの組も行の形で書く
     const toWrite = legacy ? { ...cache, ...fresh } : fresh;
     if (Object.keys(fresh).length > 0 || legacy) await writeCache(key, toWrite, allProjects ?? idxs.map((i) => pairs[i].project), legacy);
+  }
+  if (sharedCount > 0 || mismatchCount > 0) {
+    console.log(`プロパー判定: 似た要員の判定を使い回した組 ${sharedCount}（照合が合わず個別に判定 ${mismatchCount}）`);
   }
   return out;
 }

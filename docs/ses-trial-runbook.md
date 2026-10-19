@@ -114,6 +114,10 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    判定の上限（要員ごと150組（安全弁）。通常は足切りを通った組をすべて判定する）は未判定の組だけを数えるので、上限で漏れた組は次の回に回る。出力の `carried`（前の回から回ってきた組）・`overCap`（まだ残っている組）を実行ログに書く。
    前の回の作業ディレクトリは遡り期間（14日）のあいだ消さない
 4. **AI判定**: 要員ごとにサブエージェントを起動し、下の「判定の指示」を渡す。担当は1担当9組・同時に20担当まで。足りなければ空いたら順に起動する。結果は `judged_<要員>.json`
+   似た要員（同じ単価・希望、スキルの重なり係数が `PROPER_GROUP_SIMILARITY` 以上）は、`PHASE=prep` が同じ案件の組を代表の1人にだけ残し、他の人の組は `group_pending.json` に回している（出力の `grouped`＝外した組の数）。
+   判定のあと `PHASE=fanout` を実行する。代表の判定を似た要員の経歴で照合し、合えば `judged_<要員>.json` に足す。出力は `{"shared":N,"fallback":M}`。
+   `fallback` が1以上なら、`pairs_fallback.json`（`pairs.json` と同じ形）を同じ「判定の指示」で判定する（指示の `pairs.json` を `pairs_fallback.json` に読み替える）。結果は各 `judged_<要員>.json` の末尾に足す。
+   実行ログの「判定した組」には「（似た要員への使い回し N 組）」を添える
 5. `PHASE=final` を実行する。`plan.json` と `writes/wNN.json`（書き込みの範囲と値、1ファイル約15KB。書き込みは下の 6. で `ses:trial:writeplan` が変わったセルだけの `wf/wNN.json` に作り直す）ができる
    出力の `gated` が true（AI判定の失敗が多い回）のときは `plan.json`・`writes/` を作らないので、書き込みはしない（判定をやり直す）
    出力の `rekeyed`（案件IDの付け替え行数）・`deletes`（期限切れの控えへ移す行数）は実行ログに件数で書く

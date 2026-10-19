@@ -20,6 +20,7 @@ import {
   pricingSettingsInvalid,
   retentionDays,
   properJudgePerEngineer,
+  properGroupSimilarity,
   properJudgeBudgetJpy,
   pauseAbUntouched,
   resumeAbUntouched,
@@ -110,8 +111,10 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge } from '../ownMatch.js';
-import { verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
+import { skillOverlap, groupSimilarEngineers, adaptJudgment } from '../proper/group.js';
+import { planFanout } from '../trial/fanout.js';
 import { rosterProfileText, rosterEngineersFromValues } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -2101,7 +2104,7 @@ function reviewRound3Checks(): void {
 const RULE_ENV_PREFIXES = [
   'SKILL_', 'MATCH_', 'MIN_GROSS_', 'MAX_CANDIDATES', 'MAX_PROJECTS_PER_ENGINEER', 'NEGOTIATION_', 'ENABLE_NEGOTIATION', 'HOURLY_',
   'SES_STALE_DAYS', 'SES_OWN_DOMAINS', 'ANTHROPIC_MODEL_', 'JPY_PER_USD', 'SES_PRICING_', 'SES_RETENTION_',
-  'SES_PAUSE_', 'SES_RESUME_',
+  'SES_PAUSE_', 'SES_RESUME_', 'PROPER_GROUP_',
 ];
 
 // ===== レビュー指摘（第4回）: 工程の範囲・略語・業種/役割の含意・選択肢・文面の表示名・判定の失敗の分類 等 =====
@@ -4323,6 +4326,125 @@ async function properJudgeChecks(): Promise<void> {
   }
 }
 
+// 似たスキルの要員をまとめて判定する（作り物のデータだけ）
+async function groupChecks(): Promise<void> {
+  section('似た要員のまとめ判定: 重なり係数・グループ分け・代表の判定の照合・判定回数・設定');
+  const ge = (id: string, over: Partial<ProperEngineer> & { wish?: string } = {}): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills: ['Java', 'SQL', 'Linux', 'Oracle'], experienceYears: 0,
+    requiredProjectRate: 50, residence: '', prefecture: '東京都', availableDate: '', availableFrom: null, remoteWish: 'unknown', status: 'available',
+    profileText: '【スキルシート】\n研修で Java の演習\nOracle DB上でのデータ作成、削除対応\nJP1を用いたジョブ監視', ...over,
+  });
+
+  check('重なり係数は小さい方の集合で割る（0.5前後に落ちない）', skillOverlap(['Java', 'SQL', 'Zoom', 'Slack'], ['Java', 'SQL']) === 1 && skillOverlap(['A', 'B', 'C', 'D'], ['A', 'B', 'X', 'Y', 'Z']) === 0.5);
+  check('重なり係数は全角半角・大小文字の違いを同じ語とみなし、どちらかが空なら 0', skillOverlap(['ＪＡＶＡ', 'sql'], ['java', 'SQL']) === 1 && skillOverlap([], ['Java']) === 0 && skillOverlap(['Java'], []) === 0);
+
+  const similarSkills = ['Java', 'SQL', 'Linux', 'Oracle', 'Zoom'];
+  const list = [
+    ge('g_c', { skills: similarSkills }), ge('g_a', { skills: ['Java', 'SQL', 'Linux', 'Oracle'] }), ge('g_b', { skills: ['Java', 'SQL', 'Linux', 'Teams'], experienceYears: 1 }),
+    ge('g_d', { requiredProjectRate: 60 }), ge('g_e', { wish: '上流工程を希望' }),
+  ];
+  const shape = (gs: Array<{ id: string; members: Array<{ id: string }> }>) => gs.map((g) => `${g.id}:${g.members.map((m) => m.id).join('+')}`).sort().join(',');
+  const grouped = groupSimilarEngineers(list, 0.6);
+  check('同じスキル・単価・希望の3人は1つのグループ、単価の違う人・希望の違う人は1人ずつ（グループの id は基準の人の id）',
+    shape(grouped) === 'g_a:g_a+g_b+g_c,g_d:g_d,g_e:g_e', shape(grouped));
+  check('並びを入れ替えても同じグループになる', shape(groupSimilarEngineers([...list].reverse(), 0.6)) === shape(grouped));
+  check('しきい値 0 は全員1人ずつ（今と同じ）', groupSimilarEngineers(list, 0).length === 5 && groupSimilarEngineers(list, 0).every((g) => g.members.length === 1));
+  check('経験年数が2年以上離れた人・片方だけ経験なしの人はまとめない',
+    groupSimilarEngineers([ge('x1', { experienceYears: 0 }), ge('x2', { experienceYears: 2 }), ge('x3', { experienceYears: null })], 0.6).length === 3);
+
+  // 代表の判定を経歴で照合し直す
+  const pj = project({ id: 'p_grp', title: 'Oracle保守', requiredSkills: ['Oracle'], rateMax: 60, receivedAt: daysAgo(1) });
+  const rawOf = (requirement: string, evidence: string): RawProperJudgment => ({
+    work: 'データ保守', levelFit: '', preferenceFit: '記載なし', verdict: 'recommend', pitch: 'DB 運用を担当。', concerns: [], workPrefecture: '', rateReason: 'none', injectionSuspected: false,
+    requirements: [{ requirement, kind: '必須', quote: requirement, status: 'met', evidence, note: '' }],
+  });
+  const origin = ge('o_1');
+  const sameCareer = ge('o_2', { profileText: '【スキルシート】\n研修で SQL の演習\nOracle DB上でのデータ作成、削除対応' });
+  const noEvidence = ge('o_3', { profileText: '【スキルシート】\n研修で SQL の演習\n社内ヘルプデスク対応' });
+  const rawOracle = rawOf('Oracle', 'Oracle DB上でのデータ作成、削除対応');
+  const adapted = adaptJudgment(rawOracle, origin, sameCareer, pj);
+  check('代表の判定の根拠が本人の経歴にもあれば、本人の経歴で照合した判定を返す', adapted !== null && adapted.verdict === 'recommend' && adapted.met[0] === 'Oracle ← Oracle DB上でのデータ作成、削除対応', JSON.stringify(adapted));
+  check('根拠が本人の経歴に無く判定が変わるときは null（個別に判定し直す）', adaptJudgment(rawOracle, origin, noEvidence, pj) === null);
+
+  // 判定の回数: 似た2人＋違う1人 × 同じ案件3件
+  const projects = [
+    project({ id: 'p_g1', title: 'Oracle保守A', requiredSkills: ['Oracle'], rateMax: 60, receivedAt: daysAgo(1) }),
+    project({ id: 'p_g2', title: 'Oracle保守B', requiredSkills: ['Oracle'], rateMax: 60, receivedAt: daysAgo(1) }),
+    project({ id: 'p_g3', title: 'JP1運用', requiredSkills: ['JP1'], rateMax: 60, receivedAt: daysAgo(1) }),
+  ];
+  const countCalls = async (members: ProperEngineer[]) => {
+    const calls: string[] = [];
+    __setProperJudgeForTest(async (e, p) => {
+      calls.push(`${e.id}|${p.id}`);
+      return p.id === 'p_g3' ? rawOf('JP1', 'JP1を用いたジョブ監視') : rawOf('Oracle', 'Oracle DB上でのデータ作成、削除対応');
+    });
+    const savedSim = process.env.PROPER_GROUP_SIMILARITY;
+    delete process.env.PROPER_GROUP_SIMILARITY;
+    const logs: string[] = [];
+    const savedLog = console.log;
+    console.log = (...a: unknown[]) => void logs.push(a.join(' '));
+    try {
+      const pairs = projects.flatMap((p) => members.map((engineer) => ({ engineer, project: p })));
+      const out = await judgeProperPairs(pairs, projects);
+      return { calls, out, pairs, logs };
+    } finally {
+      console.log = savedLog;
+      if (savedSim === undefined) process.env.PROPER_GROUP_SIMILARITY = '0';
+      else process.env.PROPER_GROUP_SIMILARITY = savedSim;
+      __setProperJudgeForTest(null);
+    }
+  };
+  const first = ge('h_1');
+  const second = ge('h_2');
+  const other = ge('h_3', { requiredProjectRate: 70 });
+  const all = await countCalls([other, second, first]);
+  const sharedIds = all.pairs.flatMap((p, i) => (all.out[i].shared ? [`${p.engineer.id}|${p.project.id}`] : []));
+  check('似た2人＋違う1人 × 同じ案件3件のAI判定は6回（似た2人で3回・違う1人で3回）で、2人目の3組が使い回しになる',
+    all.calls.length === 6 && sharedIds.sort().join(',') === 'h_2|p_g1,h_2|p_g2,h_2|p_g3' && all.out.every((o) => o.judgment !== null), JSON.stringify({ calls: all.calls.length, sharedIds }));
+  check('使い回した組数を件数だけで1行出す', all.logs.some((l) => l === 'プロパー判定: 似た要員の判定を使い回した組 3（照合が合わず個別に判定 0）'), all.logs.join('/'));
+  const thin = ge('h_2', { profileText: '【スキルシート】\n研修で Java の演習\nOracle DB上でのデータ作成、削除対応' });
+  const partial = await countCalls([other, thin, first]);
+  const indivIdx = partial.pairs.findIndex((p) => p.engineer.id === 'h_2' && p.project.id === 'p_g3');
+  check('2人目の経歴に根拠が無い案件だけ個別に呼ばれる（呼び出しが1回増える）',
+    partial.calls.length === 7 && partial.calls.includes('h_2|p_g3') && !partial.out[indivIdx].shared && partial.out.filter((o) => o.shared).length === 2 &&
+      partial.logs.some((l) => l.includes('使い回した組 2（照合が合わず個別に判定 1）')), JSON.stringify({ calls: partial.calls.length, logs: partial.logs }));
+
+  // 試運転の fanout（純関数）
+  const label = (e: ProperEngineer) => e.proposalLabel;
+  const engineersByLabel = new Map([first, second, thin, other].map((e) => [label(e), e]));
+  const projectsById = new Map(projects.map((p) => [p.id, p]));
+  const judged = new Map([
+    ['h_1', [{ projectId: 'p_g1', judgment: rawOf('Oracle', 'Oracle DB上でのデータ作成、削除対応') }, { projectId: 'p_g3', judgment: rawOf('JP1', 'JP1を用いたジョブ監視') }]],
+  ]);
+  const plan = planFanout(
+    [{ engineer: 'h_2', projectId: 'p_g1', from: 'h_1' }, { engineer: 'h_2', projectId: 'p_g3', from: 'h_1' }, { engineer: 'h_2', projectId: 'p_g2', from: 'h_1' }],
+    judged, new Map([['h_1', first], ['h_2', thin]]), projectsById);
+  check('fanout: 照合が合う組は代表の生の判定のまま足し、合わない組・代表の判定が無い組は個別に判定する組へ回す',
+    plan.shared === 1 && plan.additions.h_2?.[0]?.projectId === 'p_g1' && plan.fallbackCount === 2 &&
+      plan.fallback.h_2.map((x) => x.projectId).sort().join(',') === 'p_g2,p_g3' && plan.fallback.h_2[0].user.includes('<untrusted_mail>'), JSON.stringify({ s: plan.shared, f: plan.fallbackCount }));
+  const again = planFanout([{ engineer: 'h_2', projectId: 'p_g1', from: 'h_1' }], new Map([...judged, ['h_2', [{ projectId: 'p_g1', judgment: rawOf('Oracle', 'x') }]]]), engineersByLabel, projectsById);
+  check('fanout: すでに同じ案件の判定がある要員の組は足さない', again.shared === 0 && again.fallbackCount === 0 && Object.keys(again.additions).length === 0);
+
+  // 設定
+  const saved = process.env.PROPER_GROUP_SIMILARITY;
+  try {
+    delete process.env.PROPER_GROUP_SIMILARITY;
+    const def = properGroupSimilarity();
+    process.env.PROPER_GROUP_SIMILARITY = '0';
+    const off = properGroupSimilarity();
+    process.env.PROPER_GROUP_SIMILARITY = '0.8';
+    const custom = properGroupSimilarity();
+    process.env.PROPER_GROUP_SIMILARITY = '1.5';
+    const high = properGroupSimilarity();
+    process.env.PROPER_GROUP_SIMILARITY = '-0.2';
+    const low = properGroupSimilarity();
+    check('PROPER_GROUP_SIMILARITY: 既定 0.6・0 で無効・0〜1 の範囲（範囲外は既定に戻す）', def === 0.6 && off === 0 && custom === 0.8 && high === 0.6 && low === 0.6, JSON.stringify([def, off, custom, high, low]));
+  } finally {
+    if (saved === undefined) delete process.env.PROPER_GROUP_SIMILARITY;
+    else process.env.PROPER_GROUP_SIMILARITY = saved;
+  }
+}
+
 // 営業リストの書き込みの流れ（Googleには接続せず、書き込みを記録するだけの Sheets API に差し替える）
 async function salesListWriteChecks(): Promise<void> {
   section('営業リストの書き込み: 見出しが今の並びと違うシートには何も書かない・空のタブは初回として書く');
@@ -5562,6 +5684,8 @@ function trialUsageChecks(): void {
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
+  // 既存の判定の確認は要員ごとの差し替え判定を前提にするため、似た要員のまとめ判定は無効にする（まとめ判定は groupChecks が個別に確かめる）
+  process.env.PROPER_GROUP_SIMILARITY = '0';
   console.log('=== SES 決定的ルールの回帰確認（ses:eval:rules） ===');
   try {
     tokenizeChecks();
@@ -5604,6 +5728,7 @@ async function main(): Promise<void> {
     sharedPrefixChecks();
     coreTechChecks();
     await properJudgeChecks();
+    await groupChecks();
     salesListChecks();
     await salesListWriteChecks();
     await salesListRound2Checks();
