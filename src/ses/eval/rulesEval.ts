@@ -206,7 +206,7 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
-import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
+import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -6113,6 +6113,20 @@ function labelStoreChecks(): void {
     check('壊れた行が混じっていても残りを読み、読めない行を skipped に数える', broken.skipped === 1 && broken.pairs.length === 1 && broken.engineers.length === 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+  const exDir = mkdtempSync(join(tmpdir(), 'ses-fb-exclude-'));
+  try {
+    check('readFbExcludeIds: ファイルが無ければ空', readFbExcludeIds(exDir).size === 0);
+    writeFileSyncForEval(join(exDir, 'fb_exclude_ids.json'), JSON.stringify({ reason: '滞留の解消', ids: [' ownmatch_a_proj_0000000a ', 'ownmatch_b_proj_0000000b', 42, null, '  '] }));
+    const ids = readFbExcludeIds(exDir);
+    check('readFbExcludeIds: ids を Set で返す（前後の空白は trim・文字列でない要素は無視）',
+      ids.size === 2 && ids.has('ownmatch_a_proj_0000000a') && ids.has('ownmatch_b_proj_0000000b'), show([...ids]));
+    writeFileSyncForEval(join(exDir, 'fb_exclude_ids.json'), JSON.stringify({ reason: 'x', ids: 'ownmatch_a_proj_0000000a' }));
+    check('readFbExcludeIds: ids が配列でなければ空', readFbExcludeIds(exDir).size === 0);
+    writeFileSyncForEval(join(exDir, 'fb_exclude_ids.json'), '{壊れた JSON');
+    check('readFbExcludeIds: 壊れた JSON は空（例外を投げない）', readFbExcludeIds(exDir).size === 0);
+  } finally {
+    rmSync(exDir, { recursive: true, force: true });
   }
   const pairs = [
     pairOf('proj_00000001', ['Java', 'Spring Boot'], 'recommend'),
