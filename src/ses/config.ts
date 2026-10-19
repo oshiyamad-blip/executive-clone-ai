@@ -860,6 +860,11 @@ export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
 }
 
+// 似た要員（同じ単価・希望・経験年数、スキルの重なり係数がこの値以上）の判定を代表の1回で使い回すしきい値。0で無効（1人ずつ判定）
+export function properGroupSimilarity(): number {
+  return envNum('PROPER_GROUP_SIMILARITY', 0.6, { min: 0, max: 1 });
+}
+
 // プロパー候補のAI判定に1回の実行で使ってよいLLMコストの目安（円）。超えたら残りの組は判定せず次回へ先送りする
 // （失敗には数えない。足切りの監視の判定も同じ上限の中で行う）。0で上限なし
 export function properJudgeBudgetJpy(): number {

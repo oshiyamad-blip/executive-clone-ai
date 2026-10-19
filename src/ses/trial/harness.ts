@@ -5,6 +5,8 @@
 //
 //   PHASE=prompts  抽出の指示文とJSONの形を RUN_DIR に書く
 //   PHASE=prep     抽出結果＋要員リスト → AI判定に回す組（pairs.json・system_<要員>.txt）。足切りの監視の組も加え、audit.json に組のキーを書く
+//                  似た要員（groupSimilarEngineers）の同じ案件の組は代表の1人にだけ残し、残りは group_pending.json・groups.json に書く（出力の grouped）
+//   PHASE=fanout   judged_<代表>.json の判定を似た要員の経歴で照合して judged_<要員>.json に足す。合わない組は pairs_fallback.json（個別に判定する組）
 //   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）。出力の judge に監視の audited・auditHits が出る
 //   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
 //   PHASE=score    取り込み・判定・営業の入力の数字（score.json。本文の写しのずれ bodyHeadShortPct・quoteMissingPct を含む）
@@ -23,6 +25,8 @@ import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
+import { groupSimilarEngineers } from '../proper/group.js';
+import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
 import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
@@ -328,10 +332,49 @@ if (phase === 'prompts') {
     const pj = kept.find((x) => x.id === p.match.projectId) as Project;
     (pairs[e.proposalLabel || e.displayName] ??= []).push({ projectId: pj.id, title: pj.title, user: judgeUserPrompt(pj) });
   }
+  // 似た要員は同じ案件の組を代表の1人にだけ残し、他の人の組は group_pending.json に回す（PHASE=fanout で代表の判定を照合して使い回す）
+  const groupPending: Array<{ engineer: string; projectId: string; from: string }> = [];
+  const groupsOut: Record<string, string[]> = {};
+  const labelOfEngineer = (e: ProperEngineer) => e.proposalLabel || e.displayName;
+  for (const g of groupSimilarEngineers(list)) {
+    if (g.members.length < 2) continue;
+    const labels = g.members.map(labelOfEngineer);
+    groupsOut[labels[0]] = labels;
+    const keeperOf = new Map<string, string>();
+    for (const label of labels) {
+      pairs[label] = (pairs[label] ?? []).filter((x) => {
+        const keeper = keeperOf.get(x.projectId);
+        if (keeper === undefined) {
+          keeperOf.set(x.projectId, label);
+          return true;
+        }
+        groupPending.push({ engineer: label, projectId: x.projectId, from: keeper });
+        return false;
+      });
+      if (pairs[label].length === 0) delete pairs[label];
+    }
+  }
+  writeFileSync(join(dir, 'group_pending.json'), JSON.stringify(groupPending, null, 1));
+  writeFileSync(join(dir, 'groups.json'), JSON.stringify(groupsOut, null, 1));
   for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
   writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
-  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, reused: reused.length }));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, reused: reused.length, grouped: groupPending.length }));
+} else if (phase === 'fanout') {
+  const list = engineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const pending = has('group_pending.json') ? read<PendingPair[]>('group_pending.json') : [];
+  const labelOfEngineer = (e: ProperEngineer) => e.proposalLabel || e.displayName;
+  const judgedByLabel = new Map<string, JudgedRow[]>();
+  for (const label of new Set(pending.flatMap((p) => [p.engineer, p.from]))) {
+    if (has(`judged_${label}.json`)) judgedByLabel.set(label, read<JudgedRow[]>(`judged_${label}.json`));
+  }
+  const plan = planFanout(pending, judgedByLabel, new Map(list.map((e) => [labelOfEngineer(e), e])), new Map(projects.map((p) => [p.id, p])));
+  for (const [label, rows] of Object.entries(plan.additions)) {
+    writeFileSync(join(dir, `judged_${label}.json`), JSON.stringify([...(judgedByLabel.get(label) ?? []), ...rows], null, 1));
+  }
+  writeFileSync(join(dir, 'pairs_fallback.json'), JSON.stringify(plan.fallback, null, 1));
+  console.log(JSON.stringify({ shared: plan.shared, fallback: plan.fallbackCount }));
 } else if (phase === 'final') {
   const { list, projects, judged, candidates, stats, auditHitKeys } = await judgedCandidates();
   // AI判定の失敗が多い回は書き込みの元（plan.json・writes）を作らない（前の回のファイルも残さない）
