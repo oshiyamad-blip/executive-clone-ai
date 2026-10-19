@@ -70,6 +70,21 @@ export function readLabelStore(dir: string): LabelStore {
   return { pairs: p.rows, engineers: e.rows, sales: s.rows, skipped: p.skipped + e.skipped + s.skipped };
 }
 
+// 営業リストの行の ID（ownmatch_...）。ここにある行の対応状況・見送り理由・精度チェックは営業の評価として取り込まない
+// （まとめて見送りにした行など）。ファイルが無い・壊れているときは空
+export function readFbExcludeIds(dir: string): Set<string> {
+  try {
+    const file = join(dir, 'fb_exclude_ids.json');
+    if (!existsSync(file)) return new Set();
+    const v = JSON.parse(readFileSync(file, 'utf8')) as { ids?: unknown } | null;
+    const ids = v && typeof v === 'object' ? v.ids : null;
+    if (!Array.isArray(ids)) return new Set();
+    return new Set(ids.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
 // key ごとに seenAt が最新の行（同時刻は後に書かれた行）
 export function latestSales(sales: LabelSales[]): Map<string, LabelSales> {
   const latest = new Map<string, LabelSales>();

@@ -17,7 +17,7 @@ import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '..
 import { parseJstLabel } from './jstLabel.js';
 import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
-import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
+import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
@@ -439,8 +439,14 @@ if (phase === 'prompts') {
   const closedRows = has('closed_rows.json') ? read<SheetRow[]>('closed_rows.json') : [];
   const sales: LabelSales[] = [];
   // 全体 → クローズ済みの順に並べる（同じ組が両方にあるときは appendLabels があとの方を採る）
+  const ex = readFbExcludeIds(store);
+  let fbExcluded = 0;
   for (const [tab, rows] of [['全体', existingRows()], ['クローズ済み', closedRows]] as const) {
     for (const r of rows) {
+      if (ex.has((r.ID ?? '').trim())) {
+        fbExcluded += 1;
+        continue;
+      }
       const key = salesKeyOf(canonical(r.ID ?? ''));
       if (!key) continue;
       sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '' });
@@ -454,7 +460,7 @@ if (phase === 'prompts') {
   const total = readLabelStore(store);
   const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1');
   const { addedPairs: _added, ...counts } = added;
-  console.log(JSON.stringify({ ...counts, missingProject, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
+  console.log(JSON.stringify({ ...counts, missingProject, fbExcluded, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
 } else if (phase === 'labels_verify') {
   const written: BackupRow[] = [];
   for (const f of readdirSync(dir).filter((n) => /^labels_backup.*\.tsv$/.test(n)).sort()) written.push(...parseBackup(readFileSync(join(dir, f), 'utf8')).rows);
