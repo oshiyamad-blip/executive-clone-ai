@@ -42,6 +42,7 @@ export interface ProperRunResult {
   retired: number; // 稼働可でなくなった社員の候補として退役させた行数
   salesRows: number | null; // 営業リストに書き出した行数（未設定・失敗・見送りは null）
   deferred?: number; // 費用の上限・実行の期限で次回に回したAI判定の組数
+  belowMinPriority?: number; // 優先度の下限（SALES_MIN_PRIORITY）で営業リストに載せなかった候補の数
   skipped?: string[]; // 書き込みを見送った理由（サマリに載せる固定文言。氏名・案件名・組のキーは含めない）
 }
 
@@ -510,12 +511,14 @@ async function writeSalesListSafely(
   projects: Project[],
   engineers: ProperEngineer[],
   openProjects: { ids: Set<string>; aliasOf: Map<string, string> },
-): Promise<{ rows: number | null; skipped?: string }> {
+): Promise<{ rows: number | null; skipped?: string; belowMin?: number }> {
   if (!salesListConfigured()) return { rows: null };
   try {
-    const n = await writeSalesList(candidates, projects, engineers, openProjects);
+    const stats = { belowMin: 0 };
+    const n = await writeSalesList(candidates, projects, engineers, openProjects, stats);
     console.log(`営業リスト: ${n ?? 0}行を書き出しました`);
-    return { rows: n };
+    if (stats.belowMin > 0) console.log(`営業リスト: 優先度の下限で載せなかった候補 ${stats.belowMin} 件`);
+    return { rows: n, belowMin: stats.belowMin };
   } catch (err) {
     // 見出しが今の並びと違うときは何も書いていない。差は列名だけを出し、実行は失敗扱いにして知らせる
     if (err instanceof SalesHeaderMismatchError) {
@@ -582,6 +585,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   if (pruned > 0) console.log(`プロパー判定: 古い判定の控え${pruned}行を片付けました`);
   const result: ProperRunResult = {
     demo: false, sync, engineers: engineers.length, projects: projects.length, candidates, saved, added, retired, salesRows: sales.rows,
+    ...((sales.belowMin ?? 0) > 0 ? { belowMinPriority: sales.belowMin } : {}),
     ...(stats.deferred > 0 ? { deferred: stats.deferred } : {}),
     ...(skipped.length > 0 ? { skipped } : {}),
   };
@@ -628,6 +632,7 @@ export function properSummaryLines(r: ProperRunResult | null, forMail: boolean):
   );
   for (const m of r.skipped ?? []) lines.push(`■${m}`);
   if ((r.deferred ?? 0) > 0) lines.push(`・AI判定${r.deferred}組は費用の上限・時間の都合で次回の実行に回しました（営業リストの既存の行はそのまま残ります）`);
+  if ((r.belowMinPriority ?? 0) > 0) lines.push(`・優先度の下限で載せなかった候補 ${r.belowMinPriority} 件`);
   const s = r.sync;
   if (s) {
     lines.push(

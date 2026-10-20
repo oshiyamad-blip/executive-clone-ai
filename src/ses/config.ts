@@ -366,6 +366,13 @@ export function sesTarget(): 'projects' | 'all' {
   return env('SES_TARGET') === 'projects' ? 'projects' : 'all';
 }
 
+// 営業リストに載せる優先度の下限（A/B/C/D。大小文字・全角を許す。既定 B = A・B だけ載せる。不正な値は既定）。
+// 判定・ラベル・精度集計には影響せず、リストに載せるかどうかだけを決める
+export function salesMinPriority(): 'a' | 'b' | 'c' | 'd' {
+  const v = env('SALES_MIN_PRIORITY').normalize('NFKC').toLowerCase();
+  return v === 'a' || v === 'b' || v === 'c' || v === 'd' ? v : 'b';
+}
+
 // 再送スキップ: 同じ送信元ドメインから何日前までに届いたメールと比べるか（0で無効）
 export function resendWindowDays(): number {
   return envNum('SES_RESEND_WINDOW_DAYS', 14, { min: 0, max: 60 });

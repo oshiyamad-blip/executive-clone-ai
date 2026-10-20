@@ -11,7 +11,7 @@
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
-import { properSalesSpreadsheetId, salesExpiredKeep } from '../config.js';
+import { properSalesSpreadsheetId, salesExpiredKeep, salesMinPriority } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import { norm } from './judge.js';
 import { normalizeSubject } from '../resend.js';
@@ -128,6 +128,20 @@ export function salesPriorityOf(c: ProperCandidate): string {
   }
   if (c.band === 'strong' && c.meetsRate && !/【(単価交渉|経験交渉|年数交渉|参考提案)】/.test(c.reason)) return SALES_PRIORITIES.a;
   return SALES_PRIORITIES.b;
+}
+
+// 優先度の文言（「C 要確認」等）が営業リストに載せる下限（SALES_MIN_PRIORITY）より低いか。読めない文言は低いとみなさない
+export function belowMinPriority(label: string): boolean {
+  const rank = 'abcd'.indexOf(String(label ?? '').trim().charAt(0).toLowerCase());
+  return rank >= 0 && rank > 'abcd'.indexOf(salesMinPriority());
+}
+
+// 候補の行を、下限以上（載せる）と下限より低い（載せない）に分ける
+export function splitByMinPriority(rows: Row[]): { kept: Row[]; below: Row[] } {
+  const kept: Row[] = [];
+  const below: Row[] = [];
+  for (const r of rows) (belowMinPriority(String(r[COL['優先度']])) ? below : kept).push(r);
+  return { kept, below };
 }
 
 // 根拠（ownMatch の reason）から交渉ポイント・確認事項を取り出す（どちらも1行1項目）
@@ -503,6 +517,7 @@ export interface SalesUpdatePlan {
   closedRows: Row[]; // クローズ・見送りにした行＋期限切れの行＋募集終了の行
   dropRows: Row[]; // deleteIds の行そのもの（「全体」から消す前に「期限切れ」タブへ移す）
   rekeyed: number; // 案件IDが変わっても同じメールの行とみなして引き継いだ行数（試運転から本番への切り替え）
+  belowMin: number; // 優先度が下限（SALES_MIN_PRIORITY）より低く、載せなかった候補の数
   rows: Row[]; // 書いた後のシートの並び（要員のタブ・件数用）
 }
 
@@ -554,6 +569,14 @@ export function planSalesUpdate(
       return NUMERIC_COLS.has(name) && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v;
     });
   const current = existing.slice(1).map(toRow);
+  // 下限より低い候補は「候補でない」扱い（新しい行にせず、既存の行は候補から外れた行と同じ規則で消す／残す）
+  const split = splitByMinPriority(fresh);
+  fresh = split.kept;
+  const belowIds = new Set(split.below.flatMap((r) => [String(r[COL['ID']]), canonical(String(r[COL['ID']]))]));
+  const belowKeys = new Set(split.below.map((r) => legacyKey(String(r[COL['要員']]), String(r[COL['案件名']]))));
+  const demoted = (prev: Row) =>
+    belowMinPriority(String(prev[COL['優先度']])) || belowIds.has(String(prev[COL['ID']]).trim()) || belowIds.has(canonical(String(prev[COL['ID']]).trim())) ||
+    belowKeys.has(legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']])));
   const isClosed = (r: Row) => isClosingStatus(String(r[COL['対応状況']]));
   const closedRows = current.filter((r) => isClosed(r) && String(r[COL['ID']]).trim());
   const closedNow = new Set([...closedIds, ...closedRows.map((r) => String(r[COL['ID']]).trim())]);
@@ -653,7 +676,7 @@ export function planSalesUpdate(
       carryStamps(next, prev, opts.addedAt ?? '');
       updates.push({ row: i + 2, values: next });
       rows.push(next);
-    } else if (stillOpen(id, prev) || hasSalesInput(prev)) {
+    } else if ((!demoted(prev) && stillOpen(id, prev)) || hasSalesInput(prev)) {
       rows.push(prev);
     } else if (hasHumanInput(prev)) {
       expireIds.push(id);
@@ -683,6 +706,7 @@ export function planSalesUpdate(
     closedRows: [...closedRows, ...expiredRows, ...endedRows],
     dropRows,
     rekeyed,
+    belowMin: split.below.length,
     rows: [...rows, ...appends],
   };
 }
@@ -1086,6 +1110,7 @@ export async function writeSalesList(
   projects: Project[],
   engineers: ProperEngineer[] = [],
   open: { ids: Set<string>; aliasOf: Map<string, string> } = { ids: new Set(), aliasOf: new Map() },
+  stats?: { belowMin: number }, // 優先度の下限で載せなかった候補の数を返す
 ): Promise<number | null> {
   const spreadsheetId = properSalesSpreadsheetId();
   if (!spreadsheetId) return null;
@@ -1094,6 +1119,8 @@ export async function writeSalesList(
 
   const projectById = new Map(projects.map((p) => [p.id, p]));
   const fresh = candidates.map((c) => salesRowOf(c, projectById.get(c.projectId)));
+  const below = splitByMinPriority(fresh).below;
+  if (stats) stats.belowMin = below.length;
 
   let tabs = await readTabs(api, spreadsheetId);
   // 見出しが今の並びと違うシートは、タブの追加も含めて何も書かずに止める（全体の書き直しは初回の作成だけ）
@@ -1189,7 +1216,10 @@ export async function writeSalesList(
     const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, closedMails: closedState.mails, endedRowIds: closedState.endedRowIds, addedAt });
     if (p) return { plan: p, rows: p.rows, closedRows: p.closedRows };
     const w = withoutClosed(values);
-    return { plan: null, rows: mergeSalesRows(w.fresh, w.kept, legacy, stillOpen, canonical, addedAt), closedRows: w.closedRows };
+    // 全体を書き直す経路も同じく、下限より低い候補は載せず、その行は残さない
+    const lowIds = new Set(below.flatMap((r) => [String(r[COL['ID']]), canonical(String(r[COL['ID']]))]));
+    const keep = (id: string, prev: Row) => !lowIds.has(id) && !lowIds.has(canonical(id)) && !belowMinPriority(String(prev[COL['優先度']])) && stillOpen(id, prev);
+    return { plan: null, rows: mergeSalesRows(splitByMinPriority(w.fresh).kept, w.kept, legacy, keep, canonical, addedAt), closedRows: w.closedRows };
   };
   let existingValues = await readExisting();
   let planned = planFor(existingValues);
