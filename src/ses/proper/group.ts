@@ -1,7 +1,7 @@
 // 似たスキルの要員をまとめて判定する。代表の1人の判定（生のAI出力）を、似た要員の経歴で照合し直して使い回し、判定の回数を減らす。
 // 単価・開始時期・勤務地などの人ごとの条件は判定の外（ownMatch・優先度）で人ごとに見るため、ここでは変えない
 import { properGroupSimilarity } from '../config.js';
-import { norm, profileTextOf, verifyJudgment, type RawProperJudgment } from './judge.js';
+import { norm, profileTextOf, verifyJudgment, verifyOptsFor, type RawProperJudgment } from './judge.js';
 import type { OwnEngineer, Project, ProperJudgment } from '../../types/index.js';
 
 // 重なり係数 |A∩B| / min(|A|,|B|)。要員リストのスキル欄には人ごとの雑多な語が混ざり、Jaccard だと似た要員でも下がるため
@@ -18,6 +18,8 @@ type Groupable = OwnEngineer & { wish?: string };
 
 function similar(a: Groupable, b: Groupable, threshold: number): boolean {
   if (a.requiredProjectRate !== b.requiredProjectRate) return false;
+  // 未経験の社員は指示文が違うため、経験者とは判定を使い回さない
+  if (Boolean(a.itInexperienced) !== Boolean(b.itInexperienced)) return false;
   if ((a.experienceYears === null) !== (b.experienceYears === null)) return false;
   if (a.experienceYears !== null && b.experienceYears !== null && Math.abs(a.experienceYears - b.experienceYears) > 1) return false;
   // 希望が違うと判定の preferenceFit が変わるため、同じものだけをまとめる
@@ -48,7 +50,7 @@ export function groupSimilarEngineers<T extends Groupable>(list: T[], threshold 
 // 代表の生の判定を member の経歴で照合し直す。代表で照合した結果（verdict・要件ごとの status）と同じときだけ member の判定を返し、
 // 違えば null（個別に判定し直す）
 export function adaptJudgment(raw: RawProperJudgment, origin: OwnEngineer, member: OwnEngineer, project: Project): ProperJudgment | null {
-  const verify = (e: OwnEngineer) => verifyJudgment(raw, profileTextOf(e), project, { level: e.level, experienceYears: e.experienceYears ?? null });
+  const verify = (e: OwnEngineer) => verifyJudgment(raw, profileTextOf(e), project, verifyOptsFor(e, project));
   const base = verify(origin);
   const mine = verify(member);
   const checksA = base.checks ?? [];

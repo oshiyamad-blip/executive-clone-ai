@@ -865,6 +865,12 @@ export function properGroupSimilarity(): number {
   return envNum('PROPER_GROUP_SIMILARITY', 0.6, { min: 0, max: 1 });
 }
 
+// IT 未経験の社員（研修明け）は、未経験可の記載がある案件の組だけをAI判定に回す。"0"/"false" で無効（今までどおり経験者と同じ足切りで全部判定）
+export function properInexperiencedStrict(): boolean {
+  const v = env('PROPER_INEXPERIENCED_STRICT').toLowerCase();
+  return !(v === '0' || v === 'false');
+}
+
 // プロパー候補のAI判定に1回の実行で使ってよいLLMコストの目安（円）。超えたら残りの組は判定せず次回へ先送りする
 // （失敗には数えない。足切りの監視の判定も同じ上限の中で行う）。0で上限なし
 export function properJudgeBudgetJpy(): number {

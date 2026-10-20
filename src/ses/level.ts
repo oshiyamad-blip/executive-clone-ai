@@ -30,6 +30,7 @@ export interface ProjectLevel {
   topPhase: Phase | null; // 担当する工程のうち最も上流
   role: RoleLevel | null; // 求める立場
   juniorOk: boolean; // 若手可・未経験可・経験浅め可
+  inexperiencedOk?: boolean; // IT の実務経験が無い人を受け入れる（未経験可・経験不問など）。若手可だけでは立てない。古い保存データは未定義
   selfDriven: boolean; // 一人称で進められることが必要
 }
 
@@ -170,6 +171,7 @@ export function sanitizeProjectLevel(raw: unknown): ProjectLevel {
     topPhase: isPhase(r.topPhase) ? r.topPhase : null,
     role: isRole(r.role) ? r.role : null,
     juniorOk: r.juniorOk === true,
+    ...(r.inexperiencedOk === true ? { inexperiencedOk: true } : {}),
     selfDriven: r.selfDriven === true,
   };
 }
@@ -197,7 +199,7 @@ export function hasEngineerLevel(l: EngineerLevel | undefined): boolean {
 }
 
 export function hasLevelRequirement(l: ProjectLevel | undefined): boolean {
-  return Boolean(l && (l.skillYears.length > 0 || l.totalYears !== null || l.topPhase !== null || l.role !== null || l.juniorOk || l.selfDriven));
+  return Boolean(l && (l.skillYears.length > 0 || l.totalYears !== null || l.topPhase !== null || l.role !== null || l.juniorOk || l.inexperiencedOk === true || l.selfDriven));
 }
 
 export function projectLevelJson(l: ProjectLevel | undefined): string {
