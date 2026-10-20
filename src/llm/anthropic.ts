@@ -98,7 +98,7 @@ export async function anthropicText(
     {
       model: resolvedModel,
       max_tokens: maxTokens,
-      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      ...(opts.thinking !== false && thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
       system,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     },

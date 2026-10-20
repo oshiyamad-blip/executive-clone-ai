@@ -145,7 +145,7 @@ export async function probeLlmCredit(): Promise<CreditProbe> {
   if (probeOverride) return probeOverride();
   if (isDemo() || llmProviderName() !== 'anthropic') return 'ok';
   try {
-    await generateText('接続確認', [{ role: 'user', content: 'ok' }], { model: extractModel(), maxTokens: 1, maxRetries: 0, timeoutMs: 30_000 });
+    await generateText('接続確認', [{ role: 'user', content: 'ok' }], { model: extractModel(), maxTokens: 16, maxRetries: 0, timeoutMs: 30_000, thinking: false });
     return 'ok';
   } catch (err) {
     return isCreditExhausted(err) ? 'exhausted' : 'unknown';
