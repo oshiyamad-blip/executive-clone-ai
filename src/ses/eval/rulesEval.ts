@@ -36,7 +36,7 @@ import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare,
 import { supportsAdaptiveThinking, supportsEffort } from '../../llm/anthropic.js';
 import { recordLlmUsage, getLlmUsageLog } from '../../llm/usage.js';
 import { isModelUnavailableError, isCreditExhausted } from '../../llm/errors.js';
-import { handoffEnabled } from '../config.js';
+import { handoffEnabled, salesMinPriority } from '../config.js';
 import { parseHandoff, handoffRows, decideApiRun, formatJst, type HandoffState } from '../handoff.js';
 import { trialCheck, trialRows } from '../trial/handoff.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
@@ -4948,6 +4948,54 @@ async function salesListRound2Checks(): Promise<void> {
     })());
   check('期限切れの上限: 超えた分だけ古い行（上）から消す・0 なら上限なし',
     expiredOverflow(2990, 20, 3000) === 10 && expiredOverflow(10, 5, 3000) === 0 && expiredOverflow(5000, 10, 0) === 0 && SALES_EXPIRED_TAB === '期限切れ');
+  // ===== 優先度の下限（SALES_MIN_PRIORITY） =====
+  {
+    const saved = process.env.SALES_MIN_PRIORITY;
+    const setMin = (v: string | undefined) => {
+      if (v === undefined) delete process.env.SALES_MIN_PRIORITY;
+      else process.env.SALES_MIN_PRIORITY = v;
+    };
+    try {
+      setMin(undefined);
+      const dflt = salesMinPriority();
+      const reads = (['A', 'c', 'Ｄ', ' b '] as const).map((v) => (setMin(v), salesMinPriority())).join();
+      const invalid = (['', 'E', 'AB', 'x'] as const).map((v) => (setMin(v), salesMinPriority())).join();
+      check('営業リストの下限: 既定は B・A/B/C/D は大小文字と全角を許す・不正な値は既定の B', dflt === 'b' && reads === 'a,c,d,b' && invalid === 'b,b,b,b', `${dflt} ${reads} ${invalid}`);
+      const mk = (id: string, over: Record<string, unknown>) => salesRowOf({ ...base, id: `ownmatch_a_${id}`, projectId: id, projectTitle: `下限の確認用の案件 ${id}`, reason: '', ...over } as ProperCandidate, undefined);
+      const rowA = mk('lowA', {});
+      const rowB = mk('lowB', { meetsRate: false });
+      const rowC = mk('lowC', { needsReview: true });
+      const rowD = mk('lowD', { reference: true });
+      const prios = [rowA, rowB, rowC, rowD].map((r) => String(r[col('優先度')])[0]).join('');
+      check('営業リストの下限: テストの候補は A・B・C・D の順の優先度になる', prios === 'ABCD', prios);
+      const ids = (rows: Array<Array<string | number>>) => rows.map((r) => String(r[col('ID')]).replace('ownmatch_a_', '')).join();
+      setMin(undefined);
+      const byDefault = planSalesUpdate([rowA, rowB, rowC, rowD], [header]);
+      check('営業リストの下限: 既定（B）では A・B だけが新しい行になり、C・D は載せず件数に数える（belowMin=2）',
+        byDefault !== null && ids(byDefault.appends) === 'lowA,lowB' && byDefault.belowMin === 2, byDefault ? ids(byDefault.appends) : 'null');
+      const prevC = asSheet(rowC, { 対応状況: '未着手' });
+      const prevD = asSheet(rowD, { 対応状況: '未着手' });
+      const prevCInput = asSheet(rowC, { ID: 'ownmatch_a_keepC', 案件名: '入力のある案件の名前です', 対応状況: '調整中', メモ: '確認中' });
+      const stay = planSalesUpdate([rowC, rowD], [header, prevC, prevD, prevCInput], () => true);
+      check('営業リストの下限: 下限より低い既存の行は入力が無ければ消す対象（stillOpen でも残さない）・入力のある行は残す',
+        stay !== null && stay.deleteIds.join() === 'ownmatch_a_lowC,ownmatch_a_lowD' && stay.dropRows.length === 2 && stay.rows.some((r) => r[col('ID')] === 'ownmatch_a_keepC') && stay.appends.length === 0,
+        JSON.stringify(stay?.deleteIds));
+      const demoted = planSalesUpdate([rowC], [header, asSheet(rowA, { ID: rowC[col('ID')] as string, 案件名: rowC[col('案件名')] as string, 対応状況: '未着手' })], () => true);
+      check('営業リストの下限: 再判定で A から C に下がった既存の行も（入力が無ければ）消す対象で、更新にはしない',
+        demoted !== null && demoted.deleteIds.join() === 'ownmatch_a_lowC' && demoted.updates.length === 0 && demoted.belowMin === 1);
+      const keptB = planSalesUpdate([rowA, rowB], [header, asSheet(rowB, { 対応状況: '未着手' })]);
+      check('営業リストの下限: A・B の既存の行は今までどおり更新される', keptB !== null && keptB.deleteIds.length === 0 && keptB.updates.length === 1 && ids(keptB.appends) === 'lowA' && keptB.belowMin === 0);
+      setMin('D');
+      const all = planSalesUpdate([rowA, rowB, rowC, rowD], [header, prevC]);
+      check('営業リストの下限: SALES_MIN_PRIORITY=D なら今までどおり全部載る（belowMin=0・既存の C の行も残る）',
+        all !== null && ids(all.appends) === 'lowA,lowB,lowD' && all.updates.length === 1 && all.deleteIds.length === 0 && all.belowMin === 0, all ? ids(all.appends) : 'null');
+      setMin('C');
+      const upToC = planSalesUpdate([rowA, rowB, rowC, rowD], [header]);
+      check('営業リストの下限: SALES_MIN_PRIORITY=C なら D だけ載せない', upToC !== null && ids(upToC.appends) === 'lowA,lowB,lowC' && upToC.belowMin === 1);
+    } finally {
+      setMin(saved);
+    }
+  }
   // 書き込みの流れ: 控えへ先に足してから「全体」の行を消す・空の控えには見出しも書く・上限を超えたら上の行を消す
   const writeLog = async (expiredColumnA: string[][], keep: string | undefined, withExpiredTab = true) => {
     const calls: Array<{ kind: string; arg: unknown }> = [];
