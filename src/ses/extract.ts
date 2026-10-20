@@ -83,6 +83,8 @@ export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリ�
   - roleLevel: 求める立場（PG/SE/PL/PM）。「PG」「プログラマー」→ PG、「SE」「SEクラス」「設計者」→ SE、
     「リーダー」「PL」→ PL、「PM」「マネージャー」→ PM。読み取れなければ null（「PMO」は PM にしない）
   - juniorOk: 「若手可」「未経験可」「経験浅め可」「20代」「育成枠」など経験の浅い人を受け入れる記載があれば true
+  - inexperiencedOk: 「未経験可」「未経験OK」「未経験歓迎」「未経験者可」「IT未経験」「経験不問」「研修あり（未経験向け）」など、
+    IT の実務経験が無い人を受け入れる記載があれば true。「若手可」「20代」「経験浅め可」だけでは true にしない（「未経験不可」も false）
   - selfDriven: 「一人称で」「自走できる」「自立して」など一人で進められることが条件なら true
 - 案件の businessFlow（商流メモ）には、参画の条件を原文の言い回しのまま入れてください: 商流・再委託の範囲（貴社社員まで／貴社1社先まで など）、
   所属・雇用形態（個人事業主・フリーランスの可否）、外国籍の可否と日本語の条件、年齢の条件（「年齢：〜45歳」「30代前半まで」など）、
@@ -153,6 +155,7 @@ const PROJECT_ITEM_SCHEMA = {
     topPhase: { anyOf: [{ type: 'string', enum: [...PHASES] }, { type: 'null' }] },
     roleLevel: { anyOf: [{ type: 'string', enum: [...ROLES] }, { type: 'null' }] },
     juniorOk: { type: 'boolean' },
+    inexperiencedOk: { type: 'boolean' },
     selfDriven: { type: 'boolean' },
   },
   required: [
@@ -176,6 +179,7 @@ const PROJECT_ITEM_SCHEMA = {
     'topPhase',
     'roleLevel',
     'juniorOk',
+    'inexperiencedOk',
     'selfDriven',
   ],
 } as const;
@@ -252,6 +256,7 @@ export interface RawProject {
   topPhase?: string | null;
   roleLevel?: string | null;
   juniorOk?: boolean;
+  inexperiencedOk?: boolean;
   selfDriven?: boolean;
 }
 
@@ -980,6 +985,7 @@ function levelOf(raw: RawProject, numbers: Set<string> | null): { level?: Projec
     topPhase: raw.topPhase ?? null,
     role: raw.roleLevel ?? null,
     juniorOk: raw.juniorOk === true,
+    inexperiencedOk: raw.inexperiencedOk === true,
     selfDriven: raw.selfDriven === true,
   });
   return hasLevelRequirement(level) ? { level } : {};

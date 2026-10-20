@@ -28,7 +28,9 @@ import {
   maxCandidatesPerItem,
   logRedact,
   properRateToleranceMan,
+  properInexperiencedStrict,
 } from './config.js';
+import { acceptsInexperienced } from './inexperienced.js';
 import { evaluateLevel } from './level.js';
 import { safeErr } from './redact.js';
 import {
@@ -87,6 +89,13 @@ export function sharesTech(project: Pick<Project, 'title' | 'requiredSkills'>, h
 export interface OwnMatchOptions {
   // AI判定の前段として緩く足切りする（sharesTech で通し、一致率・中心の技術の判定は rulePass に残す）
   forJudge?: boolean;
+  // IT 未経験の社員 × 未経験可でない案件の除外を掛けない（除外した組の数を数えるため）
+  ignoreInexperiencedGate?: boolean;
+}
+
+// IT 未経験の社員 × 未経験可の記載が無い案件は、AI判定に回さない（理由「IT未経験のため対象外（未経験可の記載なし）」。PROPER_INEXPERIENCED_STRICT で無効）
+function excludedAsInexperienced(own: OwnEngineer, project: Project, opts: OwnMatchOptions): boolean {
+  return Boolean(opts.forJudge && !opts.ignoreInexperiencedGate && own.itInexperienced && properInexperiencedStrict() && !acceptsInexperienced(project));
 }
 
 // 自社社員1名×案件1件の適合判定（純関数）。条件外なら null
@@ -101,6 +110,7 @@ interface Evaluated {
 }
 
 function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date, opts: OwnMatchOptions): Evaluated | null {
+  if (excludedAsInexperienced(own, project, opts)) return null;
   const reviewReasons: string[] = [];
   // スキル: 外部要員(match.ts)と同じ基準でバンド分けし、参考提案(tentative)は注記を付ける。
   // 必須スキルが空の案件は尚可スキルで参考判定、どちらも空なら案件名に社員のスキルが現れる場合だけ要確認
@@ -110,13 +120,18 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date,
   let band: MatchBand = 'tentative';
   const implied = impliedSkillNote(skill.breakdown);
   let rulePass = true;
+  // IT 未経験の社員 × 未経験可の案件は、技術の一致を問わずAI判定に回す（技術の経験が無いことが前提のため。ルールだけでは残さない）
+  const inexperiencedPair = Boolean(opts.forJudge && own.itInexperienced && properInexperiencedStrict() && acceptsInexperienced(project));
   if (skill.basis === 'unknown') {
-    if (skill.titleHits.length === 0) return null;
-    reviewReasons.push('必須スキル不明');
+    if (inexperiencedPair) rulePass = false;
+    else {
+      if (skill.titleHits.length === 0) return null;
+      reviewReasons.push('必須スキル不明');
+    }
   } else {
     // 工程・役割の語だけで一致率を満たした組は除く（技術の必須を1つも満たさない、または案件名の技術を1つも持たない）
     rulePass = skill.rate >= skillMatchThreshold() && coversCoreTech(project, own.skills, skill.breakdown);
-    if (!rulePass && !(opts.forJudge && sharesTech(project, own.skills, skill.breakdown))) return null;
+    if (!rulePass && !inexperiencedPair && !(opts.forJudge && sharesTech(project, own.skills, skill.breakdown))) return null;
     if (skill.basis === 'required' && directSkillRate(skill.breakdown) >= skillMatchStrongThreshold()) band = 'strong';
   }
 
@@ -257,6 +272,18 @@ export function ownPairsForJudge(own: OwnEngineer[], projects: Project[], perIte
   return rankOwnPairs(own, projects, now, { forJudge: true }, perItem).map((c) => ({ match: c.match, rulePass: c.rulePass }));
 }
 
+// IT 未経験の社員 × 未経験可でない案件として、AI判定に回さなかった組の数（ほかのルールの足切りは通る組だけ数える。試運転の出力用）
+export function inexperiencedSkippedCount(own: OwnEngineer[], projects: Project[], now = new Date()): number {
+  if (!properInexperiencedStrict()) return 0;
+  let n = 0;
+  for (const engineer of own.filter((o) => o.status === 'available' && o.itInexperienced)) {
+    for (const project of projects.filter((p) => p.status === 'open' && !acceptsInexperienced(p))) {
+      if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreInexperiencedGate: true })) n += 1;
+    }
+  }
+  return n;
+}
+
 // 足切りの監視用に、案件と社員から作る最小の match（ルールの判定を通っていないので数値は参考。要確認にして人が確かめる）
 function minimalOwnMatch(own: OwnEngineer, project: Project, now: Date): OwnMatch {
   const rate = projectRateMan(project);
@@ -294,6 +321,8 @@ export function auditPairsForJudge(own: OwnEngineer[], projects: Project[], n: n
   for (const engineer of own.filter((o) => o.status === 'available')) {
     for (const project of projects.filter((p) => p.status === 'open')) {
       if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true })) continue;
+      // 未経験可でない案件を意図して除いた組は、足切りの取りこぼしではない
+      if (excludedAsInexperienced(engineer, project, { forJudge: true })) continue;
       const techs = techNamesIn([...project.requiredSkills, ...project.preferredSkills].join(' '));
       if (!techs.some((t) => (skillMatch([t], engineer.skills)?.rate ?? 0) > 0)) continue;
       near.push({ own: engineer, project, hash: createHash('sha256').update(`${day}|${engineer.id}|${project.id}`).digest('hex') });

@@ -79,6 +79,7 @@ export function applyJudgment(m: OwnMatch, j: ProperJudgment): OwnMatch | null {
   const unmetRequired = (j.checks ?? []).filter((c) => c.kind === '必須' && c.status === 'unmet').map((c) => c.requirement);
   const overLevel = highGap && j.rateReason === 'high_level' && unmetRequired.length > 0;
   const notes = [
+    ...(j.inexperiencedOk ? ['［確認］IT未経験（研修修了）・未経験可の案件。'] : []),
     ...(overLevel ? [`［確認］案件単価が希望より${m.rateGapMan}万円高く求める水準も高い案件で、経験の無い必須があります（${unmetRequired.join('、')}）。`] : []),
     ...j.reviewNotes.map((n) => `［確認］${n}。`),
     ...j.concerns.map((c) => `［確認］${c.replace(/。$/, '')}。`),
@@ -410,6 +411,8 @@ export function clearsBar(m: OwnMatch): boolean {
 // 条件つきのうち、必須の2件以上かつ半分以上が経験なしで、満たす必須が1件以下の組
 export function weakOnRequired(m: OwnMatch): boolean {
   if (!m.judgment || m.judgment.verdict === 'recommend' || !m.judgment.checks) return false;
+  // IT 未経験の社員は必須の技術が経験なしになるのが前提のため、これだけで参考に下げない（優先度は B までにする。salesPriorityOf）
+  if (m.judgment.inexperiencedOk) return false;
   const r = requiredCounts(m.judgment);
   const total = r.met + r.close + r.unmet;
   return r.unmet >= 2 && r.unmet * 2 >= total && r.met <= 1;

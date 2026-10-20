@@ -87,6 +87,12 @@ export function summaryLevel(s: RosterSummary): EngineerLevel {
   return { skillYears: parseSkillYears(s.experienceText), phaseYears: parsePhaseYears(s.experienceText), role: parseRole(s.note) };
 }
 
+// 経験年数の欄の先頭が「なし」「未経験」なら IT 未経験（括弧の中の「社会人経験…」は IT の経験ではない）
+export function isItInexperienced(experienceText: string): boolean {
+  const head = (experienceText.normalize('NFKC').split(/[（(]/)[0] ?? '').replace(/\s+/g, '');
+  return /^(?:なし|未経験)/.test(head);
+}
+
 // 「10月」「10月\nor\n11月」「即日」→ 稼働可能日（最も早いもの）。年は今日から見て次に来る月
 export function rosterAvailableFrom(raw: string, now: Date): string | null {
   const s = raw.normalize('NFKC');
@@ -220,6 +226,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
       status: 'available',
       affiliation: s.affiliation,
       ...(s.note ? { wish: s.note } : {}),
+      ...(isItInexperienced(s.experienceText) ? { itInexperienced: true } : {}),
       ...(hasEngineerLevel(level) ? { level } : {}),
       profileText: rosterProfileText(scrubRosterName(r[col('サマリ')] ?? '', name), text),
     });

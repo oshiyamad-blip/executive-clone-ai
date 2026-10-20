@@ -110,8 +110,9 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge } from '../ownMatch.js';
-import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, type RawProperJudgment } from '../proper/judge.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
+import { acceptsInexperienced } from '../inexperienced.js';
+import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, INEXPERIENCED_PARAGRAPH, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { skillOverlap, groupSimilarEngineers, adaptJudgment } from '../proper/group.js';
 import { planFanout } from '../trial/fanout.js';
@@ -5681,6 +5682,88 @@ function trialUsageChecks(): void {
     judgmentFor(judgedMap, 'proj_new', split.reused, 'KS')?.verdict === 'propose' && judgmentFor(judgedMap, 'proj_new', split.reused, 'TM') === undefined && judgmentFor(new Map([['proj_new', { verdict: 'own' }], ...judgedMap]), 'proj_new', split.reused, 'KS')?.verdict === 'own');
 }
 
+// ===== IT 未経験の社員を「未経験可」の案件で拾う =====
+
+async function inexperiencedChecks(): Promise<void> {
+  section('IT未経験の社員（研修明け）× 未経験可の案件');
+  const summaryOf = (years: string) => `■名前：Z.Z\n■単価：30万円\n■スキル：\n■経験年数：${years}`;
+  const rosterOf = (years: string) =>
+    rosterEngineersFromValues({
+      spreadsheetId: 'sheet_x', rows: [['状況', '名前', '稼働開始時期', 'サマリ'], ['営業中', 'Z.Z', '即日', summaryOf(years)]], gidOf: new Map(), sheetTexts: new Map(),
+    }, NOW)[0];
+  check('roster: 「なし（社会人経験6年5ヶ月）」は itInexperienced（括弧の中の社会人経験は IT の経験ではない）',
+    rosterOf('なし（社会人経験6年5ヶ月）')?.itInexperienced === true && rosterOf('なし（社会人経験6年5ヶ月）')?.experienceYears === null);
+  check('roster: 空白（全角含む）の違いや「未経験」でも true', rosterOf('　なし　')?.itInexperienced === true && rosterOf('未 経験（研修修了）')?.itInexperienced === true);
+  check('roster: 「3年6ヶ月（…）」は未定義', rosterOf('3年6ヶ月（社会人経験8年）')?.itInexperienced === undefined);
+
+  const accepts = (over: Partial<Project>) => acceptsInexperienced(project(over));
+  check('acceptsInexperienced: 「未経験可」「IT未経験OK」「経験不問」「未経験者歓迎」は true',
+    accepts({ detail: '未経験可' }) && accepts({ title: 'IT未経験OK' }) && accepts({ businessFlow: '経験不問' }) && accepts({ requiredSkills: ['未経験者歓迎'] }) && accepts({ detail: '未経験ＯＫ' }));
+  check('acceptsInexperienced: 「未経験不可」「未経験者不可」「×未経験」「IT未経験者不可」は false',
+    !accepts({ detail: '未経験不可' }) && !accepts({ detail: '未経験者不可' }) && !accepts({ detail: '×未経験可' }) && !accepts({ detail: 'IT未経験者は不可' }) && !accepts({ detail: 'NG未経験歓迎' }));
+  check('acceptsInexperienced: 「若手可」「20代」「経験浅め可」だけでは false', !accepts({ detail: '若手可。20代の方。経験浅め可' }) && !accepts({ level: { ...EMPTY_PROJECT_LEVEL, juniorOk: true } }));
+  check('acceptsInexperienced: 抽出の旗 inexperiencedOk=true なら本文に記載が無くても true', accepts({ level: { ...EMPTY_PROJECT_LEVEL, inexperiencedOk: true } }));
+  check('案件のレベルの保存: inexperiencedOk を保存して読み戻せる（旗だけの案件も条件ありとして残る）',
+    parseProjectLevelJson(projectLevelJson({ ...EMPTY_PROJECT_LEVEL, inexperiencedOk: true }))?.inexperiencedOk === true && sanitizeProjectLevel({ inexperiencedOk: 'yes' }).inexperiencedOk === undefined);
+
+  // 組の選び方
+  const own = (id: string, over: Partial<ProperEngineer>): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills: [], experienceYears: null, requiredProjectRate: 30,
+    residence: '', prefecture: '東京都', availableDate: '', availableFrom: null, remoteWish: 'unknown', status: 'available', ...over,
+  });
+  const newbie = own('N1', { itInexperienced: true, profileText: '【要員リストのサマリ】\n■経験年数：なし（社会人経験6年5ヶ月）' });
+  const veteran = own('V1', { skills: ['Linux'], experienceYears: 3 });
+  const pOk = project({ id: 'p_ok', title: 'Linux運用監視', requiredSkills: ['Linux'], rateMax: 40, detail: '未経験歓迎。研修あり' });
+  // 別の案件としてまとめられないよう、出社先の駅を変えておく（dedupeProjects は出社先も見る）
+  const pNg = project({ id: 'p_ng', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, location: '品川', detail: '経験3年以上の方' });
+  const idsOf = (list: ProperEngineer[], projects: Project[]) => ownPairsForJudge(list, projects, 100, NOW).map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`).sort();
+  check('組の選び方: 未経験の社員は未経験可の案件の組だけ判定に回り、経験者は今までどおり両方回る',
+    JSON.stringify(idsOf([newbie, veteran], [pOk, pNg])) === JSON.stringify(['N1|p_ok', 'V1|p_ng', 'V1|p_ok']), JSON.stringify(idsOf([newbie, veteran], [pOk, pNg])));
+  check('組の選び方: 未経験可の案件の組はルールの基準だけでは残さない（rulePass が偽）', ownPairsForJudge([newbie], [pOk], 100, NOW)[0]?.rulePass === false);
+  const newbieSkilled = own('N2', { itInexperienced: true, skills: ['Linux'] });
+  check('組の選び方: 研修で触れた技術がある未経験の社員は未経験可でない案件は除外し、除外数に数える',
+    JSON.stringify(idsOf([newbieSkilled], [pOk, pNg])) === JSON.stringify(['N2|p_ok']) && inexperiencedSkippedCount([newbieSkilled], [pOk, pNg], NOW) === 1);
+  process.env.PROPER_INEXPERIENCED_STRICT = 'false';
+  try {
+    check('PROPER_INEXPERIENCED_STRICT=false なら今までどおり（未経験の社員も経験者と同じ足切りで、技術が無ければ回らない）',
+      JSON.stringify(idsOf([newbie, newbieSkilled], [pOk, pNg])) === JSON.stringify(['N2|p_ng', 'N2|p_ok']) && inexperiencedSkippedCount([newbieSkilled], [pOk, pNg], NOW) === 0);
+  } finally {
+    delete process.env.PROPER_INEXPERIENCED_STRICT;
+  }
+  check('試運転の選び方は本番と同じ関数: 監視の組にも除外した組は入らない', auditPairsForJudge([newbieSkilled], [pNg], 10, NOW).length === 0);
+
+  // 指示文
+  check('judgeSystemFor: 未経験の社員の指示文にだけ段落が入り、<engineer_profile> の前に置く',
+    judgeSystemFor(newbie).includes(INEXPERIENCED_PARAGRAPH) && judgeSystemFor(newbie).indexOf(INEXPERIENCED_PARAGRAPH) < judgeSystemFor(newbie).indexOf('<engineer_profile>') &&
+      !judgeSystemFor(veteran).includes('IT の実務経験がありません'));
+
+  // 判定の後
+  const rawUnmet: RawProperJudgment = {
+    work: '運用監視', levelFit: '未経験', preferenceFit: '記載なし', verdict: 'recommend', pitch: '', concerns: ['IT未経験（研修修了）。年齢は20代まで'],
+    workPrefecture: '', rateReason: 'none', injectionSuspected: false,
+    requirements: [{ requirement: '運用監視の実務経験', kind: '必須', quote: '運用監視の実務経験', status: 'unmet', evidence: '', note: '実務の記載なし' }],
+  };
+  const profileText = newbie.profileText ?? '';
+  const plain = verifyJudgment(rawUnmet, profileText, pOk);
+  const lenient = verifyJudgment({ ...rawUnmet, verdict: 'conditional' }, profileText, pOk, { inexperiencedOk: true });
+  check('判定の後: 経験者の物差しでは必須が unmet だけの組は見送り、未経験の社員 × 未経験可ではAIの conditional が残る（必須の unmet は unmet のまま）',
+    plain.verdict === 'reject' && lenient.verdict === 'conditional' && lenient.inexperiencedOk === true && lenient.checks?.[0]?.status === 'unmet', JSON.stringify(lenient));
+  check('判定の後: AIの recommend でも conditional までに抑え、AIの reject は reject のまま',
+    verifyJudgment(rawUnmet, profileText, pOk, { inexperiencedOk: true }).verdict === 'conditional' && verifyJudgment({ ...rawUnmet, verdict: 'reject' }, profileText, pOk, { inexperiencedOk: true }).verdict === 'reject');
+  __setProperJudgeForTest(async () => ({ ...rawUnmet, verdict: 'conditional' }));
+  try {
+    const { candidates } = await buildProperCandidates([newbie], [pOk, pNg], NOW);
+    const c = candidates.find((x) => x.projectId === 'p_ok');
+    check('判定の後: 候補に残り（参考に下げない）、優先度は B、確認事項の先頭に「IT未経験（研修修了）・未経験可の案件」',
+      candidates.length === 1 && c !== undefined && c.judgment?.verdict === 'conditional' && c.reference !== true && !c.needsReview && salesPriorityOf(c).startsWith('B') &&
+        !weakOnRequired(c) && salesNotesOf(c.reason).confirm.split('\n')[0] === 'IT未経験（研修修了）・未経験可の案件', JSON.stringify(c && salesNotesOf(c.reason)));
+    const veteranJudged = await buildProperCandidates([veteran], [pOk], NOW);
+    check('判定の後: 経験者の社員には注記も B への固定も付かない（必須の unmet だけの組は今までどおり見送り）', veteranJudged.candidates.length === 0, JSON.stringify(veteranJudged.stats));
+  } finally {
+    __setProperJudgeForTest(null);
+  }
+}
+
 async function main(): Promise<void> {
   for (const k of Object.keys(process.env)) if (RULE_ENV_PREFIXES.some((p) => k.startsWith(p))) delete process.env[k];
   setDemoOverride(true); // 設定の読み出しで本番の鍵・保存先を参照しない
@@ -5749,6 +5832,7 @@ async function main(): Promise<void> {
     labelSheetChecks();
     trialUsageChecks();
     pauseGateChecks();
+    await inexperiencedChecks();
   } finally {
     setDemoOverride(null);
   }

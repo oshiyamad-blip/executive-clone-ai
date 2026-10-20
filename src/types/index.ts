@@ -401,6 +401,8 @@ export interface OwnEngineer {
   level?: EngineerLevel;
   // AI判定に渡す経歴の本文（要員リストのサマリ＋スキルシートのタブ）。根拠の引用の照合にも使う。無い社員はスキル一覧から作る
   profileText?: string;
+  // IT の実務経験が無い（要員リストのサマリの経験年数が「なし」「未経験」の研修明けの社員）。Drive のスキルシート経由の社員は未定義
+  itInexperienced?: boolean;
 }
 
 // プロパー（自社社員）: 別管理のスキルシート（Drive）から抽出し、管理表「プロパー管理」で人が
@@ -497,6 +499,7 @@ export interface ProperJudgment {
   checks?: RequirementCheck[]; // 必須・尚可の要件ごとの照合後の結果（営業リストでメール本文の該当行に ○△× を付ける）
   workPrefecture?: string; // AIが案件メールから読んだ出社先の都道府県（ルールで勤務地を読めなかった案件の地方の判定に使う）
   rateReason?: RateReason; // 案件単価が希望単価より大きく高い理由（AIの見立て。差が小さい組は持たない）
+  inexperiencedOk?: boolean; // IT未経験の社員 × 未経験可の案件として判定した組（必須の不足だけで見送らず、優先度は B までにする）
 }
 
 // ===== 人間フィードバックによる精度向上 =====

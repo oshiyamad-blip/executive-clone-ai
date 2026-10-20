@@ -21,7 +21,7 @@ import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from 
 import { attachmentMaterial } from './rawAttach.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
-import { ownPairsForJudge } from '../ownMatch.js';
+import { ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
@@ -302,6 +302,8 @@ if (phase === 'prompts') {
     return p ? mailRefOf(labelOf.get(m.ownEngineerId) ?? '', p.agentEmail, p.replyTarget?.subject ?? '', jstLabel(p.receivedAt)) : null;
   };
   const everyPair = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now);
+  // 本番と同じ ownPairsForJudge を通るため、IT 未経験の社員 × 未経験可でない案件の除外はここでも効いている（除外した組の数だけ別に数える）
+  const inexperiencedSkipped = inexperiencedSkippedCount(list, kept, now);
   const siblingMails = everyPair.flatMap((p) => mailOfPair(p.match) ?? []);
   const closedPair = (m: { id: string; projectId: string; ownEngineerId: string; projectTitle: string }) => {
     const key = closedKeyOf(labelOf.get(m.ownEngineerId) ?? '', m.projectTitle);
@@ -359,7 +361,7 @@ if (phase === 'prompts') {
   for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
   writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
-  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, reused: reused.length, grouped: groupPending.length }));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, inexperiencedSkipped, reused: reused.length, grouped: groupPending.length }));
 } else if (phase === 'fanout') {
   const list = engineers();
   const { projects } = projectsOf(carriedRows().rows);

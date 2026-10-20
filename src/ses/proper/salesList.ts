@@ -118,6 +118,8 @@ function yearShortRequiredOf(c: ProperCandidate): Array<{ requirement: string; s
 export function salesPriorityOf(c: ProperCandidate): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
   if (c.reference) return SALES_PRIORITIES.d;
+  // IT 未経験の社員 × 未経験可の案件は、必須の技術が経験なしでも C にせず、条件交渉の B にする（確認事項の先頭に注記がある）
+  if (c.judgment?.inexperiencedOk) return SALES_PRIORITIES.b;
   if (unmetRequiredOf(c).length > 0) return SALES_PRIORITIES.c;
   if (c.judgment) {
     if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;

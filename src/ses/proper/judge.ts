@@ -19,6 +19,7 @@ import { techNamesIn } from '../skillDict.js';
 import { normalizePrefecture } from '../prefecture.js';
 import { skillMatch } from '../pricing.js';
 import { groupSimilarEngineers, adaptJudgment } from './group.js';
+import { acceptsInexperienced } from '../inexperienced.js';
 import type { EngineerLevel, ProjectLevel } from '../level.js';
 import type { OwnEngineer, Project, ProperEngineer, ProperJudgment, ProperVerdict, RateReason, RemoteOption, RequirementCheck, RequirementKind } from '../../types/index.js';
 
@@ -129,7 +130,19 @@ export function profileTextOf(e: OwnEngineer): string {
 // 社員の経歴は自社のデータのため指示文の側に置く（同じ社員の組どうしでプロンプトのキャッシュが効く）
 export function judgeSystemFor(e: OwnEngineer): string {
   const rate = e.requiredProjectRate !== null ? `${e.requiredProjectRate}万円/月` : '未設定';
-  return `${PROPER_JUDGE_SYSTEM}\n\n<engineer_profile>\n希望単価: ${rate}\n${profileTextOf(e)}\n</engineer_profile>`;
+  const inexperienced = e.itInexperienced ? `${INEXPERIENCED_PARAGRAPH}\n\n` : '';
+  return `${PROPER_JUDGE_SYSTEM}\n\n${inexperienced}<engineer_profile>\n希望単価: ${rate}\n${profileTextOf(e)}\n</engineer_profile>`;
+}
+
+// IT 未経験の社員（研修明け）の指示文にだけ足す段落。必須の判定（met/close/unmet）と根拠の照合の決まりは変えない
+export const INEXPERIENCED_PARAGRAPH =
+  'この社員は IT の実務経験がありません（研修を修了した未経験者）。案件が IT 未経験を受け入れる（未経験可・未経験歓迎・経験不問・研修あり）なら、' +
+  '必須の技術経験が無いことだけを理由に見送りにしないでください。業務が本人の希望（運用監視・ヘルプデスク・キッティング・テストなど）や研修で触れた技術に近ければ' +
+  ' conditional 以上にし、concerns に『IT未経験（研修修了）』と未経験可の条件（年齢・資格・シフトなど）を書いてください。未経験を受け入れない案件は reject です。';
+
+// 照合の追加の引数: IT 未経験の社員 × 未経験可の案件だけ、必須の不足を理由にした自動の見送りを当てない
+export function verifyOptsFor(e: OwnEngineer, p: Project): { level?: EngineerLevel; experienceYears: number | null; inexperiencedOk?: boolean } {
+  return { level: e.level, experienceYears: e.experienceYears ?? null, ...(e.itInexperienced && acceptsInexperienced(p) ? { inexperiencedOk: true } : {}) };
 }
 
 const REMOTE_TEXT: Record<RemoteOption, string> = { full: 'フルリモート可', partial: '一部リモート', none: '出社', unknown: '不明' };
@@ -250,7 +263,7 @@ function profileLineHolding(techs: string[], profile: string, hay: string): stri
 }
 
 export function verifyJudgment(raw: RawProperJudgment, profile: string, project: Pick<Project, 'requiredSkills'> & { title?: string; level?: ProjectLevel },
-  opts: { level?: EngineerLevel; experienceYears?: number | null } = {}): ProperJudgment {
+  opts: { level?: EngineerLevel; experienceYears?: number | null; inexperiencedOk?: boolean } = {}): ProperJudgment {
   const hay = norm(profile);
   const met: string[] = [];
   const gaps: string[] = [];
@@ -355,10 +368,15 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
   const titleTech = techNamesIn(project.title ?? '').map((t) => t.toLowerCase()).filter((t) => askedTech.has(t));
   const missesCore = titleTech.length > 0 && !titleTech.some((t) => heldTech.has(t));
   let verdict = raw.verdict;
-  if (substantive === 0 || missesCore) verdict = 'reject'; // 一般的な語だけ・根拠の無い一致だけ・中心の技術が無い
+  if (opts.inexperiencedOk) {
+    // IT 未経験の社員 × 未経験可の案件: 必須の技術経験が無いことによる自動の見送りは当てず、AIの見立てを残す（経歴に無いものを満たすとはしない）。
+    // 最高でも条件つき（優先度 B）にする。未経験の注記は候補にするとき（applyJudgment）に確認事項の先頭へ足す
+    if (verdict === 'recommend') verdict = 'conditional';
+  } else if (substantive === 0 || missesCore) verdict = 'reject'; // 一般的な語だけ・根拠の無い一致だけ・中心の技術が無い
   else if (verdict === 'recommend' && (unmetCount > metCount || unverified > 0)) verdict = 'conditional';
   return {
     verdict,
+    ...(opts.inexperiencedOk ? { inexperiencedOk: true } : {}),
     work: raw.work.trim(),
     met,
     gaps,
@@ -426,7 +444,8 @@ async function callJudge(e: OwnEngineer, p: Project): Promise<RawProperJudgment>
 
 export function cacheKeyOf(e: OwnEngineer): string {
   const h = createHash('sha256')
-    .update(`${JUDGE_VERSION}\n${matchModel()}\n${e.requiredProjectRate ?? ''}\n${profileTextOf(e)}`)
+    // 未経験の社員は指示文が違うため、経験者と同じ経歴でも別の控えにする（それまでの控えの判定は経験者の物差しのもの）
+    .update(`${JUDGE_VERSION}\n${matchModel()}\n${e.requiredProjectRate ?? ''}\n${e.itInexperienced ? 'it-inexperienced\n' : ''}${profileTextOf(e)}`)
     .digest('hex')
     .slice(0, 32);
   return `proper_judge:${h}`;
@@ -581,7 +600,7 @@ export async function judgeProperPairs(
         }
         try {
           const raw = await callJudge(engineer, project);
-          const j = verifyJudgment(raw, profileTextOf(engineer), project, { level: engineer.level, experienceYears: engineer.experienceYears ?? null });
+          const j = verifyJudgment(raw, profileTextOf(engineer), project, verifyOptsFor(engineer, project));
           out[i] = { judgment: j, cached: false };
           fresh[project.id] = j;
           if (!groupRaw.has(groupKey)) groupRaw.set(groupKey, { raw, origin: engineer });
