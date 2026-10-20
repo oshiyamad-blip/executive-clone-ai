@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { LlmMessage, GenOptions } from './index.js';
 import { recordLlmUsage, getLlmUsageLog, type LlmUsage } from './usage.js';
-import { LlmOutputError } from './errors.js';
+import { LlmOutputError, noteLlmError } from './errors.js';
 
 export { getLlmUsageLog, type LlmUsage };
 
@@ -74,6 +74,19 @@ function jsonText(response: Anthropic.Messages.Message, model: string): string {
   return textBlock.text;
 }
 
+// 全ての呼び出しの入口。残高切れを見たら控える（本番バッチが終わりに試運転へ引き継ぐ判断に使う）
+async function createMessage(
+  params: Anthropic.Messages.MessageCreateParamsNonStreaming,
+  options: { maxRetries?: number; timeout?: number },
+): Promise<Anthropic.Messages.Message> {
+  try {
+    return await client().messages.create(params, options);
+  } catch (err) {
+    noteLlmError(err);
+    throw err;
+  }
+}
+
 export async function anthropicText(
   system: string,
   messages: LlmMessage[],
@@ -81,11 +94,11 @@ export async function anthropicText(
   opts: GenOptions = {},
 ): Promise<string> {
   const resolvedModel = opts.model ?? MODEL;
-  const response = await client().messages.create(
+  const response = await createMessage(
     {
       model: resolvedModel,
       max_tokens: maxTokens,
-      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      ...(opts.thinking !== false && thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
       system,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     },
@@ -117,7 +130,7 @@ export async function anthropicJson(
   opts: GenOptions = {},
 ): Promise<unknown> {
   const resolvedModel = opts.model ?? MODEL;
-  const response = await client().messages.create(
+  const response = await createMessage(
     {
       model: resolvedModel,
       max_tokens: maxTokens,
@@ -155,7 +168,7 @@ export async function anthropicJsonWithDocuments(
     { type: 'text' as const, text: user },
   ];
   const resolvedModel = opts.model ?? MODEL;
-  const response = await client().messages.create(
+  const response = await createMessage(
     {
       model: resolvedModel,
       max_tokens: maxTokens,

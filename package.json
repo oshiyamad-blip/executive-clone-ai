@@ -45,6 +45,7 @@
     "ses:trial:writeplan": "tsx src/ses/trial/writePlan.ts",
     "ses:trial:windows": "tsx src/ses/trial/windows.ts",
     "ses:trial:gate": "tsx src/ses/trial/gate.ts",
+    "ses:trial:handoff": "tsx src/ses/trial/handoff.ts",
     "ses:labels:sheet": "tsx src/ses/eval/labelSheet.ts",
     "ses:flow:check": "tsx src/ses/selftest/sheetsFlow.ts",
     "ses:eval:labels": "tsx src/ses/eval/labelsEval.ts",

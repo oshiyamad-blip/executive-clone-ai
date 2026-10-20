@@ -453,6 +453,11 @@ async function notifySummary(summary: string, consoleSummary: string, counts: st
   }
 }
 
+// Claude API の残高が尽きて試運転に引き継ぐ回の知らせ（1文だけ。送れなくても失敗にしない）
+export async function notifyHandoff(message: string): Promise<'sent' | 'skipped' | 'failed'> {
+  return notifyPaused(message);
+}
+
 // 営業リストの未着手がたまってバッチを見送り始めた回の知らせ（1文と件数だけ）。送れなくても失敗にしない
 // （定期実行を失敗に見せないため。notifySummary は宛先や送信の不備を異常終了として記録するので使わない）
 export async function notifyPaused(message: string): Promise<'sent' | 'skipped' | 'failed'> {

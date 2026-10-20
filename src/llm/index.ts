@@ -28,6 +28,8 @@ export interface GenOptions {
   timeoutMs?: number;
   // 推論の深さ（Anthropic の output_config.effort）。対応していないモデル（Haiku 等）と Gemini では無視する
   effort?: LlmEffort;
+  // false で adaptive thinking を付けない（残高確認のような最小の呼び出し用。思考ありで max_tokens を極端に小さくすると 400 になるため）
+  thinking?: false;
 }
 
 export type LlmEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';

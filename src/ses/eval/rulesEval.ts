@@ -35,7 +35,10 @@ import { looksLikeInjection, INJECTION_REVIEW_REASON, dataSafe } from '../inject
 import { usageCostUsd, usageCostJpy, estimateCallJpy, jpyPerUsd, cacheReadShare, uncachedModels } from '../../llm/pricing.js';
 import { supportsAdaptiveThinking, supportsEffort } from '../../llm/anthropic.js';
 import { recordLlmUsage, getLlmUsageLog } from '../../llm/usage.js';
-import { isModelUnavailableError } from '../../llm/errors.js';
+import { isModelUnavailableError, isCreditExhausted } from '../../llm/errors.js';
+import { handoffEnabled } from '../config.js';
+import { parseHandoff, handoffRows, decideApiRun, formatJst, type HandoffState } from '../handoff.js';
+import { trialCheck, trialRows } from '../trial/handoff.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
 import { withExtractModelFallback, shouldFallbackExtractModel } from '../extractModelFallback.js';
 import {
@@ -5338,6 +5341,66 @@ function trialWindowsChecks(): void {
     at(odd, 0)[1] === jst(6, 12) + 2400 && odd.length === 19 && at(odd, 17)[1] === jst(6, 21) && at(odd, 18)[1] === jst(6, 21) + 600, show(odd.length));
 }
 
+// Claude API の残高があるあいだは本番バッチ、尽きたら試運転に引き継ぐ担当の持ち合い（作り物のデータだけ）
+function handoffChecks(): void {
+  section('引き継ぎ: API の残高があるあいだは本番、尽きたら試運転（営業リストの「_運用」で担当を持ち合う）');
+  const now = Date.UTC(2026, 9, 25, 3, 0, 0); // 2026/10/25 12:00 JST
+  const nowSec = now / 1000;
+  const full: HandoffState = { owner: 'trial', apiLastRun: new Date(now - 3600_000).toISOString(), apiReadEpoch: nowSec - 7200, trialReadEpoch: nowSec - 600, reason: 'API残高切れ（2026/10/25 11:00）' };
+  const rows = handoffRows(full);
+  check('handoffRows: 見出し「項目」「値」と5項目（A1:B6）。parseHandoff との往復で同じ状態に戻る',
+    rows.length === 6 && rows[0].join() === '項目,値' && show(parseHandoff(rows)) === show(full), show(rows));
+  check('handoffRows: 空の状態は値が空の5行・往復しても空', handoffRows({}).length === 6 && show(parseHandoff(handoffRows({}))) === '{}');
+  check('parseHandoff: 見出しなしの読み取りでも読める・行の順や余分な行があっても項目名で拾う',
+    parseHandoff([['無関係', 'x'], ['理由', ' 手で書いた '], ['担当', 'api']]).owner === 'api' && parseHandoff([['無関係', 'x'], ['理由', ' 手で書いた '], ['担当', 'api']]).reason === '手で書いた');
+  const broken = parseHandoff([['担当', 'both'], ['API最終実行', 'いつか'], ['API読了', '12.5'], ['試運転読了', '-3'], ['理由', '']]);
+  check('parseHandoff: 壊れた値（担当が api/trial 以外・日時でない・整数でない）は無いものとして扱い、タブが無い {} も未定', show(broken) === '{}' && show(parseHandoff([])) === '{}');
+  check('parseHandoff: 行が短い・配列でない行があっても落ちない', show(parseHandoff([[], ['担当'], null as unknown as string[]])) === '{}');
+
+  check('decideApiRun: 担当が api・未定なら残高の確認なしで今までどおり実行し、収集の下限は付けない',
+    decideApiRun({ owner: 'api' }, now).run && decideApiRun({}, now).run && decideApiRun({}, now).floorMs === null && decideApiRun({ owner: 'api', trialReadEpoch: nowSec - 60 }, now).floorMs === null);
+  check('decideApiRun: 担当が trial で残高が戻っていない（exhausted・unknown・未確認）なら見送る',
+    !decideApiRun(full, now, 'exhausted').run && !decideApiRun(full, now, 'unknown').run && !decideApiRun(full, now).run);
+  const back = decideApiRun(full, now, 'ok');
+  check('decideApiRun: 担当が trial でも残高が戻っていれば実行し、収集の下限は試運転読了（ミリ秒）。読了が無い・未来なら下限なし',
+    back.run && back.floorMs === (nowSec - 600) * 1000 && decideApiRun({ owner: 'trial' }, now, 'ok').floorMs === null && decideApiRun({ owner: 'trial', trialReadEpoch: nowSec + 5 }, now, 'ok').floorMs === null);
+  check('formatJst: 日本時間の「2026/10/25 12:00」', formatJst(now) === '2026/10/25 12:00', formatJst(now));
+
+  const err400 = { status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}' };
+  check('isCreditExhausted: 400/402 の「credit balance」「billing」は真',
+    isCreditExhausted(err400) && isCreditExhausted({ status: 402, message: 'billing issue' }) && isCreditExhausted({ status: 400, message: 'x', error: { error: { message: 'credit balance is too low' } } }));
+  check('isCreditExhausted: 429（レート制限）・500・529・認証 401・メールの側の 400・応答の形の誤り・ステータスなしは偽',
+    !isCreditExhausted({ status: 429, message: 'rate limit credit balance' }) && !isCreditExhausted({ status: 500, message: 'x' }) && !isCreditExhausted({ status: 529 })
+    && !isCreditExhausted({ status: 401, message: 'invalid x-api-key' }) && !isCreditExhausted({ status: 400, message: 'invalid pdf document' })
+    && !isCreditExhausted(new LlmOutputError('schema', 'm')) && !isCreditExhausted(new TypeError('x.map is not a function')) && !isCreditExhausted(null) && !isCreditExhausted(new Error('credit balance')));
+
+  const apiState: HandoffState = { owner: 'api', apiLastRun: new Date(now - 3600_000).toISOString(), apiReadEpoch: nowSec - 3600 };
+  const c1 = trialCheck(apiState, nowSec - 7200, nowSec);
+  check('試運転 check: 担当が api で API最終実行が6時間以内なら見送り（run:false・startEpoch は実行ログのCとAPI読了の大きい方）',
+    !c1.run && c1.mode === 'api' && c1.startEpoch === nowSec - 3600 && c1.reason.includes('本番バッチが担当中'), show(c1));
+  const c2 = trialCheck({ ...apiState, apiLastRun: new Date(now - 6 * 3600_000 - 1000).toISOString() }, nowSec - 7200, nowSec);
+  const c2edge = trialCheck({ ...apiState, apiLastRun: new Date(now - 6 * 3600_000).toISOString() }, nowSec - 7200, nowSec);
+  check('試運転 check: API最終実行が6時間より前なら（本番が止まっている）run:true・ちょうど6時間はまだ見送り',
+    c2.run && c2.reason.includes('6時間以上') && !c2edge.run, show([c2, c2edge]));
+  check('試運転 check: 担当が api でも API最終実行が無い・読めないなら run:true',
+    trialCheck({ owner: 'api' }, 100, nowSec).run && trialCheck({ owner: 'api', apiReadEpoch: 500 }, 100, nowSec).startEpoch === 500);
+  const c3 = trialCheck(full, nowSec - 300, nowSec);
+  const c4 = trialCheck({}, nowSec - 300, nowSec);
+  check('試運転 check: 担当が trial・未定（タブが無い）なら run:true。startEpoch は実行ログのCとAPI読了の大きい方',
+    c3.run && c3.mode === 'trial' && c3.startEpoch === nowSec - 300 && c4.run && c4.mode === 'none' && c4.startEpoch === nowSec - 300
+    && trialCheck(full, nowSec - 9000, nowSec).startEpoch === nowSec - 7200, show([c3, c4]));
+
+  const r1 = trialRows({ ...full, owner: 'api' }, nowSec, nowSec);
+  const p1 = parseHandoff(r1.values);
+  check('試運転 rows: 範囲は \'_運用\'!A1:B6・担当（api）と他の項目は今のまま、試運転読了だけ更新する',
+    r1.range === "'_運用'!A1:B6" && r1.values.length === 6 && p1.owner === 'api' && p1.trialReadEpoch === nowSec && p1.apiReadEpoch === full.apiReadEpoch && p1.reason === full.reason && p1.apiLastRun === full.apiLastRun, show(r1));
+  const r2 = parseHandoff(trialRows({}, nowSec, nowSec).values);
+  check('試運転 rows: 担当が未定（タブが無い）なら trial にして理由を書く', r2.owner === 'trial' && r2.trialReadEpoch === nowSec && r2.reason === '試運転が担当（2026/10/25 12:00）', show(r2));
+
+  check('SES_HANDOFF: 既定は有効・0 / false で無効（今までどおり常に本番）',
+    withEnv({ SES_HANDOFF: undefined }, handoffEnabled) && withEnv({ SES_HANDOFF: '1' }, handoffEnabled) && !withEnv({ SES_HANDOFF: '0' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'false' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'FALSE' }, handoffEnabled));
+}
+
 // 営業リストの A・B の未着手による見送り・再開（作り物のデータだけ）
 function pauseGateChecks(): void {
   section('見送り: 営業リストの A・B の未着手が多いときバッチを止め、減ったら再開する');
@@ -5865,6 +5928,7 @@ async function main(): Promise<void> {
     labelSheetChecks();
     trialUsageChecks();
     pauseGateChecks();
+    handoffChecks();
     await inexperiencedChecks();
   } finally {
     setDemoOverride(null);

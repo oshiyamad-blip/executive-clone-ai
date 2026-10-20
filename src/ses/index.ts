@@ -6,6 +6,7 @@ import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type 
 import { matchIncrementally, persistInjectionFlags } from './matchRun.js';
 import { loadSuppressionIndex } from './suppress.js';
 import { applyPauseGate } from './pauseGate.js';
+import { beginHandoff, finishHandoff } from './handoff.js';
 import { createDrafts } from './draft.js';
 import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
 import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
@@ -205,7 +206,25 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
     return;
   }
 
-  // 本番の通常バッチ
+  // 試運転（Claude Code の定期実行）が担当中で API の残高が戻っていなければ、収集以降を見送る（異常終了にはしない）
+  const startedAt = new Date();
+  const handoff = await beginHandoff(startedAt);
+  if (!handoff.proceed) {
+    await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
+    console.log('=== SESバッチ: 試運転が担当中のため、収集・抽出・照合を見送って終了 ===');
+    return;
+  }
+  let completed = false;
+  try {
+    completed = await runLiveBatch(opts, requestedDrafts);
+  } finally {
+    // 残高切れを見ていれば試運転に引き継ぎ、正常に終えていれば本番の読了を進める
+    await finishHandoff(handoff, startedAt, completed && !hasFatal());
+  }
+}
+
+// 本番の通常バッチ。収集から書き込みまで終えたら true（--collect-only は false）
+async function runLiveBatch(opts: SesBatchOptions, requestedDrafts: PendingDraftResult): Promise<boolean> {
   const pool = await loadStorePool();
   let stored: StoredItems = { projects: [], engineers: [] };
   if (pool) {
@@ -215,7 +234,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
       // サマリは送らないが、抽出の不明率等は「メトリクス」タブに残す
       await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
       console.log(`=== --collect-only指定のため収集・保存のみで終了（案件${stored.projects.length}件・要員${stored.engineers.length}件） ===`);
-      return;
+      return false;
     }
   }
 
@@ -260,6 +279,7 @@ async function runStages(opts: SesBatchOptions): Promise<void> {
   await pruneProcessedMails();
   await pruneStalePersonalData();
   await maybeRepair();
+  return true;
 }
 
 // demo・--match-only: 全件を抽出・突合してから保存・通知する（従来の流れ）
