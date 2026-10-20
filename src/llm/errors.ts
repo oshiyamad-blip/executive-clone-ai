@@ -50,3 +50,27 @@ export function isModelUnavailableError(err: unknown): boolean {
   if (status === 400 || status === 410) return MODEL_RETIRED.test(text);
   return false;
 }
+
+// Claude API の残高が尽きた（クレジット不足・請求の問題）ことを示すエラーか。
+// 残高不足は 400（まれに 402）で返る。429（レート制限）・5xx・応答の形の誤りは含めない
+export function isCreditExhausted(err: unknown): boolean {
+  if (err instanceof LlmOutputError) return false;
+  const status = (err as { status?: unknown } | null)?.status;
+  if (status !== 400 && status !== 402) return false;
+  return /credit balance|billing|purchase credits/i.test(errorText(err));
+}
+
+// この実行のどこかの呼び出しで残高切れを見たか。本番バッチが終わりに試運転へ引き継ぐかの判断に使う
+let creditExhaustedSeen = false;
+
+export function noteLlmError(err: unknown): void {
+  if (isCreditExhausted(err)) creditExhaustedSeen = true;
+}
+
+export function creditExhaustedInRun(): boolean {
+  return creditExhaustedSeen;
+}
+
+export function resetCreditExhausted(): void {
+  creditExhaustedSeen = false;
+}

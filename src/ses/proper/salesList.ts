@@ -992,7 +992,7 @@ export function __setSalesSheetsApiForTest(api: sheets_v4.Sheets | null): void {
   sheetsApiOverride = api;
 }
 
-function sheetsApi(): sheets_v4.Sheets | null {
+export function sheetsApi(): sheets_v4.Sheets | null {
   if (sheetsApiOverride) return sheetsApiOverride;
   const auth = sesMainAuth(SCOPES);
   return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;

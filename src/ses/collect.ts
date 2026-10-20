@@ -9,6 +9,7 @@ import { loadFixtureMails } from './fixtures/mails.js';
 import { isDemo, requireLive, maxFetchPerRun, collectDays, resumeLookbackHours } from './config.js';
 import { loadProcessedMailIds } from './store.js';
 import { collectFloorMs, loadPauseState } from './pauseGate.js';
+import { handoffCollectFloorMs } from './handoff.js';
 import { recordHealEvent, recordFatal } from './heal/events.js';
 import { orderForRun, isLastChance } from './schedule.js';
 import { SafeLogError } from './redact.js';
@@ -37,7 +38,9 @@ export async function collectSesMail(now = new Date()): Promise<CollectResult> {
   const processed = await loadProcessedMailIds();
   const limit = maxFetchPerRun();
   // 営業リストの未着手による見送りから再開した回以降（と、止めている間に営業リストを読めない回）は、止めていた間の古いメールを読まない
-  const sinceMs = collectFloorMs(await loadPauseState(), now.getTime(), resumeLookbackHours()) ?? undefined;
+  // 試運転から戻った回は、試運転が読んだ分も読み直さない（両方の下限があれば大きい方）
+  const floors = [collectFloorMs(await loadPauseState(), now.getTime(), resumeLookbackHours()), handoffCollectFloorMs()].filter((f): f is number => f !== null);
+  const sinceMs = floors.length > 0 ? Math.max(...floors) : undefined;
   const fetched = await collectMail((id) => processed.has(id), { limit, now, sinceMs });
   const unprocessed = fetched.mails.filter((m) => !processed.has(m.id));
 

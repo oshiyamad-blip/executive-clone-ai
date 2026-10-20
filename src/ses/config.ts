@@ -459,6 +459,13 @@ export function clampResume(pause: number, resume: number): number {
   return resume >= pause ? pause - 1 : resume;
 }
 
+// Claude API の残高があるあいだは本番バッチ、尽きたら試運転の定期実行に引き継ぐ（営業リストの「_運用」で担当を持ち合う）。
+// "0" / "false" で使わない（今までどおり、常に本番バッチが担当）
+export function handoffEnabled(): boolean {
+  const v = env('SES_HANDOFF').toLowerCase();
+  return !(v === '0' || v === 'false');
+}
+
 // 再開した回に読むメールの数（新しい順にこの通数まで。1日に届く量に回の重さが左右されないように）
 export function resumeMaxMails(): number {
   return envNum('SES_RESUME_MAX_MAILS', 1000, { min: 1, max: 20000, int: true });

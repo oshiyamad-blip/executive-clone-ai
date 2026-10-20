@@ -266,6 +266,7 @@ jobs:
           SES_RESUME_AB_UNTOUCHED: ${{ vars.SES_RESUME_AB_UNTOUCHED }}
           SES_RESUME_MAX_MAILS: ${{ vars.SES_RESUME_MAX_MAILS }}
           SES_RESUME_LOOKBACK_HOURS: ${{ vars.SES_RESUME_LOOKBACK_HOURS }}
+          SES_HANDOFF: ${{ vars.SES_HANDOFF }}
           SES_MATCH_LOOKBACK_DAYS: ${{ vars.SES_MATCH_LOOKBACK_DAYS }}
           # 案件だけモード（既定）。パートナーの要員メールも抽出して仲介まで行うときは Variable SES_TARGET=all
           SES_TARGET: ${{ vars.SES_TARGET || 'projects' }}

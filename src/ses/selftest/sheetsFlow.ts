@@ -74,6 +74,8 @@ import { runProperFlow, activeProperEngineerIds } from '../proper/index.js';
 import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, cacheKeyOf, __setProperJudgeForTest, type RawProperJudgment } from '../proper/judge.js';
 import { collectSesMail } from '../collect.js';
 import { applyPauseGate } from '../pauseGate.js';
+import { beginHandoff, finishHandoff, readHandoff, writeHandoff, handoffCollectFloorMs, __setCreditProbeForTest, type CreditProbe } from '../handoff.js';
+import { noteLlmError } from '../../llm/errors.js';
 import { SALES_COLUMNS, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { markMailProcessed, loadFingerprintRecords, touchLastSeen, loadProcessedMailIds } from '../store.js';
 import { splitOwnMails, messageIdMailId, currentOwnMailPolicy } from '../mail/ownMail.js';
@@ -3248,6 +3250,126 @@ async function testPauseGate(): Promise<void> {
   }
 }
 
+// ===== Claude API の残高切れで試運転に引き継ぎ、残高が戻ると本番に戻る =====
+
+const HANDOFF_BOOK = 'fakeHandoffBook';
+
+async function testHandoff(): Promise<void> {
+  section('引き継ぎ: 残高切れの回の後は _運用 が trial になり、次の回は見送り。残高が戻ると api に戻り、収集の下限は試運転読了');
+  sheets.createBook(HANDOFF_BOOK);
+  __setSalesSheetsApiForTest(sheets.asApi());
+  let probe: CreditProbe = 'ok';
+  let probeCalls = 0;
+  __setCreditProbeForTest(async () => {
+    probeCalls += 1;
+    return probe;
+  });
+  const HOUR_MS = 60 * 60 * 1000;
+  try {
+    await withEnv({ PROPER_SALES_SPREADSHEET_ID: HANDOFF_BOOK, SES_NOTIFY_TO: `boss@${OWN_DOMAIN}` }, async () => {
+      const t1 = new Date(NOW.getTime() - 3 * HOUR_MS);
+      newRun();
+      const b1 = await beginHandoff(t1);
+      check('「_運用」が無い（担当が未定）回は残高を確かめず今までどおり実行し、収集の下限は付けない',
+        b1.proceed && probeCalls === 0 && handoffCollectFloorMs() === null);
+      await finishHandoff(b1, t1, true);
+      const s1 = await readHandoff();
+      check('正常に終えた回は「_運用」を作って 担当=api・API最終実行・API読了（窓の終わり・秒）を書く',
+        s1.owner === 'api' && s1.apiLastRun === t1.toISOString() && s1.apiReadEpoch === Math.floor(t1.getTime() / 1000), JSON.stringify(s1));
+
+      // 残高切れの回: 担当は trial になり、API読了は進めない（その回の窓は試運転が読み直す）。知らせは1通（シートのIDを含まない）
+      const t2 = new Date(NOW.getTime() - 2 * HOUR_MS);
+      newRun();
+      const sentBefore = mail.sent.length;
+      const b2 = await beginHandoff(t2);
+      noteLlmError({ status: 400, message: '400 {"error":{"message":"Your credit balance is too low to access the Anthropic API."}}' });
+      await finishHandoff(b2, t2, true);
+      const s2 = await readHandoff();
+      const notices = mail.sent.slice(sentBefore);
+      check('残高切れを見た回は 担当=trial・理由「API残高切れ」で書き、API読了は進めない（正常終了扱いでも）',
+        b2.proceed && s2.owner === 'trial' && (s2.reason ?? '').startsWith('API残高切れ') && s2.apiReadEpoch === s1.apiReadEpoch && s2.apiLastRun === s1.apiLastRun, JSON.stringify(s2));
+      check('引き継ぎの知らせが1通（IDを含まない）。異常終了にはしない',
+        notices.length === 1 && notices[0].body.includes('試運転') && !notices[0].body.includes(HANDOFF_BOOK) && !hasFatal(), notices.map((m) => m.body).join('|'));
+
+      // 次の回: 残高の確認が exhausted / unknown なら見送り（状態も知らせも変えない）
+      for (const result of ['exhausted', 'unknown'] as const) {
+        probe = result;
+        newRun();
+        const calls = probeCalls;
+        const b = await beginHandoff(new Date(NOW.getTime() - HOUR_MS));
+        const s = await readHandoff();
+        check(`試運転が担当中で残高の確認が ${result} なら収集以降を見送る（担当は trial のまま・知らせは増えない・異常終了にしない）`,
+          !b.proceed && probeCalls === calls + 1 && s.owner === 'trial' && mail.sent.length === sentBefore + 1 && !hasFatal() && handoffCollectFloorMs() === null);
+      }
+
+      // 試運転が進めた分（試運転読了）。残高が戻ると api に戻り、収集の下限が試運転読了になる
+      const trialRead = Math.floor((NOW.getTime() - 30 * 60_000) / 1000);
+      await writeHandoff({ ...(await readHandoff()), trialReadEpoch: trialRead });
+      mail.inbox = [
+        rawMail('sesmail_ho_old', '検証一郎 <ichiro@ho.example.jp>', '【案件】試運転が読んだ分', 120),
+        rawMail('sesmail_ho_new', '検証二郎 <jiro@ho.example.jp>', '【案件】試運転の後に届いた分', 10),
+      ];
+      probe = 'ok';
+      newRun();
+      const t4 = new Date(NOW.getTime() + 60_000);
+      const b4 = await beginHandoff(t4);
+      const s4 = await readHandoff();
+      check('残高が戻ったら実行し、担当を api に戻して理由「API残高が戻った」を書く（試運転読了・API読了はそのまま）',
+        b4.proceed && s4.owner === 'api' && (s4.reason ?? '').startsWith('API残高が戻った') && s4.trialReadEpoch === trialRead && s4.apiReadEpoch === s1.apiReadEpoch, JSON.stringify(s4));
+      check('戻った回の収集の下限は試運転読了（ミリ秒）', handoffCollectFloorMs() === trialRead * 1000, String(handoffCollectFloorMs()));
+      newRun();
+      const collected = await collectSesMail(t4);
+      check('その回の収集は試運転が読んだ分を読み直さず、試運転の後に届いたメールだけ読む',
+        mail.lastSinceMs === trialRead * 1000 && collected.mails.map((m) => m.id).join() === 'sesmail_ho_new', `${mail.lastSinceMs} / ${collected.mails.map((m) => m.id).join()}`);
+      mail.inbox = [];
+
+      // 途中で終わった回（--collect-only・異常終了）は読了を進めない。正常に終えると進み、次の回は下限なし
+      await finishHandoff(b4, t4, false);
+      const s5 = await readHandoff();
+      check('正常に終えなかった回は API読了・API最終実行を進めない', s5.apiReadEpoch === s1.apiReadEpoch && s5.apiLastRun === s1.apiLastRun, JSON.stringify(s5));
+      await finishHandoff(b4, t4, true);
+      const s6 = await readHandoff();
+      check('正常に終えた回は API読了が窓の終わりに進み、担当は api のまま',
+        s6.owner === 'api' && s6.apiReadEpoch === Math.floor(t4.getTime() / 1000) && s6.apiLastRun === t4.toISOString(), JSON.stringify(s6));
+      newRun();
+      const calls7 = probeCalls;
+      const b7 = await beginHandoff(new Date(t4.getTime() + HOUR_MS));
+      check('担当が api の次の回は残高を確かめず、収集の下限もない', b7.proceed && probeCalls === calls7 && handoffCollectFloorMs() === null);
+
+      // 残高切れを見なかった回で、前の回の残高切れの印を持ち越さない
+      newRun();
+      noteLlmError({ status: 400, message: 'credit balance is too low' });
+      const b8 = await beginHandoff(new Date(t4.getTime() + 2 * HOUR_MS));
+      await finishHandoff(b8, new Date(t4.getTime() + 2 * HOUR_MS), true);
+      check('回の始まりで残高切れの印を捨てる（前の回の印で trial に切り替えない）', (await readHandoff()).owner === 'api');
+
+      // SES_HANDOFF=0 なら引き継ぎを使わない（担当が trial でも実行し、何も書かない）
+      await writeHandoff({ ...(await readHandoff()), owner: 'trial' });
+      await withEnv({ SES_HANDOFF: '0' }, async () => {
+        newRun();
+        const writes = sheets.writeCount(HANDOFF_BOOK);
+        const calls = probeCalls;
+        const off = await beginHandoff(t4);
+        noteLlmError({ status: 400, message: 'credit balance is too low' });
+        await finishHandoff(off, t4, true);
+        check('SES_HANDOFF=0 なら読まず・確かめず・書かない（担当が trial でも実行する）',
+          off.proceed && probeCalls === calls && sheets.writeCount(HANDOFF_BOOK) === writes && handoffCollectFloorMs() === null);
+      });
+      await withEnv({ PROPER_SALES_SPREADSHEET_ID: undefined }, async () => {
+        newRun();
+        const none = await beginHandoff(t4);
+        await finishHandoff(none, t4, true);
+        check('営業リストが未設定なら何もせず続ける', none.proceed && !hasFatal());
+      });
+    });
+  } finally {
+    __setCreditProbeForTest(null);
+    __setSalesSheetsApiForTest(null);
+    mail.inbox = [];
+    newRun();
+  }
+}
+
 // 1回分の実行の「下書きを作る前の確認」
 async function ledgerRun(): Promise<boolean> {
   newRun();
@@ -3377,6 +3499,7 @@ async function main(): Promise<void> {
     await testSecurityRound9();
     await testSecurityRound11();
     await testPauseGate();
+    await testHandoff();
   } catch (err) {
     failures += 1;
     console.log(`  ❌ 検証が例外で中断しました: ${err instanceof Error ? err.stack : String(err)}`);
