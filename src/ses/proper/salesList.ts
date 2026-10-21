@@ -653,8 +653,13 @@ export function planSalesUpdate(
     used.add(f.id);
     rekeyed += 1;
   }
-  // 同じ案件が1件にまとまり、その候補を別の行が引き継いだ行（同じ要員の重複）。募集中でも残さない
-  const takenByOtherRow = (id: string) => [id, canonical(id)].some((x) => freshById.has(x) && used.has(x));
+  // 同じ案件が1件にまとまった（canonical が同じ）要員の重複行は、募集中でも1行だけ残す。今回の候補かどうかには依らない（前回までに判定済みの代表でも重複は残さない）
+  const matchedKeys = new Set([...matchOf.values()].map(canonical));
+  const takenKeys = new Set(matchedKeys);
+  current.forEach((prev, i) => {
+    const id = String(prev[COL['ID']]).trim();
+    if (id && id === canonical(id) && !matchOf.has(i) && !matchedKeys.has(id) && eligible(prev) && ((!demoted(prev) && stillOpen(id, prev)) || hasSalesInput(prev))) takenKeys.add(id);
+  });
   current.forEach((prev, i) => {
     const id = String(prev[COL['ID']]).trim();
     if (!id) {
@@ -678,7 +683,10 @@ export function planSalesUpdate(
       carryStamps(next, prev, opts.addedAt ?? '');
       updates.push({ row: i + 2, values: next });
       rows.push(next);
-    } else if ((!demoted(prev) && !takenByOtherRow(id) && stillOpen(id, prev)) || hasSalesInput(prev)) {
+    } else if (hasSalesInput(prev)) {
+      rows.push(prev);
+    } else if (!demoted(prev) && stillOpen(id, prev) && (id === canonical(id) ? !matchedKeys.has(id) : !takenKeys.has(canonical(id)))) {
+      takenKeys.add(canonical(id));
       rows.push(prev);
     } else if (hasHumanInput(prev)) {
       expireIds.push(id);
