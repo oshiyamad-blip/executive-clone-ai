@@ -3976,6 +3976,20 @@ async function properJudgeChecks(): Promise<void> {
       new Set([rt.aliasOf.get('r3') ?? 'r3', rt.aliasOf.get('r4') ?? 'r4']).size === 1, JSON.stringify([...rt.aliasOf]));
   check('名前の似た別の案件（別システムのJava開発・NVH解析と衝突解析）はまとめない',
     ['r5', 'r6', 'r7', 'r8'].every((id) => !rt.aliasOf.has(id) && rt.kept.some((p) => p.id === id)));
+  const pair = (a: [string, string[], number, string], b: [string, string[], number, string]) =>
+    dedupeProjects([re('p1', ...a), re('p2', ...b)]).kept.length;
+  const testReq = ['テスト設計', '結合テスト', '総合テスト'];
+  check('出社先の書き方が違う（「新宿オフィスと在宅併用」「新宿（弊社オフィス）と在宅併用」）名前違いの同じ案件はまとめる',
+    pair(['基幹システム運用支援', testReq, 60, '新宿オフィスと在宅併用（週1出社）'], ['基幹システム運用支援業務', testReq, 60, '新宿（弊社オフィス）と在宅併用']) === 1);
+  check('括弧の補足が作業の説明だけ違う（片方だけ括弧・必須はほぼ同じ・名前に誤字）同じ案件はまとめる',
+    pair(['某グローバルカンパニー向け試験対応（テスト設計・結合/総合テスト）', testReq, 54, '天王洲アイル'], ['某グロバールカンパニー向け試験対応', testReq, 50, '天王洲アイル']) === 1);
+  check('まとめない: 両方に違う役割の括弧（PL と SE）',
+    pair(['基幹システム運用支援（PL）', testReq, 60, '新宿'], ['基幹システム運用支援業務（SE）', testReq, 60, '新宿']) === 2);
+  check('まとめない: 必須が違う・出社先の駅が違う',
+    pair(['基幹システム運用支援', testReq, 60, '新宿'], ['基幹システム運用支援業務', ['COBOL', 'JCL', '帳票設計'], 60, '新宿']) === 2 &&
+      pair(['基幹システム運用支援', testReq, 60, '新宿オフィスと在宅併用'], ['基幹システム運用支援業務', testReq, 60, '渋谷と在宅併用']) === 2);
+  check('まとめない: 片方だけ括弧でも必須の書きぶりが0.9未満なら別の枠',
+    pair(['基幹システム運用支援（性能試験担当）', ['Java', '詳細設計', 'Linux'], 60, '新宿'], ['基幹システム運用支援業務', ['Java', '詳細設計'], 60, '新宿']) === 2);
   const op = (title: string, requiredSkills: string[]) => project({ id: title, title, requiredSkills, rateMax: 80 });
   check('括弧の役割・担当が違う同名の案件は別の枠（まとめない）',
     !sameOpening(op('注文システム機能リプレース（会員認証基盤移行担当）', ['Python', 'PHP', 'Lambda']), op('注文システム機能リプレース（API担当）', ['Python', 'Lambda'])));
@@ -4666,6 +4680,23 @@ function salesListChecks(): void {
   check('営業リストの更新: 新しい候補は下に足す（No は続き・未着手）。消すのは入力も無く募集も終わった行だけ',
     planned?.appends.length === 1 && planned.appends[0][col('ID')] === nego.id && planned.appends[0][col('No')] === 8 && planned.appends[0][col('対応状況')] === '未着手' &&
       planned.deleteIds.join() === 'ownmatch_gone' && planned.rows.length === 5);
+  const repRow = salesRowOf({ ...base, id: 'ownmatch_a_pREP', projectId: 'pREP' }, undefined);
+  const mergedDup = planSalesUpdate(
+    [repRow],
+    [header, sheetRow('ownmatch_a_pREP'), sheetRow('ownmatch_a_pALT', { 案件名: '別名の同じ案件' })],
+    () => true,
+    (id) => (id === 'ownmatch_a_pALT' ? 'ownmatch_a_pREP' : id),
+  );
+  const mergedDupRev = planSalesUpdate(
+    [repRow],
+    [header, sheetRow('ownmatch_a_pALT', { 案件名: '別名の同じ案件' }), sheetRow('ownmatch_a_pREP')],
+    () => true,
+    (id) => (id === 'ownmatch_a_pALT' ? 'ownmatch_a_pREP' : id),
+  );
+  check('営業リストの更新: 1件にまとまった案件の既存の行が2行（入力なし）あれば1行にし、もう1行は期限切れへ控えて消す',
+    mergedDup !== null && mergedDup.updates.length === 1 && mergedDup.rows.length === 1 && mergedDup.deleteIds.length === 1 && mergedDup.dropRows.length === 1 &&
+      mergedDupRev !== null && mergedDupRev.updates.length === 1 && mergedDupRev.rows.length === 1 && mergedDupRev.deleteIds.length === 1,
+    JSON.stringify([mergedDup?.rows.length, mergedDup?.deleteIds, mergedDupRev?.rows.length, mergedDupRev?.deleteIds]));
   check('営業リストの更新: 人が列を並べ替えたシートは差分で書かない（全体を書き直す）',
     planSalesUpdate([], [[...header].reverse()]) === null && planSalesUpdate([], [header]) !== null);
   const closing = planSalesUpdate(

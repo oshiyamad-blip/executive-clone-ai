@@ -653,6 +653,8 @@ export function planSalesUpdate(
     used.add(f.id);
     rekeyed += 1;
   }
+  // 同じ案件が1件にまとまり、その候補を別の行が引き継いだ行（同じ要員の重複）。募集中でも残さない
+  const takenByOtherRow = (id: string) => [id, canonical(id)].some((x) => freshById.has(x) && used.has(x));
   current.forEach((prev, i) => {
     const id = String(prev[COL['ID']]).trim();
     if (!id) {
@@ -676,7 +678,7 @@ export function planSalesUpdate(
       carryStamps(next, prev, opts.addedAt ?? '');
       updates.push({ row: i + 2, values: next });
       rows.push(next);
-    } else if ((!demoted(prev) && stillOpen(id, prev)) || hasSalesInput(prev)) {
+    } else if ((!demoted(prev) && !takenByOtherRow(id) && stillOpen(id, prev)) || hasSalesInput(prev)) {
       rows.push(prev);
     } else if (hasHumanInput(prev)) {
       expireIds.push(id);
