@@ -126,7 +126,8 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    判定のあと `PHASE=fanout` を実行する。代表の判定を似た要員の経歴で照合し、合えば `judged_<要員>.json` に足す。出力は `{"shared":N,"fallback":M}`。
    `fallback` が1以上なら、`pairs_fallback.json`（`pairs.json` と同じ形）を同じ「判定の指示」で判定する（指示の `pairs.json` を `pairs_fallback.json` に読み替える）。結果は各 `judged_<要員>.json` の末尾に足す。
    実行ログの「判定した組」には「（似た要員への使い回し N 組）」を添える
-5. `PHASE=final` を実行する。`plan.json` と `writes/wNN.json`（書き込みの範囲と値、1ファイル約15KB。書き込みは下の 6. で `ses:trial:writeplan` が変わったセルだけの `wf/wNN.json` に作り直す）ができる
+5. `PHASE=final` の前に、「クローズ済み」と「期限切れ」の A 列を読み、つないで `used_nos.json`（`{"values":[[...],...]}`。見出しを含んでよい）に置く（新しい行の No. が控えの No. と重ならないようにする。無ければ「全体」の最大の次から振る）
+   `PHASE=final` を実行する。`plan.json` と `writes/wNN.json`（書き込みの範囲と値、1ファイル約15KB。書き込みは下の 6. で `ses:trial:writeplan` が変わったセルだけの `wf/wNN.json` に作り直す）ができる
    出力の `gated` が true（AI判定の失敗が多い回）のときは `plan.json`・`writes/` を作らないので、書き込みはしない（判定をやり直す）
    出力の `rekeyed`（案件IDの付け替え行数）・`deletes`（期限切れの控えへ移す行数）は実行ログに件数で書く
    出力の `auditHitKeys`（足切りの監視の当たり。営業リストには載せない）は、実行ログの改善点の欄に件数で書く（キーそのものは書かない）

@@ -27,7 +27,7 @@ import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPa
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { groupSimilarEngineers } from '../proper/group.js';
 import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
-import { planSalesUpdate, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
@@ -415,6 +415,7 @@ if (phase === 'prompts') {
     closedMails: closed.mails,
     endedRowIds: closed.endedRowIds,
     addedAt: jstLabel(now),
+    usedMaxNo: has('used_nos.json') ? maxNoOf(read<{ values: string[][] }>('used_nos.json').values) : 0,
   });
   if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
   // 書き込み: 既存の行は人の入力の列の両側だけ、新しい行は下に足す。コネクタで書ける大きさ（約15KB）に分ける
