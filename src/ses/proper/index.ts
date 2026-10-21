@@ -114,6 +114,7 @@ const DEDUPE_RETITLED_REQ_OVERLAP = 0.3;
 const DEDUPE_RETITLED_RATE_GAP_MAN = 5;
 const DEDUPE_RETITLED_SAME_TITLE = 0.8; // 名前がほぼ同じなら単価の差は同じ名前の案件と同じ幅まで許す
 const DEDUPE_RETITLED_ROLE_SHARED = 0.4; // 括弧の役割の文字がこの割合も相手の名前に無ければ別の枠
+const DEDUPE_RETITLED_SAME_REQ = 0.9; // 必須の書きぶりがここまで同じなら、片方だけの括弧は役割ではなく作業の書き添えとみなす
 
 // 丸括弧の補足のうち役割・担当を表すもの。案件番号（「DC-23615」）や働き方（「フルリモート」「急募」）は営業元ごとの書き添えなので除く
 function roleKeyOf(title: string): string {
@@ -162,10 +163,10 @@ export function textOverlap(a: string, b: string): number {
   return jaccard(grams(a), grams(b));
 }
 
-// 出社先の駅・地名の先頭（「勝どき（出社メイン）」「勝どき駅」を同じにする）。フルリモート等で地名が無ければ空
+// 出社先の駅・地名の先頭（「勝どき（出社メイン）」「勝どき駅」「新宿オフィスと在宅併用」「新宿と在宅併用」を同じにする）。フルリモート等で地名が無ければ空
 function locationKeyOf(location: string): string {
-  const head = location.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').split(/[、,/／・\s]/)[0] ?? '';
-  const key = head.replace(/駅$|常駐$|出社$/g, '').trim();
+  const head = location.normalize('NFKC').replace(/[(（【\[].*?[)）】\]]/g, '').split(/[、,/／・\s]|と|または|\bor\b|及び|および/i)[0] ?? '';
+  const key = head.replace(/(?:駅|常駐|出社|オフィス|本社|近辺|周辺|エリア)+$/g, '').trim();
   return /リモート|在宅|未定|不明|応相談/.test(key) ? '' : key;
 }
 
@@ -185,9 +186,10 @@ function sameOpeningRetitled(a: Project, b: Project): boolean {
   if (title < DEDUPE_RETITLED_TITLE_OVERLAP || req < DEDUPE_RETITLED_REQ_OVERLAP) return false;
   if (title < DEDUPE_RETITLED_CLOSE_TITLE && req < DEDUPE_SAME_TEXT) return false;
   // 括弧の役割は、相手の案件名のどこにも書かれていないときだけ別の枠とみなす（名前と括弧が入れ替わった書き方があるため）
+  const oneSidedRole = !roleKeyOf(a.title) !== !roleKeyOf(b.title);
   const roleClash = (x: Project, y: Project) => {
     const role = roleKeyOf(x.title);
-    if (!role) return false;
+    if (!role || (oneSidedRole && req >= DEDUPE_RETITLED_SAME_REQ)) return false;
     const other = new Set(y.title.normalize('NFKC').toLowerCase());
     const chars = [...new Set(role)];
     return chars.filter((c) => other.has(c)).length / chars.length < DEDUPE_RETITLED_ROLE_SHARED;
