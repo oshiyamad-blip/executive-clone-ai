@@ -551,6 +551,13 @@ export interface SalesPlanOptions {
   closedMails?: MailRef[]; // 要員＋営業元メール＋件名＋受信日時（closedStateOf の mails）
   endedRowIds?: Set<string>; // 控えにある「見送り・募集終了」の行ID（closedStateOf の endedRowIds）
   addedAt?: string; // 新しい行の「追加日時」（受信日時と同じ書式）
+  usedMaxNo?: number; // 「クローズ済み」「期限切れ」で使われている No. の最大（新しい行の No. が重ならないように）
+}
+
+// 見出しつきの表から No. の最大を読む（「No」の列、無ければ A 列。数字でない値は無視）
+export function maxNoOf(values: string[][]): number {
+  const at = Math.max(0, (values[0] ?? []).indexOf('No'));
+  return Math.max(0, ...values.map((r) => (/^\d+$/.test(String(r[at] ?? '').trim()) ? Number(String(r[at]).trim()) : 0)));
 }
 
 export function planSalesUpdate(
@@ -696,7 +703,7 @@ export function planSalesUpdate(
       dropRows.push(prev);
     }
   });
-  const maxNo = Math.max(0, ...current.map((r) => (typeof r[COL['No']] === 'number' ? (r[COL['No']] as number) : 0)));
+  const maxNo = Math.max(opts.usedMaxNo ?? 0, ...current.map((r) => (typeof r[COL['No']] === 'number' ? (r[COL['No']] as number) : 0)));
   const appends = sortSalesRows(fresh.filter((r) => !used.has(String(r[COL['ID']])))).map((r, k) => {
     const next = [...r];
     next[COL['No']] = maxNo + k + 1;
@@ -1177,6 +1184,10 @@ export async function writeSalesList(
     []) as string[][];
   const closedState = closedStateOf(closedValues);
   const closedIds = closedState.ids;
+  const expiredNos = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_EXPIRED_TAB)}!A:A` }))
+    .then((res) => (res.data.values ?? []) as string[][])
+    .catch(() => [] as string[][]);
+  const usedMaxNo = Math.max(maxNoOf(closedValues), maxNoOf(expiredNos));
   const addedAt = jstLabel(new Date()); // この実行で足す行の「追加日時」
 
   // 要員の希望単価が変わった行は前回の判定のまま残さない（今回の候補に入っていれば新しい単価で書き直される）
@@ -1223,7 +1234,7 @@ export async function writeSalesList(
     };
   };
   const planFor = (values: string[][]) => {
-    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, closedMails: closedState.mails, endedRowIds: closedState.endedRowIds, addedAt });
+    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, closedMails: closedState.mails, endedRowIds: closedState.endedRowIds, addedAt, usedMaxNo });
     if (p) return { plan: p, rows: p.rows, closedRows: p.closedRows };
     const w = withoutClosed(values);
     // 全体を書き直す経路も同じく、下限より低い候補は載せず、その行は残さない

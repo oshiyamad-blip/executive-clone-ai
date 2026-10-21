@@ -125,7 +125,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, closedStateOf, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -4680,6 +4680,14 @@ function salesListChecks(): void {
   check('営業リストの更新: 新しい候補は下に足す（No は続き・未着手）。消すのは入力も無く募集も終わった行だけ',
     planned?.appends.length === 1 && planned.appends[0][col('ID')] === nego.id && planned.appends[0][col('No')] === 8 && planned.appends[0][col('対応状況')] === '未着手' &&
       planned.deleteIds.join() === 'ownmatch_gone' && planned.rows.length === 5);
+  const noRows = [header, sheetRow('ownmatch_a_p1', { No: '10' })];
+  const noUsed = planSalesUpdate([salesRowOf(nego, undefined)], noRows, () => true, undefined, undefined, { usedMaxNo: 15 });
+  const noPlain = planSalesUpdate([salesRowOf(nego, undefined)], noRows, () => true);
+  check('営業リストの更新: 新しい行の No. は「クローズ済み」「期限切れ」で使われた最大の次から振る（未指定なら全体の最大の次）',
+    noUsed?.appends[0]?.[col('No')] === 16 && noPlain?.appends[0]?.[col('No')] === 11, JSON.stringify([noUsed?.appends[0]?.[col('No')], noPlain?.appends[0]?.[col('No')]]));
+  check('maxNoOf: 見出しの「No」の列の数字の最大（数字でない値は無視・空は 0・「No」が無ければ A 列）',
+    maxNoOf([['ID', 'No'], ['x', '12'], ['y', 'abc'], ['z', ''], ['w', '7']]) === 12 && maxNoOf([['No'], ['3'], ['21'], ['']]) === 21 &&
+      maxNoOf([['ID'], ['5'], ['9']]) === 9 && maxNoOf([]) === 0 && maxNoOf([['No']]) === 0);
   const repRow = salesRowOf({ ...base, id: 'ownmatch_a_pREP', projectId: 'pREP' }, undefined);
   const mergedDup = planSalesUpdate(
     [repRow],
