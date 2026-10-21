@@ -4696,6 +4696,16 @@ function salesListChecks(): void {
     mergedDup !== null && mergedDup.updates.length === 1 && mergedDup.rows.length === 1 && mergedDup.deleteIds.length === 1 && mergedDup.dropRows.length === 1 &&
       mergedDupRev !== null && mergedDupRev.updates.length === 1 && mergedDupRev.rows.length === 1 && mergedDupRev.deleteIds.length === 1,
     JSON.stringify([mergedDup?.rows.length, mergedDup?.deleteIds, mergedDupRev?.rows.length, mergedDupRev?.deleteIds]));
+  const aliasB = (id: string) => (id === 'ownmatch_a_pB' ? 'ownmatch_a_pA' : id);
+  const dupAB = planSalesUpdate([], [header, sheetRow('ownmatch_a_pA'), sheetRow('ownmatch_a_pB', { 案件名: '別名の同じ案件' })], () => true, aliasB);
+  const dupBA = planSalesUpdate([], [header, sheetRow('ownmatch_a_pB', { 案件名: '別名の同じ案件' }), sheetRow('ownmatch_a_pA')], () => true, aliasB);
+  const dupInput = planSalesUpdate([], [header, sheetRow('ownmatch_a_pA'), sheetRow('ownmatch_a_pB', { 案件名: '別名の同じ案件', 対応状況: '面談調整' })], () => true, aliasB);
+  check('営業リストの更新: 今回の候補が空でも、1件にまとまった案件の既存の2行（入力なし）は代表の行だけ残し、もう1行は消す（行の順に依らない）',
+    dupAB !== null && dupAB.rows.map((r) => r[col('ID')]).join() === 'ownmatch_a_pA' && dupAB.deleteIds.join() === 'ownmatch_a_pB' &&
+      dupBA !== null && dupBA.rows.map((r) => r[col('ID')]).join() === 'ownmatch_a_pA' && dupBA.deleteIds.join() === 'ownmatch_a_pB',
+    JSON.stringify([dupAB?.rows.map((r) => r[col('ID')]), dupAB?.deleteIds, dupBA?.rows.map((r) => r[col('ID')]), dupBA?.deleteIds]));
+  check('営業リストの更新: 今回の候補が空でも、まとまった案件の行に営業の入力があれば残す',
+    dupInput !== null && dupInput.rows.length === 2 && dupInput.deleteIds.length === 0, JSON.stringify(dupInput?.deleteIds));
   check('営業リストの更新: 人が列を並べ替えたシートは差分で書かない（全体を書き直す）',
     planSalesUpdate([], [[...header].reverse()]) === null && planSalesUpdate([], [header]) !== null);
   const closing = planSalesUpdate(
