@@ -1,0 +1,40 @@
+# dopamine-detox-app/ だけを GitHub Pages に公開する。
+# path をディレクトリに限定しているため、リポジトリの他の内容は成果物に含まれない。
+name: Deploy dopamine-detox-app to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dopamine-detox-app/**'
+      - '.github/workflows/detox-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # enablement: true は Pages が未作成なら作成を試みるが、GITHUB_TOKEN には
+      # Pages の作成権限がないため失敗する。初回だけ Settings → Pages → Source を
+      # 「GitHub Actions」にする手動操作が要る。以降この指定は何もしない。
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dopamine-detox-app
+      - id: deploy
+        uses: actions/deploy-pages@v4

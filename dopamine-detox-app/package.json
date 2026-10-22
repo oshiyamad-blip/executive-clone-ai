@@ -1,0 +1,16 @@
+{
+  "name": "dopamine-detox-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "スマホ断ちセッションと衝動ログのための PWA（Android 向け・依存ゼロ）",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "icons": "node scripts/gen-icons.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.0"
+  }
+}

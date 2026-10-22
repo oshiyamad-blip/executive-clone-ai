@@ -1,0 +1,278 @@
+/* 白基調・ほぼ無彩色。
+   デトックス用のアプリ自体が刺激になっては本末転倒なので、色を情報の担い手にしない。
+   区別は「濃さ・太さ・余白」で付け、有彩色は使わない。 */
+
+:root {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f6f6f5;
+  --line: #e6e5e2;
+  --line-strong: #cfcecb;
+
+  --ink: #16161a;        /* 本文・主役 */
+  --ink-mid: #6a6a70;    /* 補足 */
+  --ink-faint: #9b9b9f;  /* ラベル・時刻 */
+
+  --radius: 12px;
+  --tabbar-h: 60px;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+}
+
+* { box-sizing: border-box; }
+
+/* .sheet や .stack に display を指定しているため、UA の [hidden]{display:none} が負ける。
+   表示切り替えは hidden 属性で行う方針なので、ここで明示的に勝たせる。 */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  padding-bottom: calc(var(--tabbar-h) + var(--safe-b));
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+
+h1, h2, h3 { line-height: 1.35; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ── ヘッダー ───────────────────────────────── */
+.topbar { padding: max(18px, env(safe-area-inset-top)) 20px 8px; }
+.topbar h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: .04em; }
+.topbar__sub { margin: 2px 0 0; font-size: .8rem; color: var(--ink-faint); }
+
+.view { padding: 8px 20px 28px; max-width: 560px; margin: 0 auto; }
+
+/* ── タイマーダイヤル ────────────────────────── */
+.dial {
+  position: relative;
+  width: min(74vw, 290px);
+  aspect-ratio: 1;
+  margin: 14px auto 26px;
+}
+.dial__svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.dial__track { fill: none; stroke: var(--line); stroke-width: 5; }
+.dial__arc {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset .95s linear, stroke .3s ease;
+}
+.dial.is-aborted .dial__arc { stroke: var(--line-strong); }
+
+.dial__center {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 6px; text-align: center; padding: 0 14%;
+}
+.dial__time {
+  font-size: clamp(2.4rem, 12vw, 3.3rem);
+  font-weight: 250;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+.dial__caption { margin: 0; font-size: .8rem; color: var(--ink-mid); }
+
+/* ── パーツ ─────────────────────────────────── */
+.stack { display: flex; flex-direction: column; gap: 10px; }
+
+.btn {
+  appearance: none;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn:active { background: var(--bg-sunken); }
+.btn--lg { min-height: 56px; font-size: 1rem; }
+.btn--primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+.btn--primary:active { background: #000; }
+.btn--ghost { border-color: var(--line); color: var(--ink-mid); }
+/* 取り消し系は色ではなく「囲みを外して控えめにする」ことで区別する */
+.btn--quiet { border-color: transparent; background: none; color: var(--ink-mid); }
+.btn--strong { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips--tight { gap: 6px; }
+.chip {
+  appearance: none;
+  min-height: 42px;
+  padding: 8px 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink-mid);
+  font: inherit;
+  font-size: .92rem;
+  cursor: pointer;
+}
+.chip[aria-checked="true"], .chip[aria-pressed="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}
+
+.custom-duration {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 4px 2px; font-size: .88rem; color: var(--ink-mid);
+}
+.custom-duration input {
+  width: 108px; min-height: 44px; padding: 8px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--bg); color: var(--ink); font: inherit; text-align: right;
+}
+
+.running-note { margin: 0 0 4px; color: var(--ink-mid); font-size: .9rem; text-align: center; }
+.result-note { margin: 0 0 4px; font-size: 1rem; text-align: center; }
+
+/* ── 記録 ───────────────────────────────────── */
+.summary {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+  background: var(--line); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden;
+  margin-bottom: 22px;
+}
+.stat { background: var(--bg); padding: 14px 10px; text-align: center; }
+.stat__value { font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat__unit { font-size: .7rem; color: var(--ink-faint); margin-left: 2px; font-weight: 400; }
+.stat__label { font-size: .7rem; color: var(--ink-mid); margin-top: 2px; }
+
+.log { display: flex; flex-direction: column; gap: 0; }
+.log__day {
+  margin: 22px 0 6px; font-size: .74rem; font-weight: 600;
+  color: var(--ink-faint); letter-spacing: .06em;
+}
+.entry {
+  display: grid; grid-template-columns: 48px 1fr auto;
+  align-items: baseline; gap: 10px;
+  padding: 12px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.entry__time { font-size: .76rem; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.entry__body { min-width: 0; }
+.entry__main { font-size: .94rem; }
+.entry__meta { font-size: .77rem; color: var(--ink-mid); margin-top: 2px; word-break: break-word; }
+.entry--muted .entry__main { color: var(--ink-mid); }
+.entry__del {
+  appearance: none; border: 0; background: none; color: var(--ink-faint);
+  font: inherit; font-size: 1.05rem; line-height: 1; padding: 6px 6px; cursor: pointer;
+}
+/* 達成/未達は色ではなく記号と濃さで示す */
+.mark { font-variant-numeric: tabular-nums; }
+
+.empty { color: var(--ink-faint); font-size: .88rem; text-align: center; padding: 44px 0; }
+
+/* ── 設定 ───────────────────────────────────── */
+.section-title {
+  margin: 26px 0 6px; font-size: .74rem; font-weight: 600;
+  color: var(--ink-faint); letter-spacing: .06em;
+}
+.row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 13px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.row__label { font-size: .93rem; display: flex; flex-direction: column; }
+.row__hint { font-style: normal; font-size: .73rem; color: var(--ink-faint); }
+.row__control { flex: none; }
+input[type="number"].row__control {
+  width: 88px; min-height: 40px; padding: 6px 10px; text-align: right;
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--bg); color: var(--ink); font: inherit;
+}
+input[type="checkbox"].row__control { width: 22px; height: 22px; accent-color: var(--ink); }
+
+.note { font-size: .82rem; color: var(--ink-mid); margin: 10px 0 14px; }
+.version { margin-top: 28px; font-size: .72rem; color: var(--ink-faint); text-align: center; }
+
+/* ── FAB ────────────────────────────────────── */
+.fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--tabbar-h) + var(--safe-b) + 14px);
+  z-index: 20;
+  min-height: 48px;
+  padding: 12px 20px;
+  border: 1px solid var(--ink); border-radius: 999px;
+  background: var(--ink); color: #fff;
+  font: inherit; font-weight: 600; font-size: .92rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
+  cursor: pointer;
+}
+.fab:active { background: #000; }
+
+/* ── タブバー ───────────────────────────────── */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  height: calc(var(--tabbar-h) + var(--safe-b));
+  padding-bottom: var(--safe-b);
+  background: rgba(255, 255, 255, .92);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line);
+}
+.tabbar__btn {
+  appearance: none; border: 0; background: none;
+  color: var(--ink-faint); font: inherit; font-size: .78rem; cursor: pointer;
+}
+.tabbar__btn.is-active { color: var(--ink); font-weight: 600; }
+
+/* ── シート ─────────────────────────────────── */
+.sheet { position: fixed; inset: 0; z-index: 40; display: flex; align-items: flex-end; }
+.sheet__backdrop { position: absolute; inset: 0; background: rgba(22, 22, 26, .28); }
+.sheet__panel {
+  position: relative; width: 100%; max-width: 560px; margin: 0 auto;
+  max-height: 88vh; overflow-y: auto;
+  padding: 20px 20px calc(20px + var(--safe-b));
+  background: var(--bg);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, .10);
+  animation: rise .18s ease-out;
+}
+@keyframes rise { from { transform: translateY(14px); opacity: .6; } }
+@media (prefers-reduced-motion: reduce) {
+  .sheet__panel { animation: none; }
+  .dial__arc { transition: none; }
+}
+.sheet__title { margin: 0 0 12px; font-size: 1.02rem; }
+.sheet__lead { margin: -6px 0 14px; font-size: .85rem; color: var(--ink-mid); }
+.sheet__sub { margin: 18px 0 8px; font-size: .76rem; font-weight: 600; color: var(--ink-faint); letter-spacing: .05em; }
+.sheet__hint { margin-left: 8px; font-weight: 400; }
+.sheet__memo { display: block; margin-top: 16px; }
+.sheet__memo input {
+  width: 100%; min-height: 46px; padding: 10px 14px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--bg); color: var(--ink); font: inherit;
+}
+.sheet__actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 20px; }
+
+/* ── トースト ───────────────────────────────── */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--tabbar-h) + var(--safe-b) + 76px);
+  z-index: 50;
+  max-width: calc(100% - 40px);
+  padding: 10px 18px;
+  background: var(--ink); color: #fff;
+  border-radius: 999px; font-size: .86rem;
+}

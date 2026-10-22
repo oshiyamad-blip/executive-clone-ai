@@ -31,7 +31,9 @@ export async function collectFromDocuments(): Promise<RawLog[]> {
       if (!body.trim()) continue;
 
       logs.push({
-        id: `document_${file.id}`,
+        // 更新時刻をIDに含める。file.id だけだと一度取り込んだ文書のIDが処理済みに
+        // 残り続け、その後の編集（生きた文書の改稿）が永久に取り込まれなくなる。
+        id: `document_${file.id}_${file.modifiedTime ?? ''}`,
         source: 'document',
         timestamp: new Date(file.modifiedTime ?? Date.now()),
         content: `文書: ${file.name ?? '(無題)'}\n\n${body}`,

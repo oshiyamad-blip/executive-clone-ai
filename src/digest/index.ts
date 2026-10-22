@@ -1,8 +1,7 @@
 import '../env.js';
-import { mkdirSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { complete, DIALOGUE_TAG } from '../clone/engine.js';
-import { fetchRecentSignals, fetchRecentStories, createChildPage } from '../database/index.js';
+import { fetchRecentSignals, fetchRecentStories } from '../database/index.js';
+import { publishMarkdownReport } from '../output/publish.js';
 
 // ③ 週次ダイジェスト生成
 // 直近7日のシグナル・ストーリーを要約し、経営者向けの週次ダイジェストとして出力する。
@@ -52,23 +51,14 @@ async function main(): Promise<void> {
   const title = `週次ダイジェスト ${date}`;
   const body = `# ${title}\n\n_シグナル${signals.length}件 / ストーリー${stories.length}件_\n\n${md}`;
 
-  // ローカル保存
-  const dir = join(process.cwd(), 'digests');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${date}.md`);
-  writeFileSync(file, body, 'utf-8');
-  console.log(`✅ 週次ダイジェストを保存: ${file}`);
-
-  // 任意: Notion 出力（ダイジェスト用 → ブリーフィング用親ページの順でフォールバック）
-  const parent = process.env.NOTION_DIGEST_PARENT_PAGE_ID ?? process.env.NOTION_BRIEFING_PARENT_PAGE_ID;
-  if (parent) {
-    try {
-      const id = await createChildPage(parent, title, body);
-      console.log(`✅ Notionページ作成: ${id}`);
-    } catch (err) {
-      console.error(`Notionページ作成に失敗: ${String(err)}`);
-    }
-  }
+  // Notion 出力はダイジェスト用 → ブリーフィング用親ページの順でフォールバック
+  await publishMarkdownReport({
+    dir: 'digests',
+    filename: `${date}.md`,
+    title,
+    body,
+    notionParentId: process.env.NOTION_DIGEST_PARENT_PAGE_ID ?? process.env.NOTION_BRIEFING_PARENT_PAGE_ID,
+  });
 }
 
 main().catch((err) => {

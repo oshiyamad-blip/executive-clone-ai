@@ -1,8 +1,6 @@
 import '../env.js';
-import { mkdirSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { fetchCloneData, buildSystemPrompt, complete } from '../clone/engine.js';
-import { createChildPage } from '../database/index.js';
+import { publishMarkdownReport } from '../output/publish.js';
 
 // ① 会議前ブリーフィング生成
 // 議題を渡すと、経営者クローンの見解＋根拠＋想定反論を1枚の成果物として出力する。
@@ -45,27 +43,16 @@ async function main(): Promise<void> {
   const date = new Date().toISOString().slice(0, 10);
   const title = `会議前ブリーフィング: ${topic}`;
   const body = `# ${title}\n\n_生成日: ${date} / ${profile.name}の分身_\n\n${md}`;
-
-  // ローカルにMarkdown保存（常に）
-  const dir = join(process.cwd(), 'briefings');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const slug = topic.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
-  const file = join(dir, `${date}_${slug}.md`);
-  writeFileSync(file, body, 'utf-8');
-  console.log(`✅ ブリーフィングを保存: ${file}`);
 
-  // 任意: Notionにも子ページ作成
-  const parent = process.env.NOTION_BRIEFING_PARENT_PAGE_ID;
-  if (parent) {
-    try {
-      const id = await createChildPage(parent, title, body);
-      console.log(`✅ Notionページ作成: ${id}`);
-    } catch (err) {
-      console.error(`Notionページ作成に失敗: ${String(err)}`);
-    }
-  } else {
-    console.log('（NOTION_BRIEFING_PARENT_PAGE_ID 未設定のため Notion 出力はスキップ）');
-  }
+  await publishMarkdownReport({
+    dir: 'briefings',
+    filename: `${date}_${slug}.md`,
+    title,
+    body,
+    notionParentId: process.env.NOTION_BRIEFING_PARENT_PAGE_ID,
+    notionUnsetNote: '（NOTION_BRIEFING_PARENT_PAGE_ID 未設定のため Notion 出力はスキップ）',
+  });
 
   console.log(`\n${body}\n`);
 }

@@ -14,7 +14,8 @@ import type { RawLog } from '../types/index.js';
 //   3. Plaud アプリからの手動エクスポート（TXT/SRT/DOCX 等）をフォルダに置く
 //
 // 対応形式: .txt / .md / .srt / .vtt（文字起こしテキスト）
-const INBOX_DIR = process.env.LIFELOG_INBOX_DIR ?? join(process.cwd(), 'lifelog-inbox');
+// export しているのは doctor（環境診断）が実際の取り込み先と同じパスを検査するため
+export const INBOX_DIR = process.env.LIFELOG_INBOX_DIR ?? join(process.cwd(), 'lifelog-inbox');
 const SUPPORTED_EXT = new Set(['.txt', '.md', '.srt', '.vtt']);
 
 export async function collectFromLifelog(): Promise<RawLog[]> {

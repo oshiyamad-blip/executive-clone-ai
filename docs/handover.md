@@ -12,7 +12,7 @@ CEO の新端末にシステムを導入し、その場で動く状態で引き�
 | **リポジトリの持ち込み手段** | GitHub アクセス権（推奨）、または zip | zip の場合 `.env.local` は絶対に含めない |
 | **Gemini API キー** | **CEO 本人の Google アカウント**で [Google AI Studio](https://aistudio.google.com/) → 「Get API key」から無料発行 | 当日その場で発行してもOK（5分）。他人のキーを使い回さない |
 | **Notion（本番まで行う場合）** | 社内ワークスペース、Internal Integration 作成権限 | シグナルDB / ストーリーDB のプロパティ定義は `README.md` 参照 |
-| **経営者プロファイルの下書き** | 価値観 / 意思決定ルール / 成功・失敗パターン / 権限委譲ライン / 採用基準 | `data/executive-profile.json`（コミットされない）に入れるテキストを事前にヒアリングしておくと当日が速い。**`src/data/executiveProfile.ts`（公開リポジトリのソース）には書かない** |
+| **経営者プロファイルの下書き** | 価値観 / 意思決定ルール / 成功・失敗パターン / 権限委譲ライン / 採用基準 | **[docs/hearing-sheet.md](hearing-sheet.md)** を使ってヒアリング（60〜90分）し、`data/executive-profile.json`（コミットされない）に入れるテキストを用意しておくと当日が速い。**`src/data/executiveProfile.ts`（公開リポジトリのソース）には書かない** |
 
 ---
 

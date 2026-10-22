@@ -17,7 +17,8 @@ import type { RawLog } from '../types/index.js';
 //   12:35<TAB>自分<TAB>複数行の
 //   メッセージも連結される
 // 日付ヘッダ行で日を区切り、日ごとに1つの RawLog にまとめる。
-const INBOX_DIR = process.env.MESSENGER_INBOX_DIR ?? join(process.cwd(), 'messenger-inbox');
+// export しているのは doctor（環境診断）が実際の取り込み先と同じパスを検査するため
+export const INBOX_DIR = process.env.MESSENGER_INBOX_DIR ?? join(process.cwd(), 'messenger-inbox');
 const SUPPORTED_EXT = new Set(['.txt']);
 
 // LINE のシステム/メディア系プレースホルダ（それ単体では経営シグナルにならないノイズ）
@@ -88,8 +89,15 @@ function parseLineExport(raw: string, file: string): RawLog[] {
     }
   }
 
+  // 当日分のバケットは取り込まない（書きかけの日だから）。
+  // 「トーク×日付」IDは内容を反映しないため、昼にエクスポートした時点で当日を
+  // 処理済みにすると、夜の再エクスポートに含まれる同日後半のメッセージが
+  // 二度と取り込まれなくなる。当日分は翌日以降のバッチで完全な状態で取り込む。
+  const now = new Date();
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
   return buckets
-    .filter((b) => b.lines.length > 0)
+    .filter((b) => b.lines.length > 0 && b.dateKey !== todayKey)
     .map((b) => ({
       id: `messenger_${basename(file)}_${b.dateKey}`,
       source: 'messenger' as const,
