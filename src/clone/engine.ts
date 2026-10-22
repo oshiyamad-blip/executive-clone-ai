@@ -49,7 +49,7 @@ function notionUrl(pageId?: string): string | undefined {
 // 除外分を見込んで多めに取得してからフィルタする。
 export async function fetchCloneData(): Promise<CloneData> {
   if (DEMO_MODE) {
-    const p = getPersona(process.env.DEMO_PERSONA ?? 'mikitani');
+    const p = getPersona(process.env.DEMO_PERSONA ?? 'sample');
     return { profile: p.profile, signals: p.signals, stories: p.stories };
   }
   const [signals, stories] = await Promise.all([fetchRecentSignals(80), fetchRecentStories(10)]);

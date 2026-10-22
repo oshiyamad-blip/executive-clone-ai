@@ -1,0 +1,1771 @@
+// Googleスプレッドシート版のSESデータ保存層（DB_PROVIDER=sheets）。
+// 1つのスプレッドシートにデータ7タブ（案件/要員/マッチ/自社社員/評価/スキル同義/プロパー候補）と
+// バッチ横断の状態2タブ（処理済みメール/_状態）、バッチごとの件数・比率を1行ずつ残す「メトリクス」タブを持ち、
+// タブとヘッダー行は初回アクセス時に自動生成する
+// （タブ・行キャッシュ・クォータ制御の汎用部分は sheetBook.ts）。
+// 認証は既定でサービスアカウント自身（シートをSAのメールアドレスに編集者として共有するだけでよい）。
+// SHEETS_DB_IMPERSONATE 指定時のみDWDでそのユーザーになりすます。
+// 設定不足時は warn して縮退（保存スキップ/空配列）— Notion版と同じ振る舞い。
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { google } from 'googleapis';
+import { sheetsDbAuth, sheetsDbEditorAccount } from '../ses/googleCreds.js';
+import { sheetsDbSpreadsheetId, draftSigningKey } from '../ses/config.js';
+import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
+import { normalizePrefecture, coarseResidence } from '../ses/prefecture.js';
+import { projectLevelJson, parseProjectLevelJson } from '../ses/level.js';
+import { toInitials } from '../ses/pii.js';
+import { SafeLogError, logId, safeErr } from '../ses/redact.js';
+import { recordHealEvent } from '../ses/heal/events.js';
+import { SheetBook, sameCells, GOOGLE_REQUEST_TIMEOUT_MS, type Cell, type CachedRow } from './sheetBook.js';
+import {
+  remoteLabel,
+  labelToRemote,
+  matchStatusLabel,
+  FB_VERDICT_LABEL,
+  replyMetaJson,
+  parseReplyMeta,
+  replyMetaInjection,
+  verifyReplyMeta,
+  joinList,
+  splitList,
+  mergeDraftColumns,
+  isDraftRegenerationPending,
+  isDraftStateLocked,
+  MATCH_STATUS_LABEL,
+  DRAFT_STATE,
+  JUDGE_VERDICT_LABEL,
+  judgeVerdictLabel,
+  type DraftColumns,
+  type DraftSide,
+} from './mapping.js';
+import type {
+  Project,
+  Engineer,
+  MatchResult,
+  MatchStatus,
+  OwnEngineer,
+  MatchFeedback,
+  SkillEquivalence,
+  ProperCandidate,
+} from '../types/index.js';
+
+const SHEETS_RW_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+
+// 担当者メール列による下書き依頼の列（担当者が送信元アドレスを入れると、次回バッチがそのアドレスで
+// 全員に返信の下書きを作成し状態列に結果を書く）。対象タブの判定は draftRequestTabs()
+export const DRAFT_REQUEST_COLUMNS = [
+  '担当者メール', '案件側下書き状態', '要員側下書き状態', '案件側文面', '要員側文面', '下書きデータ',
+];
+
+export const PROPER_CANDIDATE_TAB = 'プロパー候補';
+// プロパー × 案件のAI判定の控え（1行1組）。社員ごとに1セルへ詰める方式では1セルの上限で溢れ、溢れた組を毎回判定し直していた
+export const PROPER_JUDGE_TAB = '_プロパー判定';
+
+// 突合済 = その案件・要員の候補ペアを判定してマッチタブに保存し終えた日時。空欄の間は次回以降のバッチでも突合する
+// （実行が時間切れ・失敗で途中終了しても、判定し損ねたペアを取りこぼさないため）
+export const MATCHED_COLUMN = '突合済';
+
+// AI最終判定の結果（通過・低評価・不適合・未判定 等。JUDGE_VERDICT_LABEL）。「未判定」の行は次回の実行で判定し直す
+export const JUDGE_COLUMN = '判定';
+
+// 元のメールにAIへの指示らしき記載がある案件・要員（値は「あり」）。この行の組は要確認にし、自動の下書きを作らない
+export const INJECTION_COLUMN = '指示混入疑い';
+const INJECTION_MARK = 'あり';
+
+// 指示混入疑いの印の控え（タブ:ID を1行ずつ。バッチ専用の保護したタブ）。列の印や返信メタは人が編集・版の履歴から
+// 巻き戻せるため、一度付いた印はこのタブにも残し、ここにある行は列・返信メタによらず要確認として扱う
+export const INJECTION_FLAGS_TAB = '_指示混入';
+
+// バッチごとの健全性の記録（件数・比率だけ。人名・案件名・スキル語そのものは書かない）。1回の実行で1行を追記する。
+// 比率の列は % の値（0〜100。母数が0なら空欄）
+export const METRICS_TAB = 'メトリクス';
+// 同じ内容の再送を抽出せずにスキップしたとき、元の案件・要員が直近の突合の対象から外れないよう更新する最終受信日
+export const LAST_SEEN_COLUMN = '最終受信日';
+
+// 案件の単価が、直近に届いた同じ条件の案件の中でどの位置か（marketRate.ts。集計だけでLLMは使わない）
+export const MARKET_COLUMN = '相場';
+
+// 案件の経験年数・工程・立場の条件（level.ts の JSON。抽出のたびに機械が書き直す）
+export const LEVEL_COLUMN = 'レベル条件';
+export const DETAIL_COLUMN = '本文抜粋'; // 営業リストの「案件詳細」の元（元メール本文のこの案件の部分）
+
+export const METRICS_COLUMNS = [
+  '実行日時', 'モード', 'メール数', '抽出件数(案件)', '抽出件数(要員)',
+  'null率(単金)', 'null率(都道府県)', 'null率(開始日)', 'null率(希望単金)', '必須スキル空率', '未知スキル語数',
+  '候補0件の案件率', '除外理由内訳(JSON)', '判定数', 'Sonnet平均点', 'ゲート降格数', '不適合数', '再提案抑制数',
+  '判定繰越数', 'ヒューリスティック退避数', 'キャッシュ読込率', 'バッチコスト(円)', '下書き作成数',
+  'スキル語数', '評価組数', '判定対象組数', '担当者指定の下書き作成数', '抽出モデル代替', '再送スキップ数', '要員メールスキップ数',
+];
+
+// タブ定義（列は見出しの名前で読み書きする。列の追加は末尾のみ＝既存シートは ensureTabs が見出しの右端へ自動で追記する）
+const TABS: Record<string, string[]> = {
+  案件: [
+    'ID', '案件名', '必須スキル', '尚可スキル', '単金下限', '単金上限', '勤務地', 'リモート',
+    '開始時期', '開始日', '期間', '商流メモ', '営業元会社', '営業元担当', '営業元メール',
+    '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN,
+    LEVEL_COLUMN, DETAIL_COLUMN,
+  ],
+  要員: [
+    'ID', '表示名', 'スキル', '経験年数', '希望単金', '居住地', 'リモート希望', '稼働開始可能日',
+    '営業元会社', '営業元担当', '営業元メール', '元メールID', '返信メタ', '受信日', 'ステータス', MATCHED_COLUMN,
+    '年齢', '稼働率', INJECTION_COLUMN, LAST_SEEN_COLUMN,
+  ],
+  マッチ: [
+    'ID', 'マッチ名', '粗利額', '適合スコア', '判定根拠', '案件ID', '要員ID',
+    '案件側下書きURL', '要員側下書きURL', 'ステータス', '検出日時', ...DRAFT_REQUEST_COLUMNS, JUDGE_COLUMN,
+  ],
+  自社社員: ['ID', '表示名', 'スキル', '経験年数', '必要案件単価', '居住地', 'リモート希望', '稼働可能日', 'ステータス'],
+  評価: ['日時', '元マッチID', 'マッチ名', '評価', 'メモ', '評価者', 'バンド'],
+  スキル同義: ['スキルA', 'スキルB', '追加者', '日時'],
+  処理済みメール: ['メールID', '処理日時', '結果', '指紋', '元メール'],
+  _状態: ['キー', 'JSON', '更新日時'],
+  [INJECTION_FLAGS_TAB]: ['キー', '日時'],
+  [METRICS_TAB]: METRICS_COLUMNS,
+  // プロパー（自社社員のスキルシート）× 案件の候補。提案は案件側への1通だけなので要員側の下書き列は持たない
+  [PROPER_CANDIDATE_TAB]: [
+    'ID', 'プロパー', '案件名', '案件単価', '必要案件単価', '単価差', 'スキル一致率', 'バンド', '判定',
+    '適合スコア', '根拠', '案件ID', '営業元メール', '検出日時', 'ステータス',
+    '担当者メール', '案件側下書き状態', '案件側文面', '下書きデータ',
+  ],
+  // キー = <社員の控えキー>|<案件ID>。判定JSONは1セルに収まる大きさ（超えた組は控えない）
+  [PROPER_JUDGE_TAB]: ['キー', '社員キー', '案件ID', '受信日時', '判定JSON', '更新日時'],
+};
+
+const book = new SheetBook({
+  label: 'SheetsDB',
+  tabs: TABS,
+  spreadsheetId: sheetsDbSpreadsheetId,
+  createApi: () => {
+    const auth = sheetsDbAuth(SHEETS_RW_SCOPES);
+    return auth ? google.sheets({ version: 'v4', auth, timeout: GOOGLE_REQUEST_TIMEOUT_MS }) : null;
+  },
+  missingIdMessage: 'SHEETS_DB_SPREADSHEET_ID が未設定',
+  missingAuthMessage:
+    'Google認証（SES_GOOGLE_SA_KEY_JSON / GOOGLE_SA_KEY_JSON 等）が未設定、または SHEETS_DB_IMPERSONATE に対応する専用の鍵 SHEETS_DB_SA_KEY_JSON が未設定・メインの鍵と同じ',
+  accessHint: 'IDが正しいか、サービスアカウントのメールアドレスに編集者として共有済みかを確認してください',
+  dropdowns: { [PROPER_CANDIDATE_TAB]: { ステータス: Object.values(MATCH_STATUS_LABEL) } },
+  protectedTabs: { [INJECTION_FLAGS_TAB]: 'SESバッチ専用（指示混入疑いの印の控え）。編集しないでください' },
+  protectionEditor: () => sheetsDbEditorAccount(),
+});
+
+function configured(): boolean {
+  return book.configured();
+}
+
+// 設定が揃っているか（処理済みID等の状態保存先の判定用。未設定時の警告は初回のみ）
+export function sheetsDbConfigured(): boolean {
+  return configured();
+}
+
+// バッチ開始時に呼ぶ（前回実行の状態を持ち越さない）
+export function resetSheetsCache(): void {
+  book.reset();
+  injectionFlagKeys = new Set();
+  warnedInjectionFlags = false;
+  warnedUnprotectedLedger = false;
+  ledgerChecked = false;
+  ledgerUntrusted = '';
+}
+
+function colIndex(tab: string, name: string): number {
+  return book.colIndex(tab, name);
+}
+
+const readRows = (tab: string) => book.readRows(tab);
+const findRow = (tab: string, colName: string, key: string) => book.findRow(tab, colName, key);
+const locateRow = (tab: string, colName: string, key: string) => book.locateRow(tab, colName, key);
+const appendRows = (tab: string, rows: Cell[][]) => book.appendRows(tab, rows);
+const upsertRow = (tab: string, keyCol: string, key: string, build: (existing: string[] | null) => Cell[]) =>
+  book.upsertRow(tab, keyCol, key, build);
+
+// 数値の列。人が手で「65万」「５年」「1,000」のように入れても読めるよう、全角・桁区切り・末尾の単位（万円・年）を許す
+// （「円」は単位が変わるため読まない）
+function cellNum(cells: string[], idx: number): number | null {
+  const v = (cells[idx] ?? '')
+    .normalize('NFKC')
+    .replace(/\s/g, '')
+    .replace(/(\d),(?=\d{3}(?!\d))/g, '$1');
+  if (!v) return null;
+  const m = v.match(/^(-?\d+(?:\.\d+)?)(?:万円|万|年)?$/);
+  return m ? Number(m[1]) : null;
+}
+
+function cellStr(cells: string[], idx: number): string {
+  return idx < 0 ? '' : (cells[idx] ?? '').trim();
+}
+
+// 文面など改行・前後空白も意味を持つセル（トリムしない）
+function rawCell(cells: string[], idx: number): string {
+  return idx < 0 ? '' : (cells[idx] ?? '');
+}
+
+// 人が進めたステータス（案件の終了・要員の決定済など）・突合済の印・指示混入疑いの印（AI判定・人が付けたもの）は
+// 再保存で巻き戻さない。同じメールを再抽出して同じIDを保存し直すことがあるため（Notion版の upsertByStableId と同じ振る舞い）。
+// 既存が空欄なら機械の値を入れる（指示混入疑いを外すのは人だけ）
+function keepStatus(tab: string, row: Cell[], existing: string[] | null): Cell[] {
+  for (const name of ['ステータス', MATCHED_COLUMN, INJECTION_COLUMN, LAST_SEEN_COLUMN, MARKET_COLUMN]) {
+    const col = colIndex(tab, name);
+    if (col < 0) continue;
+    const prev = existing ? cellStr(existing, col) : '';
+    if (prev) row[col] = prev;
+  }
+  return row;
+}
+
+// 保存済みの行に指示混入疑いの印（列、または署名した返信メタの中）があれば、保存し直す行の返信メタにも印を含めて署名する
+// （同じメールの抽出し直しで返信メタを書き直しても、列の印を人が消せば外れる状態に戻さないため）
+function withKeptInjection<T extends { id: string; injectionSuspected?: boolean }>(tab: string, item: T, existing: string[] | null): T {
+  if (item.injectionSuspected) return item;
+  if (injectionFlagKeys.has(injectionFlagKey(tab, item.id))) return { ...item, injectionSuspected: true };
+  if (!existing) return item;
+  const marked = cellStr(existing, colIndex(tab, INJECTION_COLUMN)) !== '' || replyMetaInjection(cellStr(existing, colIndex(tab, '返信メタ')));
+  return marked ? { ...item, injectionSuspected: true } : item;
+}
+
+// ===== 指示混入疑いの印の控え =====
+
+let injectionFlagKeys = new Set<string>();
+let warnedInjectionFlags = false; // 控えを読めない・書けない警告（1回だけ）
+let warnedUnprotectedLedger = false;
+let ledgerChecked = false; // この実行で控えの件数の確認・補充を済ませたか
+let ledgerUntrusted = ''; // この実行では控えを信用できない理由（空なら信用できる）
+
+const INJECTION_LEDGER_STATE_KEY = 'injectionLedger';
+
+function injectionFlagKey(tab: string, id: string): string {
+  return `${tab}:${id.trim()}`;
+}
+
+// 控えを信用できないとき: この実行では自動の下書き・担当者の下書き依頼を作らない（指示混入疑いの印を外された案件・要員の
+// 下書きを作らないため）。異常終了として知らせる
+function distrustInjectionLedger(reason: string, severity: 'critical' | 'warn' = 'critical'): void {
+  if (ledgerUntrusted) return;
+  ledgerUntrusted = reason;
+  recordHealEvent(severity, `「${INJECTION_FLAGS_TAB}」タブ（指示混入疑いの印の控え）を信用できません: ${reason}（この実行では下書きを作りません）`);
+}
+
+function ledgerCountSignature(key: string, count: number): string {
+  return key ? createHmac('sha256', key).update(JSON.stringify(['injectionLedger', count])).digest('base64url') : '';
+}
+
+// 控えのタブを読み直す（読めなければ前回までの控えのまま続け、この実行では下書きを作らない）
+async function loadInjectionFlags(): Promise<void> {
+  await book.ensureTabs(); // スプレッドシート自体を開けない失敗は呼び出し元へ（原因の分かる例外のまま）
+  let rows: CachedRow[];
+  try {
+    rows = await readRows(INJECTION_FLAGS_TAB);
+  } catch (err) {
+    if (!warnedInjectionFlags) console.warn(`SheetsDB: 「${INJECTION_FLAGS_TAB}」タブを読めません: ${safeErr(err)}`);
+    warnedInjectionFlags = true;
+    distrustInjectionLedger('タブを読めません（見出し行を元に戻してください）');
+    return;
+  }
+  const keys = new Set(injectionFlagKeys);
+  const ledgerKeys = new Set<string>();
+  for (const r of rows) {
+    const k = cellStr(r.cells, colIndex(INJECTION_FLAGS_TAB, 'キー'));
+    if (k) {
+      keys.add(k);
+      ledgerKeys.add(k);
+    }
+  }
+  injectionFlagKeys = keys;
+  if (!warnedUnprotectedLedger && book.unprotectedTabs().includes(INJECTION_FLAGS_TAB)) {
+    warnedUnprotectedLedger = true;
+    recordHealEvent('warn', `「${INJECTION_FLAGS_TAB}」タブを保護できていません（編集者が指示混入疑いの印を外せます。スプレッドシートのオーナーがタブを保護してください）`);
+  }
+  if (ledgerChecked) return;
+  ledgerChecked = true;
+  const recorded = await checkInjectionLedger(ledgerKeys.size);
+  await backfillInjectionFlags(recorded);
+}
+
+// 控えの件数を _状態 の署名付きの件数と比べる（控えの行が消された・タブが作り直された実行では下書きを作らない）。
+// 署名どおりに記録されていた件数（無い・合わなければ null）を返す。_状態 は保護していないため、控えに行があるのに
+// 記録が無い・空・壊れている・署名が空（鍵の設定前の記録を装える）場合も、その実行は信用しない（次の実行から今の件数で続ける）
+async function checkInjectionLedger(count: number): Promise<number | null> {
+  const key = draftSigningKey();
+  const state = await readStateJson<{ count?: unknown; sig?: unknown }>(INJECTION_LEDGER_STATE_KEY).catch(() => null);
+  const record = state && typeof state === 'object' ? state : null;
+  const unsigned = Boolean(key) && record?.sig === '';
+  const recorded =
+    record && !unsigned && typeof record.count === 'number' && Number.isInteger(record.count) && record.count >= 0 ? record.count : null;
+  if (state !== null && !unsigned && (recorded === null || (key && record?.sig !== ledgerCountSignature(key, recorded)))) {
+    distrustInjectionLedger('_状態タブの控えの件数の記録が書き換えられています');
+  } else if ((state === null || unsigned) && count > 0) {
+    distrustInjectionLedger(
+      `_状態タブに控えの件数の署名付きの記録がありません（${count}件の控えを確かめられません。署名の鍵を設定した直後・記録の書き込みに失敗した後なら次の実行から続けます）`,
+      'warn',
+    );
+  } else if (book.createdTabs().includes(INJECTION_FLAGS_TAB) && (recorded ?? 0) > 0) {
+    distrustInjectionLedger(`控えのあったタブが無くなっていたため作り直しました（${recorded}件の印が失われました）`);
+  } else if (recorded !== null && count < recorded) {
+    // オーナーが印を外すために行を消した場合もここに来る（その実行だけ下書きを見送り、次の実行から今の件数で続ける）
+    distrustInjectionLedger(`控えの行が減っています（${recorded}件 → ${count}件。オーナーが印を外したのでなければ、版の履歴で確かめてください）`, 'warn');
+  }
+  return ledgerUntrusted ? null : recorded;
+}
+
+async function writeInjectionLedgerCount(): Promise<void> {
+  const count = injectionFlagKeys.size;
+  await writeStateJson(INJECTION_LEDGER_STATE_KEY, { count, sig: ledgerCountSignature(draftSigningKey(), count) });
+}
+
+// 案件・要員の行に残る指示混入疑いの印（列・返信メタ）のうち控えに無いものを控えに足す（控えの導入前・控えの書き込みに
+// 失敗した印・作り直した控えを補う）。印を足すだけで外すことはしない
+async function backfillInjectionFlags(recorded: number | null): Promise<void> {
+  const missing: Array<{ tab: string; id: string }> = [];
+  for (const tab of ['案件', '要員']) {
+    let rows: CachedRow[];
+    try {
+      rows = await readRows(tab);
+    } catch {
+      continue; // 読めないタブは読み出しの側で異常終了になる
+    }
+    for (const r of rows) {
+      const id = cellStr(r.cells, colIndex(tab, 'ID'));
+      if (!id || injectionFlagKeys.has(injectionFlagKey(tab, id))) continue;
+      const marked = cellStr(r.cells, colIndex(tab, INJECTION_COLUMN)) !== '' || replyMetaInjection(cellStr(r.cells, colIndex(tab, '返信メタ')));
+      if (marked) missing.push({ tab, id });
+    }
+  }
+  try {
+    for (const tab of ['案件', '要員']) {
+      const ids = missing.filter((m) => m.tab === tab).map((m) => m.id);
+      if (ids.length > 0) await recordInjectionFlags(tab, ids);
+    }
+    if (missing.length > 0) console.log(`SheetsDB: 指示混入疑いの印${missing.length}件を「${INJECTION_FLAGS_TAB}」タブに控えました`);
+    // 信用できなかった実行も今の件数で書き直す（0件でも。書き直さないと次の実行以降もずっと下書きを作れない）
+    if (ledgerUntrusted || (recorded !== injectionFlagKeys.size && !(recorded === null && injectionFlagKeys.size === 0))) await writeInjectionLedgerCount();
+  } catch (err) {
+    warnInjectionLedgerWrite(err);
+  }
+}
+
+function warnInjectionLedgerWrite(err: unknown): void {
+  if (!warnedInjectionFlags) {
+    recordHealEvent('warn', `指示混入疑いの印を「${INJECTION_FLAGS_TAB}」タブに控えられませんでした（次の実行で列・返信メタの印から控え直します）: ${safeErr(err)}`);
+  }
+  warnedInjectionFlags = true;
+}
+
+// この実行で指示混入疑いの控えを信用できるか（下書きを作る前に呼ぶ。未設定なら信用できる扱い）
+export async function injectionLedgerTrustedSheets(): Promise<boolean> {
+  if (!configured()) return true;
+  try {
+    await loadInjectionFlags();
+  } catch (err) {
+    distrustInjectionLedger(`スプレッドシートを確かめられません（${safeErr(err)}）`);
+  }
+  return ledgerUntrusted === '';
+}
+
+// 指示混入疑いの印を控えに足す（控えから消すことはしない）
+async function recordInjectionFlags(tab: string, ids: string[]): Promise<void> {
+  const fresh = [...new Set(ids.filter(Boolean).map((id) => injectionFlagKey(tab, id)))].filter((k) => !injectionFlagKeys.has(k));
+  if (fresh.length === 0) return;
+  const at = new Date().toISOString();
+  await appendRows(INJECTION_FLAGS_TAB, fresh.map((k) => [k, at]));
+  fresh.forEach((k) => injectionFlagKeys.add(k));
+  if (ledgerChecked) await writeInjectionLedgerCount();
+}
+
+// 保存した行のうち指示混入疑いの印のあるものを控えに足す（失敗しても保存は続ける。列・返信メタの印は付いている）
+async function recordSavedInjectionFlags(tab: string, rows: Map<string, Cell[]>): Promise<void> {
+  const ids = [...rows].filter(([, row]) => rowCell(tab, row, INJECTION_COLUMN) !== '').map(([id]) => id);
+  try {
+    await recordInjectionFlags(tab, ids);
+  } catch (err) {
+    warnInjectionLedgerWrite(err);
+  }
+}
+
+// 受信日の解釈。機械が書くISO形式に加え、人が手で入れた「2026/9/1」「2026年9月1日」「9/1」（年なし＝直近のその日）を受け付ける。
+// 空欄・読めない値は null（受信日で絞る突合の対象から外す。「今」とみなして毎回の突合に紛れ込ませない）。
+// 未来（今から1日より先）の日付も null（年の打ち間違い・意図的な未来日付で、終わった案件・要員が突合の対象の先頭に
+// 居座り続けないように）
+const RECEIVED_AT_FUTURE_SLACK_MS = 24 * 60 * 60 * 1000;
+
+export function parseReceivedAt(raw: string, now = new Date()): Date | null {
+  const s = raw.normalize('NFKC').trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) || d.getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS ? null : d;
+  }
+  const full = s.match(/^(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?$/);
+  const short = full ? null : s.match(/^(\d{1,2})\s*[/月]\s*(\d{1,2})日?$/);
+  if (!full && !short) return null;
+  const month = Number(full ? full[2] : short![1]);
+  const day = Number(full ? full[3] : short![2]);
+  const hour = full ? Number(full[4] ?? 0) : 0;
+  const minute = full ? Number(full[5] ?? 0) : 0;
+  const jstYear = new Date(now.getTime() + 9 * 60 * 60 * 1000).getUTCFullYear();
+  const exists = (y: number) => {
+    const d = new Date(Date.UTC(y, month - 1, day));
+    return d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+  };
+  // 日本時間の日時として解釈する
+  const at = (y: number) => new Date(Date.UTC(y, month - 1, day, hour, minute) - 9 * 60 * 60 * 1000);
+  const year = full ? Number(full[1]) : jstYear;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || !exists(year)) return null;
+  // 年なしで未来になる日付は前年（12月の受信を1月に手入力した等）
+  if (!full && at(year).getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS) return exists(year - 1) ? at(year - 1) : null;
+  if (at(year).getTime() > now.getTime() + RECEIVED_AT_FUTURE_SLACK_MS) return null;
+  return at(year);
+}
+
+// 受信日が不明な行の受信日（受信日で絞る突合・プロパー候補の対象から外れる十分古い日時）
+const UNKNOWN_RECEIVED_AT = 0;
+const warnedUnknownReceivedAt = new Set<string>();
+
+function receivedAtOf(raw: string): Date {
+  return parseReceivedAt(raw) ?? new Date(UNKNOWN_RECEIVED_AT);
+}
+
+// 受信日と、再送スキップで更新した最終受信日の新しい方（受信日が読めない行は最終受信日があってもそのまま不明扱い）
+function latestReceivedAt(received: string, lastSeen: string): Date {
+  const base = receivedAtOf(received);
+  const seen = lastSeen ? parseReceivedAt(lastSeen) : null;
+  if (base.getTime() === UNKNOWN_RECEIVED_AT || !seen || seen.getTime() <= base.getTime()) return base;
+  return seen;
+}
+
+function warnUnknownReceivedAt(tab: string, items: Array<{ receivedAt: Date }>): void {
+  const unknown = items.filter((x) => x.receivedAt.getTime() === UNKNOWN_RECEIVED_AT).length;
+  if (unknown === 0 || warnedUnknownReceivedAt.has(tab)) return;
+  warnedUnknownReceivedAt.add(tab);
+  console.warn(`SheetsDB: 「${tab}」タブに受信日が空欄・読めない・未来の日付の行が${unknown}件あります（直近の突合の対象から外します。YYYY-MM-DD 等で入力してください）`);
+}
+
+// ===== 案件 =====
+
+// 返信メタの署名の対象（タブ・ID・営業元メール）
+function replyBinding(tab: string, id: string, agentEmail: string) {
+  return { key: draftSigningKey(), tab, id, agentEmail };
+}
+
+// 返信メタ・営業元メールが署名どおりのときだけ、下書きの宛先の元として使う（鍵が無ければ検証しない）。
+// 書き換えられた・署名の無い行は宛先を空にする（その行の下書きは「宛先が不明」になり作られない）
+const untrustedReplyRows = new Map<string, number>();
+
+// injection は署名どおりの返信メタに残した「指示混入疑い」の印（列の印を人が消しても要確認のままにする）
+function trustedReply(
+  tab: string,
+  cells: string[],
+): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string; injection: boolean } {
+  const c = (name: string) => cellStr(cells, colIndex(tab, name));
+  const meta = c('返信メタ');
+  if (verifyReplyMeta(meta, replyBinding(tab, c('ID'), c('営業元メール')))) {
+    return { replyTarget: parseReplyMeta(meta), agentEmail: c('営業元メール'), injection: replyMetaInjection(meta) };
+  }
+  untrustedReplyRows.set(tab, (untrustedReplyRows.get(tab) ?? 0) + 1);
+  return { replyTarget: undefined, agentEmail: '', injection: false };
+}
+
+const warnedUntrustedReply = new Set<string>();
+
+function warnUntrustedReply(tab: string): void {
+  const n = untrustedReplyRows.get(tab) ?? 0;
+  untrustedReplyRows.delete(tab);
+  if (n === 0 || warnedUntrustedReply.has(tab)) return;
+  warnedUntrustedReply.add(tab);
+  console.warn(
+    `SheetsDB: 「${tab}」タブに返信メタ・営業元メールの署名が無い・合わない行が${n}件あります（書き換えられた可能性があるため、` +
+      'これらの行の下書きの宛先には使いません。SES_DRAFT_SIGNING_KEY を登録する前に保存した行も含みます）',
+  );
+}
+
+function projectToRow(p: Project): Cell[] {
+  return [
+    p.id, p.title, joinList(p.requiredSkills), joinList(p.preferredSkills), p.rateMin, p.rateMax,
+    p.location, remoteLabel(p.remote), p.startPeriod, p.startDate ?? '', p.duration, p.businessFlow,
+    p.agentCompany, p.agentContact, p.agentEmail, p.sourceMailId,
+    replyMetaJson(p.replyTarget, replyBinding('案件', p.id, p.agentEmail), { injection: p.injectionSuspected }),
+    p.receivedAt.toISOString(), p.status === 'closed' ? '終了' : '募集中', '', p.injectionSuspected ? INJECTION_MARK : '',
+    '', '', projectLevelJson(p.level), p.detail ?? '',
+  ];
+}
+
+export async function saveProjectSheets(project: Project): Promise<string> {
+  if (!configured()) return '';
+  await loadInjectionFlags();
+  const row = await upsertRow('案件', 'ID', project.id, (existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', project, existing)), existing));
+  await recordSavedInjectionFlags('案件', new Map([[project.id, row]]));
+  return project.id;
+}
+
+function levelField(raw: string): { level?: Project['level'] } {
+  const level = parseProjectLevelJson(raw);
+  return level ? { level } : {};
+}
+
+function rowToProject(cells: string[]): Project {
+  const c = (name: string) => cellStr(cells, colIndex('案件', name));
+  const n = (name: string) => cellNum(cells, colIndex('案件', name));
+  const location = c('勤務地');
+  const reply = trustedReply('案件', cells);
+  return {
+    id: c('ID'),
+    title: c('案件名'),
+    ...requirementsOf(splitList(c('必須スキル')), splitList(c('尚可スキル'))),
+    rateMin: n('単金下限'),
+    rateMax: n('単金上限'),
+    location,
+    prefecture: normalizePrefecture(location),
+    remote: labelToRemote(c('リモート')),
+    startPeriod: c('開始時期'),
+    startDate: c('開始日') || null,
+    duration: c('期間'),
+    businessFlow: c('商流メモ'),
+    agentCompany: c('営業元会社'),
+    agentContact: c('営業元担当'),
+    agentEmail: reply.agentEmail,
+    sourceMailId: c('元メールID'),
+    replyTarget: reply.replyTarget,
+    receivedAt: latestReceivedAt(c('受信日'), c(LAST_SEEN_COLUMN)),
+    status: c('ステータス') === '終了' ? 'closed' : 'open',
+    notionPageId: c('ID'), // ステータス更新等の参照ID（Sheets版では自IDを流用）
+    matched: c(MATCHED_COLUMN) !== '',
+    ...levelField(c(LEVEL_COLUMN)),
+    ...(c(DETAIL_COLUMN) ? { detail: c(DETAIL_COLUMN) } : {}),
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection || injectionFlagKeys.has(injectionFlagKey('案件', c('ID'))) ? { injectionSuspected: true } : {}),
+  };
+}
+
+// 新しい順に並べ、受信日時が since 以降のものに絞って limit 件まで返す（追記順＝古い順のタブから最新を取るため）
+function newestFirst<T extends { receivedAt: Date }>(items: T[], limit: number, since?: Date): T[] {
+  return newestSince(items, since).slice(0, limit);
+}
+
+function newestSince<T extends { receivedAt: Date }>(items: T[], since?: Date): T[] {
+  const sinceMs = since ? since.getTime() : -Infinity;
+  const time = (x: T) => (Number.isFinite(x.receivedAt.getTime()) ? x.receivedAt.getTime() : UNKNOWN_RECEIVED_AT);
+  return items.filter((x) => time(x) >= sinceMs).sort((a, b) => time(b) - time(a));
+}
+
+// 募集中の案件を新しい順に limit 件まで返す。receivedSince 指定時はその日時以降に受信した案件に絞る
+export async function fetchOpenProjectsSheets(limit = 100, receivedSince?: Date): Promise<Project[]> {
+  if (!configured()) {
+    console.warn('SheetsDB: 案件なしで継続します');
+    return [];
+  }
+  const open = await openProjects();
+  return newestFirst(open, limit, receivedSince);
+}
+
+// 相場の集計に使う、since 以降に受信した案件（終了した案件も含む。単価の分布を作るため）
+export async function fetchRecentProjectsSheets(since: Date): Promise<Project[]> {
+  if (!configured()) return [];
+  const rows = await readRows('案件');
+  return newestSince(rows.map((r) => rowToProject(r.cells)), since);
+}
+
+// 案件ID → 相場の文を「相場」列に書く。書いた行数を返す
+export async function writeMarketLabelsSheets(labels: Map<string, string>): Promise<number> {
+  if (!configured() || labels.size === 0) return 0;
+  return book.writeCellsByKey('案件', 'ID', [...labels].map(([key, text]) => ({ key, cells: [[MARKET_COLUMN, text]] })));
+}
+
+async function openProjects(): Promise<Project[]> {
+  await loadInjectionFlags();
+  const rows = await readRows('案件');
+  const stCol = colIndex('案件', 'ステータス');
+  const open = rows.filter((r) => cellStr(r.cells, stCol) !== '終了').map((r) => rowToProject(r.cells));
+  warnUnknownReceivedAt('案件', open);
+  warnUntrustedReply('案件');
+  return open;
+}
+
+// ===== 要員 =====
+
+function engineerToRow(e: Engineer): Cell[] {
+  return [
+    e.id, e.displayName, joinList(e.skills), e.experienceYears, e.desiredRate, e.residence,
+    remoteLabel(e.remoteWish), e.availableFrom ?? '', e.agentCompany, e.agentContact, e.agentEmail,
+    e.sourceMailId, replyMetaJson(e.replyTarget, replyBinding('要員', e.id, e.agentEmail), { injection: e.injectionSuspected }), e.receivedAt.toISOString(),
+    e.status === 'assigned' ? '決定済' : '提案可', '', e.age, e.utilization, e.injectionSuspected ? INJECTION_MARK : '',
+  ];
+}
+
+export async function saveEngineerSheets(engineer: Engineer): Promise<string> {
+  if (!configured()) return '';
+  await loadInjectionFlags();
+  const row = await upsertRow('要員', 'ID', engineer.id, (existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', engineer, existing)), existing));
+  await recordSavedInjectionFlags('要員', new Map([[engineer.id, row]]));
+  return engineer.id;
+}
+
+function rowToEngineer(cells: string[]): Engineer {
+  const c = (name: string) => cellStr(cells, colIndex('要員', name));
+  const n = (name: string) => cellNum(cells, colIndex('要員', name));
+  // 以前の版で番地まで保存した行も、読み出し（と次の保存）では市区町村までにする
+  const residence = coarseResidence(c('居住地'));
+  const reply = trustedReply('要員', cells);
+  return {
+    id: c('ID'),
+    // 以前の版で保存したフルネーム・人が手で入れた氏名も、読み出しの時点でイニシャルだけにする（判定・文面に流さない）
+    displayName: toInitials(c('表示名')),
+    age: n('年齢'),
+    skills: normalizeSkills(splitList(c('スキル'))),
+    experienceYears: n('経験年数'),
+    desiredRate: n('希望単金'),
+    residence,
+    prefecture: normalizePrefecture(residence),
+    nearestStation: '',
+    availableDate: '',
+    availableFrom: c('稼働開始可能日') || null,
+    utilization: c('稼働率'),
+    remoteWish: labelToRemote(c('リモート希望')),
+    agentCompany: c('営業元会社'),
+    agentContact: c('営業元担当'),
+    agentEmail: reply.agentEmail,
+    sourceMailId: c('元メールID'),
+    replyTarget: reply.replyTarget,
+    receivedAt: latestReceivedAt(c('受信日'), c(LAST_SEEN_COLUMN)),
+    status: c('ステータス') === '決定済' ? 'assigned' : 'available',
+    notionPageId: c('ID'),
+    matched: c(MATCHED_COLUMN) !== '',
+    ...(c(INJECTION_COLUMN) !== '' || reply.injection || injectionFlagKeys.has(injectionFlagKey('要員', c('ID'))) ? { injectionSuspected: true } : {}),
+  };
+}
+
+// 提案可の要員を新しい順に limit 件まで返す。receivedSince 指定時はその日時以降に受信した要員に絞る
+export async function fetchAvailableEngineersSheets(limit = 100, receivedSince?: Date): Promise<Engineer[]> {
+  if (!configured()) {
+    console.warn('SheetsDB: 要員なしで継続します');
+    return [];
+  }
+  const available = await availableEngineers();
+  return newestFirst(available, limit, receivedSince);
+}
+
+async function availableEngineers(): Promise<Engineer[]> {
+  await loadInjectionFlags();
+  const rows = await readRows('要員');
+  const stCol = colIndex('要員', 'ステータス');
+  const available = rows.filter((r) => cellStr(r.cells, stCol) !== '決定済').map((r) => rowToEngineer(r.cells));
+  warnUnknownReceivedAt('要員', available);
+  warnUntrustedReply('要員');
+  return available;
+}
+
+// 突合前（突合済が空欄）なのに、直近の新しい順 limit 件の突合の対象から押し出された募集中の案件・提案可の要員の数
+// （SES_MATCH_POOL_LIMIT を超えて新しいものが届くと、古い突合前のものは判定されないまま残るため知らせる）
+export async function countUnmatchedBeyondPoolSheets(limit: number, since: Date): Promise<{ projects: number; engineers: number }> {
+  if (!configured()) return { projects: 0, engineers: 0 };
+  const beyond = <T extends { receivedAt: Date; matched?: boolean }>(items: T[]) =>
+    newestSince(items, since).slice(limit).filter((x) => x.matched === false).length;
+  return { projects: beyond(await openProjects()), engineers: beyond(await availableEngineers()) };
+}
+
+// 指定のメールから保存した案件・要員（ステータスによらず）。同じメールを抽出し直したときに、保存済みの行と内容で
+// 対応付けてIDを決めるために使う
+export async function fetchItemsByMailSheets(mailIds: Set<string>): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (!configured() || mailIds.size === 0) return { projects: [], engineers: [] };
+  await loadInjectionFlags();
+  const pick = async <T>(tab: string, toItem: (cells: string[]) => T): Promise<T[]> => {
+    const col = colIndex(tab, '元メールID');
+    const items = (await readRows(tab)).filter((r) => mailIds.has(cellStr(r.cells, col))).map((r) => toItem(r.cells));
+    untrustedReplyRows.delete(tab);
+    return items;
+  };
+  return { projects: await pick('案件', rowToProject), engineers: await pick('要員', rowToEngineer) };
+}
+
+// ===== 案件・要員・マッチのまとめ保存（1行ずつの追記で API 呼び出しと実行時間が膨らまないように） =====
+
+interface RowsSaveResult {
+  failed: Map<string, unknown>; // 保存できなかった ID → エラー
+  rows: Map<string, Cell[]>; // 保存できた ID → 書き込んだ行（人が進めたステータス・突合済を引き継いだ値）
+}
+
+// 既存の行は1行ずつ更新し、新しい行はまとめて追記する
+// （タブを読めない・見出しが食い違う場合は全件が失敗）
+async function saveRowsBatch<T extends { id: string }>(
+  tab: string,
+  items: T[],
+  build: (item: T, existing: string[] | null) => Cell[],
+): Promise<RowsSaveResult> {
+  const out: RowsSaveResult = { failed: new Map(), rows: new Map() };
+  if (!configured() || items.length === 0) return out;
+  try {
+    await readRows(tab); // タブの自動生成とヘッダー検証（食い違いは例外）
+  } catch (err) {
+    for (const item of items) out.failed.set(item.id, err);
+    return out;
+  }
+  const fresh: Array<{ id: string; row: Cell[] }> = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    try {
+      if (!(await findRow(tab, 'ID', item.id))) {
+        fresh.push({ id: item.id, row: build(item, null) });
+        continue;
+      }
+      out.rows.set(item.id, await upsertRow(tab, 'ID', item.id, (existing) => build(item, existing)));
+    } catch (err) {
+      out.failed.set(item.id, err);
+    }
+  }
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) {
+    const chunk = fresh.slice(i, i + APPEND_CHUNK);
+    try {
+      await appendRows(tab, chunk.map((f) => f.row));
+      for (const f of chunk) out.rows.set(f.id, f.row);
+    } catch (err) {
+      for (const f of chunk) out.failed.set(f.id, err);
+    }
+  }
+  return out;
+}
+
+export interface SheetsSaveResult<T> {
+  failed: Map<string, unknown>;
+  // 保存できたものの、保存後の状態（人が付けた「終了」「決定済」と突合済の印は、抽出し直した値でなくシートの値）
+  saved: Map<string, T>;
+}
+
+function rowCell(tab: string, row: Cell[], name: string): string {
+  const col = colIndex(tab, name);
+  return col < 0 ? '' : String(row[col] ?? '').trim();
+}
+
+export async function saveProjectsSheets(projects: Project[]): Promise<SheetsSaveResult<Project>> {
+  if (configured()) await loadInjectionFlags();
+  const { failed, rows } = await saveRowsBatch('案件', projects, (p, existing) => keepStatus('案件', projectToRow(withKeptInjection('案件', p, existing)), existing));
+  await recordSavedInjectionFlags('案件', rows);
+  const saved = new Map<string, Project>();
+  for (const p of projects) {
+    const row = rows.get(p.id);
+    if (!row) continue;
+    saved.set(p.id, {
+      ...p,
+      status: rowCell('案件', row, 'ステータス') === '終了' ? 'closed' : 'open',
+      matched: rowCell('案件', row, MATCHED_COLUMN) !== '',
+    });
+  }
+  return { failed, saved };
+}
+
+export async function saveEngineersSheets(engineers: Engineer[]): Promise<SheetsSaveResult<Engineer>> {
+  if (configured()) await loadInjectionFlags();
+  const { failed, rows } = await saveRowsBatch('要員', engineers, (e, existing) => keepStatus('要員', engineerToRow(withKeptInjection('要員', e, existing)), existing));
+  await recordSavedInjectionFlags('要員', rows);
+  const saved = new Map<string, Engineer>();
+  for (const e of engineers) {
+    const row = rows.get(e.id);
+    if (!row) continue;
+    saved.set(e.id, {
+      ...e,
+      status: rowCell('要員', row, 'ステータス') === '決定済' ? 'assigned' : 'available',
+      matched: rowCell('要員', row, MATCHED_COLUMN) !== '',
+    });
+  }
+  return { failed, saved };
+}
+
+export async function saveMatchesSheets(matches: MatchResult[]): Promise<Map<string, unknown>> {
+  return (await saveRowsBatch('マッチ', matches, (m, existing) => matchRow(m, existing))).failed;
+}
+
+// 候補ペアの判定・保存まで済んだ案件・要員に「突合済」を付ける。付けた行数を返す
+export async function markItemsMatchedSheets(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (!configured() || ids.length === 0) return 0;
+  const at = new Date().toISOString();
+  return book.writeCellsByKey(
+    kind === 'project' ? '案件' : '要員',
+    'ID',
+    [...new Set(ids)].map((id) => ({ key: id, cells: [[MATCHED_COLUMN, at]] })),
+  );
+}
+
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける。付けた行数を返す。
+// 列の印は人が消せるため、署名どおりの返信メタがある行は印を含めて署名し直す（列を消しても要確認のまま）
+export async function markItemsInjectionSuspectedSheets(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (!configured() || ids.length === 0) return 0;
+  const tab = kind === 'project' ? '案件' : '要員';
+  const unique = [...new Set(ids)];
+  await loadInjectionFlags();
+  try {
+    await recordInjectionFlags(tab, unique);
+  } catch (err) {
+    warnInjectionLedgerWrite(err);
+  }
+  const metaById = new Map<string, string>();
+  if (draftSigningKey()) {
+    const wanted = new Set(unique);
+    for (const r of await readRows(tab)) {
+      const c = (name: string) => cellStr(r.cells, colIndex(tab, name));
+      const id = c('ID');
+      if (!wanted.has(id) || metaById.has(id)) continue;
+      const meta = c('返信メタ');
+      const binding = replyBinding(tab, id, c('営業元メール'));
+      if (meta && verifyReplyMeta(meta, binding) && !replyMetaInjection(meta)) {
+        metaById.set(id, replyMetaJson(parseReplyMeta(meta), binding, { injection: true }));
+      }
+    }
+  }
+  return book.writeCellsByKey(
+    tab,
+    'ID',
+    unique.map((id) => ({
+      key: id,
+      cells: [[INJECTION_COLUMN, INJECTION_MARK], ...(metaById.has(id) ? [['返信メタ', metaById.get(id)!] as [string, string]] : [])],
+    })),
+  );
+}
+
+// ===== マッチ結果 =====
+
+function readDraftColumns(tab: string, cells: string[]): DraftColumns {
+  const c = (name: string) => cellStr(cells, colIndex(tab, name));
+  return {
+    projectState: c('案件側下書き状態'),
+    engineerState: c('要員側下書き状態'),
+    projectText: rawCell(cells, colIndex(tab, '案件側文面')),
+    engineerText: rawCell(cells, colIndex(tab, '要員側文面')),
+    data: c('下書きデータ'),
+  };
+}
+
+// 再実行で行が増殖しないよう、同じペアのマッチID（案件ID×要員IDから作る安定ID）の既存行があれば更新（upsert）。
+// タイトル（案件名×イニシャル）は別ペアと重なり得るため鍵にしない。
+// 人が編集する列（ステータス・担当者メール・下書き状態）は既存値を保持し、機械の初期値で巻き戻さない
+function matchRow(match: MatchResult, existing: string[] | null): Cell[] {
+  const keep = (name: string) => (existing ? cellStr(existing, colIndex('マッチ', name)) : '');
+  const senderEmail = existing?.[colIndex('マッチ', '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
+  const id = keep('ID') || match.id;
+  const drafts = mergeDraftColumns(
+    existing ? readDraftColumns('マッチ', existing) : null,
+    match.draftToProject,
+    match.draftToEngineer,
+    {
+      failed: match.draftFailed,
+      deferred: match.category === 'deferred',
+      signingKey: draftSigningKey(),
+      bind: draftBinding('マッチ', id),
+    },
+  );
+  return [
+    id, match.title, match.grossMarginJpy, match.score, match.reason, match.projectId,
+    match.engineerId, match.draftToProject?.url ?? '', match.draftToEngineer?.url ?? '',
+    keep('ステータス') || matchStatusLabel(match.status), match.detectedAt.toISOString(),
+    senderEmail, drafts.projectState, drafts.engineerState, drafts.projectText, drafts.engineerText, drafts.data,
+    judgeVerdictLabel(match.verdict),
+  ];
+}
+
+export async function saveMatchSheets(match: MatchResult): Promise<string> {
+  if (!configured()) return '';
+  const idCol = colIndex('マッチ', 'ID');
+  const row = await upsertRow('マッチ', 'ID', match.id, (existing) => matchRow(match, existing));
+  return String(row[idCol]);
+}
+
+// マッチタブの判定の控え。judged=判定済み（通常バッチで同じペアをLLMで判定し直さない）、capFree=そのうち不適合・低評価で
+// 候補の枠（案件ごと・要員ごとの上限）を使わない組、deferred=AI判定を次回に回した組（判定「未判定」）と文面の作り直し待ちの組
+// （一次選抜で選ばれ直さなくても判定し直す作業の列）。文面を用意できなかった行（下書き状態「文面を用意できませんでした」）と
+// 未判定の行は判定済みに含めず、次回のバッチで判定と文面の作成をやり直す
+export interface MatchLedger {
+  judged: Set<string>;
+  capFree: Set<string>;
+  deferred: Set<string>;
+}
+
+const CAP_FREE_VERDICTS = new Set([JUDGE_VERDICT_LABEL.rejected, JUDGE_VERDICT_LABEL.low]);
+
+export async function fetchMatchLedgerSheets(): Promise<MatchLedger> {
+  const ledger: MatchLedger = { judged: new Set(), capFree: new Set(), deferred: new Set() };
+  if (!configured()) return ledger;
+  const rows = await readRows('マッチ');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  for (const r of rows) {
+    const id = c(r.cells, 'ID');
+    if (!id) continue;
+    const verdict = c(r.cells, JUDGE_COLUMN);
+    if (verdict === JUDGE_VERDICT_LABEL.deferred) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    // 文面の作り直し待ちの組も作業の列に入れる（案件・要員が突合済でも判定と文面の作成をやり直す）
+    if (isDraftRegenerationPending(c(r.cells, '案件側下書き状態')) || isDraftRegenerationPending(c(r.cells, '要員側下書き状態'))) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    ledger.judged.add(id);
+    if (CAP_FREE_VERDICTS.has(verdict)) ledger.capFree.add(id);
+  }
+  // 同じIDの行が複数あり、どれかが判定済みなら判定済みとして扱う（作業の列に残さない）
+  for (const id of ledger.judged) ledger.deferred.delete(id);
+  return ledger;
+}
+
+export async function fetchJudgedMatchIdsSheets(): Promise<Set<string>> {
+  return (await fetchMatchLedgerSheets()).judged;
+}
+
+// 判定待ち・文面の作り直し待ちのまま対象から外れた組（案件の終了・要員の稼働終了・ルールを通らなくなった等）を閉じる:
+// 未判定の行は判定を「ルールのみ」にし、「判定待ち」「文面を用意できませんでした」の下書き状態を「不要」にする
+// （作り直し待ちの行の判定は残す。人が変えた状態は変えない）。閉じた行数を返す
+export async function closeDeferredMatchesSheets(ids: string[]): Promise<number> {
+  if (!configured() || ids.length === 0) return 0;
+  const want = new Set(ids);
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  const draftCols = ['案件側下書き状態', '要員側下書き状態'];
+  for (const r of await readRows('マッチ')) {
+    const id = c(r.cells, 'ID');
+    if (!want.has(id)) continue;
+    const deferred = c(r.cells, JUDGE_COLUMN) === JUDGE_VERDICT_LABEL.deferred;
+    const regen = draftCols.some((col) => isDraftRegenerationPending(c(r.cells, col)));
+    if (!deferred && !regen) continue;
+    const cells: Array<[string, Cell]> = deferred ? [[JUDGE_COLUMN, JUDGE_VERDICT_LABEL.rule]] : [];
+    for (const col of draftCols) {
+      const state = c(r.cells, col);
+      if (state.startsWith(DRAFT_STATE.awaitingJudge) || isDraftRegenerationPending(state)) cells.push([col, DRAFT_STATE.notNeeded]);
+    }
+    updates.push({ key: id, cells });
+    want.delete(id);
+  }
+  return book.writeCellsByKey('マッチ', 'ID', updates);
+}
+
+// 再提案抑制の元になる組: ステータスを「見送り」にしたマッチと、評価で「ズレ」にしたマッチ（badIds）の案件ID・要員ID
+export interface RejectedMatchRow {
+  matchId: string;
+  projectId: string;
+  engineerId: string;
+  source: 'dropped' | 'bad';
+}
+
+export async function fetchRejectedMatchRowsSheets(badIds: Set<string>): Promise<RejectedMatchRow[]> {
+  if (!configured()) return [];
+  const dropped = matchStatusLabel('dropped');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const out: RejectedMatchRow[] = [];
+  for (const r of await readRows('マッチ')) {
+    const matchId = c(r.cells, 'ID');
+    const projectId = c(r.cells, '案件ID');
+    const engineerId = c(r.cells, '要員ID');
+    if (!matchId || !projectId || !engineerId) continue;
+    if (c(r.cells, 'ステータス') === dropped) out.push({ matchId, projectId, engineerId, source: 'dropped' });
+    else if (badIds.has(matchId)) out.push({ matchId, projectId, engineerId, source: 'bad' });
+  }
+  return out;
+}
+
+// IDを指定して案件・要員を読む（ステータスによらず）。再提案抑制で、見送りにした組の案件・要員の内容と再送を比べるために使う
+export async function fetchItemsByIdsSheets(
+  projectIds: Set<string>,
+  engineerIds: Set<string>,
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (!configured() || (projectIds.size === 0 && engineerIds.size === 0)) return { projects: [], engineers: [] };
+  await loadInjectionFlags();
+  const pick = async <T>(tab: string, ids: Set<string>, toItem: (cells: string[]) => T): Promise<T[]> => {
+    if (ids.size === 0) return [];
+    const col = colIndex(tab, 'ID');
+    const items = (await readRows(tab)).filter((r) => ids.has(cellStr(r.cells, col))).map((r) => toItem(r.cells));
+    untrustedReplyRows.delete(tab);
+    return items;
+  };
+  return { projects: await pick('案件', projectIds, rowToProject), engineers: await pick('要員', engineerIds, rowToEngineer) };
+}
+
+// サマリで知らせ損ねたマッチを次の回のサマリに載せるための要約（保存済みの行から）
+export interface MatchSummaryRow {
+  id: string;
+  title: string;
+  grossMarginJpy: number | null;
+  score: number | null;
+  reason: string;
+}
+
+export async function fetchMatchSummariesSheets(ids: string[]): Promise<MatchSummaryRow[]> {
+  if (!configured() || ids.length === 0) return [];
+  const want = new Set(ids);
+  const seen = new Set<string>();
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('マッチ', name));
+  const out: MatchSummaryRow[] = [];
+  for (const r of await readRows('マッチ')) {
+    const id = c(r.cells, 'ID');
+    if (!want.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: c(r.cells, 'マッチ名'),
+      grossMarginJpy: cellNum(r.cells, colIndex('マッチ', '粗利額')),
+      score: cellNum(r.cells, colIndex('マッチ', '適合スコア')),
+      reason: c(r.cells, '判定根拠'),
+    });
+  }
+  return out;
+}
+
+export async function updateMatchStatusSheets(id: string, status: MatchStatus): Promise<void> {
+  if (!configured()) return;
+  const hit = await locateRow('マッチ', 'ID', id);
+  if (!hit) {
+    console.warn(`SheetsDB: ステータス更新対象のマッチが見つかりません (${logId(id)})`);
+    return;
+  }
+  await book.writeCells('マッチ', hit, [['ステータス', matchStatusLabel(status)]]);
+}
+
+// ===== 担当者メール列による下書き依頼（マッチ・プロパー候補等、下書き依頼の列を持つタブ共通） =====
+
+const DRAFT_STATE_COLUMNS: Record<DraftSide, string> = { project: '案件側下書き状態', engineer: '要員側下書き状態' };
+
+// 下書きデータの署名に含める行の識別（署名つきの下書きデータを別の行へ写しても通らないように）
+export function draftBinding(tab: string, id: string): string[] {
+  return [tab, id.trim()];
+}
+
+// ID・担当者メール・下書きデータと、少なくとも片側の状態列を持つタブ（プロパー候補は案件側のみ）
+export function draftRequestTabs(): string[] {
+  return book.tabNames().filter((tab) => {
+    const cols = book.columns(tab);
+    return (
+      ['ID', '担当者メール', '下書きデータ'].every((c) => cols.includes(c)) &&
+      Object.values(DRAFT_STATE_COLUMNS).some((c) => cols.includes(c))
+    );
+  });
+}
+
+export interface DraftRequestRow {
+  tab: string;
+  id: string;
+  rowNumber: number; // 一覧で見つけたシート上の行（同じIDの行が複数あっても、依頼の入った行そのものを扱う）
+  senderEmail: string; // 担当者メール（ログに出さないこと）
+  projectState: string;
+  engineerState: string;
+  draftData: string; // 下書きデータ列のJSON（mapping.parseDraftData で読む）
+}
+
+function toDraftRequestRow(tab: string, row: CachedRow): DraftRequestRow {
+  const cells = row.cells;
+  const c = (name: string) => cellStr(cells, colIndex(tab, name));
+  // 状態列の無い側は「不要」とみなし、作成対象にも書き込み対象にもしない
+  const state = (side: DraftSide) =>
+    colIndex(tab, DRAFT_STATE_COLUMNS[side]) >= 0 ? c(DRAFT_STATE_COLUMNS[side]) : DRAFT_STATE.notNeeded;
+  return {
+    tab,
+    id: c('ID'),
+    rowNumber: row.rowNumber,
+    senderEmail: c('担当者メール'),
+    projectState: state('project'),
+    engineerState: state('engineer'),
+    draftData: c('下書きデータ'),
+  };
+}
+
+// 担当者メールが入っている行（行キャッシュから。状態による絞り込みは呼び出し側）。
+// ヘッダー行が定義と食い違うタブは例外（列を取り違えて別の行・列の依頼として扱わないため）
+export async function listDraftRequestRowsSheets(tab: string): Promise<DraftRequestRow[]> {
+  if (!configured() || !draftRequestTabs().includes(tab)) return [];
+  const rows = await readRows(tab);
+  return rows.map((r) => toDraftRequestRow(tab, r)).filter((r) => r.id && r.senderEmail);
+}
+
+function normalizedSender(s: string): string {
+  return s.normalize('NFKC').trim().toLowerCase();
+}
+
+// 一覧で見つけた依頼の行を読み直す（一覧取得後に人が担当者メール・状態を変えていても最新値で判断するため）。
+// 行がずれていれば（人が行を挿入した等）タブを読み直し、同じIDの行のうち同じ担当者メールの入った行を探す。
+// 見つからなければ null
+async function locateRequestRow(listed: Pick<DraftRequestRow, 'tab' | 'id' | 'rowNumber' | 'senderEmail'>): Promise<CachedRow | null> {
+  const { tab, id } = listed;
+  const exact = await book.rowAt(tab, listed.rowNumber, 'ID', id);
+  if (exact) return exact;
+  book.invalidate(tab);
+  const senderCol = colIndex(tab, '担当者メール');
+  const rows = await book.findRows(tab, 'ID', id);
+  const want = normalizedSender(listed.senderEmail);
+  const hit =
+    rows.find((r) => want !== '' && normalizedSender(cellStr(r.cells, senderCol)) === want) ??
+    rows.find((r) => cellStr(r.cells, senderCol) !== '') ??
+    rows[0];
+  return hit ? book.rowAt(tab, hit.rowNumber, 'ID', id) : null;
+}
+
+export async function reloadDraftRequestRowSheets(
+  listed: Pick<DraftRequestRow, 'tab' | 'id' | 'rowNumber' | 'senderEmail'>,
+): Promise<DraftRequestRow | null> {
+  const hit = await locateRequestRow(listed);
+  return hit ? toDraftRequestRow(listed.tab, hit) : null;
+}
+
+function draftStateOf(row: DraftRequestRow, side: DraftSide): string {
+  return side === 'project' ? row.projectState : row.engineerState;
+}
+
+// 下書き状態列だけを書き込む（他の列は人の編集と競合させないため触らない）。対象行が無ければ false。
+// expect を渡すと、書き込む側の状態が読み直した行で expect と同じときだけ書く（別の実行・人が先に状態を変えていたら
+// 書かずに false。同時に動いた実行が同じ依頼を二重に作らないための確認）
+export async function writeDraftStatesSheets(
+  row: Pick<DraftRequestRow, 'tab' | 'id' | 'rowNumber' | 'senderEmail'>,
+  states: Partial<Record<DraftSide, string>>,
+  expect?: DraftRequestRow,
+): Promise<boolean> {
+  const tab = row.tab;
+  const hit = await locateRequestRow(row);
+  if (!hit) return false;
+  const sides = (Object.keys(DRAFT_STATE_COLUMNS) as DraftSide[]).filter((side) => states[side] !== undefined);
+  if (expect) {
+    const current = toDraftRequestRow(tab, hit);
+    if (sides.some((side) => draftStateOf(current, side) !== draftStateOf(expect, side))) return false;
+  }
+  const updates: Array<[string, Cell]> = sides.map((side) => [DRAFT_STATE_COLUMNS[side], states[side]!]);
+  await book.writeCells(tab, hit, updates);
+  return true;
+}
+
+// ===== プロパー候補（自社社員のスキルシート × 案件） =====
+
+function properVerdict(c: ProperCandidate): string {
+  return c.needsReview ? '要確認（単価・勤務地が不明）' : '単価充足';
+}
+
+// 小数は1桁に丸める（シートの表示値と比べて差分判定するため、桁数の揺れで毎回書き直さない）
+function round1(n: number | null): number | null {
+  return n === null ? null : Math.round(n * 10) / 10;
+}
+
+function properCandidateRow(c: ProperCandidate, existing: string[] | null): Cell[] {
+  const tab = PROPER_CANDIDATE_TAB;
+  const keep = (name: string) => (existing ? cellStr(existing, colIndex(tab, name)) : '');
+  const senderEmail = existing?.[colIndex(tab, '担当者メール')] ?? ''; // 人の入力をそのまま（トリムもしない）
+  const drafts = mergeDraftColumns(existing ? readDraftColumns(tab, existing) : null, c.draftToProject, undefined, {
+    signingKey: draftSigningKey(),
+    bind: draftBinding(tab, c.id),
+  });
+  return [
+    c.id, c.properLabel, c.projectTitle, round1(c.projectRate), round1(c.requiredProjectRate), round1(c.rateGapMan),
+    Math.round(c.skillMatchRate * 100), c.band === 'strong' ? '強マッチ' : '参考提案', properVerdict(c), c.score,
+    c.reason, c.projectId, c.agentEmail,
+    keep('検出日時') || c.detectedAt.toISOString(), // 初回検出日時を保つ（毎回の書き直しを避ける）
+    keep('ステータス') || matchStatusLabel('unconfirmed'),
+    senderEmail, drafts.projectState, drafts.projectText, drafts.data,
+  ];
+}
+
+// プロパー候補のID（ownmatch_<社員ID>_<案件ID>）から社員IDを取り出す（案件IDは proj_ で始まる）
+export function properEngineerIdOfCandidate(candidateId: string): string {
+  const rest = candidateId.startsWith('ownmatch_') ? candidateId.slice('ownmatch_'.length) : '';
+  const at = rest.lastIndexOf('_proj_');
+  return at > 0 ? rest.slice(0, at) : '';
+}
+
+// 募集終了の連絡に合わせて、同じ送信元ドメインの募集中の案件のうち、連絡に案件名が出てくるものを「終了」にする。
+// 人が付けたステータス（終了以外の値を含む）は、募集中・空欄のときだけ書き換える。閉じた行数を返す
+export async function closeProjectsForNoticesSheets(
+  notices: Array<{ domain: string; subject: string; body: string }>,
+  mentions: (notice: { subject: string; body: string }, title: string) => boolean,
+): Promise<number> {
+  if (!configured() || notices.length === 0) return 0;
+  const tab = '案件';
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  let closed = 0;
+  for (const r of await readRows(tab)) {
+    const status = c(r.cells, 'ステータス');
+    if (status !== '' && status !== '募集中') continue;
+    const domain = (c(r.cells, '営業元メール').match(/@([A-Za-z0-9.-]+)/)?.[1] ?? '').toLowerCase();
+    if (!domain) continue;
+    const title = c(r.cells, '案件名');
+    if (!notices.some((n) => n.domain === domain && mentions(n, title))) continue;
+    await book.writeCells(tab, r, [['ステータス', '終了']]);
+    closed += 1;
+  }
+  return closed;
+}
+
+// プロパーの社員ID。スキルシートのDriveのファイルIDはそのままファイルのURLになり、リンク共有のスキルシートを
+// 案件スプレッドシートの閲覧者が開けてしまうため、一方向のハッシュにする（元のIDはプロパー管理表にだけ置く）
+export function properEngineerIdOf(fileId: string): string {
+  return `proper_${createHash('sha256').update(fileId).digest('hex').slice(0, 16)}`;
+}
+
+// 以前の版はプロパー候補のIDにDriveのファイルIDをそのまま入れていたため、ハッシュのIDに書き換える
+async function migrateLegacyProperIds(): Promise<void> {
+  const tab = PROPER_CANDIDATE_TAB;
+  const idCol = colIndex(tab, 'ID');
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  for (const r of await readRows(tab)) {
+    const id = cellStr(r.cells, idCol);
+    const engineerId = properEngineerIdOfCandidate(id);
+    if (!engineerId.startsWith('proper_') || /^proper_[0-9a-f]{16}$/.test(engineerId)) continue;
+    const fileId = engineerId.slice('proper_'.length);
+    updates.push({ key: id, cells: [['ID', `ownmatch_${properEngineerIdOf(fileId)}${id.slice(`ownmatch_${engineerId}`.length)}`]] });
+  }
+  if (updates.length === 0) return;
+  const n = await book.writeCellsByKey(tab, 'ID', updates);
+  console.log(`SheetsDB: 「${tab}」タブの${n}行のIDを、スキルシートのファイルIDを含まない形に書き換えました`);
+}
+
+// 候補を ID で upsert する。人の列（ステータス・担当者メール・案件側下書き状態）は保持し、
+// 内容が変わらない行は書き込まない（毎回の実行で候補数ぶんのAPI呼び出しをしないため）。新規行はまとめて追記。
+// 保存（追記・更新）した行数を返す
+// まだ「プロパー候補」タブに無い（今回初めて見つかった）候補のID
+export async function newProperCandidateIdsSheets(ids: string[]): Promise<Set<string>> {
+  if (!configured() || ids.length === 0) return new Set();
+  const tab = PROPER_CANDIDATE_TAB;
+  const known = new Set((await readRows(tab)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))));
+  return new Set(ids.filter((id) => !known.has(id)));
+}
+
+export async function saveProperCandidatesSheets(candidates: ProperCandidate[]): Promise<number> {
+  if (!configured() || candidates.length === 0) return 0;
+  const tab = PROPER_CANDIDATE_TAB;
+  await readRows(tab); // タブの自動生成とヘッダー検証（食い違いは例外）を先に済ませる
+  await migrateLegacyProperIds();
+  const fresh: Cell[][] = [];
+  let written = 0;
+  for (const c of candidates) {
+    const cached = await findRow(tab, 'ID', c.id);
+    if (!cached) {
+      fresh.push(properCandidateRow(c, null));
+      continue;
+    }
+    if (sameCells(properCandidateRow(c, cached.cells), cached.cells)) continue;
+    await upsertRow(tab, 'ID', c.id, (existing) => properCandidateRow(c, existing));
+    written += 1;
+  }
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) await appendRows(tab, fresh.slice(i, i + APPEND_CHUNK));
+  return written + fresh.length;
+}
+
+export const RETIRED_PROPER_VERDICT = '対象外（稼働可の社員ではなくなりました）';
+
+// 稼働可でなくなった（対象外・アサイン済・スキルシートの削除等）社員のプロパー候補の行を退役させる。
+// 氏名と必要案件単価（根拠の文にも含まれる）・提案文面・下書きデータを消し、まだ作っていない側の下書き状態を「不要」にする
+// （古いサマリを見た営業が担当者メールを入れても、提案をやめた社員を社外に紹介しないため）。退役させた行数を返す
+export async function retireProperCandidatesSheets(activeEngineerIds: Set<string>): Promise<number> {
+  if (!configured()) return 0;
+  const tab = PROPER_CANDIDATE_TAB;
+  await migrateLegacyProperIds();
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  for (const r of await readRows(tab)) {
+    const id = c(r.cells, 'ID');
+    if (!id || activeEngineerIds.has(properEngineerIdOfCandidate(id))) continue;
+    // 以前の版で退役させた行は根拠（必要案件単価を含む）が残っているため、消し終えるまで対象にする
+    if (c(r.cells, '判定') === RETIRED_PROPER_VERDICT && c(r.cells, '根拠') === '') continue;
+    const cells: Array<[string, Cell]> = [
+      ['プロパー', '（対象外）'], ['必要案件単価', ''], ['単価差', ''], ['判定', RETIRED_PROPER_VERDICT],
+      ['根拠', ''], ['案件側文面', ''], ['下書きデータ', ''],
+    ];
+    if (!isDraftStateLocked(c(r.cells, '案件側下書き状態'))) cells.push(['案件側下書き状態', DRAFT_STATE.retired]);
+    updates.push({ key: id, cells });
+  }
+  if (updates.length === 0) return 0;
+  return book.writeCellsByKey(tab, 'ID', updates);
+}
+
+// ===== 自社社員 =====
+
+export async function saveOwnEngineerSheets(own: OwnEngineer): Promise<string> {
+  if (!configured()) return '';
+  await upsertRow('自社社員', 'ID', own.id, (existing) =>
+    keepStatus(
+      '自社社員',
+      [
+        own.id, own.displayName, joinList(own.skills), own.experienceYears, own.requiredProjectRate,
+        own.residence, remoteLabel(own.remoteWish), own.availableFrom ?? '',
+        own.status === 'assigned' ? 'アサイン済' : '稼働可',
+      ],
+      existing,
+    ),
+  );
+  return own.id;
+}
+
+export async function fetchOwnEngineersSheets(limit = 100): Promise<OwnEngineer[]> {
+  if (!configured()) {
+    console.warn('SheetsDB: 自社社員なしで継続します');
+    return [];
+  }
+  const rows = await readRows('自社社員');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('自社社員', name));
+  const n = (cells: string[], name: string) => cellNum(cells, colIndex('自社社員', name));
+  return rows
+    .filter((r) => c(r.cells, 'ステータス') === '稼働可')
+    .slice(0, limit)
+    .map((r) => {
+      const residence = c(r.cells, '居住地');
+      return {
+        id: c(r.cells, 'ID'),
+        displayName: c(r.cells, '表示名'),
+        skills: normalizeSkills(splitList(c(r.cells, 'スキル'))),
+        experienceYears: n(r.cells, '経験年数'),
+        requiredProjectRate: n(r.cells, '必要案件単価'),
+        residence,
+        prefecture: normalizePrefecture(residence),
+        availableDate: '',
+        availableFrom: c(r.cells, '稼働可能日') || null,
+        remoteWish: labelToRemote(c(r.cells, 'リモート希望')),
+        status: 'available' as const,
+        notionPageId: c(r.cells, 'ID'),
+      };
+    });
+}
+
+// ===== 評価（人間フィードバック） =====
+
+export async function saveMatchFeedbackSheets(fb: MatchFeedback): Promise<string> {
+  if (!configured()) return '';
+  await appendRows('評価', [[fb.at, fb.matchId, fb.matchTitle, FB_VERDICT_LABEL[fb.verdict], fb.note, fb.reviewer, fb.band ?? '']]);
+  return fb.matchId;
+}
+
+export async function fetchRecentFeedbackSheets(limit = 200): Promise<MatchFeedback[]> {
+  if (!configured()) return [];
+  const rows = await readRows('評価');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('評価', name));
+  // 追記順（古い順）なので反転して新しい順で返す（Notion版のdescendingソートと揃える）
+  return rows
+    .reverse()
+    .slice(0, limit)
+    .map((r) => {
+      const bandRaw = c(r.cells, 'バンド');
+      return {
+        matchId: c(r.cells, '元マッチID'),
+        matchTitle: c(r.cells, 'マッチ名'),
+        verdict: c(r.cells, '評価') === 'ズレ' ? ('bad' as const) : ('good' as const),
+        note: c(r.cells, 'メモ'),
+        reviewer: c(r.cells, '評価者'),
+        band: bandRaw === 'strong' || bandRaw === 'tentative' ? bandRaw : undefined,
+        at: c(r.cells, '日時') || new Date().toISOString(),
+      };
+    });
+}
+
+// ===== スキル同義辞書 =====
+
+export async function saveSkillEquivalenceSheets(e: SkillEquivalence): Promise<string> {
+  if (!configured()) return '';
+  await appendRows('スキル同義', [[e.a, e.b, e.addedBy, e.at]]);
+  return e.a;
+}
+
+export async function fetchSkillEquivalencesSheets(limit = 500): Promise<SkillEquivalence[]> {
+  if (!configured()) return [];
+  const rows = await readRows('スキル同義');
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex('スキル同義', name));
+  // 追記順（古い順）なので反転し、上限に達したときは新しい登録を優先する
+  return rows.reverse().slice(0, limit).map((r) => ({
+    a: c(r.cells, 'スキルA'),
+    b: c(r.cells, 'スキルB'),
+    addedBy: c(r.cells, '追加者'),
+    at: c(r.cells, '日時') || new Date().toISOString(),
+  }));
+}
+
+// ===== メトリクス（バッチごとの件数・比率を1行ずつ追記） =====
+
+// 列の名前 → 値。定義に無い名前は書かない（人名・案件名を渡さないこと）
+export async function appendMetricsRowSheets(values: Record<string, Cell>): Promise<void> {
+  if (!configured()) return;
+  await appendRows(METRICS_TAB, [METRICS_COLUMNS.map((name) => values[name] ?? '')]);
+}
+
+// ===== バッチ横断の状態（スケジュール実行はローカルファイルが残らないためシートに置く） =====
+
+// 除外 = 自分たちのメール（サマリ・自社ドメイン等）として取り込まなかったもの
+// 再送スキップ = 直近に抽出した内容と同じ再送として、抽出せずに処理済みにしたもの
+export type ProcessedMailResult = '抽出済' | '隔離' | '除外' | '再送スキップ' | '解析不可' | '要員スキップ' | '募集終了';
+
+// 処理済みメールに付ける再送判定用の指紋（本文は含まない）と、元にしたメール
+export interface ProcessedFingerprint {
+  fingerprint: string;
+  rootMailId: string;
+}
+
+export async function loadProcessedMailIdsSheets(): Promise<Set<string>> {
+  const rows = await readRows('処理済みメール');
+  const col = colIndex('処理済みメール', 'メールID');
+  return new Set(rows.map((r) => cellStr(r.cells, col)).filter(Boolean));
+}
+
+// 1回のAPI呼び出しあたりの追記行数（リクエストサイズ上限の手前で区切る）
+const APPEND_CHUNK = 500;
+
+// 収集期間を十分過ぎた処理済みメールの記録を削除する（収集の窓の外のメールは二度と取得しないため記録は不要。
+// 追記だけだとスプレッドシートのセル数の上限に近づく）。少ないうちは消さない（毎回の行削除を避ける）。削除した行数を返す
+// 未来の処理日時（シートの編集者が書いた値）の行も古い行として消す（いつまでも残って再送スキップの元にならないように）
+export async function pruneProcessedMailSheets(before: Date, minRows = 200, now = new Date()): Promise<number> {
+  if (!configured()) return 0;
+  const tab = '処理済みメール';
+  const col = colIndex(tab, '処理日時');
+  const isOld = (r: CachedRow) => {
+    const t = Date.parse(cellStr(r.cells, col));
+    return Number.isFinite(t) && (t < before.getTime() || t > now.getTime() + PROCESSED_AT_SKEW_MS);
+  };
+  if ((await readRows(tab)).filter(isOld).length < minRows) return 0;
+  return book.deleteRowsWhere(tab, isOld); // 消す直前に読み直した行番号で消す
+}
+
+export interface RetentionResult {
+  projects: number;
+  engineers: number;
+  matches: number;
+  matchesCleared: number;
+  properCandidates: number;
+  feedback: number;
+}
+
+async function deleteRowsIfAny(tab: string, match: (row: CachedRow) => boolean): Promise<number> {
+  if (!(await readRows(tab)).some(match)) return 0;
+  return book.deleteRowsWhere(tab, match);
+}
+
+// 個人データの保存期間を過ぎた行の整理（要員の表示名・年齢・居住地・希望単金・営業元の連絡先・返信メタ、紹介文面・下書きデータ等）。
+// - マッチ・プロパー候補: 検出日時が before より前の行を削除（成約の行は記録として残し、判定根拠・文面・下書きデータだけ消す）
+// - 案件・要員: 受信日（再送で更新した最終受信日を含む）が before より前で、残したマッチ・プロパー候補の行から参照されない行を削除
+// - 評価: 日時が before より前の行（メモを含む）を削除
+// 日時の読めない行は消さない。消した・消去した行数を返す
+export async function pruneStalePersonalDataSheets(before: Date): Promise<RetentionResult> {
+  const out: RetentionResult = { projects: 0, engineers: 0, matches: 0, matchesCleared: 0, properCandidates: 0, feedback: 0 };
+  if (!configured()) return out;
+  const cutoff = before.getTime();
+  const olderThan = (raw: string) => {
+    const t = Date.parse(raw);
+    return Number.isFinite(t) && t < cutoff;
+  };
+  const c = (tab: string, cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+
+  const mTab = 'マッチ';
+  const won = MATCH_STATUS_LABEL.closed_won;
+  const referenced = new Set<string>();
+  const matchRows = await readRows(mTab);
+  for (const r of matchRows) {
+    if (olderThan(c(mTab, r.cells, '検出日時'))) continue;
+    referenced.add(c(mTab, r.cells, '案件ID'));
+    referenced.add(c(mTab, r.cells, '要員ID'));
+  }
+  const pTab = PROPER_CANDIDATE_TAB;
+  for (const r of await readRows(pTab)) {
+    if (!olderThan(c(pTab, r.cells, '検出日時'))) referenced.add(c(pTab, r.cells, '案件ID'));
+  }
+
+  const textColumns = ['判定根拠', '案件側文面', '要員側文面', '下書きデータ'];
+  const clears = matchRows
+    .filter((r) => olderThan(c(mTab, r.cells, '検出日時')) && c(mTab, r.cells, 'ステータス') === won && textColumns.some((n) => c(mTab, r.cells, n) !== ''))
+    .map((r) => ({ key: c(mTab, r.cells, 'ID'), cells: textColumns.map((n): [string, Cell] => [n, '']) }))
+    .filter((u) => u.key);
+  if (clears.length > 0) out.matchesCleared = await book.writeCellsByKey(mTab, 'ID', clears);
+  out.matches = await deleteRowsIfAny(mTab, (r) => olderThan(c(mTab, r.cells, '検出日時')) && c(mTab, r.cells, 'ステータス') !== won);
+  out.properCandidates = await deleteRowsIfAny(pTab, (r) => olderThan(c(pTab, r.cells, '検出日時')));
+
+  const staleItem = (tab: string) => (r: CachedRow) => {
+    if (referenced.has(c(tab, r.cells, 'ID'))) return false;
+    const t = latestReceivedAt(c(tab, r.cells, '受信日'), c(tab, r.cells, LAST_SEEN_COLUMN)).getTime();
+    return t !== UNKNOWN_RECEIVED_AT && t < cutoff;
+  };
+  out.projects = await deleteRowsIfAny('案件', staleItem('案件'));
+  out.engineers = await deleteRowsIfAny('要員', staleItem('要員'));
+  out.feedback = await deleteRowsIfAny('評価', (r) => olderThan(c('評価', r.cells, '日時')));
+  return out;
+}
+
+// スプレッドシート全体のセル数（直近のタブ確認時点）
+export function sheetsCellCount(): number {
+  return book.cellCount();
+}
+
+// バッチの開始時に、保存先のタブを読めること（共有・見出し）を確かめる。問題があれば例外。
+// あわせて「突合済」列の導入前からある案件・要員の行を突合済みにする（migrateMatchedColumn）
+export async function checkSheetsTabs(tabs: string[]): Promise<void> {
+  for (const tab of tabs) await readRows(tab);
+  for (const tab of ['案件', '要員']) {
+    if (tabs.includes(tab)) await migrateMatchedColumn(tab);
+  }
+}
+
+const MIGRATED_MARK = '移行';
+
+interface MigrationState {
+  state: 'started' | 'done';
+  at: string;
+}
+
+// 「突合済」列の導入前からある行を突合済みにする（新しい仕組みに切り替えた最初の実行で、保存済みの全案件・要員の組を
+// 判定し直して費用がかさまないように）。列をどのプロセスが追加したか（確認UI・自社社員探し等でも追加される）に依らず、
+// _状態タブの印で1回だけ行う。印は書き込みがすべて済んでから「完了」にするため、途中で失敗しても次の実行でやり直す
+// 移行の印の形の検査（人が消した・書き換えた印を「未移行」と読んで、突合前の行を黙って突合済みにしないため）
+function migrationStateOf(raw: unknown): MigrationState | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const st = (raw as { state?: unknown }).state;
+  const at = (raw as { at?: unknown }).at;
+  return (st === 'started' || st === 'done') && typeof at === 'string' ? { state: st, at } : null;
+}
+
+// 印が無い・壊れているときに、移行を行ってよいか。突合済の列に機械が書いた日時（ISO形式）が1行でもあるタブは、
+// すでに新しい仕組みで突合している＝移行済み（印を人が消した・_状態タブを消した）とみなし、空欄の行（期限・予算で
+// 後回しにした突合前の行）を突合済みにしない。以前の版の移行の印（「移行 …」）がある場合も同じ
+export function matchedColumnNeedsMigration(matchedCells: string[]): boolean {
+  return !matchedCells.some((v) => v.startsWith(MIGRATED_MARK) || /^\d{4}-\d{2}-\d{2}T/.test(v.trim()));
+}
+
+async function migrateMatchedColumn(tab: string): Promise<void> {
+  const key = `migration:${MATCHED_COLUMN}:${tab}`;
+  const rawState = await readStateJson<unknown>(key);
+  const state = migrationStateOf(rawState);
+  if (state?.state === 'done') return;
+  const col = colIndex(tab, MATCHED_COLUMN);
+  const rows = await readRows(tab);
+  // 途中で止まった移行（印が started）は続ける。印が無い・壊れている場合は、突合済の列の中身で移行済みかを判断する
+  const needed = state?.state === 'started' || matchedColumnNeedsMigration(rows.map((r) => cellStr(r.cells, col)));
+  const ids = needed ? rows.filter((r) => !cellStr(r.cells, col)).map((r) => cellStr(r.cells, colIndex(tab, 'ID'))).filter(Boolean) : [];
+  const at = new Date().toISOString();
+  if (!state && rawState !== null) {
+    recordHealEvent('warn', `_状態タブの「${key}」の値が読めない形でした（移行済みとして書き直します）`);
+  }
+  if (ids.length > 0) {
+    await writeStateJson(key, { state: 'started', at } satisfies MigrationState);
+    const marked = await book.writeCellsByKey(tab, 'ID', ids.map((id) => ({ key: id, cells: [[MATCHED_COLUMN, `${MIGRATED_MARK} ${at}`]] })));
+    if (marked > 0) {
+      recordHealEvent('warn', `「${tab}」タブの突合前の${marked}行を突合済みにしました（${MATCHED_COLUMN}列の導入に伴う移行。新着として突合されません）`);
+    }
+  }
+  await writeStateJson(key, { state: 'done', at } satisfies MigrationState);
+}
+
+// 処理日時の未来側の許容幅（実行環境の時計のずれ）
+const PROCESSED_AT_SKEW_MS = 10 * 60 * 1000;
+const PROCESSED_SIG_SEP = '~';
+
+// 再送判定の記録（メールID・処理日時・結果・指紋・元メール）の署名（SES_DRAFT_SIGNING_KEY。未設定なら ''）。
+// 処理済みメールタブのセルはシートの編集者が書けるため、写した・書き換えた行を再送スキップ・最終受信日の更新の元にしない
+function processedRowSignature(key: string, mailId: string, at: string, result: string, fingerprint: string, root: string): string {
+  if (!key) return '';
+  return createHmac('sha256', key).update(JSON.stringify(['processedMail', mailId, at, result, fingerprint, root])).digest('base64url').slice(0, 32);
+}
+
+export function signProcessedFingerprint(key: string, mailId: string, at: string, result: string, fingerprint: string, root: string): string {
+  const sig = processedRowSignature(key, mailId, at, result, fingerprint, root);
+  return sig ? `${fingerprint}${PROCESSED_SIG_SEP}${sig}` : fingerprint;
+}
+
+// 署名を確かめた指紋（鍵が無ければそのまま）。確かめられなければ null
+export function verifiedProcessedFingerprint(key: string, mailId: string, at: string, result: string, cell: string, root: string): string | null {
+  if (!key) return cell.includes(PROCESSED_SIG_SEP) ? cell.slice(0, cell.lastIndexOf(PROCESSED_SIG_SEP)) : cell;
+  const i = cell.lastIndexOf(PROCESSED_SIG_SEP);
+  if (i < 0) return null;
+  const fingerprint = cell.slice(0, i);
+  const want = Buffer.from(processedRowSignature(key, mailId, at, result, fingerprint, root));
+  const got = Buffer.from(cell.slice(i + 1));
+  return want.length === got.length && timingSafeEqual(want, got) ? fingerprint : null;
+}
+
+export async function markMailProcessedSheets(
+  ids: string[],
+  result: ProcessedMailResult,
+  fingerprints?: Map<string, ProcessedFingerprint>,
+): Promise<void> {
+  const known = await loadProcessedMailIdsSheets();
+  const fresh = [...new Set(ids)].filter((id) => id && !known.has(id));
+  const at = new Date().toISOString();
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) {
+    await appendRows(
+      '処理済みメール',
+      fresh.slice(i, i + APPEND_CHUNK).map((id) => {
+        const fp = fingerprints?.get(id);
+        const root = fp && fp.rootMailId !== id ? fp.rootMailId : '';
+        return [id, at, result, fp?.fingerprint ? signProcessedFingerprint(draftSigningKey(), id, at, result, fp.fingerprint, root) : '', root];
+      }),
+    );
+  }
+}
+
+// 再送の判定に使う、since 以降に抽出済み・再送スキップにしたメールの指紋（隔離・除外は元にしない）。
+// 未来の処理日時の行（いつまでも再送スキップの元になる）・署名の合わない行（SES_DRAFT_SIGNING_KEY があるとき）は使わない。
+// 元メールは、このタブに「抽出済」として記録されたメールIDのときだけ使う（任意のIDを書いて別の行の最終受信日を更新させない）
+export async function loadFingerprintRowsSheets(
+  since: Date,
+  now = new Date(),
+): Promise<Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }>> {
+  if (!configured()) return [];
+  const tab = '処理済みメール';
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  const rows = await readRows(tab);
+  const extracted = new Set(rows.filter((r) => c(r.cells, '結果') === '抽出済').map((r) => c(r.cells, 'メールID')).filter(Boolean));
+  const key = draftSigningKey();
+  const out: Array<{ mailId: string; rootMailId: string; at: Date; fingerprint: string }> = [];
+  let rejected = 0;
+  for (const r of rows) {
+    const cell = c(r.cells, '指紋');
+    const result = c(r.cells, '結果');
+    const rawAt = c(r.cells, '処理日時');
+    const at = new Date(rawAt);
+    if (!cell || (result !== '抽出済' && result !== '再送スキップ')) continue;
+    if (Number.isNaN(at.getTime()) || at.getTime() < since.getTime()) continue;
+    const mailId = c(r.cells, 'メールID');
+    const root = c(r.cells, '元メール');
+    const fingerprint = verifiedProcessedFingerprint(key, mailId, rawAt, result, cell, root);
+    const future = at.getTime() > now.getTime() + PROCESSED_AT_SKEW_MS;
+    if (!mailId || fingerprint === null || future) {
+      // 署名の無い行（署名の導入前の記録）は黙って使わない。署名が合わない・未来の日時の行は書き換えとして知らせる
+      if (future || cell.includes(PROCESSED_SIG_SEP)) rejected += 1;
+      continue;
+    }
+    out.push({ mailId, rootMailId: root && extracted.has(root) ? root : mailId, at, fingerprint });
+  }
+  if (rejected > 0) {
+    recordHealEvent(
+      'warn',
+      `「${tab}」タブの${rejected}行は署名が合わないか処理日時が未来のため、再送の判定に使いませんでした（編集・コピーしないでください）`,
+    );
+  }
+  return out;
+}
+
+// 再送スキップした元メールの案件・要員の最終受信日を更新する（元メールID → 再送を受信した日時）。更新した行数を返す
+export async function touchLastSeenSheets(seen: Map<string, Date>): Promise<number> {
+  if (!configured() || seen.size === 0) return 0;
+  let updated = 0;
+  for (const tab of ['案件', '要員']) {
+    const mailCol = colIndex(tab, '元メールID');
+    const idCol = colIndex(tab, 'ID');
+    const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+    for (const r of await readRows(tab)) {
+      const at = seen.get(cellStr(r.cells, mailCol));
+      const id = cellStr(r.cells, idCol);
+      if (at && id) updates.push({ key: id, cells: [[LAST_SEEN_COLUMN, at.toISOString()]] });
+    }
+    if (updates.length > 0) updated += await book.writeCellsByKey(tab, 'ID', updates);
+  }
+  return updated;
+}
+
+// 1セルの文字数上限（50,000）に対して余裕を持たせた上限
+export const STATE_JSON_MAX_CHARS = 45_000;
+
+// 「_状態」タブのキーに対応するJSONを読む。未設定・未保存・破損時は null
+export async function readStateJson<T>(key: string): Promise<T | null> {
+  if (!configured()) return null;
+  const hit = await findRow('_状態', 'キー', key);
+  const raw = hit ? cellStr(hit.cells, colIndex('_状態', 'JSON')) : '';
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    console.warn(`SheetsDB: 状態「${key}」のJSONが壊れているため無視します`);
+    return null;
+  }
+}
+
+export async function writeStateJson(key: string, value: unknown): Promise<void> {
+  if (!configured()) return;
+  const json = JSON.stringify(value);
+  if (json.length > STATE_JSON_MAX_CHARS) {
+    throw new SafeLogError(`SheetsDB: 状態「${key}」が大きすぎます（${json.length}文字 > ${STATE_JSON_MAX_CHARS}）`);
+  }
+  await upsertRow('_状態', 'キー', key, () => [key, json, new Date().toISOString()]);
+}
+
+// 「_状態」の1キーを空にする（キー行は残す。読み側は空を未保存として扱う）。移行済みの古い控えを手放すのに使う
+export async function clearStateJson(key: string): Promise<void> {
+  if (!configured()) return;
+  await book.writeCellsByKey('_状態', 'キー', [{ key, cells: [['JSON', ''], ['更新日時', new Date().toISOString()]] }]);
+}
+
+// ===== プロパー判定の控え（_プロパー判定） =====
+
+export interface ProperJudgeRow {
+  projectId: string;
+  receivedAt: string;
+  json: string; // 判定JSON（読み側で解釈する）
+}
+
+// 社員の控えキーの行を読む。タブ全体は1回の実行で1回だけ読み（以後は行キャッシュ）、社員キーで絞る
+export async function readProperJudgeRowsSheets(engineerKey: string): Promise<ProperJudgeRow[]> {
+  if (!configured()) return [];
+  const tab = PROPER_JUDGE_TAB;
+  const c = (cells: string[], name: string) => cellStr(cells, colIndex(tab, name));
+  return (await readRows(tab))
+    .filter((r) => c(r.cells, '社員キー') === engineerKey && c(r.cells, '判定JSON') !== '')
+    .map((r) => ({ projectId: c(r.cells, '案件ID'), receivedAt: c(r.cells, '受信日時'), json: c(r.cells, '判定JSON') }))
+    .filter((r) => r.projectId !== '');
+}
+
+// 1社員の判定をまとめて保存する（新しい組は追記・変わった組は1回の一括更新。1組ずつ呼ばない）。
+// 1セルに収まらない判定は保存しない。保存した行数と、大きすぎて保存しなかった組数を返す
+export async function writeProperJudgeRowsSheets(
+  engineerKey: string,
+  rows: Array<{ projectId: string; receivedAt: string; json: string }>,
+): Promise<{ written: number; tooLarge: number }> {
+  if (!configured() || rows.length === 0) return { written: 0, tooLarge: 0 };
+  const tab = PROPER_JUDGE_TAB;
+  await readRows(tab); // タブの自動生成とヘッダー検証を先に済ませる
+  const now = new Date().toISOString();
+  const fresh: Cell[][] = [];
+  const updates: Array<{ key: string; cells: Array<[string, Cell]> }> = [];
+  let tooLarge = 0;
+  for (const r of rows) {
+    if (r.json.length > STATE_JSON_MAX_CHARS) {
+      tooLarge += 1;
+      continue;
+    }
+    const key = `${engineerKey}|${r.projectId}`;
+    const hit = await findRow(tab, 'キー', key);
+    if (!hit) {
+      fresh.push([key, engineerKey, r.projectId, r.receivedAt, r.json, now]);
+    } else if (cellStr(hit.cells, colIndex(tab, '判定JSON')) !== r.json) {
+      updates.push({ key, cells: [['受信日時', r.receivedAt], ['判定JSON', r.json], ['更新日時', now]] });
+    }
+  }
+  for (let i = 0; i < fresh.length; i += APPEND_CHUNK) await appendRows(tab, fresh.slice(i, i + APPEND_CHUNK));
+  const updated = updates.length > 0 ? await book.writeCellsByKey(tab, 'キー', updates) : 0;
+  return { written: fresh.length + updated, tooLarge };
+}
+
+// 受信日時が before より前の行を消す（日時を読めない行は消さない）。消した行数を返す
+export async function pruneProperJudgeRowsSheets(before: Date): Promise<number> {
+  if (!configured()) return 0;
+  const tab = PROPER_JUDGE_TAB;
+  const col = colIndex(tab, '受信日時');
+  const isOld = (r: CachedRow) => {
+    const t = Date.parse(cellStr(r.cells, col));
+    return Number.isFinite(t) && t < before.getTime();
+  };
+  return deleteRowsIfAny(tab, isOld);
+}
+
+// ===== 同時実行の防止（バッチの実行中の印） =====
+
+const LEASE_KEY = 'batchLease';
+
+interface LeaseState {
+  token: string;
+  until: string; // ISO日時。これを過ぎた印は無効（打ち切られた実行の印が残っても、次の定時実行を止めない）
+}
+
+export type LeaseResult = { ok: true; token: string } | { ok: false; until: string };
+
+async function readStateFresh<T>(key: string): Promise<T | null> {
+  book.invalidate('_状態');
+  return readStateJson<T>(key);
+}
+
+// 同時に動くバッチ（定時実行と手元の実行・自前の定期実行など）を1つに限る。_状態タブに期限つきの印を書き、少し待ってから
+// 読み直して自分の印が残っていれば実行してよい（ほぼ同時に書いた相手がいれば、後から書いた方だけが残る）
+export async function acquireBatchLeaseSheets(ttlMs: number, confirmDelayMs = 5000): Promise<LeaseResult> {
+  const now = Date.now();
+  const current = await readStateFresh<LeaseState>(LEASE_KEY);
+  if (current?.token && Date.parse(current.until) > now) return { ok: false, until: current.until };
+  const token = randomUUID();
+  await writeStateJson(LEASE_KEY, { token, until: new Date(now + ttlMs).toISOString() } satisfies LeaseState);
+  if (confirmDelayMs > 0) await new Promise((res) => setTimeout(res, confirmDelayMs));
+  const confirmed = await readStateFresh<LeaseState>(LEASE_KEY);
+  return confirmed?.token === token ? { ok: true, token } : { ok: false, until: confirmed?.until ?? '' };
+}
+
+// 自分の印のときだけ消す（期限切れの後に別の実行が取った印は消さない）
+export async function releaseBatchLeaseSheets(token: string): Promise<void> {
+  const current = await readStateFresh<LeaseState>(LEASE_KEY);
+  if (current?.token !== token) return;
+  await writeStateJson(LEASE_KEY, { token: '', until: new Date(0).toISOString() } satisfies LeaseState);
+}

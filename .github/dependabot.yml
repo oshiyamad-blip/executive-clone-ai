@@ -1,0 +1,20 @@
+# 依存パッケージと GitHub Actions の更新・脆弱性の修正を PR で届ける（main への取り込みはレビュー必須のルールで確認する）。
+# 公開直後の版をすぐには取り込まない（乗っ取られた版が見つかって取り下げられるまでの期間を避ける）。
+# xlsx は cdn.sheetjs.com の URL で固定しているため、ここでは更新されない（手順書 9章の定期確認）。
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7

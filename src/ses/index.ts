@@ -1,0 +1,840 @@
+import '../env.js';
+import { collectSesMail } from './collect.js';
+import { parseAttachments } from './parse.js';
+import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
+import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
+import { matchIncrementally, persistInjectionFlags } from './matchRun.js';
+import { loadSuppressionIndex } from './suppress.js';
+import { applyPauseGate } from './pauseGate.js';
+import { beginHandoff, finishHandoff } from './handoff.js';
+import { createDrafts } from './draft.js';
+import { persistAndNotify, notifyResults, loadUnnotifiedMatches, rememberUnnotified, clearUnnotified } from './notify.js';
+import { materializePendingDrafts, type PendingDraftResult } from './pendingDrafts.js';
+import { runProperFlow, activeProperEngineerIds, type ProperRunResult } from './proper/index.js';
+import { resetProperMasterCache } from './proper/master.js';
+import {
+  markMailProcessed,
+  loadFingerprintRecords,
+  touchLastSeen,
+  type ProcessedFingerprint,
+  writeDemoArtifact,
+  readDemoArtifact,
+  dedupeProjects,
+  dedupeEngineers,
+  withoutResentProjects,
+  withoutResentEngineers,
+  reconcileReextractedIds,
+} from './store.js';
+import {
+  saveProjects,
+  saveEngineers,
+  fetchOpenProjects,
+  fetchAvailableEngineers,
+  fetchMatchLedger,
+  fetchItemsByIds,
+  fetchSavedItemsForMails,
+} from '../database/index.js';
+import {
+  resetSheetsCache,
+  checkSheetsTabs,
+  sheetsCellCount,
+  pruneProcessedMailSheets,
+  pruneStalePersonalDataSheets,
+  sheetsDbConfigured,
+  closeProjectsForNoticesSheets,
+  fetchRecentProjectsSheets,
+  writeMarketLabelsSheets,
+  countUnmatchedBeyondPoolSheets,
+  INJECTION_FLAGS_TAB,
+} from '../database/sheets.js';
+import {
+  isDemo,
+  liveConfigError,
+  minGrossMarginJpy,
+  maxCandidatesPerItem,
+  repairEnabled,
+  matchLookbackDays,
+  resendWindowDays,
+  sesTarget,
+  maxMailsPerRun,
+  collectDays,
+  resendSimilarity,
+  matchPoolLimit,
+  dbProvider,
+  runDeadlineMinutes,
+  logRedact,
+  resetExtractModelFallback,
+  COLLECT_DAYS_MAX,
+  llmProviderName,
+  geminiUsesVertex,
+  geminiApiAcknowledged,
+  pricingSettingsInvalid,
+  retentionDays,
+} from './config.js';
+import { geminiDataUseProblem } from './settingsFormat.js';
+import { unneededDelegationProblems } from './googleCreds.js';
+import { setMetricsMode, recordBatchMetrics, collectBatchMetrics } from './batchMetrics.js';
+import { startHealBatch } from './heal/budget.js';
+import { persistUnknownSkillTokens, resetSkillTokenTally } from './skillStats.js';
+import {
+  resetHealEvents,
+  recordStat,
+  getStats,
+  recordFatal,
+  hasFatal,
+  fatalReasons,
+  recordHealEvent,
+} from './heal/events.js';
+import { runRepair } from './heal/repair.js';
+import { startRunClock, stopRunClock, pastRunDeadline, DAY_MS, pickForExtraction, isLastChance } from './schedule.js';
+import { redactable, safeErr, logId } from './redact.js';
+import { acquireRunLease, releaseRunLease } from './lease.js';
+import { splitResends, lastSeenUpdates, serializeFingerprint, type ResendSplit } from './resend.js';
+import { splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from './mailKind.js';
+import { marketLabelOf, recordMarketHighlights, resetMarketHighlights, MARKET_LOOKBACK_DAYS, type MarketLabel } from './marketRate.js';
+import type { Project, Engineer, ExtractedItem, MatchResult, SesRawMail } from '../types/index.js';
+import type { MatchLedger } from '../database/sheets.js';
+
+// SESマッチングバッチのオーケストレータ。
+// 本番の通常バッチ: 下書き依頼 → 保存先の確認 → collect→parse→extract（10通ごとに保存・処理済み記録）→
+//   match（小分けに判定・保存し、終えた案件・要員に突合済）→ proper → notify。
+//   実行時間の期限（SES_RUN_DEADLINE_MINUTES）を過ぎたら新しい抽出・判定を始めず、済んだ分でサマリを送る
+//   （途中で打ち切られても、処理済みにしていないメール・突合済でない案件と要員は次回の実行で続きから処理する）。
+// demo・--match-only: 従来どおり全件を抽出・突合してから保存・通知する。
+// 各段は try/catch でエラーを吸収し、途中段が失敗しても後続へ渡せるデータがあれば継続する。
+// 収集失敗・保存失敗・重大異常・サマリ送信失敗などは recordFatal で記録し、終了コードを非0にする
+// （スケジュール実行で「失敗」として検知・通知させるため）。
+export interface SesBatchOptions {
+  collectOnly?: boolean; // ①〜④まで（保存で止める）
+  matchOnly?: boolean; // ⑤〜⑦のみ（既存DB/demo成果物から読んで突合）
+}
+
+export async function runSesBatch(opts: SesBatchOptions = {}): Promise<void> {
+  console.log('=== SES案件・要員マッチングバッチ開始 ===');
+  // CI等で鍵が渡っていないのに demo（fixture）で「成功」しないよう、設定不備はここで異常終了にする
+  const configError = liveConfigError();
+  if (configError) {
+    console.error(`SESバッチ: 🚨 ${configError}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!isDemo()) {
+    const geminiProblem = geminiDataUseProblem({ provider: llmProviderName(), vertex: geminiUsesVertex(), acknowledged: geminiApiAcknowledged(), production: true });
+    if (geminiProblem) {
+      console.error(`SESバッチ: 🚨 ${geminiProblem}`);
+      process.exitCode = 1;
+      return;
+    }
+    // 価格の方針を解釈できないまま既定値（公開されている値）・誤った単位で動かさない（値はログに出さない）
+    if (pricingSettingsInvalid()) {
+      console.error('SESバッチ: 🚨 価格の方針（SES_PRICING_POLICY_JSON・MIN_GROSS_MARGIN_*・NEGOTIATION_MAX_*）に解釈できない値があるため停止します（npm run ses:preflight で確認）');
+      process.exitCode = 1;
+      return;
+    }
+    // 鍵に使わないスコープのドメイン全体の委任（テナントの全員のメール・ドライブに及ぶ）が付いていたら動かさない
+    // （鍵はバッチの実行環境・手元の .env.local にあり、社外から届いたリンク・添付も扱うため）
+    const delegation = await unneededDelegationProblems();
+    if (delegation.length > 0) {
+      for (const p of delegation) console.error(`SESバッチ: 🚨 ${p}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  // 粗利下限は社外に知られたくない方針（Secretsに登録）のため、公開ログ（秘匿モード）には値を出さない
+  const margin = logRedact() ? '設定済み（値は表示しません）' : `${minGrossMarginJpy()}円/月`;
+  console.log(`モード: ${isDemo() ? 'DEMO（外部呼び出しなし）' : '本番'} / 粗利下限: ${margin} / 候補上限: ${maxCandidatesPerItem()}件`);
+
+  // 自動検証・修復レイヤーの初期化（コストメーターとイベント収集。demoでは実質no-op）
+  startHealBatch();
+  resetHealEvents();
+  resetSkillTokenTally();
+  resetMarketHighlights();
+  resetPrimarySelectTally();
+  resetJudgeTally();
+  resetSheetsCache();
+  resetProperMasterCache();
+  resetExtractModelFallback();
+  setMetricsMode(isDemo() ? 'demo' : opts.matchOnly ? '突合のみ' : opts.collectOnly ? '収集のみ' : '通常');
+  if (!isDemo()) startRunClock();
+
+  let lease: string | null = null;
+  try {
+    lease = await acquireLease();
+    if (lease !== null) {
+      await runStages(opts);
+      await persistUnknownSkillTokens();
+    }
+  } finally {
+    if (lease) await releaseRunLease(lease);
+    stopRunClock();
+    if (hasFatal()) {
+      console.error(`=== SESバッチ: 異常終了扱い（要因${fatalReasons().length}件）: ${fatalReasons().join(' / ')} ===`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+// 同時に動くバッチを1つに限る（定時実行と手元・自前の定期実行が重なると、同じ依頼の下書き・同じメールの行を二重に作るため）。
+// 実行してよければ印の識別子、だめなら null（異常終了として知らせる）。印を使わない実行（demo 等）は ''
+async function acquireLease(): Promise<string | null> {
+  const r = await acquireRunLease();
+  if (r.ok) return r.token;
+  recordFatal(r.reason);
+  return null;
+}
+
+async function runStages(opts: SesBatchOptions): Promise<void> {
+  // 前回バッチ以降にスプレッドシートの「担当者メール」で依頼された下書きを、収集より先に作成する
+  let requestedDrafts: PendingDraftResult = { created: 0, failed: 0 };
+  try {
+    requestedDrafts = await materializePendingDrafts(undefined, activeProperEngineerIds);
+  } catch (err) {
+    console.error(`SES下書き依頼: 失敗: ${safeErr(err)}`);
+    recordFatal('担当者指定の下書き作成段が例外で停止しました');
+  }
+
+  if (opts.matchOnly || isDemo()) {
+    await runWholeBatch(opts, requestedDrafts);
+    return;
+  }
+
+  // 営業リストの A・B の未着手がたまっていたら、収集以降を見送る（定期実行を失敗に見せないため recordFatal は使わない）
+  const gate = await applyPauseGate();
+  if (gate.paused) {
+    await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
+    console.log('=== SESバッチ: 営業リストの未着手が多いため、収集・抽出・照合を見送って終了 ===');
+    return;
+  }
+
+  // 試運転（Claude Code の定期実行）が担当中で API の残高が戻っていなければ、収集以降を見送る（異常終了にはしない）
+  const startedAt = new Date();
+  const handoff = await beginHandoff(startedAt);
+  if (!handoff.proceed) {
+    await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
+    console.log('=== SESバッチ: 試運転が担当中のため、収集・抽出・照合を見送って終了 ===');
+    return;
+  }
+  let completed = false;
+  try {
+    completed = await runLiveBatch(opts, requestedDrafts);
+  } finally {
+    // 残高切れを見ていれば試運転に引き継ぎ、正常に終えていれば本番の読了を進める
+    await finishHandoff(handoff, startedAt, completed && !hasFatal());
+  }
+}
+
+// 本番の通常バッチ。収集から書き込みまで終えたら true（--collect-only は false）
+async function runLiveBatch(opts: SesBatchOptions, requestedDrafts: PendingDraftResult): Promise<boolean> {
+  const pool = await loadStorePool();
+  let stored: StoredItems = { projects: [], engineers: [] };
+  if (pool) {
+    stored = await collectAndStoreLive(pool);
+    await updateMarketLabels(stored.projects);
+    if (opts.collectOnly) {
+      // サマリは送らないが、抽出の不明率等は「メトリクス」タブに残す
+      await recordBatchMetrics(collectBatchMetrics({ requestedDrafts: requestedDrafts.created }));
+      console.log(`=== --collect-only指定のため収集・保存のみで終了（案件${stored.projects.length}件・要員${stored.engineers.length}件） ===`);
+      return false;
+    }
+  }
+
+  // 前回までの実行で保存したがサマリで知らせ損ねたマッチ（今回のサマリに載せる）
+  const carried = await loadUnnotifiedMatches();
+  const saved: MatchResult[] = [];
+  const remember = () => rememberUnnotified(carried.ids, saved);
+  if (pool) {
+    try {
+      const { projects, engineers, scope } = matchScope(pool, stored);
+      console.log(
+        `SESマッチング: 新着 案件${stored.projects.length}件・要員${stored.engineers.length}件を、直近${matchLookbackDays()}日の` +
+          `案件${projects.length - stored.projects.length}件・要員${engineers.length - stored.engineers.length}件とも突合します（判定済み${pool.ledger.judged.size}組は除外・判定待ち${pool.ledger.deferred.size}組は判定し直し）`,
+      );
+      const suppression = await loadSuppressionIndex({ projects, engineers });
+      await matchIncrementally(projects, engineers, scope, {
+        saved,
+        checkpoint: remember,
+        suppression,
+        pendingItems: pool.pendingItems,
+      });
+    } catch (err) {
+      console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
+      recordFatal('マッチング段が例外で停止しました（突合済でない案件・要員は次回の実行で突合します）');
+    }
+  }
+  try {
+    await remember();
+  } catch (err) {
+    console.warn(`SES通知: 知らせていないマッチの控えを書けません: ${safeErr(err)}`);
+  }
+
+  const proper = pastRunDeadline() ? skipProperForDeadline() : await runProperStage([]);
+  try {
+    // 送れた（または送る先が無い）ときだけ控えを消す。送れなければ次の回のサマリに持ち越す
+    if ((await notifyResults(saved, requestedDrafts, proper, carried.rows)) !== 'failed') await clearUnnotified();
+  } catch (err) {
+    console.error(`SES通知: 失敗: ${safeErr(err)}`);
+    recordFatal('通知段が例外で停止しました');
+  }
+  console.log(`=== SESバッチ完了: マッチ候補 計${saved.length}件 ===`);
+  await pruneProcessedMails();
+  await pruneStalePersonalData();
+  await maybeRepair();
+  return true;
+}
+
+// demo・--match-only: 全件を抽出・突合してから保存・通知する（従来の流れ）
+async function runWholeBatch(opts: SesBatchOptions, requestedDrafts: PendingDraftResult): Promise<void> {
+  let projects: Project[];
+  let engineers: Engineer[];
+  if (opts.matchOnly) {
+    ({ projects, engineers } = await loadExisting());
+  } else {
+    ({ projects, engineers } = await collectAndStoreWhole());
+    if (opts.collectOnly) {
+      console.log(`=== --collect-only指定のため収集・保存のみで終了（案件${projects.length}件・要員${engineers.length}件） ===`);
+      return;
+    }
+  }
+  const matches = await matchDraftAndNotify(projects, engineers, requestedDrafts);
+  console.log(`=== SESバッチ完了: マッチ候補 計${matches.length}件 ===`);
+  await maybeRepair();
+}
+
+async function maybeRepair(): Promise<void> {
+  // 隔離が増えた場合、opt-in（SES_REPAIR_ENABLED=true）なら修正パッチ案を自動生成（1日1回まで）。
+  // 生成には時間がかかるため、実行時間の期限を過ぎていれば次の回に回す（手動の npm run ses:repair はいつでも可）
+  if (!isDemo() && repairEnabled() && getStats().quarantinedNew > 0) {
+    if (pastRunDeadline()) {
+      console.log('SES修復: 実行時間の上限を過ぎたため、修正パッチ案の自動生成は次の回に回します（手動: npm run ses:repair）');
+      return;
+    }
+    try {
+      await runRepair(true);
+    } catch (err) {
+      console.error(`SES修復: パッチ案の自動生成に失敗: ${safeErr(err)}`);
+    }
+  }
+}
+
+function isProjectItem(item: ExtractedItem): item is { kind: 'project'; project: Project } {
+  return item.kind === 'project';
+}
+
+function isEngineerItem(item: ExtractedItem): item is { kind: 'engineer'; engineer: Engineer } {
+  return item.kind === 'engineer';
+}
+
+interface StorePool {
+  projects: Project[];
+  engineers: Engineer[];
+  ledger: MatchLedger;
+  // 判定待ちの組の相手のうち、突合の対象期間を外れた案件・要員（その組の判定にだけ使う）
+  pendingItems: { projects: Project[]; engineers: Engineer[] };
+}
+
+interface StoredItems {
+  projects: Project[];
+  engineers: Engineer[];
+}
+
+// スプレッドシートのセル数の上限（1,000万）に近づいたら知らせる（上限に達すると追記がすべて失敗する）
+const SHEETS_CELL_LIMIT = 10_000_000;
+
+// 保存先を確かめ、直近の案件・要員と判定済みのペアを読む。読めなければ（共有の解除・見出しの変更等）
+// LLMで抽出しても保存できず毎回同じメールを抽出し直すことになるため、収集・抽出・突合をせずに異常終了として知らせる
+async function loadStorePool(): Promise<StorePool | null> {
+  const since = new Date(Date.now() - matchLookbackDays() * DAY_MS);
+  try {
+    if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
+      // _状態（隔離リスト等）も先に確かめる（読めないまま抽出すると、失敗したメールを隔離できずに取りこぼすため）。
+      // 指示混入疑いの控えも（読めないまま続けると、印を外された案件・要員を自動の下書きに回すため）
+      await checkSheetsTabs(['案件', '要員', 'マッチ', '処理済みメール', '_状態', INJECTION_FLAGS_TAB]);
+      const cells = sheetsCellCount();
+      if (cells > SHEETS_CELL_LIMIT * 0.8) {
+        recordHealEvent(
+          cells > SHEETS_CELL_LIMIT * 0.95 ? 'critical' : 'warn',
+          `スプレッドシートのセル数が上限（1,000万）の${Math.round((cells / SHEETS_CELL_LIMIT) * 100)}%です（古い行を別のスプレッドシートへ移してください）`,
+        );
+      }
+    }
+    const [projects, engineers, ledger] = await Promise.all([
+      fetchOpenProjects(matchPoolLimit(), { receivedSince: since }),
+      fetchAvailableEngineers(matchPoolLimit(), { receivedSince: since }),
+      fetchMatchLedger(since),
+    ]);
+    const pendingItems = await loadPendingItems(ledger, projects, engineers);
+    if (dbProvider() === 'sheets' && sheetsDbConfigured()) {
+      const beyond = await countUnmatchedBeyondPoolSheets(matchPoolLimit(), since);
+      if (beyond.projects + beyond.engineers > 0) {
+        recordHealEvent(
+          'critical',
+          `突合前の案件${beyond.projects}件・要員${beyond.engineers}件が、突合の対象の上限（SES_MATCH_POOL_LIMIT=${matchPoolLimit()}件）を超えて` +
+            '対象から外れています（判定されないまま残ります。SES_MATCH_POOL_LIMIT を上げてください）',
+        );
+      }
+    }
+    return { projects, engineers, ledger, pendingItems };
+  } catch (err) {
+    console.error(`SES: 保存先を読み込めません: ${safeErr(err)}`);
+    recordFatal('保存先（スプレッドシート等）を読み込めないため、メールの抽出と突合を行いませんでした（共有・見出しを確認してください）');
+    return null;
+  }
+}
+
+// 判定待ちの組（判定「未判定」）の相手のうち、突合の対象期間を外れた案件・要員を ID で読む。
+// 読めなかった組は今回は判定も閉じもせず、判定待ちのまま次回に回す（ledger.deferred から外す）
+async function loadPendingItems(
+  ledger: MatchLedger,
+  projects: Project[],
+  engineers: Engineer[],
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  const knownProjects = new Set(projects.map((p) => p.id));
+  const knownEngineers = new Set(engineers.map((e) => e.id));
+  const wantProjects = new Set<string>();
+  const wantEngineers = new Set<string>();
+  for (const id of ledger.deferred) {
+    const ids = parseMatchId(id);
+    if (!ids) {
+      ledger.deferred.delete(id);
+      continue;
+    }
+    if (!knownProjects.has(ids.projectId)) wantProjects.add(ids.projectId);
+    if (!knownEngineers.has(ids.engineerId)) wantEngineers.add(ids.engineerId);
+  }
+  if (wantProjects.size + wantEngineers.size === 0 || dbProvider() !== 'sheets') {
+    // Notion は ID で読めないため、対象期間内の案件・要員の組だけを判定し直す（それ以外は閉じずに残す）
+    for (const id of [...ledger.deferred]) {
+      const ids = parseMatchId(id)!;
+      if (wantProjects.has(ids.projectId) || wantEngineers.has(ids.engineerId)) ledger.deferred.delete(id);
+    }
+    return { projects: [], engineers: [] };
+  }
+  try {
+    return await fetchItemsByIds(wantProjects, wantEngineers);
+  } catch (err) {
+    console.warn(`SES: 判定待ちの組の案件・要員を読めません（今回はその組を判定せず次回に回します）: ${safeErr(err)}`);
+    for (const id of [...ledger.deferred]) {
+      const ids = parseMatchId(id)!;
+      if (wantProjects.has(ids.projectId) || wantEngineers.has(ids.engineerId)) ledger.deferred.delete(id);
+    }
+    return { projects: [], engineers: [] };
+  }
+}
+
+// 本番の①〜④: 収集 → 展開 → 抽出。10通ごとに、再送を除いて保存し、保存できたメールを処理済みにする
+// （途中で打ち切られても済んだ分を失わず、次回同じメールを抽出し直さないため）
+async function collectAndStoreLive(pool: StorePool): Promise<StoredItems> {
+  const parsedMails = await collectAndParse();
+  const stored: StoredItems = { projects: [], engineers: [] };
+  const knownProjects = [...pool.projects];
+  const knownEngineers = [...pool.engineers];
+  const matchedById = new Map<string, boolean | undefined>([
+    ...pool.projects.map((p) => [p.id, p.matched] as const),
+    ...pool.engineers.map((e) => [e.id, e.matched] as const),
+  ]);
+  let saveFailures = 0;
+  let markFailed = false;
+  let droppedEngineers = 0;
+  const projectsOnly = sesTarget() === 'projects';
+
+  const flush: ExtractFlush = async ({ items, processedMailIds }) => {
+    const extracted = await withStableIds(
+      items.filter(isProjectItem).map((i) => i.project),
+      items.filter(isEngineerItem).map((i) => i.engineer),
+    );
+    const projects = withoutResentProjects(knownProjects, dedupeProjects(extracted.projects));
+    const { kept, dropped } = engineersToKeep(extracted.engineers, projectsOnly);
+    droppedEngineers += dropped;
+    const engineers = withoutResentEngineers(knownEngineers, dedupeEngineers(kept));
+    const failedMailIds = new Set<string>();
+    const [pr, er] = [await saveProjects(projects), await saveEngineers(engineers)];
+    for (const p of projects) {
+      const err = pr.failed.get(p.id);
+      if (err !== undefined) {
+        console.error(`SES保存: 案件保存失敗 (${logId(p.id)} ${redactable(p.title)}): ${safeErr(err)}`);
+        failedMailIds.add(p.sourceMailId);
+        continue;
+      }
+      // 保存済みの行を抽出し直した場合は、人が付けた「終了」と突合済の印をシートの値のまま引き継ぐ
+      // （抽出し直した値で「募集中・突合前」として扱うと、終了した案件を紹介し直してしまう）
+      const kept = pr.saved?.get(p.id) ?? { ...p, matched: matchedById.get(p.id) ?? false };
+      const saved = { ...kept, notionPageId: pr.pageIds.get(p.id) };
+      stored.projects.push(saved);
+      knownProjects.push(saved);
+    }
+    for (const e of engineers) {
+      const err = er.failed.get(e.id);
+      if (err !== undefined) {
+        console.error(`SES保存: 要員保存失敗 (${logId(e.id)} ${redactable(e.displayName)}): ${safeErr(err)}`);
+        failedMailIds.add(e.sourceMailId);
+        continue;
+      }
+      const kept = er.saved?.get(e.id) ?? { ...e, matched: matchedById.get(e.id) ?? false };
+      const saved = { ...kept, notionPageId: er.pageIds.get(e.id) };
+      stored.engineers.push(saved);
+      knownEngineers.push(saved);
+    }
+    const failures = pr.failed.size + er.failed.size;
+    saveFailures += failures;
+    // 保存に失敗した案件・要員の元メールは処理済みにしない（次回再抽出。IDはメールIDと出現順から決まるため同じ行を更新する）
+    const doneIds = processedMailIds.filter((id) => !failedMailIds.has(id));
+    if (!(await markMailProcessed(doneIds, '抽出済', processedFingerprints(parsedMails.resend, doneIds)))) markFailed = true;
+    // この回の保存がすべて失敗した（保存先に書けない）なら、これ以上LLMで抽出しても保存できないため止める
+    const attempted = projects.length + engineers.length;
+    return !markFailed && !(attempted > 0 && failures === attempted);
+  };
+
+  let quarantinedMailIds: string[] = [];
+  try {
+    ({ quarantinedMailIds } = await extractItems(parsedMails.mails, { onBatch: flush, batchSize: 10 }));
+  } catch (err) {
+    console.error(`SES抽出: 失敗: ${safeErr(err)}（未保存のメールは処理済みにせず次回再処理します）`);
+    recordFatal('抽出段が例外で停止しました');
+  }
+  if (droppedEngineers > 0) {
+    console.log(`SES抽出: 案件だけモードのため、抽出で見つかった要員${droppedEngineers}名は保存しません（振り分けの漏れ）`);
+  }
+  if (saveFailures > 0) {
+    recordFatal(`抽出した案件・要員${saveFailures}件を保存できませんでした（元のメールは処理済みにせず次回再処理します）`);
+  }
+  const quarantinedMarked = await markMailProcessed(quarantinedMailIds, '隔離');
+  // 再送スキップ: 抽出せずに処理済みにし、元の案件・要員の最終受信日を更新する（直近の突合の対象から外れないように）。
+  // 最終受信日を延ばすのは送り主の認証に合格した再送だけ（lastSeenUpdates）
+  const skippedIds = parsedMails.resend.skipped.map((x) => x.mail.id);
+  const skippedMarked = await markMailProcessed(skippedIds, '再送スキップ', processedFingerprints(parsedMails.resend, skippedIds));
+  const lastSeen = lastSeenUpdates(parsedMails.resend.skipped);
+  await touchLastSeen(lastSeen);
+  // 自分たちのメールとして除外した分も記録し、次回から本文を取得し直さない
+  const excludedMarked = await markMailProcessed(parsedMails.excludedMailIds, '除外');
+  // 原文を解析できなかったメールも記録し、次回から取得・解析し直さない（解析に時間のかかるメールで毎回の収集を止めない）
+  const unparsableMarked = await markMailProcessed(parsedMails.unparsableMailIds, '解析不可');
+  // 案件だけモードで抽出しなかった要員メールも記録し、次回から本文を取得し直さない
+  const engineerSkipMarked = await markMailProcessed(parsedMails.skippedEngineerMailIds, '要員スキップ');
+  const closedMarked = await markMailProcessed(parsedMails.closedNoticeMailIds, '募集終了');
+  if (markFailed || !quarantinedMarked || !excludedMarked || !skippedMarked || !unparsableMarked || !engineerSkipMarked || !closedMarked) {
+    recordFatal('処理済みメールIDを保存できませんでした（次回同じメールを再処理します）');
+  }
+  return stored;
+}
+
+// 同じメールを抽出し直した（前回は一部の保存に失敗して処理済みにしなかった等）とき、IDを保存済みの行と内容で対応付ける。
+// IDはメール内の出現順から作るため、LLMが項目の順番・件数を変えて返すと、別の案件・要員の行を上書きしてしまう
+async function withStableIds(projects: Project[], engineers: Engineer[]): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  const mailIds = new Set([...projects.map((p) => p.sourceMailId), ...engineers.map((e) => e.sourceMailId)]);
+  let savedItems: { projects: Project[]; engineers: Engineer[] };
+  try {
+    savedItems = await fetchSavedItemsForMails(mailIds);
+  } catch (err) {
+    console.warn(`SES保存: 保存済みの行を確かめられないため、抽出した順のIDで保存します: ${safeErr(err)}`);
+    return { projects, engineers };
+  }
+  return {
+    projects: reconcileReextractedIds('project', projects, savedItems.projects, (mailId, i) => itemIdOf('proj', mailId, i)),
+    engineers: reconcileReextractedIds('engineer', engineers, savedItems.engineers, (mailId, i) => itemIdOf('eng', mailId, i)),
+  };
+}
+
+async function collectAndParse(): Promise<{
+  mails: SesRawMail[];
+  excludedMailIds: string[];
+  unparsableMailIds: string[];
+  resend: ResendSplit;
+  skippedEngineerMailIds: string[];
+  closedNoticeMailIds: string[];
+}> {
+  let mails: SesRawMail[] = [];
+  let excludedMailIds: string[] = [];
+  let unparsableMailIds: string[] = [];
+  let collectFailed = false;
+  try {
+    const collected = await collectSesMail();
+    ({ mails, excludedMailIds } = collected);
+    unparsableMailIds = collected.unparsableMailIds ?? [];
+  } catch (err) {
+    collectFailed = true;
+    console.error(`SES収集: 失敗: ${safeErr(err)}`);
+    recordFatal('メール収集に失敗しました');
+  }
+  console.log(`SES収集: 未処理メール${mails.length}件`);
+  recordStat('collected', mails.length);
+  if (mails.length === 0 && !collectFailed) {
+    console.log('SES収集: 未処理の新着メールはありません（続く場合はメーリスの配信・転送設定を確認してください）');
+  }
+  // 募集終了・充足の連絡は抽出せず、同じ送信元の募集中の案件を閉じる（終わった案件への提案を防ぐ）。
+  // 再送の判定より先に分ける（件名の【募集終了】は再送の正規化で消えるため、元の案件メールの再送と誤判定される）
+  const closedNotices = mails.filter((m) => isClosedNotice(m));
+  await closeProjectsForNotices(closedNotices);
+  const resend = await splitResendMails(mails.filter((m) => !isClosedNotice(m)));
+  const openMails = resend.fresh;
+  // 案件だけモード: 要員の紹介メールは添付の展開も抽出もしない（要員は要員管理表の登録分だけを使う）
+  const kinds = splitByKind(openMails, sesTarget() === 'projects');
+  if (kinds.skippedEngineerMailIds.length > 0) {
+    console.log(`SES収集: 案件だけモードのため要員の紹介メール${kinds.skippedEngineerMailIds.length}通を抽出しません`);
+  }
+  recordStat('engineerMailsSkipped', kinds.skippedEngineerMailIds.length);
+  // LLM で抽出する件数の上限は、再送・要員メールを除いた後に掛ける（弾いたメールで枠を使わない）。
+  // 超えた分は処理済みにせず次回以降へ（次回には収集期間を外れる分は異常終了として知らせる）
+  const limit = maxMailsPerRun();
+  const pick = pickForExtraction(kinds.extract, limit, collectDays());
+  if (pick.deferred.length > 0) {
+    recordHealEvent('warn', `抽出の上限（SES_MAX_MAILS_PER_RUN=${limit}）を超えた${pick.deferred.length}通を次回以降に回しました`);
+    const lost = pick.deferred.filter((m) => isLastChance(m.receivedAt, collectDays())).length;
+    if (lost > 0) {
+      recordFatal(
+        `抽出の上限を超えて次回以降に回したメールのうち${lost}通は、次回の実行時には収集期間（SES_COLLECT_DAYS）を外れて処理されません` +
+          '（SES_MAX_MAILS_PER_RUN を上げてください）',
+      );
+    }
+  }
+  let parsedMails = pick.picked;
+  try {
+    parsedMails = await parseAttachments(pick.picked);
+  } catch (err) {
+    console.error(`SES展開: 失敗: ${safeErr(err)}`);
+  }
+  return {
+    mails: parsedMails,
+    excludedMailIds,
+    unparsableMailIds,
+    resend,
+    skippedEngineerMailIds: kinds.skippedEngineerMailIds,
+    closedNoticeMailIds: closedNotices.map((m) => m.id),
+  };
+}
+
+// 今回保存した案件の相場（直近90日の同じ条件の案件の中での単価の位置）を「相場」列に書き、高めの案件をサマリに載せる。
+// 集計だけでLLMは使わない。Sheets運用のみ。失敗しても続行する
+async function updateMarketLabels(projects: Project[]): Promise<void> {
+  if (projects.length === 0 || dbProvider() !== 'sheets' || !sheetsDbConfigured() || isDemo()) return;
+  try {
+    const pool = await fetchRecentProjectsSheets(new Date(Date.now() - MARKET_LOOKBACK_DAYS * DAY_MS));
+    const labeled = projects.map((p) => ({ project: p, label: marketLabelOf(p, pool) })).filter((x): x is { project: Project; label: MarketLabel } => x.label !== null);
+    await writeMarketLabelsSheets(new Map(labeled.map((x) => [x.project.id, x.label.text])));
+    recordMarketHighlights(labeled);
+    const high = labeled.filter((x) => x.label.level === 'high').length;
+    console.log(`SES相場: 案件${labeled.length}件の相場を記録（高め${high}件）`);
+  } catch (err) {
+    console.warn(`SES相場: 相場を記録できません: ${safeErr(err)}`);
+  }
+}
+
+// 募集終了の連絡に合わせて募集中の案件を閉じる（Sheets運用のみ。失敗しても続行し、次の回の連絡で閉じ直せる）
+async function closeProjectsForNotices(notices: SesRawMail[]): Promise<void> {
+  if (notices.length === 0) return;
+  console.log(`SES収集: 募集終了の連絡${notices.length}通（抽出しません）`);
+  recordStat('closedNotices', notices.length);
+  if (dbProvider() !== 'sheets' || !sheetsDbConfigured() || isDemo()) return;
+  try {
+    const closed = await closeProjectsForNoticesSheets(
+      notices.map((m) => ({ domain: (m.from.match(/@([A-Za-z0-9.-]+)/)?.[1] ?? '').toLowerCase(), subject: m.subject, body: m.body })),
+      mentionsTitle,
+    );
+    if (closed > 0) console.log(`SES収集: 募集終了の連絡に合わせて案件${closed}件を「終了」にしました`);
+  } catch (err) {
+    console.warn(`SES収集: 募集終了の連絡に合わせて案件を閉じられません: ${safeErr(err)}`);
+  }
+}
+
+// 抽出の前に、直近に抽出した内容と同じ再送を分ける（Haikuの抽出を呼ばない。件数だけログに出す）
+async function splitResendMails(mails: SesRawMail[]): Promise<ResendSplit> {
+  const days = resendWindowDays();
+  if (days <= 0 || mails.length === 0) return { fresh: mails, skipped: [], fingerprints: splitResends(mails, [], { since: new Date(), threshold: 1 }).fingerprints };
+  const since = new Date(Date.now() - days * DAY_MS);
+  const records = await loadFingerprintRecords(since);
+  const split = splitResends(mails, records, { since, threshold: resendSimilarity() });
+  if (split.skipped.length > 0) {
+    console.log(`SES再送: 直近${days}日に抽出済みの内容と同じ再送${split.skipped.length}通を抽出せずにスキップします`);
+  }
+  recordStat('resendSkipped', split.skipped.length);
+  return split;
+}
+
+function processedFingerprints(split: ResendSplit, ids: string[]): Map<string, ProcessedFingerprint> {
+  const out = new Map<string, ProcessedFingerprint>();
+  for (const id of ids) {
+    const f = split.fingerprints.get(id);
+    if (f) out.set(id, { fingerprint: serializeFingerprint(f.fp), rootMailId: f.rootMailId });
+  }
+  return out;
+}
+
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Map<string, T>();
+  for (const item of items) if (!seen.has(item.id)) seen.set(item.id, item);
+  return [...seen.values()];
+}
+
+// 突合の範囲: 今回保存した案件・要員と直近の保存済みのうち、まだ突合を終えていないもの（突合済でない）を含み、
+// 判定済みでないペア。Notion等「突合済」を記録しない保存先では、保存済みのものは突合済みとして扱う
+function matchScope(pool: StorePool, stored: StoredItems): { projects: Project[]; engineers: Engineer[]; scope: PairScope } {
+  const projects = uniqueById([...stored.projects, ...pool.projects]);
+  const engineers = uniqueById([...stored.engineers, ...pool.engineers]);
+  return {
+    projects,
+    engineers,
+    scope: {
+      newProjectIds: new Set(projects.filter((p) => p.matched === false).map((p) => p.id)),
+      newEngineerIds: new Set(engineers.filter((e) => e.matched === false).map((e) => e.id)),
+      judgedMatchIds: pool.ledger.judged,
+      capFreeMatchIds: pool.ledger.capFree,
+      pendingMatchIds: pool.ledger.deferred,
+    },
+  };
+}
+
+// 収集期間を十分過ぎた処理済みメールの記録を消す（スプレッドシートの容量対策。失敗しても次回に回すだけ）。
+// 取りこぼしの復旧で SES_COLLECT_DAYS を広げて再実行しても処理済みのメールを抽出し直さないよう、
+// 今の設定ではなく設定できる最大の日数（60日）より古い記録だけを消す
+async function pruneProcessedMails(): Promise<void> {
+  if (dbProvider() !== 'sheets' || !sheetsDbConfigured()) return;
+  try {
+    const removed = await pruneProcessedMailSheets(new Date(Date.now() - (COLLECT_DAYS_MAX + 7) * DAY_MS));
+    if (removed > 0) console.log(`SES: 収集期間を過ぎた処理済みメールの記録${removed}行を削除しました`);
+  } catch (err) {
+    console.warn(`SES: 処理済みメールの記録の整理に失敗: ${safeErr(err)}`);
+  }
+}
+
+// 個人データの保存期間（SES_RETENTION_DAYS）を過ぎた案件・要員・マッチ・プロパー候補・評価の行を整理する
+// （突合・再確認に使うのは直近の行だけのため。失敗しても次回に回すだけ）
+async function pruneStalePersonalData(): Promise<void> {
+  if (dbProvider() !== 'sheets' || !sheetsDbConfigured()) return;
+  try {
+    const r = await pruneStalePersonalDataSheets(new Date(Date.now() - retentionDays() * DAY_MS));
+    const total = r.projects + r.engineers + r.matches + r.matchesCleared + r.properCandidates + r.feedback;
+    if (total > 0) {
+      console.log(
+        `SES: 保存期間（${retentionDays()}日）を過ぎた行を整理しました（案件${r.projects}行・要員${r.engineers}行・マッチ${r.matches}行を削除、` +
+          `成約のマッチ${r.matchesCleared}行の文面を消去、プロパー候補${r.properCandidates}行・評価${r.feedback}行を削除）`,
+      );
+    }
+  } catch (err) {
+    console.warn(`SES: 保存期間を過ぎた行の整理に失敗: ${safeErr(err)}`);
+  }
+}
+
+function skipProperForDeadline(): null {
+  recordHealEvent('warn', `1回の実行時間の上限（${runDeadlineMinutes()}分）に達したため、プロパー候補の処理は次回の実行に回しました`);
+  return null;
+}
+
+// demo・--collect-only(demo) 用の①〜④: 収集 → 展開 → 抽出 → 保存（名寄せ込み）
+async function collectAndStoreWhole(): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  const { mails } = await collectAndParse();
+  let items: ExtractedItem[] = [];
+  try {
+    ({ items } = await extractItems(mails));
+  } catch (err) {
+    console.error(`SES抽出: 失敗: ${safeErr(err)}`);
+    recordFatal('抽出段が例外で停止しました');
+  }
+  const projects = dedupeProjects(items.filter(isProjectItem).map((i) => i.project));
+  const engineers = dedupeEngineers(items.filter(isEngineerItem).map((i) => i.engineer));
+  writeDemoArtifact('projects', projects);
+  writeDemoArtifact('engineers', engineers);
+  return { projects, engineers };
+}
+
+// --match-only 用: 既存データを読み込む（本番=DB、demo=直前の data/ses-demo/*.json）
+async function loadExisting(): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (isDemo()) {
+    const projects = readDemoArtifact<Project[]>('projects') ?? [];
+    const engineers = readDemoArtifact<Engineer[]>('engineers') ?? [];
+    if (projects.length === 0 && engineers.length === 0) {
+      console.warn('SES: --match-only 用の直前データが無いため、先に収集・保存から実行します');
+      return collectAndStoreWhole();
+    }
+    // JSON復元時に Date が文字列になるため戻す
+    return {
+      projects: projects.map((p) => ({ ...p, receivedAt: new Date(p.receivedAt) })),
+      engineers: engineers.map((e) => ({ ...e, receivedAt: new Date(e.receivedAt) })),
+    };
+  }
+  try {
+    const [projects, engineers] = await Promise.all([
+      fetchOpenProjects(matchPoolLimit()),
+      fetchAvailableEngineers(matchPoolLimit()),
+    ]);
+    return { projects, engineers };
+  } catch (err) {
+    console.error(`SES: 既存データの読み込みに失敗: ${safeErr(err)}`);
+    recordFatal('既存の案件・要員データを読み込めませんでした');
+    return { projects: [], engineers: [] };
+  }
+}
+
+// プロパー（自社社員のスキルシート）× 案件の候補探し。失敗しても本体のマッチング・通知は続ける
+async function runProperStage(projects: Project[]): Promise<ProperRunResult | null> {
+  try {
+    return await runProperFlow(projects);
+  } catch (err) {
+    console.error(`プロパー候補: 失敗: ${safeErr(err)}`);
+    recordHealEvent('warn', 'プロパー候補の処理が途中で停止しました（外部要員とのマッチング・通知は継続します）');
+    return null;
+  }
+}
+
+// --match-only（本番）: 判定の予算に達して「未判定」になった組のうち、既にAI判定のある組は保存しない
+// （判定済みの行を未判定で上書きすると、案件・要員は突合済のため定時の実行でも判定し直されず、良い組が埋もれる）
+async function withoutDeferredOverwrites(matches: MatchResult[]): Promise<MatchResult[]> {
+  if (isDemo() || !matches.some((m) => m.category === 'deferred')) return matches;
+  let judged: Set<string>;
+  try {
+    judged = (await fetchMatchLedger()).judged;
+  } catch (err) {
+    console.warn(`SESマッチング: 判定済みの組を確かめられないため、未判定の組は保存しません: ${safeErr(err)}`);
+    return matches.filter((m) => m.category !== 'deferred');
+  }
+  const kept = matches.filter((m) => !(m.category === 'deferred' && judged.has(m.id)));
+  if (kept.length < matches.length) {
+    console.log(`SESマッチング: 判定の予算に達したため、判定済みの${matches.length - kept.length}組は前回の判定のまま残します`);
+  }
+  return kept;
+}
+
+// demo・--match-only の⑤〜⑦: マッチング → 下書き生成 → プロパー → 保存・通知
+async function matchDraftAndNotify(
+  projects: Project[],
+  engineers: Engineer[],
+  requestedDrafts: PendingDraftResult,
+): Promise<MatchResult[]> {
+  let matches: MatchResult[] = [];
+  try {
+    matches = await matchAll(projects, engineers, undefined, { suppression: await loadSuppressionIndex({ projects, engineers }) });
+    matches = await withoutDeferredOverwrites(matches);
+    await persistInjectionFlags();
+  } catch (err) {
+    console.error(`SESマッチング: 失敗: ${safeErr(err)}`);
+    recordFatal('マッチング段が例外で停止しました');
+  }
+
+  try {
+    matches = await createDrafts(matches, projects, engineers);
+  } catch (err) {
+    console.error(`SES下書き: 失敗: ${safeErr(err)}`);
+    recordFatal('下書き生成段が例外で停止しました');
+  }
+
+  const proper = await runProperStage(projects);
+  try {
+    await persistAndNotify(matches, projects, engineers, requestedDrafts, proper);
+  } catch (err) {
+    console.error(`SES通知: 失敗: ${safeErr(err)}`);
+    recordFatal('保存・通知段が例外で停止しました');
+  }
+
+  return matches;
+}
+
+function parseArgs(): SesBatchOptions {
+  const args = process.argv.slice(2);
+  return {
+    collectOnly: args.includes('--collect-only'),
+    matchOnly: args.includes('--match-only'),
+  };
+}
+
+runSesBatch(parseArgs()).catch((err) => {
+  console.error(`SESバッチ: 予期しないエラーで終了しました: ${safeErr(err)}`);
+  process.exitCode = 1;
+});

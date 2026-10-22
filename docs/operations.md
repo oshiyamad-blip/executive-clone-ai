@@ -14,7 +14,7 @@
    - LLMキー: `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`（無料枠可）、または `ANTHROPIC_API_KEY`（ZDRキー推奨）
    - `NOTION_TOKEN` / `NOTION_SIGNAL_DB_ID` / `NOTION_STORY_DB_ID`
 3. Notion に「シグナルDB」「ストーリーDB」を作成（プロパティは `README.md` 参照）→ 各DBの **Connections** でインテグレーションを共有
-4. `src/data/executiveProfile.ts` に経営者本人の**価値観・15の意思決定ルール・成功/失敗パターン**を登録（要件3.3 初期設定）
+4. `data/executive-profile.json`（コミットされない。`src/data/executiveProfile.ts` と同じ項目名の JSON）に経営者本人の**価値観・15の意思決定ルール・成功/失敗パターン**を登録（要件3.3 初期設定。公開リポジトリのソース `src/data/executiveProfile.ts` には書かない）
 5. 動作確認: `lifelog-inbox/` か `messenger-inbox/` にサンプルを1つ置く → `npm run daily` → Notion にシグナルが入るか確認 → `npm run chat`
 6. 自動実行を仕込む（下記「自動化」）
 
@@ -58,7 +58,7 @@ systemctl list-timers | grep exec-clone   # 次回実行を確認
   文字起こしが `lifelog-inbox/` に入るようにしておく（下記「取り込み経路」）。
 - **LINEを週1でエクスポート**（下記手順）。
 - **AIと対話する**: 気づきを増やすため、たまに `npm run chat` で壁打ちする（対話は学習ソースとして循環）。
-- **四半期に1回**: 新しい判断軸・成功/失敗を `executiveProfile.ts` に追記。
+- **四半期に1回**: 新しい判断軸・成功/失敗を `data/executive-profile.json` に追記（ソースファイルには書かない）。
 
 ### 経営企画・部門長
 

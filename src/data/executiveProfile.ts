@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import type { ExecutiveProfile } from '../types/index.js';
 
 // 経営者プロファイル — 経営者クローンの「心臓部」となる単一の真実の源。
@@ -9,8 +12,10 @@ import type { ExecutiveProfile } from '../types/index.js';
 // 要件 3.4「経営理念プロンプト」に対応:
 //   decisionRules と values が対話インターフェースのシステムプロンプトの基盤になる。
 //
-// ⚠️ ここはサンプル値です。実際の経営者の言葉・判断基準に置き換えてください。
-export const EXECUTIVE_PROFILE: ExecutiveProfile = {
+// ⚠️ ここはサンプル値です。このファイルは公開リポジトリで管理されるため、実際の経営者の言葉・判断基準
+// （権限委譲の上限・採用基準・失敗体験等）はここに書かず、data/executive-profile.json（data/ はコミットされない）か
+// 環境変数 EXECUTIVE_PROFILE_JSON に置いてください（同じ項目名の JSON。書いた項目だけがサンプル値を置き換えます）。
+const SAMPLE_EXECUTIVE_PROFILE: ExecutiveProfile = {
   name: process.env.EXECUTIVE_NAME ?? '代表取締役',
   role: 'CEO',
 
@@ -80,3 +85,26 @@ export const EXECUTIVE_PROFILE: ExecutiveProfile = {
     '迷ったら見送る。採用のミスは組織への負債が大きい',
   ],
 };
+
+// 実データの置き場（リポジトリ直下の data/executive-profile.json。.gitignore の data/* で除外済み）
+export const EXECUTIVE_PROFILE_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../..', 'data/executive-profile.json');
+
+export type ExecutiveProfileSource = 'env' | 'file' | 'sample';
+
+function loadExecutiveProfile(): { profile: ExecutiveProfile; source: ExecutiveProfileSource } {
+  const fromEnv = (process.env.EXECUTIVE_PROFILE_JSON ?? '').trim();
+  const source: ExecutiveProfileSource = fromEnv ? 'env' : existsSync(EXECUTIVE_PROFILE_FILE) ? 'file' : 'sample';
+  if (source === 'sample') return { profile: SAMPLE_EXECUTIVE_PROFILE, source };
+  try {
+    const parsed: unknown = JSON.parse(fromEnv || readFileSync(EXECUTIVE_PROFILE_FILE, 'utf-8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    return { profile: { ...SAMPLE_EXECUTIVE_PROFILE, ...(parsed as Partial<ExecutiveProfile>) }, source };
+  } catch {
+    console.warn(`経営者プロファイル: ${source === 'env' ? 'EXECUTIVE_PROFILE_JSON' : 'data/executive-profile.json'} を JSON として読めないため、サンプル値を使います`);
+    return { profile: SAMPLE_EXECUTIVE_PROFILE, source: 'sample' };
+  }
+}
+
+const loaded = loadExecutiveProfile();
+export const EXECUTIVE_PROFILE: ExecutiveProfile = loaded.profile;
+export const EXECUTIVE_PROFILE_SOURCE: ExecutiveProfileSource = loaded.source;

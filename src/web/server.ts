@@ -1,5 +1,7 @@
 import '../env.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import { readFileSync } from 'fs';
 import { createHash, timingSafeEqual } from 'crypto';
 import {
   loadCloneContext,
@@ -10,44 +12,39 @@ import {
   type CloneMode,
 } from '../clone/engine.js';
 import type { LlmMessage } from '../llm/index.js';
+import {
+  HttpError,
+  readJsonObject,
+  rejectReason,
+  runHandler,
+  securityHeaders,
+  sendJson,
+  webStartupProblem,
+} from './httpSecurity.js';
 
 // ② Web チャットUI（要件3.4 意思決定シミュレーション対話 / 4.1 アクセス制御）
 // 経営企画・役員がブラウザで壁打ちできる軽量ローカルサーバー。
 // アクセス制御: WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証を要求する。
 // 既定では 127.0.0.1（ローカルのみ）にバインドする。
 
-const HOST = process.env.WEB_HOST ?? '127.0.0.1';
-const PORT = Number(process.env.WEB_PORT ?? '8787');
-const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN ?? '';
-
-interface ChatRequest {
-  message: string;
-  history: Array<{ role: 'user' | 'assistant'; content: string }>;
-  mode?: CloneMode;
-}
+// 空文字の設定は未設定扱い（空のホストは全インターフェースで待ち受けてしまうため）
+const HOST = process.env.WEB_HOST?.trim() || '127.0.0.1';
+const PORT = Number(process.env.WEB_PORT?.trim() || '8787') || 8787;
+const ACCESS_TOKEN = process.env.WEB_ACCESS_TOKEN?.trim() ?? '';
+// ループバック以外で待ち受けるには HTTPS（証明書・秘密鍵のPEMファイル）か、TLS終端（リバースプロキシ・VPN）の内側の明示が必要
+const TLS_CERT = process.env.WEB_TLS_CERT?.trim() ?? '';
+const TLS_KEY = process.env.WEB_TLS_KEY?.trim() ?? '';
+const BEHIND_TLS = /^(1|true|yes|on)$/i.test(process.env.WEB_BEHIND_TLS?.trim() ?? '');
 
 // JSONボディの mode は型保証がないため、既知のモードのみ受け付けて chat に縮退する
 function normalizeMode(mode: unknown): CloneMode {
   return CLONE_MODES.includes(mode as CloneMode) ? (mode as CloneMode) : 'chat';
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 1_000_000) req.destroy(); // 1MB 上限
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
+const json = sendJson;
 
-function json(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(payload);
-}
+// 会話履歴は直近 MAX_HISTORY 件しか使わないため、本文の上限は長文の貼り付け（履歴書等）数回分に抑える
+const MAX_BODY_BYTES = 2_000_000;
 
 // 定数時間比較（トークンのタイミング攻撃対策）。長さ差を隠すため両者をハッシュ化して比較。
 function safeEqual(a: string, b: string): boolean {
@@ -87,21 +84,32 @@ async function getContext(): Promise<CloneContext> {
   return cachedCtx;
 }
 
+// 本文の形は保証されないため、型を確かめてから使う（不正な形でプロセスを落とさない）
+function parseHistory(raw: unknown): LlmMessage[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new HttpError(400, 'history は配列で指定してください');
+  return raw
+    .filter(
+      (m): m is LlmMessage =>
+        Boolean(m) &&
+        typeof m === 'object' &&
+        ((m as LlmMessage).role === 'user' || (m as LlmMessage).role === 'assistant') &&
+        typeof (m as LlmMessage).content === 'string' &&
+        (m as LlmMessage).content !== '',
+    )
+    .slice(-MAX_HISTORY)
+    .map((m) => ({ role: m.role, content: m.content }));
+}
+
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!authorized(req)) return json(res, 401, { error: 'unauthorized' });
 
-  let body: ChatRequest;
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch {
-    return json(res, 400, { error: 'invalid json' });
-  }
-  const message = (body.message ?? '').trim();
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  if (typeof body.message !== 'string') return json(res, 400, { error: 'message is required' });
+  const message = body.message.trim();
   if (!message) return json(res, 400, { error: 'message is required' });
 
-  const history: LlmMessage[] = (body.history ?? [])
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
-    .map((m) => ({ role: m.role, content: m.content }));
+  const history = parseHistory(body.history);
   history.push({ role: 'user', content: message });
 
   // 直近 MAX_HISTORY 件に制限し、先頭が user になるよう調整（Messages APIの制約）
@@ -121,35 +129,75 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       sources: result.sources.map((s) => ({ tag: s.tag, label: s.label, url: s.url ?? null })),
     });
   } catch (err) {
-    json(res, 502, { error: `生成に失敗しました: ${String(err)}` });
+    // 例外の文言（接続先・設定・入力の断片を含みうる）は画面に返さず、サーバーのログに種類だけ残す
+    console.error(`Web UI: 生成に失敗: ${err instanceof Error ? err.name : typeof err}`);
+    json(res, 502, { error: '生成に失敗しました（しばらくしてから再度お試しください）' });
+  }
+}
+
+function loadTls(): { cert: Buffer; key: Buffer } | null | 'error' {
+  if (!TLS_CERT && !TLS_KEY) return null;
+  if (!TLS_CERT || !TLS_KEY) {
+    console.error('❌ HTTPS で待ち受けるには WEB_TLS_CERT と WEB_TLS_KEY の両方を指定してください。起動を中止します');
+    return 'error';
+  }
+  try {
+    return { cert: readFileSync(TLS_CERT), key: readFileSync(TLS_KEY) };
+  } catch (err) {
+    console.error(`❌ WEB_TLS_CERT / WEB_TLS_KEY のファイルを読めません（${err instanceof Error ? err.name : typeof err}）。起動を中止します`);
+    return 'error';
   }
 }
 
 async function main(): Promise<void> {
+  const tls = loadTls();
+  if (tls === 'error') {
+    process.exitCode = 1;
+    return;
+  }
+  const problem = webStartupProblem({
+    host: HOST,
+    token: ACCESS_TOKEN,
+    tlsProtected: tls !== null || BEHIND_TLS,
+    behindTlsDeclared: BEHIND_TLS,
+    hostVar: 'WEB_HOST',
+    tokenVar: 'WEB_ACCESS_TOKEN',
+    behindTlsVar: 'WEB_BEHIND_TLS',
+    otherTokens: [{ name: 'SES_WEB_ACCESS_TOKEN（SESマッチ確認UI）', value: process.env.SES_WEB_ACCESS_TOKEN?.trim() ?? '' }],
+    tlsHint: 'WEB_TLS_CERT / WEB_TLS_KEY に証明書と秘密鍵のファイルを指定する',
+  });
+  if (problem) {
+    console.error(`❌ ${problem}。起動を中止します`);
+    process.exitCode = 1;
+    return;
+  }
   console.log('経営者クローンAI — Web対話サーバーを起動中...');
   const ctx = await getContext();
   console.log(`✅ コンテキスト読込（シグナル${ctx.signals.length}件 / ストーリー${ctx.stories.length}件）`);
   if (!ACCESS_TOKEN) {
-    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。ローカル(127.0.0.1)以外に公開しないでください。');
+    console.warn('⚠️  WEB_ACCESS_TOKEN が未設定です。このPCのブラウザから直接（プロキシを通さず）のみ利用できます。');
   }
 
   const page = renderPage(ctx.profile.name);
 
-  const server = createServer((req, res) => {
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
+    const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
+    if (blocked) return json(res, blocked.status, { error: blocked.message });
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() });
       res.end(page);
       return;
     }
     if (req.method === 'POST' && req.url === '/api/chat') {
-      void handleChat(req, res);
+      runHandler(res, () => handleChat(req, res));
       return;
     }
     json(res, 404, { error: 'not found' });
-  });
+  };
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key, minVersion: 'TLSv1.2' }, handle) : createServer(handle);
 
   server.listen(PORT, HOST, () => {
-    console.log(`\n🌐 http://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
+    console.log(`\n🌐 ${tls ? 'https' : 'http'}://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
   });
 }
 
@@ -208,8 +256,10 @@ function renderPage(name: string): string {
   const input = document.getElementById('input');
   const send = document.getElementById('send');
   const tokenEl = document.getElementById('token');
-  tokenEl.value = localStorage.getItem('ec_token') || '';
-  tokenEl.addEventListener('change', () => localStorage.setItem('ec_token', tokenEl.value));
+  // アクセストークンはタブを閉じれば消える sessionStorage に置く（共用PCのブラウザに残さない）。以前の保存分は消す
+  try { localStorage.removeItem('ec_token'); } catch (e) {}
+  try { tokenEl.value = sessionStorage.getItem('ec_token') || ''; } catch (e) {}
+  tokenEl.addEventListener('change', () => { try { sessionStorage.setItem('ec_token', tokenEl.value); } catch (e) {} });
 
   // モードごとに会話履歴と表示欄を分離する。
   // 採用モードに貼られた候補者情報が、他モードのリクエストに紛れ込むのを防ぐ。
@@ -268,7 +318,8 @@ function renderPage(name: string): string {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value },
-        body: JSON.stringify({ message: msg, history: histories[m], mode: m })
+        // サーバーは直近40件しか使わないため、送るのも直近分だけにする（長い会話で本文の上限に達しないように）
+        body: JSON.stringify({ message: msg, history: histories[m].slice(-40), mode: m })
       });
       const data = await res.json();
       if (!res.ok) { add(m, 'bot', '[エラー] ' + (data.error || res.status)); return; }

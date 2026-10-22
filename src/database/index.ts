@@ -1,13 +1,82 @@
-import { Client } from '@notionhq/client';
-import type { Signal, Story } from '../types/index.js';
+import type { Client } from '@notionhq/client';
+import { normalizePrefecture } from '../ses/prefecture.js';
+import { normalizeSkills, requirementsOf } from '../ses/skillDict.js';
+import { toInitials } from '../ses/pii.js';
+import {
+  dbProvider,
+  notionProjectDbId,
+  notionEngineerDbId,
+  notionMatchDbId,
+  notionOwnEngineerDbId,
+  notionFeedbackDbId,
+  notionSkillEquivDbId,
+  draftSigningKey,
+} from '../ses/config.js';
+import { safeErr } from '../ses/redact.js';
+import { recordHealEvent } from '../ses/heal/events.js';
+import * as sheetsDb from './sheets.js';
+import {
+  remoteLabel,
+  labelToRemote,
+  matchStatusLabel,
+  FB_VERDICT_LABEL,
+  combineAgentInfo,
+  parseAgentInfo,
+  replyMetaJson,
+  parseReplyMeta,
+  verifyReplyMeta,
+  replyMetaInjection,
+  sanitizeListItem,
+  JUDGE_VERDICT_LABEL,
+  judgeVerdictLabel,
+} from './mapping.js';
+import type {
+  Signal,
+  Story,
+  Project,
+  Engineer,
+  MatchResult,
+  MatchStatus,
+  OwnEngineer,
+  MatchFeedback,
+  SkillEquivalence,
+} from '../types/index.js';
 
 // Notion API バージョン 2025-09-03 以降、database ID と data source ID は別物になった。
 // ページ作成・クエリは data_source_id ベースで行う（database_id は不可）。
 // @notionhq/client v5 は既定で 2025-09-03 を使う。
-const notion = new Client({ auth: process.env.NOTION_TOKEN });
+// SDK は最初の呼び出しのときに読み込む（DB_PROVIDER=sheets の SES バッチでは、使わない SDK のコードを鍵を持つプロセスで動かさない）。
+// notion.<名前>.<名前>(...) の呼び出しを、読み込み後のクライアントの同じメソッドへ渡す
+let notionClient: Promise<Client> | null = null;
+
+function loadNotion(): Promise<Client> {
+  notionClient ??= import('@notionhq/client').then(({ Client: NotionClient }) => new NotionClient({ auth: process.env.NOTION_TOKEN }));
+  return notionClient;
+}
+
+function lazyNotion(path: string[]): unknown {
+  return new Proxy(function () {}, {
+    get: (_t, prop) => (typeof prop === 'string' && prop !== 'then' ? lazyNotion([...path, prop]) : undefined),
+    apply: async (_t, _this, args: unknown[]) => {
+      let owner: unknown = await loadNotion();
+      for (const key of path.slice(0, -1)) owner = (owner as Record<string, unknown>)[key];
+      const method = (owner as Record<string, (...a: unknown[]) => unknown>)[path[path.length - 1]];
+      return method.apply(owner, args);
+    },
+  });
+}
+
+const notion = lazyNotion([]) as Client;
 
 const SIGNAL_DB_ID = process.env.NOTION_SIGNAL_DB_ID ?? '';
 const STORY_DB_ID = process.env.NOTION_STORY_DB_ID ?? '';
+// SESマッチング機能で追加（設定の単一の真実の源である ses/config.ts のゲッターを経由する）
+const PROJECT_DB_ID = notionProjectDbId();
+const ENGINEER_DB_ID = notionEngineerDbId();
+const MATCH_DB_ID = notionMatchDbId();
+const OWN_ENGINEER_DB_ID = notionOwnEngineerDbId();
+const FEEDBACK_DB_ID = notionFeedbackDbId();
+const SKILL_EQUIV_DB_ID = notionSkillEquivDbId();
 
 // --- レート制限（平均 3 req/s）+ 429/529 リトライ ---
 // 全 Notion 呼び出しをこのラッパー経由にして最小間隔を空ける。
@@ -75,7 +144,7 @@ async function resolveDataSourceId(databaseId: string): Promise<string> {
       return databaseId;
     }
     // 一過性エラー（429/5xx/ネットワーク）はキャッシュ汚染を避け、今回のみフォールバック
-    console.warn(`Notion: data_source_id 解決に失敗（今回のみフォールバック）: ${String(err)}`);
+    console.warn(`Notion: data_source_id 解決に失敗（今回のみフォールバック）: ${safeErr(err)}`);
     return databaseId;
   }
 }
@@ -184,6 +253,771 @@ export async function saveStory(story: Story): Promise<string> {
         : []),
     ],
   );
+}
+
+// ===== SESマッチング機能向けの拡張 =====
+// saveSignal/saveStory と同型（data_source_id 方式・共通ヘルパー再利用）。既存関数は無変更。
+// プロパティ名は docs/ses-matching-basic-design.md §6 のNotion DB設計に一致させる。
+
+// ラベル変換・返信メタ・営業元の結合/分解は DBプロバイダ共通のため ./mapping.ts に集約
+// （Sheets版バックエンド ./sheets.ts と同じ表記で保存・復元するための単一の変換層）
+
+// Notion APIの1ページあたりの取得上限
+const NOTION_PAGE_SIZE = 100;
+
+type QueryArgs = Omit<Parameters<typeof notion.dataSources.query>[0], 'data_source_id' | 'start_cursor' | 'page_size'>;
+
+// has_more/next_cursor を辿って最大 limit 件まで取得する（page_size は常に100以下）
+async function queryAll(dataSourceId: string, args: QueryArgs, limit: number): Promise<unknown[]> {
+  const results: unknown[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await throttle(() =>
+      notion.dataSources.query({
+        ...args,
+        data_source_id: dataSourceId,
+        page_size: Math.min(NOTION_PAGE_SIZE, Math.max(1, limit - results.length)),
+        ...(cursor ? { start_cursor: cursor } : {}),
+      } as never),
+    );
+    const page = res as { results: unknown[]; has_more: boolean; next_cursor: string | null };
+    results.push(...page.results);
+    cursor = page.has_more && page.next_cursor ? page.next_cursor : undefined;
+  } while (cursor && results.length < limit);
+  return results.slice(0, limit);
+}
+
+// SESで後から追加したテキスト列（安定ID）を、既存のDBにも自動で追加する（プロセス内で1回。
+// 既存の列は型を変えない。権限不足等で追加できなければ警告のみ — 保存時に失敗し、元メールは次回再処理される）
+const ensuredProps = new Map<string, Promise<boolean>>();
+
+// 列がある（または追加できた）なら true
+function ensureTextProperties(dataSourceId: string, names: string[]): Promise<boolean> {
+  const key = `${dataSourceId}:${names.join(',')}`;
+  let pending = ensuredProps.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const ds = (await throttle(() => notion.dataSources.retrieve({ data_source_id: dataSourceId }))) as {
+          properties?: Record<string, unknown>;
+        };
+        const missing = names.filter((n) => !(n in (ds.properties ?? {})));
+        if (missing.length === 0) return true;
+        await throttle(() =>
+          notion.dataSources.update({
+            data_source_id: dataSourceId,
+            properties: Object.fromEntries(missing.map((n) => [n, { rich_text: {} }])),
+          } as never),
+        );
+        console.log(`Notion: SES用のテキスト列を追加しました（${missing.join(', ')}）`);
+        return true;
+      } catch (err) {
+        ensuredProps.delete(key); // 次回呼び出しで再試行
+        console.warn(`Notion: SES用の列（${names.join(', ')}）の確認・追加に失敗: ${safeErr(err)}`);
+        return false;
+      }
+    })();
+    ensuredProps.set(key, pending);
+  }
+  return pending;
+}
+
+// 安定IDの列で既存ページを探す（見つからなければ null）
+async function findPageIdByText(dataSourceId: string, property: string, value: string): Promise<string | null> {
+  if (!value) return null;
+  const res = await throttle(() =>
+    notion.dataSources.query({
+      data_source_id: dataSourceId,
+      filter: { property, rich_text: { equals: value } },
+      page_size: 1,
+    } as never),
+  );
+  const first = (res as { results: Array<{ id?: string }> }).results[0];
+  return first?.id ?? null;
+}
+
+// multi_select の選択肢名はカンマを含められず100文字まで（LLMの抽出値でページ作成全体が失敗しないように整える）
+function multiSelect(values: string[]): { multi_select: Array<{ name: string }> } {
+  const names = [...new Set(values.map((v) => sanitizeListItem(v).slice(0, 100)).filter(Boolean))];
+  return { multi_select: names.map((name) => ({ name })) };
+}
+
+// 実在する YYYY-MM-DD だけを日付型に入れる（それ以外はプロパティ自体を省く）
+function dateOnly(s: string | null | undefined): string | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s ? s : null;
+}
+
+// 安定IDで upsert する。人が進めたステータスは再保存で巻き戻さない（更新時はステータスを送らない）
+async function upsertByStableId(
+  dataSourceId: string,
+  idProperty: string,
+  id: string,
+  properties: Record<string, unknown>,
+  bodyBlocks: Array<Record<string, unknown>>,
+): Promise<string> {
+  await ensureTextProperties(dataSourceId, [idProperty]);
+  const existingId = await findPageIdByText(dataSourceId, idProperty, id);
+  if (existingId) {
+    const { ステータス: _status, ...rest } = properties;
+    await throttle(() => notion.pages.update({ page_id: existingId, properties: rest } as never));
+    return existingId;
+  }
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    bodyBlocks,
+  );
+}
+
+// 指示混入疑いの列が無いDBに、印の付いた案件・要員を突合の対象外として保存したことを知らせる
+function injectionColumnMissing(kind: '案件' | '要員'): void {
+  recordHealEvent(
+    'warn',
+    `Notionの${kind}DBに「${sheetsDb.INJECTION_COLUMN}」の列を追加できないため、AIへの指示らしき記載のある${kind}を突合の対象外（${kind === '案件' ? '終了' : '決定済'}）で保存しました（列を追加し、内容を人が確かめてください）`,
+  );
+}
+
+// SES案件をNotion案件DBに保存する（案件ID=抽出時の決定的IDで upsert。再実行で重複ページを作らない）
+export async function saveProject(project: Project): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveProjectSheets(project);
+  if (!PROJECT_DB_ID) {
+    console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
+  const properties: Record<string, unknown> = {
+    案件名: { title: toRichText(project.title) },
+    案件ID: { rich_text: toRichText(project.id) },
+    必須スキル: multiSelect(project.requiredSkills),
+    尚可スキル: multiSelect(project.preferredSkills),
+    単金下限: { number: project.rateMin },
+    単金上限: { number: project.rateMax },
+    勤務地: { rich_text: toRichText(project.location) },
+    リモート: { select: { name: remoteLabel(project.remote) } },
+    開始時期: { rich_text: toRichText(project.startPeriod) },
+    商流メモ: { rich_text: toRichText(project.businessFlow) },
+    営業元会社: { rich_text: toRichText(project.agentCompany) },
+    営業元担当: { rich_text: toRichText(project.agentContact) },
+    営業元メール: { rich_text: toRichText(project.agentEmail) },
+    元メールID: { rich_text: toRichText(project.sourceMailId) },
+    // 全員に返信の再現用（--match-only 経路のため。DBにプロパティが必要 → 導入マニュアル4-1参照）
+    返信メタ: { rich_text: toRichText(replyMetaJson(project.replyTarget, notionReplyBinding('案件', project.id, project.agentEmail), { injection: project.injectionSuspected })) },
+    受信日: { date: { start: project.receivedAt.toISOString() } },
+    ステータス: { select: { name: project.status === 'closed' ? '終了' : '募集中' } },
+  };
+  const startDate = dateOnly(project.startDate);
+  if (startDate) properties['開始日'] = { date: { start: startDate } };
+  // 指示混入疑いの列を追加できない（権限不足等）ときは書かずに保存する（保存そのものを失敗させない）。
+  // ただし印の付いた案件は、読み戻したときに印が消えてAI判定・自動の下書きに進まないよう「終了」で保存する
+  if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
+    // 印は付けるだけにし、空欄では上書きしない（AI判定・人が付けた印を再抽出で消さない。外すのは人だけ）
+    if (project.injectionSuspected) properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText('あり') };
+  } else if (project.injectionSuspected) {
+    properties['ステータス'] = { select: { name: '終了' } };
+    injectionColumnMissing('案件');
+  }
+  return upsertByStableId(
+    dataSourceId,
+    '案件ID',
+    project.id,
+    properties,
+    toParagraphBlocks(`期間: ${project.duration}\n開始日(正規化): ${startDate ?? '不明'}`),
+  );
+}
+
+// SES要員をNotion要員DBに保存する（要員ID=抽出時の決定的IDで upsert）
+export async function saveEngineer(engineer: Engineer): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveEngineerSheets(engineer);
+  if (!ENGINEER_DB_ID) {
+    console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
+  const properties: Record<string, unknown> = {
+    表示名: { title: toRichText(engineer.displayName) },
+    要員ID: { rich_text: toRichText(engineer.id) },
+    スキル: multiSelect(engineer.skills),
+    経験年数: { number: engineer.experienceYears },
+    希望単金: { number: engineer.desiredRate },
+    居住地: { rich_text: toRichText(engineer.residence) },
+    リモート希望: { select: { name: remoteLabel(engineer.remoteWish) } },
+    営業元: { rich_text: toRichText(combineAgentInfo(engineer.agentCompany, engineer.agentContact, engineer.agentEmail)) },
+    元メールID: { rich_text: toRichText(engineer.sourceMailId) },
+    // 全員に返信の再現用（--match-only 経路のため。DBにプロパティが必要 → 導入マニュアル4-2参照）
+    返信メタ: {
+      rich_text: toRichText(
+        replyMetaJson(engineer.replyTarget, notionReplyBinding('要員', engineer.id, engineerAgentEmail(engineer)), { injection: engineer.injectionSuspected }),
+      ),
+    },
+    受信日: { date: { start: engineer.receivedAt.toISOString() } },
+    ステータス: { select: { name: engineer.status === 'assigned' ? '決定済' : '提案可' } },
+  };
+  const availableFrom = dateOnly(engineer.availableFrom);
+  if (availableFrom) properties['稼働開始可能日'] = { date: { start: availableFrom } };
+  if (await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN])) {
+    // 印は付けるだけにし、空欄では上書きしない（AI判定・人が付けた印を再抽出で消さない。外すのは人だけ）
+    if (engineer.injectionSuspected) properties[sheetsDb.INJECTION_COLUMN] = { rich_text: toRichText('あり') };
+  } else if (engineer.injectionSuspected) {
+    properties['ステータス'] = { select: { name: '決定済' } };
+    injectionColumnMissing('要員');
+  }
+  return upsertByStableId(
+    dataSourceId,
+    '要員ID',
+    engineer.id,
+    properties,
+    toParagraphBlocks(
+      `最寄り駅: ${engineer.nearestStation}\n稼働開始可能日(原文): ${engineer.availableDate}\n稼働率: ${engineer.utilization}`,
+    ),
+  );
+}
+
+// マッチ結果をNotionマッチDBに保存する。案件・要員のNotionページIDが分かればrelationも張る。
+// マッチID（案件ID×要員IDから作る安定ID）で upsert する（タイトルは表示用で、別ペアと重なり得るため鍵にしない）
+export async function saveMatch(
+  match: MatchResult,
+  refs?: { projectNotionPageId?: string; engineerNotionPageId?: string },
+): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveMatchSheets(match);
+  if (!MATCH_DB_ID) {
+    console.warn('NOTION_MATCH_DB_ID が未設定 — マッチ結果の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  // 判定列を追加できない（権限不足等）ときは判定を書かずに保存する（保存そのものを失敗させない）
+  const hasJudgeColumn = await ensureTextProperties(dataSourceId, ['判定']);
+  const properties: Record<string, unknown> = {
+    マッチ名: { title: toRichText(match.title) },
+    マッチID: { rich_text: toRichText(match.id) },
+    粗利額: { number: match.grossMarginJpy },
+    適合スコア: { number: match.score },
+    判定根拠: { rich_text: toRichText(match.reason) },
+    案件側下書きURL: { rich_text: toRichText(match.draftToProject?.url ?? '') },
+    要員側下書きURL: { rich_text: toRichText(match.draftToEngineer?.url ?? '') },
+    ステータス: { select: { name: matchStatusLabel(match.status) } },
+    検出日時: { date: { start: match.detectedAt.toISOString() } },
+  };
+  if (hasJudgeColumn) properties['判定'] = { rich_text: toRichText(judgeVerdictLabel(match.verdict)) };
+  if (refs?.projectNotionPageId) properties['案件'] = { relation: [{ id: refs.projectNotionPageId }] };
+  if (refs?.engineerNotionPageId) properties['要員'] = { relation: [{ id: refs.engineerNotionPageId }] };
+  return upsertByStableId(dataSourceId, 'マッチID', match.id, properties, toParagraphBlocks(match.reason));
+}
+
+// ===== まとめ保存（Sheetsは新しい行をまとめて追記。Notionは1件ずつ） =====
+
+export interface BatchSaveResult<T = unknown> {
+  failed: Map<string, unknown>; // 保存できなかった ID → エラー
+  pageIds: Map<string, string>; // 保存できた ID → 参照ID（NotionのページID。Sheetsは自ID）
+  // 保存後の状態（Sheetsのみ。人が進めたステータス・突合済の印を引き継いだ値）。無ければ渡した値のまま
+  saved?: Map<string, T>;
+}
+
+async function saveEach<T extends { id: string }>(items: T[], save: (item: T) => Promise<string>): Promise<BatchSaveResult<T>> {
+  const result: BatchSaveResult<T> = { failed: new Map(), pageIds: new Map() };
+  for (const item of items) {
+    try {
+      result.pageIds.set(item.id, await save(item));
+    } catch (err) {
+      result.failed.set(item.id, err);
+    }
+  }
+  return result;
+}
+
+function sheetsResult<T extends { id: string }>(items: T[], failed: Map<string, unknown>, saved?: Map<string, T>): BatchSaveResult<T> {
+  return { failed, pageIds: new Map(items.filter((i) => !failed.has(i.id)).map((i) => [i.id, i.id])), ...(saved ? { saved } : {}) };
+}
+
+export async function saveProjects(projects: Project[]): Promise<BatchSaveResult<Project>> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.saveProjectsSheets(projects);
+    return sheetsResult(projects, r.failed, r.saved);
+  }
+  return saveEach(projects, saveProject);
+}
+
+export async function saveEngineers(engineers: Engineer[]): Promise<BatchSaveResult<Engineer>> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.saveEngineersSheets(engineers);
+    return sheetsResult(engineers, r.failed, r.saved);
+  }
+  return saveEach(engineers, saveEngineer);
+}
+
+// 指定のメールから保存済みの案件・要員（同じメールを抽出し直したときのIDの対応付け用。Sheetsのみ）
+export async function fetchSavedItemsForMails(mailIds: Set<string>): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchItemsByMailSheets(mailIds);
+  return { projects: [], engineers: [] };
+}
+
+export async function saveMatches(
+  matches: MatchResult[],
+  refsOf: (match: MatchResult) => { projectNotionPageId?: string; engineerNotionPageId?: string },
+): Promise<BatchSaveResult> {
+  if (dbProvider() === 'sheets') return sheetsResult(matches, await sheetsDb.saveMatchesSheets(matches));
+  return saveEach(matches, (m) => saveMatch(m, refsOf(m)));
+}
+
+// 候補ペアの判定・保存まで済んだ案件・要員に印を付ける（Sheets運用のみ。Notionは印を持たず、その回の新着だけを突合する）
+export async function markItemsMatched(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (dbProvider() === 'sheets') return sheetsDb.markItemsMatchedSheets(kind, ids);
+  return 0;
+}
+
+// この実行で指示混入疑いの印の控えを信用できるか（Sheets運用のみ確かめる。信用できなければ下書きを作らない）
+export async function injectionLedgerTrusted(): Promise<boolean> {
+  if (dbProvider() === 'sheets') return sheetsDb.injectionLedgerTrustedSheets();
+  return true;
+}
+
+// 最終判定のAIが指示らしき記載を見つけた案件・要員に「指示混入疑い」を付ける（次回以降もAI判定・自動の下書きに回さない）。
+// Notion は列を追加できなければ、印が消えないよう突合の対象外（終了・決定済）にする。付けた件数を返す
+export async function markItemsInjectionSuspected(kind: 'project' | 'engineer', ids: string[]): Promise<number> {
+  if (dbProvider() === 'sheets') return sheetsDb.markItemsInjectionSuspectedSheets(kind, ids);
+  const dbId = kind === 'project' ? PROJECT_DB_ID : ENGINEER_DB_ID;
+  if (!dbId || ids.length === 0) return 0;
+  const dataSourceId = await resolveDataSourceId(dbId);
+  const label = kind === 'project' ? '案件' : '要員';
+  const hasColumn = await ensureTextProperties(dataSourceId, [sheetsDb.INJECTION_COLUMN]);
+  if (!hasColumn) injectionColumnMissing(label);
+  let marked = 0;
+  for (const id of new Set(ids)) {
+    const pageId = await findPageIdByText(dataSourceId, `${label}ID`, id);
+    if (!pageId) continue;
+    const properties: Record<string, unknown> = hasColumn
+      ? { [sheetsDb.INJECTION_COLUMN]: { rich_text: toRichText('あり') } }
+      : { ステータス: { select: { name: kind === 'project' ? '終了' : '決定済' } } };
+    // 署名どおりの返信メタには印を含めて署名し直す（列の印を人が消しても要確認のままにする）
+    const resigned = await resignedInjectionMeta(pageId, label, id);
+    if (resigned) properties['返信メタ'] = { rich_text: toRichText(resigned) };
+    await throttle(() => notion.pages.update({ page_id: pageId, properties } as never));
+    marked += 1;
+  }
+  return marked;
+}
+
+async function resignedInjectionMeta(pageId: string, label: string, id: string): Promise<string | null> {
+  if (!draftSigningKey()) return null;
+  try {
+    const page = (await throttle(() => notion.pages.retrieve({ page_id: pageId }))) as { properties?: Record<string, unknown> };
+    const props = page.properties ?? {};
+    const meta = readRichText(props['返信メタ']);
+    const agentEmail = label === '案件' ? readRichText(props['営業元メール']) : parseAgentInfo(readRichText(props['営業元'])).email;
+    const binding = notionReplyBinding(label, id, agentEmail);
+    if (!meta || !verifyReplyMeta(meta, binding) || replyMetaInjection(meta)) return null;
+    return replyMetaJson(parseReplyMeta(meta), binding, { injection: true });
+  } catch (err) {
+    console.warn(`Notion: 返信メタに指示混入疑いの印を含められませんでした: ${safeErr(err)}`);
+    return null;
+  }
+}
+
+// マッチの判定の控え（判定済み・枠を使わない判定済み・判定待ちの組）。since 以降に検出したものに絞る（Notion）。
+// AI判定を次回に回した組（判定「未判定」）は判定済みに含めず、判定待ちの作業の列として返す
+export async function fetchMatchLedger(since?: Date): Promise<sheetsDb.MatchLedger> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchMatchLedgerSheets();
+  const ledger: sheetsDb.MatchLedger = { judged: new Set(), capFree: new Set(), deferred: new Set() };
+  if (!MATCH_DB_ID) return ledger;
+  const pages = await matchPagesSince(since);
+  for (const page of pages) {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    const id = readRichText(props['マッチID']);
+    if (!id) continue;
+    const verdict = readRichText(props['判定']);
+    if (verdict === JUDGE_VERDICT_LABEL.deferred) {
+      ledger.deferred.add(id);
+      continue;
+    }
+    ledger.judged.add(id);
+    if (verdict === JUDGE_VERDICT_LABEL.rejected || verdict === JUDGE_VERDICT_LABEL.low) ledger.capFree.add(id);
+  }
+  for (const id of ledger.judged) ledger.deferred.delete(id);
+  return ledger;
+}
+
+async function matchPagesSince(since?: Date): Promise<unknown[]> {
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  await ensureTextProperties(dataSourceId, ['マッチID', '判定']);
+  return queryAll(
+    dataSourceId,
+    since ? { filter: { property: '検出日時', date: { on_or_after: since.toISOString() } } } : {},
+    10_000,
+  );
+}
+
+// 判定済みのマッチID（通常バッチで同じペアをLLMで判定し直さないため）
+export async function fetchJudgedMatchIds(since?: Date): Promise<Set<string>> {
+  return (await fetchMatchLedger(since)).judged;
+}
+
+// 判定待ちのまま対象から外れた組を閉じる（判定「ルールのみ」）。閉じた件数を返す
+export async function closeDeferredMatches(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  if (dbProvider() === 'sheets') return sheetsDb.closeDeferredMatchesSheets(ids);
+  if (!MATCH_DB_ID) return 0;
+  const want = new Set(ids);
+  let closed = 0;
+  for (const page of await matchPagesSince()) {
+    const p = page as { id?: string; properties?: Record<string, unknown> };
+    const props = p.properties ?? {};
+    if (!p.id || !want.has(readRichText(props['マッチID'])) || readRichText(props['判定']) !== JUDGE_VERDICT_LABEL.deferred) continue;
+    await throttle(() =>
+      notion.pages.update({ page_id: p.id!, properties: { 判定: { rich_text: toRichText(JUDGE_VERDICT_LABEL.rule) } } } as never),
+    );
+    closed += 1;
+  }
+  return closed;
+}
+
+export type { RejectedMatchRow } from './sheets.js';
+
+// 再提案抑制の元になる組（ステータス「見送り」のマッチと、評価で「ズレ」にしたマッチ badIds）。
+// Notion は「見送り」のマッチだけを読み、案件ID・要員IDはマッチIDから取り出す（取り出せないものは呼び出し側で除く）
+export async function fetchRejectedMatchRows(
+  badIds: Set<string>,
+  parseId: (matchId: string) => { projectId: string; engineerId: string } | null,
+): Promise<sheetsDb.RejectedMatchRow[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchRejectedMatchRowsSheets(badIds);
+  if (!MATCH_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(MATCH_DB_ID);
+  const pages = await queryAll(
+    dataSourceId,
+    { filter: { property: 'ステータス', select: { equals: matchStatusLabel('dropped') } } } as QueryArgs,
+    10_000,
+  );
+  return pages.flatMap((page) => {
+    const matchId = readRichText(((page as { properties?: Record<string, unknown> }).properties ?? {})['マッチID']);
+    const ids = matchId ? parseId(matchId) : null;
+    return ids ? [{ matchId, ...ids, source: 'dropped' as const }] : [];
+  });
+}
+
+// IDを指定して案件・要員を読む（ステータスによらず。再提案抑制用）。Notion は読まない（直近の突合の対象だけで照合する）
+export async function fetchItemsByIds(
+  projectIds: Set<string>,
+  engineerIds: Set<string>,
+): Promise<{ projects: Project[]; engineers: Engineer[] }> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchItemsByIdsSheets(projectIds, engineerIds);
+  return { projects: [], engineers: [] };
+}
+
+// 確認UIから下書きを作る直前に、組の案件・要員の今の状態（ステータス・指示混入疑い・返信先）を読み直す。
+// 見つからなければ null。読めなかった（接続・権限の失敗）ときは例外（呼び出し側は作らない）
+export async function fetchCurrentPair(
+  projectId: string,
+  engineerId: string,
+): Promise<{ project: Project | null; engineer: Engineer | null }> {
+  if (dbProvider() === 'sheets') {
+    const r = await sheetsDb.fetchItemsByIdsSheets(new Set([projectId]), new Set([engineerId]));
+    return { project: r.projects.find((x) => x.id === projectId) ?? null, engineer: r.engineers.find((x) => x.id === engineerId) ?? null };
+  }
+  const pageOf = async (dbId: string, property: string, id: string): Promise<unknown | null> => {
+    if (!dbId || !id) return null;
+    const dataSourceId = await resolveDataSourceId(dbId);
+    const res = await throttle(() =>
+      notion.dataSources.query({ data_source_id: dataSourceId, filter: { property, rich_text: { equals: id } }, page_size: 1 } as never),
+    );
+    return (res as { results: unknown[] }).results[0] ?? null;
+  };
+  const [projectPage, engineerPage] = [await pageOf(PROJECT_DB_ID, '案件ID', projectId), await pageOf(ENGINEER_DB_ID, '要員ID', engineerId)];
+  return { project: projectPage ? projectFromPage(projectPage) : null, engineer: engineerPage ? engineerFromPage(engineerPage) : null };
+}
+
+// 突合対象の案件（募集中のみ）を新しい順に取得する（通常バッチの突合プール・--match-only・プロパー候補探しで使用）。
+// receivedSince 指定時はその日時以降に受信した案件に絞る
+export async function fetchOpenProjects(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Project[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchOpenProjectsSheets(limit, opts.receivedSince);
+  if (!PROJECT_DB_ID) {
+    console.warn('NOTION_PROJECT_DB_ID が未設定 — 案件なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(PROJECT_DB_ID);
+  const open = { property: 'ステータス', select: { equals: '募集中' } };
+  const since = opts.receivedSince;
+  const pages = await queryAll(
+    dataSourceId,
+    {
+      filter: since ? { and: [open, { property: '受信日', date: { on_or_after: since.toISOString() } }] } : open,
+      sorts: [{ property: '受信日', direction: 'descending' }],
+    } as QueryArgs,
+    limit,
+  );
+  return pages.map((page) => projectFromPage(page));
+}
+
+// 突合対象の要員（提案可のみ）を新しい順に取得する。receivedSince 指定時はその日時以降に受信した要員に絞る
+export async function fetchAvailableEngineers(limit = 100, opts: { receivedSince?: Date } = {}): Promise<Engineer[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchAvailableEngineersSheets(limit, opts.receivedSince);
+  if (!ENGINEER_DB_ID) {
+    console.warn('NOTION_ENGINEER_DB_ID が未設定 — 要員なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(ENGINEER_DB_ID);
+  const available = { property: 'ステータス', select: { equals: '提案可' } };
+  const since = opts.receivedSince;
+  const pages = await queryAll(
+    dataSourceId,
+    {
+      filter: since
+        ? { and: [available, { property: '受信日', date: { on_or_after: since.toISOString() } }] }
+        : available,
+      sorts: [{ property: '受信日', direction: 'descending' }],
+    } as QueryArgs,
+    limit,
+  );
+  return pages.map((page) => engineerFromPage(page));
+}
+
+// 返信メタの署名（Sheets運用と同じ仕組み。タブ名に notion: を付けて Sheets の行の値と取り違えない）。
+// 編集者が返信メタ・営業元メールを書き換えた・署名の無いページは宛先に使わず、署名に残した指示混入疑いの印は
+// 列の印を消しても外れない
+function notionReplyBinding(tab: string, id: string, agentEmail: string) {
+  return { key: draftSigningKey(), tab: `notion:${tab}`, id, agentEmail };
+}
+
+// 要員の営業元メールは「営業元」列に会社・担当とまとめて保存するため、読み戻したときと同じ値で署名する
+function engineerAgentEmail(e: Pick<Engineer, 'agentCompany' | 'agentContact' | 'agentEmail'>): string {
+  return parseAgentInfo(combineAgentInfo(e.agentCompany, e.agentContact, e.agentEmail)).email;
+}
+
+let untrustedNotionReplies = 0;
+
+function trustedNotionReply(
+  tab: string,
+  id: string,
+  agentEmail: string,
+  meta: string,
+): { replyTarget: ReturnType<typeof parseReplyMeta>; agentEmail: string; injection: boolean } {
+  if (verifyReplyMeta(meta, notionReplyBinding(tab, id, agentEmail))) {
+    return { replyTarget: parseReplyMeta(meta), agentEmail, injection: replyMetaInjection(meta) };
+  }
+  untrustedNotionReplies += 1;
+  if (untrustedNotionReplies === 1) {
+    console.warn(
+      'Notion: 返信メタ・営業元メールの署名が無い・合わないページがあります（書き換えられた可能性があるため、下書きの宛先には使いません。' +
+        'SES_DRAFT_SIGNING_KEY を登録する前に保存したページも含みます）',
+    );
+  }
+  return { replyTarget: undefined, agentEmail: '', injection: false };
+}
+
+function projectFromPage(page: unknown): Project {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const location = readRichText(props['勤務地']);
+  const id = readRichText(props['案件ID']) || p.id;
+  const reply = trustedNotionReply('案件', id, readRichText(props['営業元メール']), readRichText(props['返信メタ']));
+  return {
+    // 収集経路と同じ決定的ID（マッチIDの一致に必要）。列が無い古いページだけページIDで代用する
+    id,
+    title: readTitle(props['案件名']),
+    // 人がNotion上で直接編集したスキル（'JS'/'k8s' 等の表記ゆれ）もマッチングに乗るよう読出時に正規化する
+    ...requirementsOf(readMultiSelect(props['必須スキル']), readMultiSelect(props['尚可スキル'])),
+    rateMin: readNumber(props['単金下限']) ?? null,
+    rateMax: readNumber(props['単金上限']) ?? null,
+    location,
+    prefecture: normalizePrefecture(location),
+    remote: labelToRemote(readSelect(props['リモート'])),
+    startPeriod: readRichText(props['開始時期']),
+    startDate: readDate(props['開始日']) ?? null,
+    duration: '',
+    businessFlow: readRichText(props['商流メモ']),
+    agentCompany: readRichText(props['営業元会社']),
+    agentContact: readRichText(props['営業元担当']),
+    agentEmail: reply.agentEmail,
+    sourceMailId: readRichText(props['元メールID']),
+    replyTarget: reply.replyTarget,
+    receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
+    status: readSelect(props['ステータス']) === '終了' ? 'closed' : 'open',
+    notionPageId: p.id,
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) || reply.injection ? { injectionSuspected: true } : {}),
+  };
+}
+
+function engineerFromPage(page: unknown): Engineer {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const residence = readRichText(props['居住地']);
+  const agentInfo = parseAgentInfo(readRichText(props['営業元']));
+  const id = readRichText(props['要員ID']) || p.id;
+  const reply = trustedNotionReply('要員', id, agentInfo.email, readRichText(props['返信メタ']));
+  return {
+    id,
+    // 以前の版で保存したフルネーム・人が手で入れた氏名も、読み出しの時点でイニシャルだけにする
+    displayName: toInitials(readTitle(props['表示名'])),
+    age: null,
+    skills: normalizeSkills(readMultiSelect(props['スキル'])),
+    experienceYears: readNumber(props['経験年数']) ?? null,
+    desiredRate: readNumber(props['希望単金']) ?? null,
+    residence,
+    prefecture: normalizePrefecture(residence),
+    nearestStation: '',
+    availableDate: '',
+    availableFrom: readDate(props['稼働開始可能日']) ?? null,
+    utilization: '',
+    remoteWish: labelToRemote(readSelect(props['リモート希望'])),
+    agentCompany: agentInfo.company,
+    agentContact: agentInfo.contact,
+    agentEmail: reply.agentEmail,
+    sourceMailId: readRichText(props['元メールID']),
+    replyTarget: reply.replyTarget,
+    receivedAt: new Date(readDate(props['受信日']) ?? nowIso()),
+    status: readSelect(props['ステータス']) === '決定済' ? 'assigned' : 'available',
+    notionPageId: p.id,
+    ...(readRichText(props[sheetsDb.INJECTION_COLUMN]) || reply.injection ? { injectionSuspected: true } : {}),
+  };
+}
+
+// 自社社員をNotion自社社員DBに保存する（候補要員→案件探し機能）
+export async function saveOwnEngineer(own: OwnEngineer): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveOwnEngineerSheets(own);
+  if (!OWN_ENGINEER_DB_ID) {
+    console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
+  const properties: Record<string, unknown> = {
+    表示名: { title: toRichText(own.displayName) },
+    スキル: multiSelect(own.skills),
+    経験年数: { number: own.experienceYears },
+    必要案件単価: { number: own.requiredProjectRate },
+    居住地: { rich_text: toRichText(own.residence) },
+    リモート希望: { select: { name: remoteLabel(own.remoteWish) } },
+    ステータス: { select: { name: own.status === 'assigned' ? 'アサイン済' : '稼働可' } },
+  };
+  const availableFrom = dateOnly(own.availableFrom);
+  if (availableFrom) properties['稼働可能日'] = { date: { start: availableFrom } };
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    toParagraphBlocks(`稼働可能時期(原文): ${own.availableDate}`),
+  );
+}
+
+// 突合対象の自社社員（稼働可のみ）を取得する
+export async function fetchOwnEngineers(limit = 100): Promise<OwnEngineer[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchOwnEngineersSheets(limit);
+  if (!OWN_ENGINEER_DB_ID) {
+    console.warn('NOTION_OWN_ENGINEER_DB_ID が未設定 — 自社社員なしで継続します');
+    return [];
+  }
+  const dataSourceId = await resolveDataSourceId(OWN_ENGINEER_DB_ID);
+  const pages = await queryAll(dataSourceId, { filter: { property: 'ステータス', select: { equals: '稼働可' } } } as QueryArgs, limit);
+  return pages.map((page) => ownEngineerFromPage(page));
+}
+
+function ownEngineerFromPage(page: unknown): OwnEngineer {
+  const p = page as { id: string; properties?: Record<string, unknown> };
+  const props = p.properties ?? {};
+  const residence = readRichText(props['居住地']);
+  return {
+    id: p.id,
+    displayName: readTitle(props['表示名']),
+    // 自社社員DBは人手入力のため表記ゆれ（'JS'/'k8s' 等）が入りやすい。読出時に正規化してマッチングに乗せる
+    skills: normalizeSkills(readMultiSelect(props['スキル'])),
+    experienceYears: readNumber(props['経験年数']) ?? null,
+    requiredProjectRate: readNumber(props['必要案件単価']) ?? null,
+    residence,
+    prefecture: normalizePrefecture(residence),
+    availableDate: '',
+    availableFrom: readDate(props['稼働可能日']) ?? null,
+    remoteWish: labelToRemote(readSelect(props['リモート希望'])),
+    status: readSelect(props['ステータス']) === 'アサイン済' ? 'assigned' : 'available',
+    notionPageId: p.id,
+  };
+}
+
+// マッチ結果のステータスをNotion側で更新する（確認UIの操作を系のstore=Notionへ反映）
+export async function updateMatchStatus(notionPageId: string, status: MatchStatus): Promise<void> {
+  if (dbProvider() === 'sheets') return sheetsDb.updateMatchStatusSheets(notionPageId, status);
+  await throttle(() =>
+    notion.pages.update({
+      page_id: notionPageId,
+      properties: { ステータス: { select: { name: matchStatusLabel(status) } } },
+    } as never),
+  );
+}
+
+// ===== フィードバック（マッチ評価ログ）: 複数人運用の共有の正 =====
+
+export async function saveMatchFeedback(fb: MatchFeedback): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveMatchFeedbackSheets(fb);
+  if (!FEEDBACK_DB_ID) {
+    console.warn('NOTION_FEEDBACK_DB_ID が未設定 — フィードバックの保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
+  const properties: Record<string, unknown> = {
+    マッチ: { title: toRichText(fb.matchTitle) },
+    元マッチID: { rich_text: toRichText(fb.matchId) },
+    評価: { select: { name: FB_VERDICT_LABEL[fb.verdict] } },
+    メモ: { rich_text: toRichText(fb.note) },
+    評価者: { rich_text: toRichText(fb.reviewer) },
+    日時: { date: { start: fb.at } },
+  };
+  if (fb.band) properties['バンド'] = { select: { name: fb.band } };
+  return createPageWithBody(
+    { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties } as never,
+    [],
+  );
+}
+
+export async function fetchRecentFeedback(limit = 200): Promise<MatchFeedback[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchRecentFeedbackSheets(limit);
+  if (!FEEDBACK_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(FEEDBACK_DB_ID);
+  const pages = await queryAll(dataSourceId, { sorts: [{ property: '日時', direction: 'descending' }] } as QueryArgs, limit);
+  return pages.map((page) => {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    const bandRaw = readSelect(props['バンド']);
+    return {
+      matchId: readRichText(props['元マッチID']),
+      matchTitle: readTitle(props['マッチ']),
+      verdict: readSelect(props['評価']) === 'ズレ' ? 'bad' : 'good',
+      note: readRichText(props['メモ']),
+      reviewer: readRichText(props['評価者']),
+      band: bandRaw === 'strong' || bandRaw === 'tentative' ? bandRaw : undefined,
+      at: readDate(props['日時']) ?? nowIso(),
+    };
+  });
+}
+
+// ===== スキル同義辞書（共有・育てる） =====
+export async function saveSkillEquivalence(e: SkillEquivalence): Promise<string> {
+  if (dbProvider() === 'sheets') return sheetsDb.saveSkillEquivalenceSheets(e);
+  if (!SKILL_EQUIV_DB_ID) {
+    console.warn('NOTION_SKILL_EQUIV_DB_ID が未設定 — スキル同義の保存をスキップします');
+    return '';
+  }
+  const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
+  return createPageWithBody(
+    {
+      parent: { type: 'data_source_id', data_source_id: dataSourceId },
+      properties: {
+        スキルA: { title: toRichText(e.a) },
+        スキルB: { rich_text: toRichText(e.b) },
+        追加者: { rich_text: toRichText(e.addedBy) },
+        日時: { date: { start: e.at } },
+      },
+    } as never,
+    [],
+  );
+}
+
+export async function fetchSkillEquivalences(limit = 500): Promise<SkillEquivalence[]> {
+  if (dbProvider() === 'sheets') return sheetsDb.fetchSkillEquivalencesSheets(limit);
+  if (!SKILL_EQUIV_DB_ID) return [];
+  const dataSourceId = await resolveDataSourceId(SKILL_EQUIV_DB_ID);
+  const pages = await queryAll(dataSourceId, { sorts: [{ property: '日時', direction: 'descending' }] } as QueryArgs, limit);
+  return pages.map((page) => {
+    const props = (page as { properties?: Record<string, unknown> }).properties ?? {};
+    return {
+      a: readTitle(props['スキルA']),
+      b: readRichText(props['スキルB']),
+      addedBy: readRichText(props['追加者']),
+      at: readDate(props['日時']) ?? nowIso(),
+    };
+  });
 }
 
 // 指定した親ページの下に、Markdownを変換した子ページを作成する

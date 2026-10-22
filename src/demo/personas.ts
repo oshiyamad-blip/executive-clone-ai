@@ -2,7 +2,8 @@ import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 import { DEMO_PROFILE, DEMO_SIGNALS, DEMO_STORIES } from './sampleData.js';
 import { MIKITANI_PROFILE, MIKITANI_SIGNALS, MIKITANI_STORIES } from './mikitani.js';
 
-// デモ用ペルソナの切り替え。DEMO_PERSONA 環境変数で選ぶ（既定: mikitani）。
+// デモ用ペルソナの切り替え。DEMO_PERSONA 環境変数で選ぶ（既定: 架空企業の sample）。
+// 実在の人物の名前で生成した回答が切り取られて広まらないよう、実在の人物のスタイルのペルソナは名前を指定したときだけ使う。
 export interface PersonaData {
   profile: ExecutiveProfile;
   signals: Signal[];
@@ -17,5 +18,5 @@ const PERSONAS: Record<string, PersonaData> = {
 };
 
 export function getPersona(name?: string): PersonaData {
-  return PERSONAS[name ?? ''] ?? PERSONAS.mikitani;
+  return PERSONAS[name ?? ''] ?? PERSONAS.sample;
 }

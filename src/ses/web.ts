@@ -1,0 +1,536 @@
+import '../env.js';
+import { readFileSync } from 'fs';
+import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import { createHash, timingSafeEqual } from 'crypto';
+import { readReviewMatches, readReviewOwnMatches, setMatchStatus, hasReviewData, createReplyDraftForSender } from './review.js';
+import { recordFeedback, loadFeedback } from './feedback.js';
+import { addSkillEquivalence, type EquivalenceRejection } from './skillEquiv.js';
+import { computeBandMetrics } from './metrics.js';
+import {
+  sesWebPort,
+  sesWebHost,
+  sesWebAccessToken,
+  chatWebAccessToken,
+  sesWebTlsCertPath,
+  sesWebTlsKeyPath,
+  sesWebBehindTls,
+  isDemo,
+  setDemoOverride,
+  demoModeExplicit,
+} from './config.js';
+import { senderRejection, currentSenderPolicy, normalizeSenderEmail } from './pendingDrafts.js';
+import { safeErr } from './redact.js';
+import {
+  HttpError,
+  readJsonObject,
+  rejectReason,
+  runHandler,
+  securityHeaders,
+  sendJson as json,
+  webStartupProblem,
+} from '../web/httpSecurity.js';
+import type { MatchStatus, MatchFeedback, MatchBand } from '../types/index.js';
+
+// SESマッチ確認UI（複数人運用）。バッチ/自社社員探しが書き出したレビュー成果を一覧表示し、
+// 紹介メール下書きを確認し、ステータス更新・妥当/ズレ評価・スキル同義追加を行う。
+// 評価と操作には「名前」を添えて誰の操作かを記録する（共有の正は本番=Notion/Sheets / demo=ローカルJSON）。
+// アクセス制御: SES_WEB_ACCESS_TOKEN を設定すると /api/* に Bearer 認証（chat UI の WEB_ACCESS_TOKEN とは別の値）。ホストは SES_WEB_HOST（既定ローカル）。
+// UIはLLMを呼ばないため、demoかどうかは LLM の鍵の有無ではなく DEMO_MODE の明示だけで決める
+// （本番のUIを鍵無しで起動したときに、評価や下書きがdemo扱いでローカルに消えないように）
+setDemoOverride(demoModeExplicit());
+
+const HOST = sesWebHost();
+const PORT = sesWebPort();
+const ACCESS_TOKEN = sesWebAccessToken();
+const VALID_STATUSES: MatchStatus[] = ['unconfirmed', 'introduced', 'closed_won', 'dropped'];
+
+// 入力の長さ上限（メモはLLM最終判定の参考として毎回プロンプトに載るため短く保つ）
+const MAX_NOTE_CHARS = 500;
+const MAX_SKILL_CHARS = 60;
+const MAX_REVIEWER_CHARS = 50;
+const MAX_BODY_BYTES = 64 * 1024;
+
+function safeEqual(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+function authorized(req: IncomingMessage): boolean {
+  if (!ACCESS_TOKEN) return true;
+  const header = req.headers['authorization'] ?? '';
+  return safeEqual(header, `Bearer ${ACCESS_TOKEN}`);
+}
+
+function text(body: Record<string, unknown>, key: string, max: number): string {
+  const v = body[key];
+  if (v === undefined || v === null) return '';
+  if (typeof v !== 'string') throw new HttpError(400, `${key} は文字列で指定してください`);
+  const t = v.trim();
+  if (t.length > max) throw new HttpError(400, `${key} は${max}文字以内にしてください`);
+  return t;
+}
+
+async function handleData(res: ServerResponse): Promise<void> {
+  const matches = readReviewMatches();
+  const feedback = await loadFeedback();
+  const metrics = computeBandMetrics(matches, feedback);
+  json(res, 200, { matches, ownMatches: readReviewOwnMatches(), metrics });
+}
+
+async function handleStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const id = text(body, 'id', 200);
+  const status = body.status as MatchStatus;
+  const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
+  if (!id || !VALID_STATUSES.includes(status)) {
+    return json(res, 400, { error: 'id と有効な status が必要です' });
+  }
+  try {
+    const updated = await setMatchStatus(id, status, reviewer);
+    if (!updated) return json(res, 404, { error: '該当マッチが見つかりません' });
+    return json(res, 200, { ok: true, match: updated });
+  } catch (err) {
+    console.error(`SES確認UI: ステータス更新に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '更新に失敗しました' });
+  }
+}
+
+async function handleFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const matchId = text(body, 'matchId', 200);
+  const verdict = body.verdict === 'bad' ? 'bad' : body.verdict === 'good' ? 'good' : null;
+  if (!matchId || !verdict) return json(res, 400, { error: 'matchId と verdict(good/bad) が必要です' });
+  // マッチ名・バンドはクライアントの申告ではなく、保存済みのマッチから取る（任意の文言を学習データに混ぜない）
+  const match = readReviewMatches().find((m) => m.id === matchId);
+  if (!match) return json(res, 404, { error: '該当マッチが見つかりません' });
+  const band: MatchBand | undefined = match.band === 'strong' || match.band === 'tentative' ? match.band : undefined;
+  const fb: MatchFeedback = {
+    matchId,
+    matchTitle: match.title,
+    verdict,
+    note: text(body, 'note', MAX_NOTE_CHARS),
+    reviewer: text(body, 'reviewer', MAX_REVIEWER_CHARS) || '(不明)',
+    band,
+    at: new Date().toISOString(),
+  };
+  try {
+    const savedTo = await recordFeedback(fb);
+    // 本番でDBに書けずローカル退避した場合はUIに知らせる（黙って握りつぶさない）
+    const degraded = !isDemo() && savedTo === 'local';
+    return json(res, 200, { ok: true, degraded });
+  } catch (err) {
+    console.error(`SES確認UI: 評価の保存に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '評価の保存に失敗しました' });
+  }
+}
+
+async function handleMakeDraft(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const matchId = text(body, 'matchId', 200);
+  const side = body.side === 'engineer' ? 'engineer' : body.side === 'project' ? 'project' : null;
+  const fromEmail = text(body, 'fromEmail', 254);
+  if (!matchId || !side) return json(res, 400, { error: 'matchId と side が必要です' });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) {
+    return json(res, 400, { error: '送信元となるあなたの会社メールアドレスを入力してください' });
+  }
+  const rejected = senderRejection(normalizeSenderEmail(fromEmail), currentSenderPolicy());
+  if (rejected) return json(res, 400, { error: rejected });
+  try {
+    const result = await createReplyDraftForSender(matchId, side, fromEmail);
+    if (!result.ok) {
+      if (result.reason === 'use_sheet') {
+        return json(res, 409, {
+          error: 'Sheets運用では、スプレッドシートの「担当者メール」列にあなたのアドレスを入れて下書きを依頼してください（次回のバッチで作成します。二重作成を防ぐため確認UIからは作成しません）',
+        });
+      }
+      if (result.reason === 'unleased') {
+        return json(res, 409, {
+          error: 'この構成（DB_PROVIDER=sheets 以外）では確認UIから下書きを作りません（別の実行と二重に作らないため。単独の運用なら SES_ALLOW_UNLEASED=true）',
+        });
+      }
+      if (result.reason === 'revoked') {
+        return json(res, 409, { error: `この組からは下書きを作りません（${result.detail ?? '組・案件・要員の状態が変わりました'}）。内容を確かめてください` });
+      }
+      return result.reason === 'already_created'
+        ? json(res, 409, { error: 'この側の下書きは作成済み（または作成中）です' })
+        : json(res, 404, { error: '該当マッチ／下書きが見つかりません' });
+    }
+    return json(res, 200, { ok: true, ref: result.ref });
+  } catch (err) {
+    console.error(`SES確認UI: 下書き作成に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '下書き作成に失敗しました（設定・接続を確認してください）' });
+  }
+}
+
+const EQUIVALENCE_REJECTION_MESSAGE: Record<EquivalenceRejection, string> = {
+  invalid: '異なる2つのスキル名を1つずつ入力してください（「Java(Spring)」のような複数の技術を含む名前は登録できません）',
+  not_equivalent: 'この2つは名前が似ていても別の技術として扱う組み合わせのため、同義には登録できません',
+  implied: 'この2つは上位・下位の技術の関係です。下位の技術の経験で上位の必須スキルは既に満たされるため登録は不要です（上位だけで下位の必須を満たす扱いにはしません）',
+};
+
+async function handleSkillEquiv(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonObject(req, MAX_BODY_BYTES);
+  const a = text(body, 'a', MAX_SKILL_CHARS);
+  const b = text(body, 'b', MAX_SKILL_CHARS);
+  const reviewer = text(body, 'reviewer', MAX_REVIEWER_CHARS);
+  try {
+    const added = await addSkillEquivalence(a, b, reviewer);
+    if (!added.ok) return json(res, 400, { error: EQUIVALENCE_REJECTION_MESSAGE[added.reason] });
+    return json(res, 200, { ok: true, entry: added.entry, degraded: !isDemo() && added.savedTo === 'local' });
+  } catch (err) {
+    console.error(`SES確認UI: 同義の保存に失敗: ${safeErr(err)}`);
+    return json(res, 502, { error: '同義の保存に失敗しました' });
+  }
+}
+
+type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+const API_ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler }> = {
+  '/api/data': { method: 'GET', handler: (_req, res) => handleData(res) },
+  '/api/status': { method: 'POST', handler: handleStatus },
+  '/api/feedback': { method: 'POST', handler: handleFeedback },
+  '/api/skill-equivalence': { method: 'POST', handler: handleSkillEquiv },
+  '/api/make-draft': { method: 'POST', handler: handleMakeDraft },
+};
+
+// HTTPS の証明書・秘密鍵（両方指定されたときだけ）。読めなければ 'error'
+function loadTls(): { cert: Buffer; key: Buffer } | null | 'error' {
+  const certPath = sesWebTlsCertPath();
+  const keyPath = sesWebTlsKeyPath();
+  if (!certPath && !keyPath) return null;
+  if (!certPath || !keyPath) {
+    console.error('❌ HTTPS で待ち受けるには SES_WEB_TLS_CERT と SES_WEB_TLS_KEY の両方を指定してください。起動を中止します');
+    return 'error';
+  }
+  try {
+    return { cert: readFileSync(certPath), key: readFileSync(keyPath) };
+  } catch (err) {
+    console.error(`❌ SES_WEB_TLS_CERT / SES_WEB_TLS_KEY のファイルを読めません: ${safeErr(err)}。起動を中止します`);
+    return 'error';
+  }
+}
+
+function main(): void {
+  const tls = loadTls();
+  if (tls === 'error') {
+    process.exitCode = 1;
+    return;
+  }
+  const problem = webStartupProblem({
+    host: HOST,
+    token: ACCESS_TOKEN,
+    tlsProtected: tls !== null || sesWebBehindTls(),
+    behindTlsDeclared: sesWebBehindTls(),
+    hostVar: 'SES_WEB_HOST',
+    tokenVar: 'SES_WEB_ACCESS_TOKEN',
+    behindTlsVar: 'SES_WEB_BEHIND_TLS',
+    otherTokens: [{ name: 'WEB_ACCESS_TOKEN（chat UI）', value: chatWebAccessToken() }],
+    tlsHint: 'SES_WEB_TLS_CERT / SES_WEB_TLS_KEY に証明書と秘密鍵のファイルを指定する',
+  });
+  if (problem) {
+    console.error(`❌ ${problem}。起動を中止します`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!hasReviewData()) {
+    console.warn('⚠️  レビュー成果がまだありません。先に `npm run ses:demo`（本番は `npm run ses`）や `npm run ses:own-match` を実行してください。');
+  }
+  if (!ACCESS_TOKEN) {
+    console.warn('⚠️  SES_WEB_ACCESS_TOKEN が未設定です。このPCのブラウザから直接（プロキシを通さず）のみ利用できます。');
+    if (chatWebAccessToken()) console.warn('⚠️  WEB_ACCESS_TOKEN は chat UI 用で、確認UIでは使いません（確認UIには別の値の SES_WEB_ACCESS_TOKEN を設定）。');
+  }
+
+  const page = renderPage();
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
+    const blocked = rejectReason(req, { tokenRequired: Boolean(ACCESS_TOKEN) });
+    if (blocked) return json(res, blocked.status, { error: blocked.message });
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() });
+      res.end(page);
+      return;
+    }
+    const route = API_ROUTES[req.url ?? ''];
+    if (!route || route.method !== req.method) return json(res, 404, { error: '不明なパスです' });
+    if (!authorized(req)) return json(res, 401, { error: '認証エラー（アクセストークンを確認してください）' });
+    runHandler(res, () => route.handler(req, res));
+  };
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key, minVersion: 'TLSv1.2' }, handle) : createServer(handle);
+
+  server.listen(PORT, HOST, () => {
+    console.log(`\n🌐 SESマッチ確認UI: ${tls ? 'https' : 'http'}://${HOST}:${PORT} で待受中（Ctrl+Cで終了）\n`);
+  });
+}
+
+function renderPage(): string {
+  return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SESマッチ確認</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+  header { padding: 12px 16px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header input { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px 8px; }
+  #name { width: 120px; }
+  #senderEmail { width: 210px; }
+  #token { width: 130px; margin-left: auto; }
+  .reply { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+  .reply-label { font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+  .reply-h { font-size: 12px; color: var(--ink-soft); font-family: var(--font-mono); line-height: 1.6; margin-bottom: 6px; word-break: break-all; }
+  .reply .made { font-size: 12px; margin-left: 8px; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 14px; color: #9aa4b2; border-bottom: 1px solid #2a2f3a; padding-bottom: 6px; margin: 24px 0 12px; }
+  .metrics { display: flex; gap: 10px; flex-wrap: wrap; }
+  .metric { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; font-size: 13px; min-width: 150px; }
+  .metric b { font-size: 15px; }
+  .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .card.confirmed { border-left: 3px solid #3fb950; }
+  .card.tentative { border-left: 3px solid #58a6ff; }
+  .card.negotiable { border-left: 3px solid #a371f7; }
+  .card.review { border-left: 3px solid #d9a441; }
+  .card.rejected { border-left: 3px solid #6e7681; opacity: 0.8; }
+  .card.deferred { border-left: 3px solid #6e7681; }
+  .title { font-weight: 600; margin-bottom: 4px; }
+  .meta { font-size: 13px; color: #9aa4b2; margin-bottom: 6px; }
+  .reason { font-size: 13px; line-height: 1.5; margin-bottom: 8px; }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; margin-left: 8px; }
+  .b-confirmed { background: #238636; color: #fff; }
+  .b-tentative { background: #1f6feb; color: #fff; }
+  .b-negotiable { background: #8957e5; color: #fff; }
+  .b-review { background: #9e6a00; color: #fff; }
+  .b-rejected { background: #484f58; color: #fff; }
+  .b-deferred { background: #30363d; color: #c9d1d9; }
+  .b-unconfirmed { background: #30363d; color: #c9d1d9; }
+  .b-introduced { background: #1f6feb; color: #fff; }
+  .b-closed_won { background: #238636; color: #fff; }
+  .b-dropped { background: #6e2f2f; color: #fff; }
+  .neg { font-size: 13px; color: #c8a6ff; background: #1c1630; border: 1px solid #3a2f52; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
+  .actions button { background: #0f1115; color: #c9d1d9; border: 1px solid #2a2f3a; border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+  .actions button:hover { border-color: #2f6feb; }
+  .fb { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2a2f3a; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .fb input { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+  .fb .note { flex: 1; min-width: 160px; }
+  .good { border-color: #238636 !important; color: #7ee787 !important; }
+  .bad { border-color: #6e2f2f !important; color: #ff9b9b !important; }
+  .drafts { margin-top: 10px; }
+  .drafts summary { cursor: pointer; font-size: 13px; color: #6ea8fe; }
+  pre { white-space: pre-wrap; background: #0f1115; border: 1px solid #2a2f3a; border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.5; overflow-x: auto; }
+  .own-eng { margin: 14px 0 6px; font-weight: 600; }
+  .own-proj { font-size: 13px; padding: 6px 10px; border-left: 2px solid #2a2f3a; margin: 4px 0; }
+  .empty { color: #9aa4b2; font-size: 13px; }
+  a { color: #6ea8fe; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SESマッチ確認</h1>
+  <input id="name" placeholder="あなたの名前" />
+  <input id="senderEmail" type="email" placeholder="あなたの会社メール（送信元）" />
+  <button id="reload" type="button" style="background:#2f6feb;color:#fff;border:0;border-radius:8px;padding:7px 14px;cursor:pointer">再読込</button>
+  <input id="token" type="password" placeholder="アクセストークン" />
+</header>
+<main>
+  <span id="status" class="empty"></span>
+  <h2>バンド別メトリクス（フィードバックで精度を可視化）</h2>
+  <div id="metrics" class="metrics"></div>
+  <h2>スキル同義の追加（例: CakePHP ≈ Laravel。Spring Boot → Java のような上位・下位の関係は登録不要）</h2>
+  <div class="fb" style="border:0">
+    <input id="eqA" placeholder="スキルA" style="width:140px" />
+    <span>≈</span>
+    <input id="eqB" placeholder="スキルB" style="width:140px" />
+    <button id="eqAdd" type="button">同義に追加</button>
+    <span id="eqMsg" class="empty"></span>
+  </div>
+  <h2>外部マッチ（案件 × 外部要員）</h2>
+  <div id="matches"></div>
+  <h2>自社社員 → 合いそうな案件</h2>
+  <div id="own"></div>
+</main>
+<script>
+  var nameEl = document.getElementById('name');
+  var senderEl = document.getElementById('senderEmail');
+  var tokenEl = document.getElementById('token');
+  nameEl.value = localStorage.getItem('ses_reviewer') || '';
+  senderEl.value = localStorage.getItem('ses_sender') || '';
+  // アクセストークンはタブを閉じれば消える sessionStorage に置く（共用PCのブラウザに残さない）
+  try { localStorage.removeItem('ses_token'); } catch (e) {}
+  tokenEl.value = sessionStorage.getItem('ses_token') || '';
+  nameEl.addEventListener('change', function(){ localStorage.setItem('ses_reviewer', nameEl.value); });
+  senderEl.addEventListener('change', function(){ localStorage.setItem('ses_sender', senderEl.value); });
+  tokenEl.addEventListener('change', function(){ sessionStorage.setItem('ses_token', tokenEl.value); });
+  function senderEmail(){ return senderEl.value.trim(); }
+
+  var STATUS_LABEL = { unconfirmed: '未確認', introduced: '紹介済', closed_won: '成約', dropped: '見送り' };
+  var CAT = {
+    confirmed: { cls: 'confirmed', label: '成立候補' },
+    tentative: { cls: 'tentative', label: '参考提案' },
+    negotiable: { cls: 'negotiable', label: '交渉提案' },
+    review: { cls: 'review', label: '要確認' },
+    rejected: { cls: 'rejected', label: '不適合（AI判定）' },
+    deferred: { cls: 'deferred', label: 'AI判定待ち' }
+  };
+  var BAND_LABEL = { strong: '強マッチ', tentative: '参考(許容範囲)', negotiable: '交渉提案' };
+
+  // 属性値にも埋め込むため引用符も含めてエスケープする（textContent方式は " をエスケープしないため不可）
+  function esc(s){
+    return (s==null?'':String(s)).replace(/[&<>"']/g, function(c){
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+  function headers(){ return { 'content-type': 'application/json', 'authorization': 'Bearer ' + tokenEl.value }; }
+  function reviewer(){ return nameEl.value.trim(); }
+  function pct(x){ return x==null ? '—' : Math.round(x*100) + '%'; }
+
+  function statusBadge(s){ return '<span class="badge b-' + s + '">' + (STATUS_LABEL[s]||s) + '</span>'; }
+  function catBadge(c){ var v = CAT[c] || CAT.review; return '<span class="badge b-' + c + '">' + v.label + '</span>'; }
+
+  // 全員に返信の下書きセクション（宛先・本文プレビュー・自分のアドレスで下書き作成ボタン）
+  function replySection(m, side, ref, text){
+    if (!ref && !text) return '';
+    var label = (side === 'project' ? '案件側' : '要員側') + '（元メールへ全員に返信）';
+    var head = ref ? ('<div class="reply-h">To: ' + esc(ref.to) + '<br>Cc: ' + esc(ref.cc || '（なし）') + '<br>From: ' + esc(ref.from || '') + (ref.inReplyTo ? '<br>（元メールにスレッド返信）' : '') + (ref.addressNote ? '<br>※ ' + esc(ref.addressNote) : '') + '</div>') : '';
+    var bodyd = text ? ('<details class="drafts"><summary>本文を見る</summary><pre>' + esc(text) + '</pre></details>') : '';
+    // http(s) 以外（imap:// やローカルパス）はブラウザで開けないためリンクにせずラベル表示
+    var made = '';
+    if (ref && ref.url) {
+      made = /^https?:\\/\\//.test(ref.url)
+        ? ('<a class="made" href="' + esc(ref.url) + '" target="_blank" rel="noopener">作成済みの下書きを開く</a>')
+        : ('<span class="made empty">下書き作成済み（' + esc(ref.url) + '）</span>');
+    }
+    // 見送り・成約の組には作成ボタンを出さない（作成時もサーバー側で確かめる）
+    var btn = (m.status === 'dropped' || m.status === 'closed_won') ? '' : '<button data-act="makedraft" data-id="' + esc(m.id) + '" data-side="' + side + '">自分のアドレスで下書き作成</button>';
+    return '<div class="reply"><div class="reply-label">' + label + '</div>' + head + bodyd + '<div class="actions">' + btn + made + '</div></div>';
+  }
+
+  function renderMetrics(metrics){
+    var root = document.getElementById('metrics');
+    if (!metrics || !metrics.length) { root.innerHTML = '<span class="empty">データなし</span>'; return; }
+    root.innerHTML = metrics.map(function(m){
+      return '<div class="metric">' + esc(BAND_LABEL[m.band]||m.band) +
+        '<br>検出 <b>' + m.total + '</b>件 ・ 成約率 <b>' + pct(m.winRate) + '</b>' +
+        '<br><span class="empty">妥当率 ' + pct(m.goodRate) + '（成約' + m.closedWon + '/見送り' + m.dropped + '・妥当' + m.good + '/ズレ' + m.bad + '）</span></div>';
+    }).join('');
+  }
+
+  function renderMatches(matches){
+    var root = document.getElementById('matches');
+    if (!matches.length) { root.innerHTML = '<p class="empty">マッチはまだありません。</p>'; return; }
+    root.innerHTML = matches.map(function(m){
+      var cat = CAT[m.category] || CAT.review;
+      var man = (m.grossMarginJpy/10000).toFixed(1);
+      var negBanner = '';
+      if (m.negotiation) {
+        var n = m.negotiation;
+        negBanner = '<div class="neg">交渉案: 案件単金 +' + n.projectRaiseMan + '万円（→' + n.targetProjectRateMan + '万円/月） ／ 要員単金 −' + n.engineerCutMan + '万円（→' + n.targetEngineerRateMan + '万円/月）　⇒ 粗利 ' + (n.resultingGrossMarginJpy/10000).toFixed(1) + '万円/月</div>';
+      }
+      var acts = ['unconfirmed','introduced','closed_won','dropped'].map(function(s){
+        return '<button data-act="status" data-id="' + esc(m.id) + '" data-status="' + s + '">' + STATUS_LABEL[s] + 'にする</button>';
+      }).join('');
+      var by = m.lastActionBy ? '<span class="empty" style="margin-left:6px">最終更新: ' + esc(m.lastActionBy) + '</span>' : '';
+      var fb = '<div class="fb">評価: ' +
+        '<button class="good" data-act="fb" data-id="' + esc(m.id) + '" data-title="' + esc(m.title) + '" data-band="' + esc(m.band) + '" data-verdict="good">妥当</button>' +
+        '<button class="bad" data-act="fb" data-id="' + esc(m.id) + '" data-title="' + esc(m.title) + '" data-band="' + esc(m.band) + '" data-verdict="bad">ズレ</button>' +
+        '<input class="note" placeholder="メモ（例: CakePHPとLaravelは実質同じ）" />' +
+        '</div>';
+      return '<div class="card ' + cat.cls + '">' +
+        '<div class="title">' + esc(m.title) + catBadge(m.category) + statusBadge(m.status) + by + '</div>' +
+        '<div class="meta">現状粗利 ' + man + '万円/月 ・ 適合スコア ' + esc(m.score) + ' ・ ' + (BAND_LABEL[m.band]||m.band) + '</div>' +
+        negBanner +
+        '<div class="reason">' + esc(m.reason) + '</div>' +
+        replySection(m, 'project', m.draftProject, m.draftToProjectText) +
+        replySection(m, 'engineer', m.draftEngineer, m.draftToEngineerText) +
+        '<div class="actions">' + acts + '</div>' +
+        fb +
+      '</div>';
+    }).join('');
+  }
+
+  function renderOwn(own){
+    var root = document.getElementById('own');
+    if (!own.length) { root.innerHTML = '<p class="empty">自社社員の候補案件はまだありません（npm run ses:own-match を実行）。</p>'; return; }
+    var byEng = {};
+    own.forEach(function(m){ (byEng[m.ownEngineerName] = byEng[m.ownEngineerName] || []).push(m); });
+    root.innerHTML = Object.keys(byEng).map(function(name){
+      var items = byEng[name].map(function(m){
+        var tag = (m.band === 'tentative' ? '[参考提案] ' : '') + (m.needsReview ? '[要確認] ' : (m.meetsRate ? '[単価充足] ' : '[単価交渉] '));
+        return '<div class="own-proj">' + tag + esc(m.projectTitle) + ' — 案件単価' + esc(m.projectRate==null?'不明':m.projectRate) + '万円/月, スコア' + esc(m.score) + '点<br><span class="empty">' + esc(m.reason) + '</span></div>';
+      }).join('');
+      return '<div class="own-eng">' + esc(name) + '</div>' + items;
+    }).join('');
+  }
+
+  async function post(url, payload){
+    var res = await fetch(url, { method: 'POST', headers: headers(), body: JSON.stringify(payload) });
+    var data = await res.json().catch(function(){ return {}; });
+    return { ok: res.ok, status: res.status, data: data };
+  }
+
+  async function load(){
+    var st = document.getElementById('status');
+    try {
+      var res = await fetch('/api/data', { headers: headers() });
+      if (!res.ok) { st.textContent = '[エラー] ' + res.status; return; }
+      var data = await res.json();
+      renderMetrics(data.metrics || []);
+      renderMatches(data.matches || []);
+      renderOwn(data.ownMatches || []);
+      st.textContent = '外部マッチ ' + (data.matches||[]).length + '件 / 自社候補 ' + (data.ownMatches||[]).length + '件';
+    } catch (e) { st.textContent = '[通信エラー] ' + e; }
+  }
+
+  document.getElementById('reload').addEventListener('click', load);
+
+  document.getElementById('eqAdd').addEventListener('click', async function(){
+    var msg = document.getElementById('eqMsg');
+    var a = document.getElementById('eqA').value.trim();
+    var b = document.getElementById('eqB').value.trim();
+    if (!a || !b) { msg.textContent = 'スキルA・Bを入力してください'; return; }
+    var r = await post('/api/skill-equivalence', { a: a, b: b, reviewer: reviewer() });
+    if (!r.ok) { msg.textContent = '失敗: ' + (r.data.error || r.status); return; }
+    msg.textContent = r.data.degraded
+      ? (r.data.entry.a + ' ≈ ' + r.data.entry.b + ' はデータベースに保存できなかったため、この端末にだけ退避しました（定期バッチには反映されません。DBの設定・接続をご確認ください）')
+      : (r.data.entry.a + ' ≈ ' + r.data.entry.b + ' を追加しました（次回マッチから反映）');
+    document.getElementById('eqA').value = ''; document.getElementById('eqB').value = '';
+  });
+
+  document.getElementById('matches').addEventListener('click', async function(e){
+    var b = e.target.closest('button[data-act]'); if (!b) return;
+    b.disabled = true;
+    try {
+      if (b.dataset.act === 'status') {
+        var r = await post('/api/status', { id: b.dataset.id, status: b.dataset.status, reviewer: reviewer() });
+        if (!r.ok) { alert('更新失敗: ' + (r.data.error||r.status)); return; }
+        await load();
+      } else if (b.dataset.act === 'fb') {
+        var card = b.closest('.card');
+        var noteEl = card ? card.querySelector('.note') : null;
+        var note = noteEl ? noteEl.value.trim() : '';
+        var r2 = await post('/api/feedback', { matchId: b.dataset.id, matchTitle: b.dataset.title, band: b.dataset.band, verdict: b.dataset.verdict, note: note, reviewer: reviewer() });
+        if (!r2.ok) { alert('評価失敗: ' + (r2.data.error||r2.status)); return; }
+        if (r2.data.degraded) { alert('評価は記録しましたが、Notionへ保存できなかったためローカルに退避しました。Notionの設定・接続をご確認ください。'); }
+        if (noteEl) noteEl.value = '';
+        b.textContent = b.dataset.verdict === 'good' ? '妥当✓' : 'ズレ✓';
+        await load();
+      } else if (b.dataset.act === 'makedraft') {
+        if (!senderEmail()) { alert('上部に「あなたの会社メール（送信元）」を入力してください'); return; }
+        var r3 = await post('/api/make-draft', { matchId: b.dataset.id, side: b.dataset.side, fromEmail: senderEmail() });
+        if (!r3.ok) { alert('下書き作成失敗: ' + (r3.data.error||r3.status)); return; }
+        await load();
+      }
+    } catch (err) { alert('通信エラー: ' + err); } finally { b.disabled = false; }
+  });
+
+  load();
+</script>
+</body>
+</html>`;
+}
+
+main();

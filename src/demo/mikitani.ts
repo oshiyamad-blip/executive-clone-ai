@@ -12,7 +12,7 @@ import type { ExecutiveProfile, Signal, Story } from '../types/index.js';
 const day = (d: string) => new Date(`2026-07-${d}T09:00:00+09:00`);
 
 export const MIKITANI_PROFILE: ExecutiveProfile = {
-  name: '三木谷 浩史（デモ）',
+  name: 'グローバル志向の創業経営者（公開情報ベースのデモ・本人ではありません）',
   role: '創業者 / 代表取締役会長兼社長',
 
   values: [

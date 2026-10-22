@@ -1,3 +1,5 @@
+import type { ProjectLevel, EngineerLevel } from '../ses/level.js';
+
 // データソースの種類
 export type DataSource =
   | 'slack'
@@ -48,8 +50,6 @@ export interface CausalLink {
 }
 
 // ストーリーデータベースのエントリ
-// narrative / causalChain は生成時のみ存在し、Notionにはページ本文として保存される
-// （プロパティではないため fetchRecentStories では読み戻せない → optional）。
 export interface Story {
   id: string;
   title: string;
@@ -87,3 +87,452 @@ export interface ExecutiveProfile {
   hiringCriteria?: string[];
 }
 
+// 対話メッセージ
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: SourceReference[];
+  timestamp: Date;
+}
+
+// 回答の根拠参照
+export interface SourceReference {
+  type: 'signal' | 'story';
+  id: string;
+  excerpt: string;
+}
+
+// バッチ処理の結果
+export interface BatchResult<T> {
+  succeeded: T[];
+  failed: Array<{ item: T; error: Error }>;
+  processedAt: Date;
+}
+
+// ===== SES案件・要員マッチング機能 =====
+// 単金はすべて「万円/月」に正規化した number で保持する（不明値は null）。
+// 詳細は docs/ses-matching-basic-design.md §3 を参照。
+
+// リモート可否（フル/一部/不可/不明）
+export type RemoteOption = 'full' | 'partial' | 'none' | 'unknown';
+// 案件ステータス（募集中/終了）
+export type ProjectStatus = 'open' | 'closed';
+// 要員ステータス（提案可/決定済）
+export type EngineerStatus = 'available' | 'assigned';
+// マッチステータス（未確認/紹介済/成約/見送り）
+export type MatchStatus = 'unconfirmed' | 'introduced' | 'closed_won' | 'dropped';
+
+// SES案件（要件定義 §4.1 の抽出スキーマに一致）
+export interface Project {
+  id: string; // 'proj_<hash>' 決定的ID（名寄せキーにも使う）
+  title: string;
+  requiredSkills: string[]; // 正規化済み
+  preferredSkills: string[]; // 正規化済み
+  rateMin: number | null; // 万円/月。「スキル見合い」等は null
+  rateMax: number | null; // 万円/月
+  location: string; // 勤務地（都道府県+市区）原文
+  prefecture: string | null; // 正規化した都道府県名（隣接判定用）
+  remote: RemoteOption;
+  startPeriod: string; // 開始時期（原文）
+  startDate: string | null; // 正規化した開始日 ISO（不明は null）
+  duration: string; // 期間（原文）
+  businessFlow: string; // 商流制限・外国籍可否・面談回数などの原文メモ
+  agentCompany: string;
+  agentContact: string;
+  agentEmail: string; // 紹介メールの宛先に使用
+  sourceMailId: string; // 抽出元メールID
+  replyTarget?: ReplyTarget; // 元の案件メールへ全員に返信するための情報
+  receivedAt: Date;
+  status: ProjectStatus;
+  notionPageId?: string;
+  // 候補ペアの判定・保存まで済んだか（Sheets運用の「突合済」列）。false の間は次回以降のバッチでも突合する。
+  // 未定義（Notion等、記録しない保存先）は突合済みとして扱い、その回の新着だけを突合する
+  matched?: boolean;
+  // 元のメールにAIへの指示らしき記載がある（抽出のAIの印・コードの検知）。この案件の組は要確認にし、AI判定・自動の下書きをしない
+  injectionSuspected?: boolean;
+  // 経験年数・工程・立場の条件（level.ts）。記載が無い案件・古い保存データは未定義
+  level?: ProjectLevel;
+  // 元メールの本文のうちこの案件の部分（営業リストの「案件詳細」用。extract.ts の projectExcerpt）。古い保存データは未定義
+  detail?: string;
+}
+
+// SES要員（エンジニア）。氏名・年齢等はPII（CLAUDE.md §非機能要件）
+export interface Engineer {
+  id: string; // 'eng_<hash>' 決定的ID
+  displayName: string; // イニシャルのみ（「K.S.」。決められなければ「（イニシャル不明）」。抽出・読み出しで toInitials を通す）
+  age: number | null;
+  skills: string[]; // 正規化済み
+  experienceYears: number | null;
+  desiredRate: number | null; // 万円/月。不明は null
+  residence: string; // 居住地（原文）
+  prefecture: string | null; // 正規化した都道府県名
+  nearestStation: string;
+  availableDate: string; // 稼働開始可能日（原文）
+  availableFrom: string | null; // 正規化した稼働可能日 ISO（不明は null）
+  utilization: string; // 稼働率（原文）
+  remoteWish: RemoteOption;
+  agentCompany: string;
+  agentContact: string;
+  agentEmail: string;
+  sourceMailId: string;
+  replyTarget?: ReplyTarget; // 元の要員メールへ全員に返信するための情報
+  receivedAt: Date;
+  status: EngineerStatus;
+  notionPageId?: string;
+  matched?: boolean; // Project.matched と同じ
+  injectionSuspected?: boolean; // Project.injectionSuspected と同じ
+}
+
+// 交渉提案。粗利が下限に届かないペアを、案件単金の値上げ交渉と要員単金の値下げ交渉で
+// 成立させるための提案（例: 同単金のペアを 案件+5万・要員−5万 で粗利10万円にする）。
+export interface NegotiationProposal {
+  projectRaiseMan: number; // 案件単金を上げてもらう交渉額（万円/月）
+  engineerCutMan: number; // 要員単金を下げてもらう交渉額（万円/月）
+  targetProjectRateMan: number; // 交渉後の案件単金（万円/月）
+  targetEngineerRateMan: number; // 交渉後の要員単金（万円/月）
+  resultingGrossMarginJpy: number; // 交渉成立時の粗利（円/月）
+}
+
+// スキル確度バンド。strong=強マッチ、tentative=許容範囲（参考提案）
+export type MatchBand = 'strong' | 'tentative';
+
+// マッチの表示区分。優先度: review > tentative > negotiable > confirmed。
+// rejected = AI最終判定で不適合（下書きなし・サマリは件数だけ）、deferred = AI判定の予算超過・一時的な失敗で
+// 判定を次回に回した組（ルールの結果のまま保存し、下書きは作らない）
+export type MatchCategory = 'confirmed' | 'negotiable' | 'tentative' | 'review' | 'rejected' | 'deferred';
+
+// AI最終判定の結果（スプレッドシート「マッチ」タブの「判定」列）。
+// passed=基準以上 / low=基準（MATCH_MIN_LLM_SCORE）未満で参考提案に下げた / rejected=不適合 /
+// deferred=未判定（次回判定） / failed=判定に失敗し参考提案として扱った / rule=AI判定を使わないルールのみの判定（要確認枠等）
+export type JudgeVerdict = 'passed' | 'low' | 'rejected' | 'deferred' | 'failed' | 'rule';
+
+// AI最終判定が挙げる即NG条件の種類（入力から違反が読み取れるものだけ）
+export type DealBreakerCode =
+  | 'flow'
+  | 'affiliation'
+  | 'nationality'
+  | 'age'
+  | 'onsite'
+  | 'utilization'
+  | 'skill'
+  | 'skill_years'
+  | 'timing'
+  | 'rate'
+  | 'other';
+
+// 必須スキルの満たし方の内訳（要件の表記）。equiv=同義辞書または確実な含意（EC2 ⇒ AWS 等）で満たしたもの、
+// implied=要員の下位の技術の経験から推定して満たしたもの（Spring ⇒ Java 等。直接の記載なし）。via は implied/equiv の根拠となった要員側のスキル（必須スキル名 → 要員のスキル名）
+export interface SkillBreakdown {
+  exact: string[];
+  implied: string[];
+  equiv: string[];
+  missing: string[];
+  via: Record<string, string>;
+}
+
+// 尚可スキルの一致数（m=0 なら尚可の記載なし）
+export interface PreferredMatch {
+  matched: number;
+  total: number;
+}
+
+// 受信からの鮮度。fresh=14日以内、aging=それより古い（並びで少し下げる）、stale=SES_STALE_DAYS 超（強マッチにしない）
+export type FreshnessLevel = 'fresh' | 'aging' | 'stale';
+export interface Freshness {
+  level: FreshnessLevel;
+  ageDays: number; // 受信からの経過日数
+}
+
+// 一次選抜の内訳（判定根拠・サマリ・最終判定の入力に簡潔な形で載せる）。
+// location: same=同一都道府県 / adjacent=隣接県 / remote=フルリモートで不問 / unknown=片側不明。
+// rate: ok=粗利下限以上 / lowerOnly=案件単金の下限で計算 / negotiable=交渉で下限に届く / unknown=単金不明
+export interface PairBreakdown {
+  skill: {
+    basis: 'required' | 'preferred' | 'unknown'; // 判定に使ったスキル（必須 / 必須が空のため尚可 / どちらも空）
+    rate: number; // 0〜1
+    exact: number;
+    equiv: number;
+    implied: number;
+    total: number;
+    preferred: PreferredMatch;
+  };
+  location: 'same' | 'adjacent' | 'remote' | 'unknown';
+  timing: 'ok' | 'unknown';
+  rate: 'ok' | 'lowerOnly' | 'negotiable' | 'unknown';
+  freshness: Freshness; // 案件・要員のうち古い側
+  notes: string[]; // 区分・並びを調整した理由の短い記述（含意のみで降格・鮮度で降格 等）
+}
+
+// 一次選抜（LLM不使用）を通過した候補ペア
+export interface MatchPair {
+  project: Project;
+  engineer: Engineer;
+  grossMarginJpy: number; // 現状の粗利額（円/月。交渉前）
+  skillMatchRate: number; // 必須スキル一致率 0〜1（同義辞書考慮後）
+  band: MatchBand; // 強マッチ / 参考（許容範囲）
+  locationOk: boolean;
+  timingOk: boolean;
+  needsReview: boolean; // 単金・勤務地不明などの「要確認」枠
+  reviewReasons: string[]; // 要確認の理由（'単金不明' 等。needsReview のときだけ非空）
+  cautions: string[]; // 判定の前提・注意（例: 案件単金は下限のみの記載）。判定根拠の末尾に付す
+  negotiation?: NegotiationProposal; // 現状は粗利不足だが交渉で成立見込みの場合に付与
+  skillBreakdown?: SkillBreakdown; // 判定に使ったスキル（必須、無ければ尚可）の満たし方
+  preferredMatch?: PreferredMatch; // 尚可スキルの一致数（同順位の並べ替え・最終判定の参考）
+  breakdown: PairBreakdown;
+}
+
+// 紹介メール下書き参照（全員に返信のスレッド返信下書き）
+export interface DraftRef {
+  draftId: string; // Gmail下書きID（demoはローカルID）
+  url: string; // 下書きURL（demoはローカルファイルパス）
+  to: string; // 返信の To（元送信者）
+  cc?: string; // 返信の Cc（元の宛先一同・メーリス含む）
+  from?: string; // 送信元（担当営業個人の会社アドレス。未確定なら placeholder）
+  subject: string; // Re: 付き件名
+  inReplyTo?: string; // 元 Message-ID（スレッド継続）
+  references?: string; // References ヘッダ
+  body?: string; // 返信本文（UIでの送信下書き作成に使用）
+  addressNote?: string; // 宛先の注意（Ccから外した社外・配信用アドレスの件数など。アドレス自体は書かない）
+  // 下書きの識別子（X-SES-Draft-Key ヘッダ）。作成の成否が分からなかったときに、下書きフォルダに既にあるかを確かめる
+  draftKey?: string;
+}
+
+// 最終判定・保存対象のマッチ結果（要件定義 §6.4 マッチ結果DBに対応）
+export interface MatchResult {
+  id: string; // 'match_<projId>_<engId>' 決定的ID（再実行冪等）
+  projectId: string;
+  engineerId: string;
+  title: string; // 「案件名 × 要員表示名」
+  grossMarginJpy: number; // 円/月
+  score: number; // 適合スコア 0〜100
+  reason: string; // 判定根拠文
+  needsReview: boolean;
+  band: MatchBand; // スキル確度バンド
+  category: MatchCategory; // 表示区分（成立候補/交渉提案/参考提案/要確認）
+  negotiation?: NegotiationProposal; // 交渉で成立見込みの提案（あれば「交渉提案」枠）
+  draftToProject?: DraftRef;
+  draftToEngineer?: DraftRef;
+  // 下書きを作るべき区分なのに文面を用意できなかった（下書き状態を「エラー」にし、次回のバッチで作り直す）
+  draftFailed?: boolean;
+  verdict?: JudgeVerdict; // AI最終判定の結果（未設定は従来の保存分）
+  dealBreakers?: DealBreakerCode[]; // AI最終判定が挙げた即NG条件
+  questions?: string[]; // AI最終判定が挙げた先方への確認事項（最大3件）
+  status: MatchStatus;
+  detectedAt: Date;
+  notionPageId?: string;
+}
+
+// 添付を同梱した収集メール（parse への入力）
+export interface SesRawMail {
+  id: string; // 'sesmail_<gmailId>'
+  from: string;
+  to: string;
+  cc: string; // Cc ヘッダ（全員に返信の宛先組み立て用）
+  replyTo?: string; // Reply-To ヘッダ（あれば返信の To はこちら）
+  subject: string;
+  body: string; // text/plain 本文
+  messageIdHeader: string; // 元メールの Message-ID（In-Reply-To/References 用）
+  references: string; // 元メールの References ヘッダ（スレッド継続用）
+  receivedAt: Date;
+  attachments: SesAttachment[];
+  sheetLinks: string[]; // 本文中の Google スプレッドシートURL
+  authDomain?: string; // 受信サーバーの送信ドメイン認証で DMARC に合格した From のドメイン（無ければ未設定。再送スキップの送り主の識別用）
+}
+
+// 元メールへ「全員に返信」するために必要な情報（案件/要員それぞれの元メールから採取）。
+// 共有メールボックス(sales@)宛に届いた1通に対し、担当営業個人のアドレスから
+// 全員に返信（元の宛先そのまま＝メーリス含む）でスレッド返信するために使う。
+export interface ReplyTarget {
+  from: string; // 元メールの送信者 → 返信の To（Reply-To があればそちら）
+  replyTo?: string; // 元メールの Reply-To（配信システム経由のメールは From が送信専用のことが多い）
+  to: string; // 元メールの To（sales@ メーリス等） → 返信の Cc に含める
+  cc: string; // 元メールの Cc → 返信の Cc に含める
+  subject: string; // 元件名（返信は Re: を付与）
+  messageId: string; // 元 Message-ID（In-Reply-To / References に設定）
+  references: string; // 元 References（スレッド継続）
+}
+
+export interface SesAttachment {
+  filename: string;
+  mimeType: string;
+  data: string; // base64（PDFはそのままdocumentブロックへ）
+  text?: string; // parseでテキスト化した結果（xlsx/Sheets）
+}
+
+// メール量の測定（npm run ses:mail-stats）用に、本文を取得せずに得るメタ情報。
+// 件名・送信元は集計（キーワード分類・ドメイン数・自己メール判定）にだけ使い、表示・保存しない
+export type SesAttachmentKind = 'pdf' | 'xlsx' | 'xls' | 'docx' | 'other';
+
+export interface SesMailMeta {
+  receivedAt: Date; // サーバーの受信日時（IMAP INTERNALDATE / Gmail internalDate）
+  subject: string;
+  fromAddress: string;
+  sizeBytes: number;
+  attachmentKinds: SesAttachmentKind[]; // 添付ファイルごとの種類（Gmailはメール単位で種類の有無のみ）
+}
+
+// extract の出力（1メールから0件以上）。種別で判別可能なユニオン
+export type ExtractedItem =
+  | { kind: 'project'; project: Project }
+  | { kind: 'engineer'; engineer: Engineer }
+  | { kind: 'other' }; // 案件でも要員でもない（破棄）
+
+// ===== 自社社員（候補要員）→ 案件探し機能 =====
+// 外部要員(Engineer)と異なり、粗利下限ではなく「必要案件単価」で案件を絞る閾値方式。
+// 必要案件単価 = その社員をアサインするのに最低限必要な案件単価（希望margin込みで営業が入力）。
+
+// 自社社員ステータス（稼働可/アサイン済）
+export type OwnEngineerStatus = 'available' | 'assigned';
+
+export interface OwnEngineer {
+  id: string; // 'own_<hash>' 決定的ID
+  displayName: string; // 氏名またはイニシャル
+  skills: string[]; // 正規化済み
+  experienceYears: number | null;
+  requiredProjectRate: number | null; // 必要案件単価（万円/月）。これ以上の案件を提示
+  residence: string; // 居住地（原文）
+  prefecture: string | null; // 正規化した都道府県名
+  availableDate: string; // 稼働可能時期（原文）
+  availableFrom: string | null; // 正規化した稼働可能日 ISO（不明は null）
+  remoteWish: RemoteOption;
+  status: OwnEngineerStatus;
+  notionPageId?: string;
+  // 技術ごとの年数・工程ごとの年数・立場（level.ts）。分からない社員は未定義
+  level?: EngineerLevel;
+  // AI判定に渡す経歴の本文（要員リストのサマリ＋スキルシートのタブ）。根拠の引用の照合にも使う。無い社員はスキル一覧から作る
+  profileText?: string;
+  // IT の実務経験が無い（要員リストのサマリの経験年数が「なし」「未経験」の研修明けの社員）。Drive のスキルシート経由の社員は未定義
+  itInexperienced?: boolean;
+}
+
+// プロパー（自社社員）: 別管理のスキルシート（Drive）から抽出し、管理表「プロパー管理」で人が
+// 稼働状況・必要案件単価を付けた自社社員。matchOwnEngineersToProjects にそのまま渡せる
+export interface ProperEngineer extends OwnEngineer {
+  fileId: string; // スキルシートのDriveファイルID（id はこれから作る）
+  fullName: string; // 氏名（社内シート・サマリメール用。ログにも提案文面にも出さない）
+  proposalLabel: string; // 提案用表記（イニシャル）。社外向けの提案文面にはこれだけを使う
+  skillSheetUrl: string;
+  affiliation?: 'proper' | 'partner'; // 区分（空欄はプロパー＝自社社員）
+  wish?: string; // 本人の希望（要員リストの「■備考」。営業リストの「要員一覧」に出す）
+}
+
+// プロパー × 案件の候補（案件スプレッドシートの「プロパー候補」タブ1行に対応）
+export interface ProperCandidate extends OwnMatch {
+  properLabel: string; // 「プロパー」列の表示（提案用表記。氏名はプロパー管理表にだけ置く）。ログに出さない
+  draftToProject?: DraftRef; // 案件の元メールへの全員に返信（提案文面。テンプレート生成）
+  reference?: boolean; // 社員ごとの上限を超えた、AIが見送らなかった組（営業リストでは「D 参考」。数を出しつつ主な候補と分ける）
+}
+
+// マッチ確認UI（web.ts）が扱う表示用のマッチ。demo/本番で同一形にするため
+// MatchResult から下書きURL/本文を平坦化して持つ（Notion内部構造から独立させる）。
+export interface ReviewMatch {
+  id: string;
+  title: string;
+  grossMarginJpy: number; // 円/月
+  score: number;
+  reason: string;
+  needsReview: boolean;
+  band: MatchBand;
+  category: MatchCategory;
+  negotiation?: NegotiationProposal; // 交渉提案（あれば「交渉提案」枠として表示）
+  status: MatchStatus;
+  draftToProjectUrl: string | null;
+  draftToEngineerUrl: string | null;
+  draftToProjectText: string | null; // 全員に返信の本文（プレビュー用）
+  draftToEngineerText: string | null;
+  draftProject?: DraftRef; // 全員に返信の下書き内容（送信元入力で本人のGmailに作成する用）
+  draftEngineer?: DraftRef;
+  notionPageId?: string; // あればステータス更新をNotionへ反映
+  lastActionBy?: string; // 直近にステータスを変更した人（複数人運用の記録）
+  lastActionAt?: string; // その日時 ISO
+  detectedAt?: string; // 初回検出日時 ISO（未確認のまま一覧に残す期間の判定用）
+}
+
+// 自社社員と案件のマッチ（金額条件は「案件単価 ≥ 必要案件単価」）
+export interface OwnMatch {
+  id: string; // 'ownmatch_<ownId>_<projId>'
+  ownEngineerId: string;
+  ownEngineerName: string;
+  projectId: string;
+  projectTitle: string;
+  projectRate: number | null; // 案件単価（万円/月, rateMax優先）
+  requiredProjectRate: number | null; // 社員の必要案件単価
+  rateGapMan: number | null; // 案件単価 − 必要案件単価（万円/月）。不明は null
+  meetsRate: boolean; // 案件単価が必要案件単価以上か（不明は要確認扱い）
+  skillMatchRate: number; // 必須スキル一致率 0〜1
+  band: MatchBand; // スキル確度バンド（外部要員マッチと同一基準。tentative=参考提案）
+  locationOk: boolean;
+  timingOk: boolean;
+  needsReview: boolean; // 単価・勤務地不明で要確認
+  score: number; // 適合スコア 0〜100
+  reason: string; // 提示理由
+  agentEmail: string; // 案件の営業元（打診先）
+  detectedAt: Date;
+  matchedSkills?: string[]; // 満たした必須スキル（営業リストの「合っている点」）
+  missingSkills?: string[]; // 満たさない必須スキル（「足りない点」）
+  judgment?: ProperJudgment; // AIの判定（proper/judge.ts）。ルールだけで出した候補は未定義
+}
+
+// プロパー×案件のAI判定（根拠の引用を経歴と照合した後の値）
+export type ProperVerdict = 'recommend' | 'conditional' | 'reject';
+export type RequirementKind = '必須' | '尚可';
+// 案件単価が高い理由: 商流が浅い（利益が大きい見込み）／求める水準が高い／判断できない
+export type RateReason = 'shallow_flow' | 'high_level' | 'unclear';
+export interface RequirementCheck {
+  kind: RequirementKind;
+  requirement: string;
+  quote: string; // メール本文の記載（原文のまま。本文に無ければ空か抽出の表記）
+  status: 'met' | 'close' | 'unmet';
+  shortYears?: number; // 必須の年数条件に経歴の年数が足りず close にしたときの、経歴側の年数
+  evidence?: string; // met/close の根拠（経歴の文。経歴との照合を通ったものだけ）。営業リストの「判定の理由」用
+  note?: string; // AIの補足（unmet の理由など）
+}
+export interface ProperJudgment {
+  verdict: ProperVerdict;
+  work: string; // 案件で実際に担う作業
+  met: string[]; // 「要件 ← 経歴の根拠」（営業リストの「合っている点」）
+  gaps: string[]; // 満たさない・近い経験のみの要件（「足りない点」）
+  levelFit: string;
+  pitch: string; // 相手先に伝える推しどころ
+  concerns: string[];
+  reviewNotes: string[]; // 人が確かめる事項（根拠が経歴に見当たらない・必須の記載が途中で切れている等）
+  checks?: RequirementCheck[]; // 必須・尚可の要件ごとの照合後の結果（営業リストでメール本文の該当行に ○△× を付ける）
+  workPrefecture?: string; // AIが案件メールから読んだ出社先の都道府県（ルールで勤務地を読めなかった案件の地方の判定に使う）
+  rateReason?: RateReason; // 案件単価が希望単価より大きく高い理由（AIの見立て。差が小さい組は持たない）
+  inexperiencedOk?: boolean; // IT未経験の社員 × 未経験可の案件として判定した組（必須の不足だけで見送らず、優先度は B までにする）
+}
+
+// ===== 人間フィードバックによる精度向上 =====
+
+// マッチ評価（妥当/ズレ）。複数人運用のため評価者名を持つ。共有の正はNotion。
+export type FeedbackVerdict = 'good' | 'bad';
+export interface MatchFeedback {
+  matchId: string;
+  matchTitle: string;
+  verdict: FeedbackVerdict; // 妥当(good)/ズレ(bad)
+  note: string; // 自由記述（例: PHPとLaravelは実質同じ、経験浅すぎ 等）
+  reviewer: string; // 評価者名
+  band?: MatchBand; // 評価時点のバンド（バンド別成約率の集計用）
+  at: string; // ISO日時
+}
+
+// スキル同義・類似辞書のエントリ。人のフィードバックで育てる（a と b を相互に満たすとみなす）。
+export interface SkillEquivalence {
+  a: string; // 正規化スキル
+  b: string; // 正規化スキル
+  addedBy: string; // 追加者名
+  at: string; // ISO日時
+}
+
+// バンド別の成約率メトリクス
+export interface BandMetrics {
+  band: MatchBand | 'negotiable';
+  total: number; // 検出数
+  introduced: number; // 紹介済
+  closedWon: number; // 成約
+  dropped: number; // 見送り
+  good: number; // 妥当評価
+  bad: number; // ズレ評価
+  winRate: number | null; // 成約率 = closedWon / (closedWon + dropped)
+  goodRate: number | null; // 妥当率 = good / (good + bad)
+}

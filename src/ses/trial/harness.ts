@@ -1,0 +1,574 @@
+// 試運転（APIキーを使わず、Claude Code の定期実行が抽出・AI判定を代行する）の段ごとの処理。
+// 本番と同じコード（抽出結果の組み立て・重複のまとめ・足切り・判定の検証・優先度・営業リストの差分）を通し、
+// Google への読み書きだけをコネクタ側に任せる。手順は docs/ses-trial-runbook.md。
+// 個人データはここに置かない（要員・メール・シートの値は実行時に RUN_DIR へ書き出したファイルから読む）。
+//
+//   PHASE=prompts  抽出の指示文とJSONの形を RUN_DIR に書く
+//   PHASE=prep     抽出結果＋要員リスト → AI判定に回す組（pairs.json・system_<要員>.txt）。足切りの監視の組も加え、audit.json に組のキーを書く
+//                  似た要員（groupSimilarEngineers）の同じ案件の組は代表の1人にだけ残し、残りは group_pending.json・groups.json に書く（出力の grouped）
+//   PHASE=fanout   judged_<代表>.json の判定を似た要員の経歴で照合して judged_<要員>.json に足す。合わない組は pairs_fallback.json（個別に判定する組）
+//   PHASE=final    AI判定の結果＋シートの今の行 → 営業リストへの書き込み（plan.json・writes/*.json）。出力の judge に監視の audited・auditHits が出る
+//   PHASE=side     要員一覧・精度集計・要員のタブの値と数式（side.json。要員リストが変わったときの反映用）
+//   PHASE=score    取り込み・判定・営業の入力の数字（score.json。本文の写しのずれ bodyHeadShortPct・quoteMissingPct を含む）
+//   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
+//                  増えた組は labels_backup.tsv に書く（LABELS_BACKUP_ALL=1 でストア全体を labels_backup_NN.tsv に分けて書く）
+//   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
+import { parseJstLabel } from './jstLabel.js';
+import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
+import { attachmentMaterial } from './rawAttach.js';
+import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
+import { isClosedNotice } from '../mailKind.js';
+import { ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
+import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
+import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
+import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
+import { groupSimilarEngineers } from '../proper/group.js';
+import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
+import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
+import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
+
+const dir = process.env.RUN_DIR as string;
+if (!dir) throw new Error('RUN_DIR を指定してください');
+const phase = process.env.PHASE ?? 'prep';
+const now = process.env.NOW ? new Date(process.env.NOW) : new Date();
+const LOOKBACK_DAYS = Number(process.env.PROPER_PROJECT_LOOKBACK_DAYS ?? 14);
+const read = <T,>(name: string): T => JSON.parse(readFileSync(join(dir, name), 'utf8')) as T;
+const has = (name: string) => existsSync(join(dir, name));
+const HEADER = SALES_COLUMNS.map((c) => c.name);
+const COL = Object.fromEntries(HEADER.map((n, i) => [n, i])) as Record<string, number>;
+
+// ===== 抽出結果（out/*.jsonl：1スレッド1行） =====
+interface OutRow {
+  threadId: string;
+  messageId: string;
+  subject?: string;
+  from?: string;
+  receivedAt: string;
+  kind?: string;
+  extraction?: { projects?: unknown[]; engineers?: unknown[]; injectionSuspected?: boolean };
+  bodyHead?: string;
+  // 案件メールの添付（表計算）の文字。ses:trial:raw の出力（text）を40000文字まで。読めなかったときは attachmentUnread
+  attachmentText?: string;
+  attachmentNames?: string[];
+  attachmentUnread?: boolean;
+  error?: string;
+}
+
+function outRows(base = dir): OutRow[] {
+  const rows: OutRow[] = [];
+  const out = join(base, 'out');
+  if (!existsSync(out)) return rows;
+  for (const f of readdirSync(out).filter((x) => x.endsWith('.jsonl')).sort()) {
+    for (const line of readFileSync(join(out, f), 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        rows.push(JSON.parse(line) as OutRow);
+      } catch {
+        console.error(`読めない行があります: ${f}`);
+      }
+    }
+  }
+  return rows;
+}
+
+const attach = (r: OutRow, excerpt = '') => attachmentMaterial(r.bodyHead ?? '', excerpt, r.attachmentText, r.attachmentNames);
+
+function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; failed: number } {
+  const seen = new Set<string>();
+  const projects: Project[] = [];
+  let closed = 0;
+  let failed = 0;
+  for (const r of rows) {
+    if (seen.has(r.messageId) || !r.extraction) continue;
+    seen.add(r.messageId);
+    const mail = {
+      id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: attach(r).body,
+      messageIdHeader: '', references: '', receivedAt: new Date(r.receivedAt), attachments: [], sheetLinks: [],
+    } as SesRawMail;
+    if (isClosedNotice({ ...mail, body: r.bodyHead ?? '' })) closed += 1;
+    const ps = (r.extraction.projects ?? []) as Parameters<typeof buildProject>[0][];
+    ps.forEach((raw, i) => {
+      try {
+        const p = buildProject(raw, mail, i, null) as Project;
+        const detail = attach(r, projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i)).detail;
+        if (detail) p.detail = detail;
+        p.replyTarget = { from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', messageId: '', references: '' };
+        if (r.extraction?.injectionSuspected) p.injectionSuspected = true;
+        projects.push(p);
+      } catch {
+        failed += 1;
+      }
+    });
+  }
+  return { projects, closed, failed };
+}
+
+// ===== 前の回の繰り越し =====
+// 上限で判定できなかった組を次の回に回すため、同じ親ディレクトリの別の回（run_*）を前の回とみなす。
+// CARRY_DIRS（カンマ区切り）があればそれを使う
+function carryDirs(): string[] {
+  const own = resolve(dir);
+  const given = (process.env.CARRY_DIRS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (given.length > 0) return given.map((x) => resolve(x)).filter((x) => x !== own);
+  const parent = dirname(own);
+  try {
+    return readdirSync(parent, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name.startsWith('run_'))
+      .map((d) => join(parent, d.name))
+      .filter((p) => resolve(p) !== own)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+// この回の抽出結果＋前の回の抽出結果のうち受信が遡り期間内のもの（同じ threadId は1回だけ）。読めない回は飛ばす
+function carriedRows(): { rows: OutRow[]; carriedRows: OutRow[] } {
+  const own = outRows();
+  const seen = new Set(own.map((r) => r.threadId));
+  const since = now.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const prev: OutRow[] = [];
+  for (const d of carryDirs()) {
+    try {
+      for (const r of outRows(d)) {
+        const t = new Date(r.receivedAt).getTime();
+        if (seen.has(r.threadId) || !Number.isFinite(t) || t < since || t > now.getTime()) continue;
+        seen.add(r.threadId);
+        prev.push(r);
+      }
+    } catch (err) {
+      console.error(`前の回を読めませんでした（飛ばします）: ${d}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { rows: [...own, ...prev], carriedRows: prev };
+}
+
+// 前の回で判定済みの組（要員ID|案件ID）。控えにある組として、この回は判定しない
+function previouslyJudged(list: ProperEngineer[]): Map<string, Set<string>> {
+  const byEngineer = new Map<string, Set<string>>();
+  for (const d of carryDirs()) {
+    for (const e of list) {
+      const f = join(d, `judged_${e.proposalLabel || e.displayName}.json`);
+      try {
+        if (!existsSync(f)) continue;
+        const set = byEngineer.get(e.id) ?? new Set<string>();
+        for (const r of JSON.parse(readFileSync(f, 'utf8')) as Array<{ projectId: string }>) set.add(r.projectId);
+        byEngineer.set(e.id, set);
+      } catch (err) {
+        console.error(`前の回の判定を読めませんでした（飛ばします）: ${f}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+  return byEngineer;
+}
+
+// 前の回とこの回の判定ファイル（judged_<要員>.json）の中身。再送で案件IDが替わった組の判定の使い回しに使う
+function judgedFilesOf(label: string): Array<{ projectId: string; judgment: RawProperJudgment }> {
+  const rows: Array<{ projectId: string; judgment: RawProperJudgment }> = [];
+  for (const d of [...carryDirs(), resolve(dir)]) {
+    const f = join(d, `judged_${label}.json`);
+    try {
+      if (existsSync(f)) rows.push(...(JSON.parse(readFileSync(f, 'utf8')) as typeof rows));
+    } catch (err) {
+      console.error(`判定を読めませんでした（飛ばします）: ${f}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return rows;
+}
+
+// ===== 要員リスト（roster.json：{ spreadsheetId, rows, gidOf, sheets: { 名前: 値 } }） =====
+interface RosterDump {
+  spreadsheetId: string;
+  rows: string[][];
+  gidOf: Record<string, number>;
+  sheets: Record<string, string[][]>;
+}
+
+function engineers(): ProperEngineer[] {
+  const r = read<RosterDump>('roster.json');
+  const sheetTexts = new Map(Object.entries(r.sheets ?? {}).map(([name, values]) => [name, skillSheetText(values)]));
+  return rosterEngineersFromValues(
+    { spreadsheetId: r.spreadsheetId, rows: r.rows, gidOf: new Map(Object.entries(r.gidOf ?? {})), sheetTexts },
+    now,
+  ).map((e) => ({ ...e, affiliation: 'proper' as const }));
+}
+
+// ===== 営業リストの今の行（existing.json：見出しの名前 → 値 の配列。人の入力と照合に要る列だけ） =====
+type SheetRow = Record<string, string> & { ID: string };
+
+function existingRows(): SheetRow[] {
+  return has('existing.json') ? read<SheetRow[]>('existing.json') : [];
+}
+
+function closedIds(): Set<string> {
+  return new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
+}
+
+// 「クローズ済み」タブの行（closed_rows.json）から、要員＋案件名の照合と「見送り・募集終了」の行を取る（本番の writeSalesList と同じ関数）
+function closedState(): ClosedState {
+  return closedStateOf(sheetValues(has('closed_rows.json') ? read<SheetRow[]>('closed_rows.json') : []));
+}
+
+// 以前の試運転の行（own_gu のような仮のID）を、要員リストのIDに読み替える
+function legacyCanonical(list: ProperEngineer[]) {
+  return (id: string): string => {
+    const m = /^ownmatch_own_([a-z]+)_(proj_[0-9a-f]+)$/.exec(id);
+    if (!m) return id;
+    const e = list.find((x) => (x.proposalLabel || x.displayName).replace(/[^A-Za-z]/g, '').toLowerCase() === m[1]);
+    return e ? `ownmatch_${e.id}_${m[2]}` : id;
+  };
+}
+
+// シートの1行目（existing_header.json）が今の列の並びでなければ止める。見出しが古いまま書くと、増えた列から右の値が1列ずつずれて入る
+function assertSheetHeader(): void {
+  if (!has('existing_header.json')) return;
+  const sheet = read<string[]>('existing_header.json');
+  if (sheet.length !== HEADER.length || sheet.some((h, i) => h !== HEADER[i])) {
+    throw new Error(`営業リストの見出しが今の列の並びと違います（シート ${sheet.length}列・今の並び ${HEADER.length}列）。runbook の「列が増えたとき」の手順で先に列を挿入してください`);
+  }
+}
+
+function sheetValues(rows: SheetRow[]): string[][] {
+  return [HEADER, ...rows.map((r) => HEADER.map((h) => r[h] ?? ''))];
+}
+
+// この回の判定結果（judged_*.json）を差し替えの判定器に入れ、本番と同じ組み立て（足切り・検証・優先度の元）で候補にする。final と labels で共有
+async function judgedCandidates() {
+  const list = engineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const done = previouslyJudged(list);
+  const judged = new Map<string, RawProperJudgment>();
+  for (const e of list) {
+    const label = e.proposalLabel || e.displayName;
+    if (!has(`judged_${label}.json`)) continue;
+    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, r.judgment);
+  }
+  // 再送で代表が替わった組は、prep が reused.json に残した前の案件の判定を使う（判定の中身はそのまま。projectId だけ新しい案件）
+  const reused = has('reused.json') ? read<ReusedPair[]>('reused.json') : [];
+  for (const e of list) {
+    const label = e.proposalLabel || e.displayName;
+    const before = new Map(judgedFilesOf(label).map((r) => [r.projectId, r.judgment]));
+    for (const r of reused.filter((x) => x.engineer === label)) {
+      if (judged.has(`${e.id}|${r.projectId}`)) continue;
+      const j = judgmentFor(before, r.projectId, reused, label);
+      if (j) judged.set(`${e.id}|${r.projectId}`, j);
+    }
+  }
+  __setProperJudgeForTest(async (e, p) => {
+    const j = judged.get(`${e.id}|${p.id}`);
+    if (j) return j;
+    // 前の回で判定済みの組はこの回の判定ファイルに無いだけなので失敗に数えない（失敗率のゲートが誤って働かないように。載せる組はこの回の判定だけ）
+    if (done.get(e.id)?.has(p.id)) {
+      return { work: '', requirements: [], levelFit: '', preferenceFit: '', verdict: 'reject', pitch: '', concerns: [], workPrefecture: '', injectionSuspected: false };
+    }
+    throw new Error('この回では判定していない組');
+  });
+  // prep と同じ選び方にするため、前の回で判定済みの組を控えとして扱う
+  __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
+  // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
+  process.env.PROPER_JUDGE_PER_ENGINEER = '300';
+  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now);
+  return { list, projects, judged, candidates, stats, auditHitKeys };
+}
+
+// ===== 段 =====
+if (phase === 'prompts') {
+  writeFileSync(join(dir, 'extract_system.txt'), EXTRACT_SYSTEM);
+  writeFileSync(join(dir, 'extract_schema.json'), JSON.stringify(EXTRACT_SCHEMA, null, 1));
+  console.log('ok');
+} else if (phase === 'prep') {
+  const list = engineers();
+  const { rows, carriedRows: prevRows } = carriedRows();
+  const { projects } = projectsOf(rows);
+  const carriedIds = new Set(projectsOf(prevRows).projects.map((p) => p.id));
+  const kept = dedupeProjects(projects).kept;
+  const perEngineer = Number(process.env.PROPER_JUDGE_PER_ENGINEER ?? 150);
+  const done = previouslyJudged(list);
+  const canonical = legacyCanonical(list);
+  // すでにシートにある組・クローズした組は判定し直さない（本番の判定の控えの代わり）
+  const skip = new Set([...existingRows().map((r) => canonical(r.ID)), ...[...closedIds()].map(canonical)]);
+  // 切り替えで案件IDが変わってもクローズ済み（見送り含む）の組は戻らず、募集終了の案件も候補に入らない（final と同じ照合）
+  const closed = closedState();
+  const labelOf = new Map(list.map((e) => [e.id, e.proposalLabel || e.displayName]));
+  const endedProjects = new Set([...closed.endedRowIds].map((id) => projectIdOf(legacyCanonical(list)(id))).filter(Boolean));
+  // 要員＋営業元メール＋件名＋受信日時でも照合する（切り替えで案件名の抽出結果が変わっても戻さない。final の planSalesUpdate と同じ規則）
+  const projectById = new Map(kept.map((p) => [p.id, p]));
+  const mailOfPair = (m: { projectId: string; ownEngineerId: string }) => {
+    const p = projectById.get(m.projectId);
+    return p ? mailRefOf(labelOf.get(m.ownEngineerId) ?? '', p.agentEmail, p.replyTarget?.subject ?? '', jstLabel(p.receivedAt)) : null;
+  };
+  const everyPair = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now);
+  // 本番と同じ ownPairsForJudge を通るため、IT 未経験の社員 × 未経験可でない案件の除外はここでも効いている（除外した組の数だけ別に数える）
+  const inexperiencedSkipped = inexperiencedSkippedCount(list, kept, now);
+  const siblingMails = everyPair.flatMap((p) => mailOfPair(p.match) ?? []);
+  const closedPair = (m: { id: string; projectId: string; ownEngineerId: string; projectTitle: string }) => {
+    const key = closedKeyOf(labelOf.get(m.ownEngineerId) ?? '', m.projectTitle);
+    return skip.has(m.id) || endedProjects.has(m.projectId) || (key !== '' && closed.keys.has(key)) || closedByMail(mailOfPair(m), closed.mails, siblingMails);
+  };
+  const all = everyPair.filter((p) => !closedPair(p.match));
+  // 前の回で判定済みの組は上限に数えず、判定もしない。未判定の組だけを上限まで選ぶ
+  const selected = selectPairsForJudge(all, (id) => done.get(id), perEngineer, Number.MAX_SAFE_INTEGER);
+  // 足切りの監視の組（本番と同じ選び方）は各要員の配列の後ろに足し、組のキーを audit.json に書く（final で当たりを数える）
+  const audit = pickAuditPairs(list, kept, now, selected, (id) => done.get(id)).filter((p) => !closedPair(p.match));
+  const auditKeys = audit.map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`);
+  const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
+  let carried = 0;
+  // 再送で代表の案件IDが替わった組は、中身（案件名・必須・単価・都道府県・開始年月）が同じ案件の前の判定を使い回し、判定に回さない
+  const labelOfId = (id: string) => labelOf.get(id) ?? '';
+  const allProjectById = new Map(projects.map((x) => [x.id, x]));
+  const judgedBefore = list.flatMap((e) => judgedFilesOf(labelOfId(e.id)).map((r) => ({ engineer: labelOfId(e.id), projectId: r.projectId })));
+  const split = splitReused(
+    [...selected, ...audit].filter((p) => !done.get(p.match.ownEngineerId)?.has(p.match.projectId)).map((p) => ({ p, engineer: labelOfId(p.match.ownEngineerId), projectId: p.match.projectId })),
+    indexJudgedByContent(judgedBefore, allProjectById),
+    allProjectById,
+  );
+  const reused: ReusedPair[] = split.reused;
+  writeFileSync(join(dir, 'reused.json'), JSON.stringify(reused, null, 1));
+  for (const { p } of split.toJudge) {
+    if (carriedIds.has(p.match.projectId)) carried += 1;
+    const e = list.find((x) => x.id === p.match.ownEngineerId) as ProperEngineer;
+    const pj = kept.find((x) => x.id === p.match.projectId) as Project;
+    (pairs[e.proposalLabel || e.displayName] ??= []).push({ projectId: pj.id, title: pj.title, user: judgeUserPrompt(pj) });
+  }
+  // 似た要員は同じ案件の組を代表の1人にだけ残し、他の人の組は group_pending.json に回す（PHASE=fanout で代表の判定を照合して使い回す）
+  const groupPending: Array<{ engineer: string; projectId: string; from: string }> = [];
+  const groupsOut: Record<string, string[]> = {};
+  const labelOfEngineer = (e: ProperEngineer) => e.proposalLabel || e.displayName;
+  for (const g of groupSimilarEngineers(list)) {
+    if (g.members.length < 2) continue;
+    const labels = g.members.map(labelOfEngineer);
+    groupsOut[labels[0]] = labels;
+    const keeperOf = new Map<string, string>();
+    for (const label of labels) {
+      pairs[label] = (pairs[label] ?? []).filter((x) => {
+        const keeper = keeperOf.get(x.projectId);
+        if (keeper === undefined) {
+          keeperOf.set(x.projectId, label);
+          return true;
+        }
+        groupPending.push({ engineer: label, projectId: x.projectId, from: keeper });
+        return false;
+      });
+      if (pairs[label].length === 0) delete pairs[label];
+    }
+  }
+  writeFileSync(join(dir, 'group_pending.json'), JSON.stringify(groupPending, null, 1));
+  writeFileSync(join(dir, 'groups.json'), JSON.stringify(groupsOut, null, 1));
+  for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
+  writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
+  writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, inexperiencedSkipped, reused: reused.length, grouped: groupPending.length }));
+} else if (phase === 'fanout') {
+  const list = engineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const pending = has('group_pending.json') ? read<PendingPair[]>('group_pending.json') : [];
+  const labelOfEngineer = (e: ProperEngineer) => e.proposalLabel || e.displayName;
+  const judgedByLabel = new Map<string, JudgedRow[]>();
+  for (const label of new Set(pending.flatMap((p) => [p.engineer, p.from]))) {
+    if (has(`judged_${label}.json`)) judgedByLabel.set(label, read<JudgedRow[]>(`judged_${label}.json`));
+  }
+  const plan = planFanout(pending, judgedByLabel, new Map(list.map((e) => [labelOfEngineer(e), e])), new Map(projects.map((p) => [p.id, p])));
+  for (const [label, rows] of Object.entries(plan.additions)) {
+    writeFileSync(join(dir, `judged_${label}.json`), JSON.stringify([...(judgedByLabel.get(label) ?? []), ...rows], null, 1));
+  }
+  writeFileSync(join(dir, 'pairs_fallback.json'), JSON.stringify(plan.fallback, null, 1));
+  console.log(JSON.stringify({ shared: plan.shared, fallback: plan.fallbackCount }));
+} else if (phase === 'final') {
+  const { list, projects, judged, candidates, stats, auditHitKeys } = await judgedCandidates();
+  // AI判定の失敗が多い回は書き込みの元（plan.json・writes）を作らない（前の回のファイルも残さない）
+  if (stats.gated) {
+    rmSync(join(dir, 'writes'), { recursive: true, force: true });
+    rmSync(join(dir, 'plan.json'), { force: true });
+    console.log(JSON.stringify({ gated: true, failed: stats.failed, judged: stats.judged, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats }));
+    process.exit(0);
+  }
+  // この回で判定した組だけを載せる（判定していない組は失敗扱いになるため除く。シートにある組は下の差分で残る）
+  const fresh = candidates.filter((c) => judged.has(`${c.ownEngineerId}|${c.projectId}`)).map((c) => salesRowOf(c, projects.find((p) => p.id === c.projectId)));
+  const existing = existingRows();
+  const canonical = legacyCanonical(list);
+  const deduped = dedupeProjects(projects);
+  const alias = (id: string) => {
+    const c = canonical(id);
+    for (const e of list) {
+      const prefix = `ownmatch_${e.id}_`;
+      const to = c.startsWith(prefix) ? deduped.aliasOf.get(c.slice(prefix.length)) : undefined;
+      if (to) return `${prefix}${to}`;
+    }
+    return c;
+  };
+  // 前回の行は、受信から遡り日数の内で要員が営業中・希望単価も同じなら残す（試運転は過去の案件を持たないため受信日時で見る）
+  const since = now.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const stillOpen = (id: string, prev: Array<string | number>) => {
+    const c = canonical(id);
+    const e = list.find((x) => c.startsWith(`ownmatch_${x.id}_`));
+    const received = parseJstLabel(String(prev[COL['受信日時']]));
+    return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
+  };
+  assertSheetHeader();
+  const closed = closedState();
+  const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
+    closedKeys: closed.keys,
+    closedMails: closed.mails,
+    endedRowIds: closed.endedRowIds,
+    addedAt: jstLabel(now),
+    usedMaxNo: has('used_nos.json') ? maxNoOf(read<{ values: string[][] }>('used_nos.json').values) : 0,
+  });
+  if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
+  // 書き込み: 既存の行は人の入力の列の両側だけ、新しい行は下に足す。コネクタで書ける大きさ（約15KB）に分ける
+  const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
+  const first = Math.min(...humanCols);
+  const last = Math.max(...humanCols);
+  const letter = (i: number) => (i < 26 ? String.fromCharCode(65 + i) : `A${String.fromCharCode(65 + i - 26)}`);
+  const writes: Array<{ range: string; values: Array<Array<string | number>> }> = [];
+  for (const u of plan.updates) {
+    writes.push({ range: `'全体'!A${u.row}:${letter(first - 1)}${u.row}`, values: [u.values.slice(0, first)] });
+    writes.push({ range: `'全体'!${letter(last + 1)}${u.row}:${letter(HEADER.length - 1)}${u.row}`, values: [u.values.slice(last + 1)] });
+  }
+  let next = existing.length + 2;
+  for (const r of plan.appends) writes.push({ range: `'全体'!A${next++}`, values: [r] });
+  const chunks: Array<typeof writes> = [];
+  for (const w of writes) {
+    const size = JSON.stringify(w).length;
+    const cur = chunks[chunks.length - 1];
+    if (!cur || JSON.stringify(cur).length + size > 15_000) chunks.push([w]);
+    else cur.push(w);
+  }
+  mkdirSync(join(dir, 'writes'), { recursive: true });
+  chunks.forEach((c, i) => writeFileSync(join(dir, 'writes', `w${String(i).padStart(2, '0')}.json`), JSON.stringify(c)));
+  writeFileSync(join(dir, 'plan.json'), JSON.stringify({
+    appendFrom: existing.length + 2,
+    appendCount: plan.appends.length,
+    updateRows: plan.updates.map((u) => u.row),
+    deleteIds: plan.deleteIds,
+    dropRows: plan.dropRows,
+    expiredTab: SALES_EXPIRED_TAB,
+    rekeyed: plan.rekeyed,
+    closeIds: plan.closeIds,
+    expireIds: plan.expireIds,
+    endedIds: plan.endedIds,
+    closedRows: plan.closedRows,
+    closedStatus: SALES_CLOSED_STATUS,
+  }, null, 1));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, belowMinPriority: plan.belowMin, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
+} else if (phase === 'labels') {
+  const { list, projects, judged, candidates } = await judgedCandidates();
+  const store = labelsDir();
+  const nowIso = now.toISOString();
+  const startSec = has('start.txt') ? Number(readFileSync(join(dir, 'start.txt'), 'utf8').trim()) : NaN;
+  const judgedAt = Number.isFinite(startSec) && startSec > 0 ? new Date(startSec * 1000).toISOString() : nowIso;
+  const deduped = dedupeProjects(projects);
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  const priorityOf = new Map(candidates.map((c) => [`${c.ownEngineerId}|${c.projectId}`, salesPriorityOf(c)]));
+  const engineerById = new Map(list.map((e) => [e.id, e]));
+  const hashOf = new Map(list.map((e) => [e.id, engineerHashOf(e)]));
+  const pairs: LabelPair[] = [];
+  let missingProject = 0;
+  for (const [key, judgment] of judged) {
+    const [engineerId, projectId] = key.split('|');
+    const e = engineerById.get(engineerId);
+    const found = projectById.get(projectId) ?? projectById.get(deduped.aliasOf.get(projectId) ?? '');
+    if (!e || !found) {
+      missingProject += 1;
+      continue;
+    }
+    const { replyTarget: _drop, ...project } = found;
+    pairs.push({
+      key, engineerId, engineerLabel: e.proposalLabel || e.displayName, projectId: found.id, runId: basename(resolve(dir)), judgedAt,
+      engineerHash: hashOf.get(engineerId) as string, project: project as Project, judgment, priority: priorityOf.get(key) ?? '',
+    });
+  }
+  const canonical = legacyCanonical(list);
+  const closedRows = has('closed_rows.json') ? read<SheetRow[]>('closed_rows.json') : [];
+  const sales: LabelSales[] = [];
+  // 全体 → クローズ済みの順に並べる（同じ組が両方にあるときは appendLabels があとの方を採る）
+  const ex = readFbExcludeIds(store);
+  let fbExcluded = 0;
+  for (const [tab, rows] of [['全体', existingRows()], ['クローズ済み', closedRows]] as const) {
+    for (const r of rows) {
+      if (ex.has((r.ID ?? '').trim())) {
+        fbExcluded += 1;
+        continue;
+      }
+      const key = salesKeyOf(canonical(r.ID ?? ''));
+      if (!key) continue;
+      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '' });
+    }
+  }
+  const added = appendLabels(store, {
+    pairs,
+    engineers: list.map((e) => ({ hash: hashOf.get(e.id) as string, engineerId: e.id, engineer: e })),
+    sales,
+  });
+  const total = readLabelStore(store);
+  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1');
+  const { addedPairs: _added, ...counts } = added;
+  console.log(JSON.stringify({ ...counts, missingProject, fbExcluded, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
+} else if (phase === 'labels_verify') {
+  const written: BackupRow[] = [];
+  for (const f of readdirSync(dir).filter((n) => /^labels_backup.*\.tsv$/.test(n)).sort()) written.push(...parseBackup(readFileSync(join(dir, f), 'utf8')).rows);
+  const readBack: BackupRow[] = [];
+  let bad = 0;
+  const backDir = join(dir, 'backup_readback');
+  for (const f of existsSync(backDir) ? readdirSync(backDir).filter((n) => n.endsWith('.txt')).sort() : []) {
+    const r = parseBackup(readFileSync(join(backDir, f), 'utf8'));
+    readBack.push(...r.rows);
+    bad += r.bad;
+  }
+  const result = compareBackup(written, readBack, bad);
+  console.log(JSON.stringify(result));
+  if (!result.ok) process.exitCode = 1;
+} else if (phase === 'side') {
+  const list = engineers();
+  // 行の残っている要員（営業から外れても、人の入力がある行は残る）のタブも作る
+  const labels = [...new Set([...list.map((e) => e.proposalLabel || e.displayName), ...existingRows().map((r) => r['要員']).filter(Boolean)])].sort();
+  writeFileSync(join(dir, 'side.json'), JSON.stringify({
+    staffList: staffListValues(list),
+    summary: summaryValues(labels),
+    staffTabs: labels.map((l) => ({ title: staffTabName(l), formula: staffFilterFormula(l), header: HEADER.map((h) => (SALES_COLUMNS.find((c) => c.name === h)?.human ? `${h}（入力は全体タブ）` : h)) })),
+  }, null, 1));
+  console.log(JSON.stringify({ engineers: list.length, labels }));
+} else if (phase === 'score') {
+  const rows = outRows();
+  const { closed, failed } = projectsOf(rows);
+  const { projects } = projectsOf(carriedRows().rows);
+  const kept = dedupeProjects(projects).kept;
+  const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
+  const engineerMails = rows.filter((r) => r.kind === 'engineer').length;
+  const errors = rows.filter((r) => r.error).length;
+  const existing = existingRows();
+  const count = (col: string, prefix: string) => existing.filter((r) => (r[col] ?? '').startsWith(prefix)).length;
+  const checked = existing.filter((r) => (r['精度チェック'] ?? '').trim()).length;
+  const good = count('精度チェック', '◎') + count('精度チェック', '○');
+  const reasons: Record<string, number> = {};
+  for (const r of existing) if ((r['見送り理由'] ?? '').trim()) reasons[r['見送り理由']] = (reasons[r['見送り理由']] ?? 0) + 1;
+  const statuses: Record<string, number> = {};
+  for (const r of existing) statuses[r['対応状況'] || '（空）'] = (statuses[r['対応状況'] || '（空）'] ?? 0) + 1;
+  const verdicts: Record<string, number> = {};
+  const judgments: GapJudgment[] = [];
+  for (const f of readdirSync(dir).filter((x) => /^judged_.+\.json$/.test(x))) {
+    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(f)) {
+      verdicts[r.judgment.verdict] = (verdicts[r.judgment.verdict] ?? 0) + 1;
+      judgments.push(r);
+    }
+  }
+  const mailIdOfProject = new Map(projects.map((p) => [p.id, p.sourceMailId]));
+  const score = {
+    mails: rows.length, engineerMails, extractErrors: errors, closedNotices: closed, buildFailures: failed,
+    projects: projects.length, keptAfterDedupe: kept.length, dedupeRemoved: projects.length - kept.length,
+    rateMissingPct: pct(projects.filter((p) => p.rateMax === null && p.rateMin === null).length, projects.length),
+    requiredEmptyPct: pct(projects.filter((p) => p.requiredSkills.length === 0).length, projects.length),
+    prefectureMissingPct: pct(projects.filter((p) => p.remote !== 'full' && !p.prefecture).length, projects.filter((p) => p.remote !== 'full').length),
+    bodyHeadShortPct: bodyHeadShortPct(rows),
+    quoteMissingPct: quoteMissingPct(carriedRows().rows, judgments, mailIdOfProject),
+    verdicts,
+    sheet: { rows: existing.length, priorities: Object.fromEntries(['A', 'B', 'C', 'D'].map((p) => [p, count('優先度', p)])), statuses, reasons, checked, goodRatePct: pct(good, checked) },
+  };
+  writeFileSync(join(dir, 'score.json'), JSON.stringify(score, null, 1));
+  console.log(JSON.stringify(score));
+} else {
+  throw new Error(`PHASE が不明です: ${phase}`);
+}

@@ -1,33 +1,123 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { LlmMessage } from './index.js';
+import type { LlmMessage, GenOptions } from './index.js';
+import { recordLlmUsage, getLlmUsageLog, type LlmUsage } from './usage.js';
+import { LlmOutputError, noteLlmError } from './errors.js';
+
+export { getLlmUsageLog, type LlmUsage };
 
 // Anthropic（Claude）バックエンド。従来どおり adaptive thinking + 構造化出力を使う。
 // クライアントは遅延生成（Gemini運用時にAnthropicキーが無くても import で落ちないように）。
+// SDKの自動再試行は1回に抑える（SESの自動修復が自前で再試行するため、既定の2回と掛け算にならないように）。
+// タイムアウトを明示すると、SDKが大きな max_tokens の非ストリーミング呼び出しを事前に拒否する判定も外れる
+// （出力上限を増やしての再試行で使う）
 let _client: Anthropic | null = null;
+// GitHub Actions では接続先を公式の API に固定する（環境変数 ANTHROPIC_BASE_URL で鍵・メール本文を別のサーバーへ送らせない）
+export const ANTHROPIC_OFFICIAL_BASE_URL = 'https://api.anthropic.com';
 function client(): Anthropic {
-  return (_client ??= new Anthropic());
+  const baseURL = process.env.GITHUB_ACTIONS === 'true' ? ANTHROPIC_OFFICIAL_BASE_URL : undefined;
+  return (_client ??= new Anthropic({ maxRetries: 1, timeout: 10 * 60 * 1000, ...(baseURL ? { baseURL } : {}) }));
 }
-const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
+const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-opus-4-8';
+
+// キャッシュの書き込み・読み込みは input_tokens に含まれず単価の倍率も違うため、別に記録する
+function recordUsage(model: string, usage: Anthropic.Messages.Usage): void {
+  recordLlmUsage(model, usage.input_tokens, usage.output_tokens, {
+    creation: usage.cache_creation_input_tokens,
+    creation1h: usage.cache_creation?.ephemeral_1h_input_tokens,
+    read: usage.cache_read_input_tokens,
+  });
+}
+
+// adaptive thinking（thinking: {type: 'adaptive'}）は Opus/Sonnet系（4.6以降）と Haiku 5.5 以降でのみ有効で、
+// Haiku 4.5 以前には存在しない設定のため付与すると 400 になりうる。モデル名で分岐する
+export function supportsAdaptiveThinking(model: string): boolean {
+  return !model.includes('haiku') || /haiku-[5-9]/.test(model);
+}
+
+function thinkingParam(model: string): { type: 'adaptive' } | undefined {
+  return supportsAdaptiveThinking(model) ? { type: 'adaptive' } : undefined;
+}
+
+// effort を受け付けるモデルだけに付ける（Haiku 4.5・Sonnet 4.5 以前は 400 になるため、既知の対応モデルに限る）
+const EFFORT_MODELS = /opus-4-[5-9]|opus-5|sonnet-4-6|sonnet-5|haiku-[5-9]|fable|mythos/;
+
+export function supportsEffort(model: string): boolean {
+  return EFFORT_MODELS.test(model);
+}
+
+function outputConfig(model: string, schema: object, opts: GenOptions): Anthropic.Messages.OutputConfig {
+  const format = { type: 'json_schema' as const, schema: schema as Record<string, unknown> };
+  return opts.effort && supportsEffort(model) ? { format, effort: opts.effort } : { format };
+}
+
+// 構造化出力の呼び出し（抽出・判定）は同じ system を1回のバッチで何百回も送るため、system の末尾でキャッシュする。
+// 5分以内に次の呼び出しが来れば読み込み（入力の約0.1倍）になる。モデルの最小長（Haiku 5.5 は512・Haiku 4.5 は4096トークン）に
+// 満たない system は黙ってキャッシュされないだけで、料金は増えない（効いたかはメトリクスの「キャッシュ読込率」で分かる）
+function cachedSystem(system: string): Anthropic.Messages.TextBlockParam[] {
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+}
+
+// 呼び出し単位のSDKオプション（再試行回数・タイムアウト）
+function requestOptions(opts: GenOptions): { maxRetries?: number; timeout?: number } {
+  const o: { maxRetries?: number; timeout?: number } = {};
+  if (opts.maxRetries !== undefined) o.maxRetries = opts.maxRetries;
+  if (opts.timeoutMs !== undefined) o.timeout = opts.timeoutMs;
+  return o;
+}
+
+// 構造化出力の本文を取り出す。途中打ち切り・拒否は壊れた/空のJSONを黙って受け取らず型付きエラーにする
+function jsonText(response: Anthropic.Messages.Message, model: string): string {
+  if (response.stop_reason === 'max_tokens') throw new LlmOutputError('max_tokens', model);
+  if (response.stop_reason === 'refusal') throw new LlmOutputError('refusal', model);
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text' || !textBlock.text.trim()) throw new LlmOutputError('empty', model);
+  return textBlock.text;
+}
+
+// 全ての呼び出しの入口。残高切れを見たら控える（本番バッチが終わりに試運転へ引き継ぐ判断に使う）
+async function createMessage(
+  params: Anthropic.Messages.MessageCreateParamsNonStreaming,
+  options: { maxRetries?: number; timeout?: number },
+): Promise<Anthropic.Messages.Message> {
+  try {
+    return await client().messages.create(params, options);
+  } catch (err) {
+    noteLlmError(err);
+    throw err;
+  }
+}
 
 export async function anthropicText(
   system: string,
   messages: LlmMessage[],
   maxTokens: number,
+  opts: GenOptions = {},
 ): Promise<string> {
-  const response = await client().messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
-    system,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-  });
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await createMessage(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(opts.thinking !== false && thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    },
+    requestOptions(opts),
+  );
+  recordUsage(resolvedModel, response.usage);
   const textBlock = response.content.find((b) => b.type === 'text');
-  let answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  const answer = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  // バッチ用途（strict）では、途中で切れた文面や拒否・空応答を正常な回答として返さない
+  if (opts.strict) {
+    if (response.stop_reason === 'max_tokens') throw new LlmOutputError('max_tokens', resolvedModel);
+    if (response.stop_reason === 'refusal') throw new LlmOutputError('refusal', resolvedModel);
+    if (!answer.trim()) throw new LlmOutputError('empty', resolvedModel);
+    return answer;
+  }
   if (!answer.trim()) {
-    answer =
-      response.stop_reason === 'max_tokens'
-        ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
-        : '（うまく回答を生成できませんでした。もう一度お試しください。）';
+    return response.stop_reason === 'max_tokens'
+      ? '（回答が長くなりすぎて途中で止まりました。質問を分けてお試しください。）'
+      : '（うまく回答を生成できませんでした。もう一度お試しください。）';
   }
   return answer;
 }
@@ -37,16 +127,58 @@ export async function anthropicJson(
   user: string,
   schema: object,
   maxTokens: number,
+  opts: GenOptions = {},
 ): Promise<unknown> {
-  const response = await client().messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
-    system,
-    output_config: { format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
-    messages: [{ role: 'user', content: user }],
-  });
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') throw new Error('空のJSON応答');
-  return JSON.parse(textBlock.text);
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await createMessage(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system: cachedSystem(system),
+      output_config: outputConfig(resolvedModel, schema, opts),
+      messages: [{ role: 'user', content: user }],
+    },
+    requestOptions(opts),
+  );
+  recordUsage(resolvedModel, response.usage);
+  return JSON.parse(jsonText(response, resolvedModel));
+}
+
+export interface PdfDocument {
+  mediaType: 'application/pdf';
+  dataBase64: string;
+}
+
+// PDF読解用（documentブロック）。SES案件のスキルシートPDFなどをClaudeに直接読ませる用途。
+// 構造化出力(json_schema)と併用し、抽出結果を確実にパースする。
+export async function anthropicJsonWithDocuments(
+  system: string,
+  user: string,
+  schema: object,
+  documents: PdfDocument[],
+  maxTokens: number,
+  opts: GenOptions = {},
+): Promise<unknown> {
+  const content: Array<Anthropic.Messages.DocumentBlockParam | Anthropic.Messages.TextBlockParam> = [
+    ...documents.map((d) => ({
+      type: 'document' as const,
+      source: { type: 'base64' as const, media_type: d.mediaType, data: d.dataBase64 },
+    })),
+    { type: 'text' as const, text: user },
+  ];
+  const resolvedModel = opts.model ?? MODEL;
+  const response = await createMessage(
+    {
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      ...(thinkingParam(resolvedModel) ? { thinking: thinkingParam(resolvedModel) } : {}),
+      system: cachedSystem(system),
+      output_config: outputConfig(resolvedModel, schema, opts),
+      messages: [{ role: 'user', content }],
+    },
+    requestOptions(opts),
+  );
+  recordUsage(resolvedModel, response.usage);
+  return JSON.parse(jsonText(response, resolvedModel));
 }
