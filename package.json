@@ -61,7 +61,7 @@
     "@slack/web-api": "^7.9.0",
     "dotenv": "^16.4.5",
     "googleapis": "^161.0.0",
-    "imapflow": "^1.4.7",
+    "imapflow": "^2.4.2",
     "mailparser": "^3.9.14",
     "mammoth": "^1.12.3",
     "nodemailer": "^10.0.10",
