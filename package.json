@@ -62,14 +62,14 @@
     "dotenv": "^16.4.5",
     "googleapis": "^161.0.0",
     "imapflow": "^1.4.7",
-    "mailparser": "^3.9.14",
+    "mailparser": "^3.9.39",
     "mammoth": "^1.12.3",
     "nodemailer": "^10.0.10",
     "unpdf": "^1.8.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "@types/mailparser": "^3.4.6",
+    "@types/mailparser": "^3.9.0",
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^8.0.1",
     "tsx": "^4.19.0",
