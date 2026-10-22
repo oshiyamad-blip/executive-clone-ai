@@ -55,8 +55,8 @@ export interface Story {
   title: string;
   signalIds: string[];
   period: { start: Date; end: Date };
-  narrative: string;
-  causalChain: CausalLink[];
+  narrative?: string;
+  causalChain?: CausalLink[];
   insight: string;
   createdAt: Date;
   updatedAt: Date;
