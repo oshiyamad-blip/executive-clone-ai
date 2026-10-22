@@ -54,7 +54,7 @@ src/collectors/ → src/dedup/ → src/store/ → src/extractors/ → src/analyz
 - `src/ses/proper/judge.ts` — プロパー×案件のAI判定（案件の作業内容とスキルシートの経歴を読み比べ、必須ごとの根拠を経歴と機械照合。一般的な語だけの一致は見送り。似た要員（同じ単価・希望、スキルの重なり係数が PROPER_GROUP_SIMILARITY 以上）は代表の判定を経歴で照合し直して使い回す）
 - `src/ses/proper/salesList.ts` — 営業に渡すプロパー提案候補リスト（別スプレッドシート。「全体」＋要員別タブ、優先度・対応状況の色分け、人の入力列はIDで引き継ぐ。見送り・クローズの行は次の更新で「クローズ済み」へ移し、見送り理由「募集終了」はその案件の他の要員の行にも及ぶ。候補から外れ入力の無い行は消す前に「期限切れ」タブへ控え、機械の列「最終更新」「前回優先度」で再判定の変化を示し、試運転と本番で案件IDが変わっても同じメール（要員・営業元メール・件名・受信30分以内）の行を引き継ぐ。案件詳細のメール本文の必須・尚可の行に ○△× を付ける。優先度が `SALES_MIN_PRIORITY`（既定 B）より低い候補は載せず、既存の行は候補から外れた行と同じ扱い。判定・ラベルは変えない）
 - `src/ses/eval/labels.ts` — 判定ラベルの蓄積（AI判定と営業の評価を `SES_LABELS_DIR` にためる。足切りの再現率・優先度の妥当率は `labelsEval.ts`）
-- `src/ses/proper/roster.ts` — 営業用の要員リスト（「要員」タブのサマリ＋「スキルシート_<名前>」タブ）から社員を読む（サマリの経験年数が「なし」「未経験」の研修明けは `itInexperienced`。未経験可の案件（`src/ses/inexperienced.ts`）の組だけをAI判定に回し、判定後も必須の不足で見送らず優先度は B まで。`PROPER_INEXPERIENCED_STRICT`）
+- `src/ses/proper/roster.ts` — 営業用の要員リスト（「要員」タブのサマリ＋「スキルシート_<名前>」タブ）から社員を読む（サマリの経験年数が「なし」「未経験」の研修明けは `itInexperienced`。未経験可の案件（`src/ses/inexperienced.ts`）の組だけをAI判定に回し、判定後も必須の不足で見送らず優先度は B まで。`PROPER_INEXPERIENCED_STRICT`）。自社社員の照合（`src/ses/ownMatch.ts`）は、案件に「地方不可」「首都圏在住」などがあれば（`src/ses/residence.ts`）1都3県の外に住む社員を組まない（住まいの都道府県が不明なら通す。除外数は `metroResidenceSkipped`）
 - `src/ses/trial/rawAttach.ts` — 試運転で案件メールの添付（表計算・PDF）を読む CLI（`npm run ses:trial:raw`。Gmail の RAW 取得結果か .eml を本番と同じ解析にかける）
 - `src/data/executiveProfile.ts` — 経営者プロファイル（価値観・15の意思決定ルール・
   成功/失敗パターン）の単一の真実の源。要件3.3初期設定 / 3.4経営理念プロンプトに対応
