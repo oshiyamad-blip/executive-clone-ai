@@ -113,7 +113,8 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount } from '../ownMatch.js';
+import { requiresMetroResidence } from '../residence.js';
 import { acceptsInexperienced } from '../inexperienced.js';
 import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, INEXPERIENCED_PARAGRAPH, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
@@ -5891,6 +5892,29 @@ async function inexperiencedChecks(): Promise<void> {
     delete process.env.PROPER_INEXPERIENCED_STRICT;
   }
   check('試運転の選び方は本番と同じ関数: 監視の組にも除外した組は入らない', auditPairsForJudge([newbieSkilled], [pNg], 10, NOW).length === 0);
+
+  // 首都圏在住が条件（地方不可）
+  const metro = (text: string) => requiresMetroResidence(text);
+  check('requiresMetroResidence: 「地方不可」「地方在住不可」「地方在住の方不可」「地方の方不可」「地方NG」は true',
+    ['地方不可', '地方在住不可', '地方在住の方不可', '地方の方不可', '地方NG', '基本リモート・不定期に出社・地方不可'].every(metro));
+  check('requiresMetroResidence: 「首都圏在住」「都内在住」「1都3県在住」「一都三県在住」「１都３県在住」は true',
+    ['首都圏在住の方', '都内在住', '1都3県在住', '一都三県在住', '１都３県在住'].every(metro));
+  check('requiresMetroResidence: 「地方可」「地方在住可」「地方の方も歓迎」と無関係な文は false',
+    !['地方可', '地方在住可', '地方の方も歓迎', 'Java開発。週2出社'].some(metro));
+  const gunma = own('G1', { skills: ['Linux'], prefecture: '群馬県' });
+  const tokyo = own('T1', { skills: ['Linux'], prefecture: '東京都' });
+  const unknownPref = own('U1', { skills: ['Linux'], prefecture: null });
+  const pMetro = project({ id: 'p_metro', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, prefecture: '東京都', detail: '基本リモート・不定期に出社・地方不可' });
+  const pKanto = project({ id: 'p_kanto', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, prefecture: '東京都', location: '品川', detail: '基本リモート' });
+  check('組の選び方: 群馬在住の要員 × 「地方不可」の案件は外れ、数に数える',
+    idsOf([gunma], [pMetro]).length === 0 && metroResidenceSkippedCount([gunma], [pMetro], NOW) === 1);
+  check('組の選び方: 東京在住の要員 × 「地方不可」の案件は通る（数えない）',
+    JSON.stringify(idsOf([tokyo], [pMetro])) === JSON.stringify(['T1|p_metro']) && metroResidenceSkippedCount([tokyo], [pMetro], NOW) === 0);
+  check('組の選び方: 群馬在住の要員 × 「地方不可」の無い関東の案件は今までどおり通る',
+    JSON.stringify(idsOf([gunma], [pKanto])) === JSON.stringify(['G1|p_kanto']) && metroResidenceSkippedCount([gunma], [pKanto], NOW) === 0);
+  check('組の選び方: 都道府県が分からない要員は「地方不可」の案件にも通る',
+    JSON.stringify(idsOf([unknownPref], [pMetro])) === JSON.stringify(['U1|p_metro']) && metroResidenceSkippedCount([unknownPref], [pMetro], NOW) === 0);
+  check('監視の組にも「地方不可」で除いた組は入らない', auditPairsForJudge([gunma], [pMetro], 10, NOW).length === 0);
 
   // 指示文
   check('judgeSystemFor: 未経験の社員の指示文にだけ段落が入り、<engineer_profile> の前に置く',

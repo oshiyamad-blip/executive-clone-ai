@@ -14,6 +14,7 @@ import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
 import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
 import { isFullRemoteLocation, wideRegionOf } from './prefecture.js';
+import { livesOutsideMetro, projectRequiresMetroResidence } from './residence.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
@@ -91,6 +92,13 @@ export interface OwnMatchOptions {
   forJudge?: boolean;
   // IT 未経験の社員 × 未経験可でない案件の除外を掛けない（除外した組の数を数えるため）
   ignoreInexperiencedGate?: boolean;
+  // 首都圏在住が条件（地方不可）の案件 × 首都圏の外に住む社員の除外を掛けない（除外した組の数を数えるため）
+  ignoreMetroGate?: boolean;
+}
+
+// 「地方不可」の案件は、フルリモート・本人と同じ地方でも、1都3県の外に住む社員は組まない
+function excludedAsOutsideMetro(own: OwnEngineer, project: Project, opts: OwnMatchOptions): boolean {
+  return !opts.ignoreMetroGate && livesOutsideMetro(own.prefecture) && projectRequiresMetroResidence(project);
 }
 
 // IT 未経験の社員 × 未経験可の記載が無い案件は、AI判定に回さない（理由「IT未経験のため対象外（未経験可の記載なし）」。PROPER_INEXPERIENCED_STRICT で無効）
@@ -156,6 +164,7 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date,
   const projectRegion = wideRegionOf(project.prefecture);
   const ownRegion = wideRegionOf(own.prefecture);
   if (!fullRemote && projectRegion && ownRegion && projectRegion !== ownRegion) return null;
+  if (excludedAsOutsideMetro(own, project, opts)) return null;
   const locationOk = true;
 
   // 時期: どちらか不明なら通過(緩め)
@@ -284,6 +293,17 @@ export function inexperiencedSkippedCount(own: OwnEngineer[], projects: Project[
   return n;
 }
 
+// 「地方不可」の案件 × 首都圏の外に住む社員として、AI判定に回さなかった組の数（ほかのルールの足切りは通る組だけ数える）
+export function metroResidenceSkippedCount(own: OwnEngineer[], projects: Project[], now = new Date()): number {
+  let n = 0;
+  for (const engineer of own.filter((o) => o.status === 'available' && livesOutsideMetro(o.prefecture))) {
+    for (const project of projects.filter((p) => p.status === 'open' && projectRequiresMetroResidence(p))) {
+      if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreMetroGate: true })) n += 1;
+    }
+  }
+  return n;
+}
+
 // 足切りの監視用に、案件と社員から作る最小の match（ルールの判定を通っていないので数値は参考。要確認にして人が確かめる）
 function minimalOwnMatch(own: OwnEngineer, project: Project, now: Date): OwnMatch {
   const rate = projectRateMan(project);
@@ -323,6 +343,7 @@ export function auditPairsForJudge(own: OwnEngineer[], projects: Project[], n: n
       if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true })) continue;
       // 未経験可でない案件を意図して除いた組は、足切りの取りこぼしではない
       if (excludedAsInexperienced(engineer, project, { forJudge: true })) continue;
+      if (excludedAsOutsideMetro(engineer, project, {})) continue;
       const techs = techNamesIn([...project.requiredSkills, ...project.preferredSkills].join(' '));
       if (!techs.some((t) => (skillMatch([t], engineer.skills)?.rate ?? 0) > 0)) continue;
       near.push({ own: engineer, project, hash: createHash('sha256').update(`${day}|${engineer.id}|${project.id}`).digest('hex') });

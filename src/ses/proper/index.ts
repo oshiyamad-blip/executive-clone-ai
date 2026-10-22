@@ -6,7 +6,7 @@
 import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, properFailGatePct, properJudgeBudgetJpy, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
-import { ownPairsForJudge, auditPairsForJudge, signedMan } from '../ownMatch.js';
+import { ownPairsForJudge, auditPairsForJudge, signedMan, metroResidenceSkippedCount } from '../ownMatch.js';
 import { getLlmUsageLog } from '../../llm/usage.js';
 import { usageCostJpy } from '../../llm/pricing.js';
 import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, properBudgetExhausted } from './judge.js';
@@ -56,6 +56,7 @@ export interface JudgeStats {
   rejected: number; // AIが見送りとした組
   outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
+  metroResidenceSkipped: number; // 「地方不可」の案件 × 首都圏の外に住む社員として、判定に回さなかった組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
   deferred: number; // 費用の上限・実行の期限で判定せず次回に回した組（失敗に数えない。下の2つの合計）
   deferredBudget: number;
@@ -297,7 +298,7 @@ export async function buildProperCandidates(
   for (const e of engineers) cachedByEngineer.set(e.id, await cachedProjectIdsFor(e));
   const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
   const stats: JudgeStats = {
-    prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length,
+    prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, metroResidenceSkipped: metroResidenceSkippedCount(engineers, projects, now), overCap: all.length - pairs.length,
     deferred: 0, deferredBudget: 0, deferredDeadline: 0,
     audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 }, gated: false,
   };
@@ -449,6 +450,9 @@ function logJudge(s: JudgeStats): void {
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
+  if (s.metroResidenceSkipped > 0) {
+    console.log(`プロパー判定: 「地方不可」の案件で首都圏の外に住む要員の組を判定に回さなかった組${s.metroResidenceSkipped}`);
+  }
   if (s.deferred > 0) {
     console.warn(
       `プロパー判定: 判定${s.judged - s.cached}組（控え${s.cached}組）・先送り${s.deferred}組（費用の上限${s.deferredBudget}／時間${s.deferredDeadline}。次回の実行で続きを判定します）`,
