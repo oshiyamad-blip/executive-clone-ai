@@ -26,7 +26,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # enablement: true は Pages が未作成なら作成を試みるが、GITHUB_TOKEN には
       # Pages の作成権限がないため失敗する。初回だけ Settings → Pages → Source を
       # 「GitHub Actions」にする手動操作が要る。以降この指定は何もしない。
