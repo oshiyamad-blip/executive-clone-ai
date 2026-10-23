@@ -52,7 +52,9 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    プレビューに出るのは古い5通までなので、メッセージ数が5を超えるスレッドは最新メッセージIDを空にする。件名のタブ・改行は空白に置き換える）
 2. **チャンク分け**: `npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1] [max=0]` を実行する（`max` は新しい順に残すスレッド数。0 は上限なし。再開した回だけ 1000 を付ける。環境変数 `SES_TRIAL_MAX_THREADS` でも可で、引数が優先）。試運転は `keep=0.5`（使用量を抑えるため件名の点数 `subjectPriority` の上位半分だけ抽出する。外したメールは `<RUN_DIR>/deferred.jsonl` に残る）で行う。スレッドIDの重複を除き（internalDate が大きい行）、受信時刻の順に30件ずつ
    `chunks/cNN`（各行 `スレッドID<TAB>受信日時ISO<TAB>最新メッセージID<TAB>メッセージ数`）に分ける。件名だけで明らかな要員メール（`engineerBySubject`）は抽出に回さず `out/skip.jsonl` に書く。
-   古い形の一覧（`スレッドID<TAB>スレッドID<TAB>internalDate<TAB>送信者`）も読める。標準出力は件数だけ（`threads`・`capped`（max で外した数）・`skippedBySubject`・`deferred`（keep で外した数）・`chunks`）
+   前の回（兄弟の `run_*`、または `CARRY_DIRS`）で1案件と抽出したメールと同じ送信者・同じ件名の再送（受信が新しく、遡り期間内）は抽出に回さず、前の行を写して `out/resent.jsonl` に書く
+   （一覧・まとめの件名は、案件名が件名に含まれるときだけ。2案件以上のメールは対象外）。
+   古い形の一覧（`スレッドID<TAB>スレッドID<TAB>internalDate<TAB>送信者`）も読める。標準出力は件数だけ（`threads`・`capped`（max で外した数）・`skippedBySubject`・`deferred`（keep で外した数）・`chunks`・`resent`（再送として使い回した数））
 3. **抽出**: チャンクごとにサブエージェントを起動する（下の「抽出の指示」をそのまま渡す）。結果は `out/cNN.jsonl`
    （チャンクごとに Agent を個別に同時起動する。1つのワークフローにまとめると同時に動く数が絞られ、約2倍の時間がかかる）
 4. すべてのチャンクで行数が入力（`chunks/cNN` の行数）と一致することを確かめる。足りないチャンクは同じ指示で再実行する

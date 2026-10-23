@@ -5691,7 +5691,7 @@ function trialUsageChecks(): void {
       c0[0] === `t2\t${new Date(2500).toISOString()}\tm2b\t8` && c1[0] === `t4\t${new Date(4000).toISOString()}\t\t`, show(c0[0]));
     check('chunks: skip.jsonl の行は kind engineer・bodyHead 空・skippedBySubject true',
       skip.length === 1 && skip[0].threadId === 't1' && skip[0].kind === 'engineer' && skip[0].bodyHead === '' && skip[0].skippedBySubject === true && skip[0].messageId === 'm1' && skip[0].receivedAt === new Date(1000).toISOString());
-    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）。max=0 は capped 0', JSON.stringify(res) === '{"threads":4,"capped":0,"skippedBySubject":1,"deferred":0,"chunks":2}');
+    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）。max=0 は capped 0', JSON.stringify(res) === '{"threads":4,"capped":0,"skippedBySubject":1,"deferred":0,"chunks":2,"resent":0}');
     check('chunks: keep=1 は今と同じ動き（deferred 0・deferred.jsonl は空）',
       res.deferred === 0 && readFileSyncB(join(dir, 'deferred.jsonl'), 'utf8') === '');
   } finally {
@@ -5729,7 +5729,7 @@ function trialUsageChecks(): void {
       resK.chunks === 1 && cK.join(',') === 'k1,k3,k4', show(cK));
     check('chunks: 外した分は deferred.jsonl に threadId・messageId・subject・from・receivedAt・priority で入る（out/ には書かない）。件数は deferred 2',
       resK.deferred === 2 && defK.length === 2 && defK.map((d) => d.threadId).sort().join(',') === 'k2,k5' && defK.every((d) => typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined) &&
-      JSON.stringify(resK) === '{"threads":5,"capped":0,"skippedBySubject":0,"deferred":2,"chunks":1}', show(resK));
+      JSON.stringify(resK) === '{"threads":5,"capped":0,"skippedBySubject":0,"deferred":2,"chunks":1,"resent":0}', show(resK));
     check('chunks: keep で外した行には reason lowPriority が付く', defK.every((d) => d.reason === 'lowPriority'), show(defK.map((d) => d.reason)));
   } finally {
     rmSync(dirK, { recursive: true, force: true });
@@ -5754,13 +5754,13 @@ function trialUsageChecks(): void {
     const skipM = readFileSyncB(join(dirM, 'out', 'skip.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     const defM = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     check('chunks: max=3 は新しい順に3スレッド（x6・x5・x4）だけが以降に回り、外した3スレッドは deferred.jsonl に reason olderThanResumeCap で入る',
-      JSON.stringify(resM) === '{"threads":6,"capped":3,"skippedBySubject":1,"deferred":0,"chunks":1}' &&
+      JSON.stringify(resM) === '{"threads":6,"capped":3,"skippedBySubject":1,"deferred":0,"chunks":1,"resent":0}' &&
       cM.join(',') === 'x4,x6' && defM.length === 3 && defM.map((d) => d.threadId).sort().join(',') === 'x1,x2,x3' && defM.every((d) => d.reason === 'olderThanResumeCap' && typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined), show([resM, cM, defM.length]));
     check('chunks: 件名で要員の判定は残った3件にだけかかる（x5 は skip.jsonl・外した x2 は skip.jsonl に入らない）',
       skipM.length === 1 && skipM[0].threadId === 'x5', show(skipM.map((s) => s.threadId)));
     const resM0 = chunkRunDir(dirM, 10, 1, 0);
     check('chunks: max=0 は上限なし（今と同じ。capped 0・6スレッド全部が対象で deferred.jsonl は空）',
-      JSON.stringify(resM0) === '{"threads":6,"capped":0,"skippedBySubject":2,"deferred":0,"chunks":1}' && readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8') === '', show(resM0));
+      JSON.stringify(resM0) === '{"threads":6,"capped":0,"skippedBySubject":2,"deferred":0,"chunks":1,"resent":0}' && readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8') === '', show(resM0));
     const resMK = chunkRunDir(dirM, 10, 0.5, 5);
     const defMK = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     check('chunks: max と keep の組み合わせで数が合う（max=5 で x1 を外し、残り5のうち要員2を除いた3の半分＝切り上げ2を残し1を lowPriority で外す）',
@@ -5768,6 +5768,67 @@ function trialUsageChecks(): void {
       defMK.length === 2 && defMK.filter((d) => d.reason === 'olderThanResumeCap').length === 1 && defMK.filter((d) => d.reason === 'lowPriority').length === 1, show([resMK, defMK.map((d) => d.reason)]));
   } finally {
     rmSync(dirM, { recursive: true, force: true });
+  }
+
+  // 前の回で1案件と抽出済みの再送は抽出に回さず、前の行を写して out/resent.jsonl に書く
+  const parentR = mkdtempSync(join(tmpdir(), 'ses-chunks-resent-'));
+  try {
+    const prevDir = join(parentR, 'run_a');
+    const curDir = join(parentR, 'run_b');
+    mkdirSyncBf(join(prevDir, 'out'), { recursive: true });
+    mkdirSyncBf(join(curDir, 'list'), { recursive: true });
+    const nowMs = Date.now();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const prevRow = (id: string, from: string, subj: string, at: number, titles: string[]) =>
+      JSON.stringify({ threadId: id, messageId: `m_${id}`, subject: subj, from, receivedAt: iso(at), kind: 'project', extraction: { projects: titles.map((title) => ({ title })) }, bodyHead: 'x' });
+    const A = 'a@example.invalid';
+    writeFileSyncForEval(join(prevDir, 'out', 'c00.jsonl'), [
+      prevRow('p1', A, '【X社】在庫管理システム改修 Java', nowMs - 3 * 86_400_000, ['在庫管理システム改修']),
+      prevRow('p2', A, '二案件のまとめ Java', nowMs - 3 * 86_400_000, ['案件甲', '案件乙']),
+      prevRow('p3', A, '【X社】新着案件のご連絡', nowMs - 3 * 86_400_000, ['販売管理システム刷新']),
+      prevRow('p4', A, '【Y社】販売管理システム刷新 新着案件', nowMs - 3 * 86_400_000, ['販売管理システム刷新']),
+      prevRow('p5', A, '会計システム保守 COBOL', nowMs - 3 * 86_400_000, ['会計システム保守']),
+      prevRow('p6', A, '古い案件 Python', nowMs - 40 * 86_400_000, ['古い案件']),
+      prevRow('p7', `担当 <${A}>`, 'ネットワーク構築 Cisco', nowMs - 3 * 86_400_000, ['ネットワーク構築']),
+      prevRow('p8', A, '基盤更改 Linux', nowMs - 86_400_000, ['基盤更改']),
+    ].join('\n') + '\nnot json\n');
+    const nrow = (t: string, d: number, from: string, subj: string) => [t, t, String(d), from, subj, '1'].join('\t');
+    const at = nowMs - 86_400_000;
+    writeFileSyncForEval(join(curDir, 'list', 'w00.tsv'), [
+      nrow('n1', at, A, '【X社】在庫管理システム改修 Java'),
+      nrow('n2', at, A, '二案件のまとめ Java'),
+      nrow('n3', at, A, '【X社】新着案件のご連絡'),
+      nrow('n4', at, A, '【Y社】販売管理システム刷新 新着案件'),
+      nrow('n5', at, 'other@example.invalid', '会計システム保守 COBOL'),
+      nrow('n6', at, A, '古い案件 Python'),
+      nrow('p7', at, A, 'ネットワーク構築 Cisco'),
+      nrow('p8', at, A, '基盤更改 Linux'),
+    ].join('\n') + '\n');
+    const savedCarry = process.env.CARRY_DIRS;
+    delete process.env.CARRY_DIRS;
+    let resR: ReturnType<typeof chunkRunDir>;
+    try {
+      resR = chunkRunDir(curDir, 10);
+    } finally {
+      if (savedCarry !== undefined) process.env.CARRY_DIRS = savedCarry;
+    }
+    const inChunks = readFileSyncB(join(curDir, 'chunks', 'c00'), 'utf8').trim().split('\n').map((l) => l.split('\t')[0]).sort();
+    const resent = readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: 同じ送信者・具体的な件名で前の回に1案件と抽出済みなら再送として抽出に回さず（n1・n4）、out/resent.jsonl に新しい threadId・receivedAt と resentOf で書く',
+      resent.map((r) => r.threadId).sort().join(',') === 'n1,n4,p7' && !inChunks.includes('n1') && !inChunks.includes('n4') &&
+      resent[0].messageId === resent[0].threadId && resent[0].resentOf === 'm_p1' && resent[0].receivedAt === iso(at) && resent[0].kind === 'project' && resent[0].bodyHead === 'x', show([resR, inChunks, resent]));
+    check('chunks: 前の行が2案件・汎用の件名で案件名が件名に無い・送信者が違う・前の行が期間より古いものは再送にしない',
+      inChunks.join(',') === 'n2,n3,n5,n6,p8', show(inChunks));
+    check('chunks: 同じスレッドに入った新しいメッセージも再送とみなす（p7。前の行の送信者が「名前 <アドレス>」でもアドレスで比べる）。受信が新しくなければ抽出に回す（p8）',
+      resent.some((r) => r.threadId === 'p7' && r.resentOf === 'm_p7') && inChunks.includes('p8'), show(resent.map((r) => r.threadId)));
+    check('chunks: 結果の JSON に resent の件数が入る（最後のキー）',
+      JSON.stringify(resR) === '{"threads":8,"capped":0,"skippedBySubject":0,"deferred":0,"chunks":1,"resent":3}', show(resR));
+    const resR2 = chunkRunDir(curDir, 10);
+    check('chunks: 作り直しても resent.jsonl は同じ（冪等）。前の回が無ければ空ファイルを書く',
+      resR2.resent === 3 && readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8').trim().split('\n').length === 3 &&
+      (rmSync(prevDir, { recursive: true, force: true }), chunkRunDir(curDir, 10).resent === 0 && readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8') === ''));
+  } finally {
+    rmSync(parentR, { recursive: true, force: true });
   }
 
   // 書き込みの差分
