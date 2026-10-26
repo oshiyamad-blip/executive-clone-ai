@@ -373,6 +373,52 @@ export function projectIdOf(rowId: string): string {
   return (/_(proj_.+)$/.exec(rowId) ?? /^ownmatch_[^_]+_(.+)$/.exec(rowId))?.[1] ?? '';
 }
 
+// 同じ営業元が日を置いて少し違う案件名で再送してくる案件を、見送り・クローズ済みの行と同じ案件とみなすための表記ゆれ吸収
+export interface ClosedSimilar {
+  engineer: string;
+  agency: string;
+  title: string;
+}
+const SIMILAR_MIN_TITLE = 8; // 短い案件名は一般的な語だけで一致しやすいため照合しない
+const SIMILAR_DICE = 0.6;
+const SIMILAR_CONTAIN = 0.85;
+export function normalizeAgency(agency: string): string {
+  return agency
+    .normalize('NFKC')
+    .replace(/\([^)]*\)/g, '')
+    .replace(/株式会社|\(株\)|有限会社/g, '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+export function normalizeCaseTitle(title: string): string {
+  return title
+    .normalize('NFKC')
+    .replace(/^\s*(?:no\.?\s*\d+|#\s*\d+|[a-z0-9]{1,3}-\d+)\s*/i, '')
+    .replace(/[【】\[\]()・/\s]/g, '')
+    .toLowerCase();
+}
+const bigramsOf = (s: string): Set<string> => new Set(Array.from({ length: Math.max(0, s.length - 1) }, (_, i) => s.slice(i, i + 2)));
+export function similarCaseTitle(a: string, b: string): boolean {
+  const x = normalizeCaseTitle(a);
+  const y = normalizeCaseTitle(b);
+  if (x.length < SIMILAR_MIN_TITLE || y.length < SIMILAR_MIN_TITLE) return false;
+  const bx = bigramsOf(x);
+  const by = bigramsOf(y);
+  const common = [...bx].filter((g) => by.has(g)).length;
+  return (2 * common) / (bx.size + by.size) >= SIMILAR_DICE || common / Math.min(bx.size, by.size) >= SIMILAR_CONTAIN;
+}
+// 同じ要員・同じ営業元会社で案件名が似ている見送り・クローズ済みの行があるか
+export function similarClosedProject(engineer: string, agency: string, title: string, closed: ClosedSimilar[]): boolean {
+  const eng = engineer.trim();
+  const ag = normalizeAgency(agency);
+  if (!eng || !ag) return false;
+  return closed.some((c) => c.engineer === eng && normalizeAgency(c.agency) === ag && similarCaseTitle(c.title, title));
+}
+const closedSimilarOf = (r: Row): ClosedSimilar[] =>
+  isClosingStatus(String(r[COL['対応状況']] ?? ''))
+    ? [{ engineer: String(r[COL['要員']] ?? '').trim(), agency: String(r[COL['営業元会社']] ?? ''), title: String(r[COL['案件名']] ?? '') }]
+    : [];
+
 // 「クローズ済み」タブの照合用の集合。ID は同じ候補、keys は要員＋案件名（切り替え前後で ID が変わっても戻さないため）、
 // endedRowIds は「見送り」かつ見送り理由が募集終了の行（その案件を以後の候補に入れない根拠）
 export interface ClosedState {
@@ -380,11 +426,12 @@ export interface ClosedState {
   keys: Set<string>;
   endedRowIds: Set<string>;
   mails: MailRef[]; // 要員＋営業元メール＋件名＋受信日時（切り替えで案件名の抽出結果が変わっても戻さないため）
+  similar: ClosedSimilar[]; // 見送り・クローズの行の要員＋営業元会社＋案件名（案件名が少し違う再送を戻さないため）
 }
 export function closedStateOf(values: string[][]): ClosedState {
   const header = (values[0] ?? []).map((h) => String(h ?? '').trim());
   const at = (name: string) => header.indexOf(name);
-  const state: ClosedState = { ids: new Set(), keys: new Set(), endedRowIds: new Set(), mails: [] };
+  const state: ClosedState = { ids: new Set(), keys: new Set(), endedRowIds: new Set(), mails: [], similar: [] };
   for (const cells of values.slice(1)) {
     const cell = (name: string) => (at(name) >= 0 ? String(cells[at(name)] ?? '').trim() : '');
     const id = cell('ID');
@@ -393,6 +440,7 @@ export function closedStateOf(values: string[][]): ClosedState {
     if (key) state.keys.add(key);
     const mail = mailRefOf(cell('要員'), cell('営業元メール'), cell('メール件名'), cell('受信日時'));
     if (mail) state.mails.push(mail);
+    if (isClosingStatus(cell('対応状況'))) state.similar.push({ engineer: cell('要員'), agency: cell('営業元会社'), title: cell('案件名') });
     if (id && cell('対応状況') === SALES_SKIPPED_STATUS && cell('見送り理由') === SALES_ENDED_REASON) state.endedRowIds.add(id);
   }
   return state;
@@ -549,6 +597,7 @@ function assertSalesHeaderOrEmpty(values: string[][]): void {
 export interface SalesPlanOptions {
   closedKeys?: Set<string>; // 要員＋案件名（closedStateOf の keys）
   closedMails?: MailRef[]; // 要員＋営業元メール＋件名＋受信日時（closedStateOf の mails）
+  closedSimilar?: ClosedSimilar[]; // 要員＋営業元会社＋案件名（closedStateOf の similar）。新しく足す行にだけ使う
   endedRowIds?: Set<string>; // 控えにある「見送り・募集終了」の行ID（closedStateOf の endedRowIds）
   addedAt?: string; // 新しい行の「追加日時」（受信日時と同じ書式）
   usedMaxNo?: number; // 「クローズ済み」「期限切れ」で使われている No. の最大（新しい行の No. が重ならないように）
@@ -704,7 +753,11 @@ export function planSalesUpdate(
     }
   });
   const maxNo = Math.max(opts.usedMaxNo ?? 0, ...current.map((r) => (typeof r[COL['No']] === 'number' ? (r[COL['No']] as number) : 0)));
-  const appends = sortSalesRows(fresh.filter((r) => !used.has(String(r[COL['ID']])))).map((r, k) => {
+  const closedSimilar = [...(opts.closedSimilar ?? []), ...closedRows.flatMap(closedSimilarOf)];
+  const isFreshAppend = (r: Row) =>
+    !used.has(String(r[COL['ID']])) &&
+    !similarClosedProject(String(r[COL['要員']]), String(r[COL['営業元会社']]), String(r[COL['案件名']]), closedSimilar);
+  const appends = sortSalesRows(fresh.filter(isFreshAppend)).map((r, k) => {
     const next = [...r];
     next[COL['No']] = maxNo + k + 1;
     next[COL['追加日時']] = opts.addedAt ?? '';
@@ -1234,7 +1287,7 @@ export async function writeSalesList(
     };
   };
   const planFor = (values: string[][]) => {
-    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, closedMails: closedState.mails, endedRowIds: closedState.endedRowIds, addedAt, usedMaxNo });
+    const p = planSalesUpdate(fresh, values, stillOpen, canonical, closedIds, { closedKeys: closedState.keys, closedMails: closedState.mails, closedSimilar: closedState.similar, endedRowIds: closedState.endedRowIds, addedAt, usedMaxNo });
     if (p) return { plan: p, rows: p.rows, closedRows: p.closedRows };
     const w = withoutClosed(values);
     // 全体を書き直す経路も同じく、下限より低い候補は載せず、その行は残さない
