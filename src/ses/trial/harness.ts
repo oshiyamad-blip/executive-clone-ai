@@ -414,6 +414,7 @@ if (phase === 'prompts') {
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
     closedKeys: closed.keys,
     closedMails: closed.mails,
+    closedSimilar: closed.similar,
     endedRowIds: closed.endedRowIds,
     addedAt: jstLabel(now),
     usedMaxNo: has('used_nos.json') ? maxNoOf(read<{ values: string[][] }>('used_nos.json').values) : 0,

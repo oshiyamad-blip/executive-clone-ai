@@ -126,7 +126,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -5174,6 +5174,28 @@ async function salesListRound2Checks(): Promise<void> {
   check('クローズ済みの照合: 同じメールの候補が複数ある（1通に複数案件）ときはメールでは照合しない（別の案件を巻き込まない）', notUnique !== null && notUnique.appends.length === 2);
   const otherEngineer = planSalesUpdate([salesRowOf({ ...base, id: 'ownmatch_b_proj_prod1', properLabel: 'B.B', projectId: 'proj_prod1', projectTitle: '本番での案件名の表記です' }, proj(at, 'Java案件のご紹介'))], [header], () => false, (id) => id, st.ids, { closedKeys: st.keys, closedMails: st.mails, addedAt: stamp });
   check('クローズ済みの照合: 要員が違えば戻る', otherEngineer !== null && otherEngineer.appends.length === 1);
+  // 少し違う案件名での再送（同じ要員・同じ営業元会社）
+  const cl = (title: string, agency = '株式会社テスト商事', engineer = 'A.A') => [{ engineer, agency, title }];
+  const sim = (closed: string, next: string, agency = '(株)テスト商事（旧：サンプル）', engineer = 'A.A') => similarClosedProject(engineer, agency, next, cl(closed));
+  check('クローズ済みの照合（案件名が似ている再送）: 案件番号の付け外し・括弧や中黒の違い・語の挿入でも同じ案件とみなす',
+    sim('I-24274【Windows/Linux】営業店システムにおけるバックアップ・リストア仕組み構築案件', '【Windows/Linux】営業店システムにおけるバックアップ・リストア仕組み構築案件') &&
+      sim('Azure・PL案件（Windows Server/Azure 要件定義～構築）', 'Azure・Windows Server PL案件（要件定義～構築）') &&
+      sim('No.658 証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築 インフラ設計構築', '証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築（インフラ設計構築）'));
+  check('クローズ済みの照合（案件名が似ている再送）: 営業元会社が違う・要員が違う・短い案件名・まったく別の案件は戻す',
+    !sim('証券会社向けEOS対応、基幹システムリプレイス', '証券会社向けEOS対応、基幹システムリプレイス', '別会社') &&
+      !sim('証券会社向けEOS対応、基幹システムリプレイス', '証券会社向けEOS対応、基幹システムリプレイス', undefined, 'B.B') &&
+      !sim('AWS構築', 'AWS構築（債権回収）') &&
+      !sim('証券会社向けEOS対応、基幹システムリプレイス', '小売業向け在庫管理システムの画面開発（React/TypeScript）') &&
+      !similarClosedProject('A.A', '', '証券会社向けEOS対応、基幹システムリプレイス', cl('証券会社向けEOS対応、基幹システムリプレイス', '')));
+  const simTitle = 'No.658 証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築 インフラ設計構築';
+  const withAgency = (r: ReturnType<typeof candOf>, agency: string) => r.map((v, i) => (i === col('営業元会社') ? agency : v)) as typeof r;
+  const simClosedTab = [header, withAgency(asSheet(candOf('ownmatch_a_sesmail_s1', simTitle, '案件のご紹介'), { 対応状況: '見送り', 見送り理由: '単価が安い' }) as unknown as ReturnType<typeof candOf>, '株式会社テスト商事')] as string[][];
+  const simSt = closedStateOf(simClosedTab);
+  const reSent = withAgency(candOf('ownmatch_a_proj_s2', '証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築（インフラ設計構築）', '【再送】案件のご紹介', new Date(at.getTime() + 3 * 24 * 60 * 60 * 1000)), '(株)テスト商事');
+  const unrelated = withAgency(candOf('ownmatch_a_proj_s3', '小売業向け在庫管理システムの画面開発（React/TypeScript）', '別件のご紹介', new Date(at.getTime() + 3 * 24 * 60 * 60 * 1000)), '(株)テスト商事');
+  const simPlan = planSalesUpdate([reSent, unrelated], [header], () => false, (id) => id, simSt.ids, { closedSimilar: simSt.similar, addedAt: stamp });
+  check('クローズ済みの照合（案件名が似ている再送）: 似た案件名の候補は足さず、別の案件は足す',
+    simSt.similar.length === 1 && simPlan !== null && simPlan.appends.length === 1 && simPlan.appends[0][col('ID')] === 'ownmatch_a_proj_s3');
 
   // ===== 氏名を外に出さない =====
   section('要員の氏名: displayName・営業リスト・タブ名・判定の入力に出ない');
