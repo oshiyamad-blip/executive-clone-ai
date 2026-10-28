@@ -155,7 +155,7 @@ import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATT
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { fixRunDir } from '../trial/bodyFix.js';
 import { windowsOf } from '../trial/windows.js';
-import { fixListRows, hourGroups, internalDateOfId } from '../trial/listHours.js';
+import { fixListRows, hourGroups, internalDateOfId, listQueryOf } from '../trial/listHours.js';
 import { planLabelSheet, packLabelElements, exportCli } from './labelSheet.js';
 import { chunkRunDir } from '../trial/chunks.js';
 import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
@@ -4235,6 +4235,12 @@ async function properJudgeChecks(): Promise<void> {
     check('社員ごとの上限を超えた組も、AIが見送っていなければ「参考」として残す（主な候補は上限まで）',
       capped.candidates.length === 7 && capped.candidates.filter((c) => c.reference).length === 2 &&
         capped.candidates.filter((c) => !c.reference).length === 5, JSON.stringify(capped.candidates.map((c) => c.reference ?? false)));
+    const more = [...many, ...[7, 8].map((i) => project({ id: `p_many${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, location: ['川崎', '千葉'][i - 7], receivedAt: daysAgo(1) }))];
+    const sheetIds = new Set(['p_many5', 'p_many6']);
+    const onSheetCapped = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], more, NOW, (_e, pid) => sheetIds.has(pid));
+    const refIds = onSheetCapped.candidates.filter((c) => c.reference).map((c) => c.projectId).sort().join();
+    check('すでに営業リストに行がある組は上限で「参考」に落とさない（上限は新しい行にだけ。シートに無い上限超えの組は参考のまま）',
+      onSheetCapped.candidates.length === 9 && refIds === 'p_many7,p_many8', refIds);
     // 判定の控えにある組は上限に数えず、控えに無い組だけが上限まで新しく判定される。上限で漏れた組は次の回に回る
     const savedPerItem = process.env.PROPER_JUDGE_PER_ENGINEER;
     const calledIds: string[] = [];
@@ -5485,6 +5491,10 @@ function trialWindowsChecks(): void {
   const gb = hourGroups(busyNow - 5 * 3600, busyNow, busyNow);
   check('hourGroups: 平日 10:30 から5時間前まで（08:00 以降の昼は1時間ずつ）', gb.hours.length === 5 && gb.groups.length >= 3 && at2(gb.groups, 0).length === 1 && at2(gb.groups, 1).length === 1, show(gb.groups));
   const sunNow = jst(11, 3); // 日 03:00（JST）
+  const q0 = listQueryOf(0);
+  const q3 = listQueryOf(3);
+  check('listQueryOf: 時間ごとの範囲に要員メールの件名の除外が付く（「要員」単独は除外しない）',
+    q0.startsWith('label:SES newer_than:1h ') && q3.startsWith('label:SES newer_than:4h older_than:3h ') && q3.includes('-subject:"要員紹介"') && !/-subject:"?(要員|人材|技術者)"?( |$)/.test(q3), q3);
   const gs = hourGroups(sunNow - 14 * 3600, sunNow, sunNow);
   check('hourGroups: 日曜の夜は6時間ずつ（14時間 → 6+6+2）、先頭は 0 時間前', gs.hours.length === 14 && gs.groups.map((g) => g.length).join() === '6,6,2' && at2(gs.groups, 0)[0] === 0, show(gs.groups));
   const rowsIn = [`T1\tM1\t${5000}\tf\ts\t1`, `T1\tM2\t${9000}\tf\ts\t2`, `T2\tM3\t${1000}\tf\ts\t1`, `T3\tM4\t${99000}\tf\ts\t1`, ''];

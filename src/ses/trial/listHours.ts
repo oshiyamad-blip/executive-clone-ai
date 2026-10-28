@@ -1,5 +1,5 @@
 // Gmail の検索が after:/before:（epoch秒）を受け付けず nextPageToken も返さないときの、時間単位の一覧の補助。
-//   npm run --silent ses:trial:listhours -- plan <startEpochSec> <endEpochSec> [nowEpochSec]   → {"hours":[0..H],"groups":[[..],..]}
+//   npm run --silent ses:trial:listhours -- plan <startEpochSec> <endEpochSec> [nowEpochSec]   → {"hours":[0..H],"groups":[[..],..],"queries":["..",..]}（queries[h] が時間 h の基本クエリ）
 //   npm run --silent ses:trial:listhours -- fix <RUN_DIR> <startEpochSec> [endEpochSec]       → {"read":N,"kept":K,"dropped":D}
 // 時間 h は「いまから h 時間前〜h+1 時間前」（クエリは newer_than:{h+1}h older_than:{h}h。h=0 は newer_than:1h）。
 import { readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -9,6 +9,16 @@ import { inDaytime } from './windows.js';
 
 const HOUR = 3600;
 const QUIET_GROUP_MAX = 6;
+
+// 件名だけで要員メールと分かる語（mailKind.ts の SUBJECT_ENGINEER_RE の「〜情報/紹介」型）。一覧の量を減らすため検索から外す。
+// 「要員」「人材」単独は「要員募集」のように案件の件名にも出るため除外語にしない
+const ENGINEER_SUBJECT_PHRASES = ['要員情報', '要員紹介', '人材情報', '人材紹介', '技術者情報', '技術者紹介', 'エンジニア紹介'];
+
+// 時間 h の一覧の基本クエリ（要員メールの件名を除く）。h=0 は newer_than:1h
+export function listQueryOf(h: number): string {
+  const range = h === 0 ? 'newer_than:1h' : `newer_than:${h + 1}h older_than:${h}h`;
+  return `label:SES ${range} ${ENGINEER_SUBJECT_PHRASES.map((w) => `-subject:"${w}"`).join(' ')}`;
+}
 
 // 時間 h（いまから h 時間前〜h+1 時間前）が平日 JST 08:00〜21:00 にかかるか
 const isBusyHour = (h: number, now: number): boolean => inDaytime(now - (h + 1) * HOUR) || inDaytime(now - h * HOUR - 1);
@@ -71,7 +81,8 @@ function main(): void {
       process.exitCode = 1;
       return;
     }
-    console.log(JSON.stringify(hourGroups(start, end, now)));
+    const plan = hourGroups(start, end, now);
+    console.log(JSON.stringify({ ...plan, queries: plan.hours.map(listQueryOf) }));
     return;
   }
   if (cmd === 'fix') {
