@@ -155,6 +155,7 @@ import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATT
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { fixRunDir } from '../trial/bodyFix.js';
 import { windowsOf } from '../trial/windows.js';
+import { fixListRows, hourGroups, internalDateOfId } from '../trial/listHours.js';
 import { planLabelSheet, packLabelElements, exportCli } from './labelSheet.js';
 import { chunkRunDir } from '../trial/chunks.js';
 import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
@@ -4154,6 +4155,23 @@ async function properJudgeChecks(): Promise<void> {
       evaluateOwnMatch(kanto, nagoya, NOW) === null &&
       evaluateOwnMatch(kanto, { ...nagoya, remote: 'full' }, NOW) !== null &&
       evaluateOwnMatch({ ...kanto, prefecture: '群馬県' }, { ...nagoya, prefecture: '東京都', location: '品川' }, NOW) !== null);
+  {
+    const noPref = { ...kanto, prefecture: null };
+    const savedRegion = process.env.PROPER_DEFAULT_REGION;
+    try {
+      delete process.env.PROPER_DEFAULT_REGION;
+      const offPref = evaluateOwnMatch(noPref, nagoya, NOW) === null;
+      const fullPref = evaluateOwnMatch(noPref, { ...nagoya, remote: 'full' }, NOW) !== null;
+      process.env.PROPER_DEFAULT_REGION = '';
+      const disabled = evaluateOwnMatch(noPref, nagoya, NOW) !== null;
+      check('都道府県が読めない社員は既定の地方（関東）で見る（愛知の常駐は出さない・フルリモートは出す・PROPER_DEFAULT_REGION が空なら見ない）',
+        offPref && fullPref && disabled, show([offPref, fullPref, disabled]));
+    } finally {
+      if (savedRegion === undefined) delete process.env.PROPER_DEFAULT_REGION;
+      else process.env.PROPER_DEFAULT_REGION = savedRegion;
+    }
+    check('勤務地の表記: 伏見駅(愛知)は愛知県・名駅は愛知県・堂島は大阪府', normalizePrefecture('伏見駅(愛知)') === '愛知県' && normalizePrefecture('名駅') === '愛知県' && normalizePrefecture('堂島') === '大阪府');
+  }
   __setProperJudgeForTest(async (e) => {
     if (e.id === 'E_fail') throw new Error('overloaded');
     if (e.id === 'E_rej') return raw({ verdict: 'reject' });
@@ -5407,6 +5425,7 @@ function bodyFixMessageChecks(): void {
 }
 
 // 一覧の区切り: 平日の昼は30分ごと・夜間と土日は続く間を1つにまとめる（JST。作り物の時刻だけ）
+const at2 = (g: number[][], i: number): number[] => g[i] ?? [];
 function trialWindowsChecks(): void {
   section('試運転: 一覧の区切り');
   const jst = (d: number, h: number): number => Date.UTC(2026, 9, d, h - 9) / 1000; // 2026-10 の d 日 h 時（JST）。5日=月・9日=金・10日=土
@@ -5427,6 +5446,18 @@ function trialWindowsChecks(): void {
   const odd = windowsOf(jst(6, 12) + 600, jst(6, 21) + 600);
   check('windowsOf: 30分刻みは start から（08:00 にそろえなくてよい）・21:00 をまたぐ区切りは 21:00 で切る',
     at(odd, 0)[1] === jst(6, 12) + 2400 && odd.length === 19 && at(odd, 17)[1] === jst(6, 21) && at(odd, 18)[1] === jst(6, 21) + 600, show(odd.length));
+  // 時間単位の一覧: 平日の昼は1時間ずつ・それ以外は6時間まで。id から internalDate を出し、行は範囲で絞って threadId で重複を除く
+  const id = '1a17f409f017c769';
+  check('internalDateOfId: 16進IDを 20bit 右に寄せた ms', internalDateOfId(id) === Number(BigInt('0x' + id) >> 20n) && internalDateOfId(id) > 1.5e12 && internalDateOfId(id) < 2e12, show(internalDateOfId(id)));
+  const busyNow = jst(6, 10) + 1800; // 火 10:30。0〜1 時間前は 09:30〜10:30
+  const gb = hourGroups(busyNow - 5 * 3600, busyNow, busyNow);
+  check('hourGroups: 平日 10:30 から5時間前まで（08:00 以降の昼は1時間ずつ）', gb.hours.length === 5 && gb.groups.length >= 3 && at2(gb.groups, 0).length === 1 && at2(gb.groups, 1).length === 1, show(gb.groups));
+  const sunNow = jst(11, 3); // 日 03:00（JST）
+  const gs = hourGroups(sunNow - 14 * 3600, sunNow, sunNow);
+  check('hourGroups: 日曜の夜は6時間ずつ（14時間 → 6+6+2）、先頭は 0 時間前', gs.hours.length === 14 && gs.groups.map((g) => g.length).join() === '6,6,2' && at2(gs.groups, 0)[0] === 0, show(gs.groups));
+  const rowsIn = [`T1\tM1\t${5000}\tf\ts\t1`, `T1\tM2\t${9000}\tf\ts\t2`, `T2\tM3\t${1000}\tf\ts\t1`, `T3\tM4\t${99000}\tf\ts\t1`, ''];
+  const fx = fixListRows(rowsIn, 3, 20);
+  check('fixListRows: start 未満・end 超過を落とし、threadId の重複は internalDate が大きい行を残す', fx.read === 4 && fx.rows.length === 1 && fx.rows[0]?.includes('\tM2\t') === true && fx.dropped === 3 && fixListRows(rowsIn, 3).rows.length === 2, show(fx));
 }
 
 // Claude API の残高があるあいだは本番バッチ、尽きたら試運転に引き継ぐ担当の持ち合い（作り物のデータだけ）
