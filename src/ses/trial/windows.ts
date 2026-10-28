@@ -18,7 +18,7 @@ const isWeekday = (jstDay: number): boolean => {
 };
 const epochOf = (jstDay: number, secOfDay: number): number => jstDay * DAY + secOfDay - JST_OFFSET;
 
-function inDaytime(t: number): boolean {
+export function inDaytime(t: number): boolean {
   const day = jstDayOf(t);
   if (!isWeekday(day)) return false;
   const sec = t + JST_OFFSET - day * DAY;

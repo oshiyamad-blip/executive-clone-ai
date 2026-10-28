@@ -13,7 +13,7 @@ import { parseAttachments } from './parse.js';
 import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
 import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
-import { isFullRemoteLocation, wideRegionOf } from './prefecture.js';
+import { defaultOwnRegion, isFullRemoteLocation, wideRegionOf } from './prefecture.js';
 import { livesOutsideMetro, projectRequiresMetroResidence } from './residence.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, ageLimitOf } from './match.js';
@@ -159,10 +159,10 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date,
     (flow.soleProprietor === 'ng' && affiliation === 'partner' ? '［条件］個人事業主不可（所属を確認）。' : '');
 
   // 勤務地: 通勤時間は見ないが、本人と違う地方（関東の社員に名古屋・兵庫など）の出社がある案件は候補にしない。
-  // フルリモートは地方を問わない。どちらかの都道府県が分からなければ通す（営業リストの勤務地を人が見る）
+  // フルリモートは地方を問わない。社員の都道府県は最寄り駅だけの名簿だと読めないため、既定の地方（PROPER_DEFAULT_REGION）で見る。案件側が分からなければ通す（営業リストの勤務地を人が見る）
   const fullRemote = project.remote === 'full' || isFullRemoteLocation(project.location);
   const projectRegion = wideRegionOf(project.prefecture);
-  const ownRegion = wideRegionOf(own.prefecture);
+  const ownRegion = wideRegionOf(own.prefecture) ?? defaultOwnRegion();
   if (!fullRemote && projectRegion && ownRegion && projectRegion !== ownRegion) return null;
   if (excludedAsOutsideMetro(own, project, opts)) return null;
   const locationOk = true;

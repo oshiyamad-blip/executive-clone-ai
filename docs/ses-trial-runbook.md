@@ -46,6 +46,14 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 1. **一覧**: 区切りは `npm run --silent ses:trial:windows -- <startEpochSec> <endEpochSec>` で作る（標準出力は `[[after,before],...]`）。
    平日（JST の月〜金）の 08:00〜21:00 は30分ごと、夜間・土日は続いている間を1つの区切りにまとめる（祝日は見ない）。夜間・休日の区切りは1担当でページを最後までたどる。
    区切りごとにサブエージェントへ一覧を頼む。
+   - Gmail の検索が `after:`/`before:` の秒指定を受け付けず（0件）、`nextPageToken` も返さない（1回50スレッドまで）ときは、時間単位で一覧する。
+     `npm run --silent ses:trial:listhours -- plan <startEpochSec> <endEpochSec>` の出力 `{"hours":[0..H],"groups":[[..],..]}` の区切り（group）ごとに一覧担当を1つ起動する
+     （平日 08:00〜21:00 の時間は1時間ずつ、それ以外は6時間まで。毎分の上限があるので同時は5担当まで）。
+     担当は時間 h ごとに `label:SES newer_than:{h+1}h older_than:{h}h`（h=0 は `label:SES newer_than:1h`）を `THREAD_VIEW_MINIMAL`・`pageSize: 50` で呼ぶ。
+     50件返ったら取りこぼしがあるので、`smaller:8K` → `larger:8K smaller:16K` → `larger:16K smaller:32K` → `larger:32K smaller:64K` → `larger:64K smaller:128K` → `larger:128K` のようにサイズで分けて呼び直し、
+     それでも50件のものはサイズの範囲をさらに半分に分ける。internalDate は最新メッセージIDから `Number(BigInt('0x'+id) >> 20n)`（ms）で出す。
+     行は `list/sNN.tsv` に書く（形式は上と同じ）。全担当が終わったら `npm run --silent ses:trial:listhours -- fix <RUN_DIR> <startEpochSec> [endEpochSec]` で範囲外を落として重複を除き、`list/w00.tsv` にまとめる
+     （標準出力は件数だけ `{"read":N,"kept":K,"dropped":D}`）。そのあとは同じくチャンク分けへ進む。
    Gmail の `search_threads` を `label:SES after:<始まり> before:<終わり>`（epoch秒）、`THREAD_VIEW_MINIMAL`、`pageSize: 50` で呼び、
    次のページが無くなるまで取り、各スレッドについて `スレッドID<TAB>最新メッセージID<TAB>internalDate<TAB>送信者<TAB>件名<TAB>メッセージ数` の行を `list/wNN.tsv` に書く
    （最新メッセージID・internalDate・件名・送信者は、そのスレッドのうち区切りの時間内に受信した一番新しいメッセージのもの。メッセージ数はスレッド全体。
