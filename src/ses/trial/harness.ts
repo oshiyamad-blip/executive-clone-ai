@@ -271,7 +271,15 @@ async function judgedCandidates() {
   __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
   // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
   process.env.PROPER_JUDGE_PER_ENGINEER = '300';
-  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now);
+  // シートにある行の組は上限の対象外（上限だけで行が消えないように。再送で案件IDが変わった行は buildProperCandidates が別名で照合する）
+  const canonicalId = legacyCanonical(list);
+  const onSheetKeys = new Set<string>();
+  for (const r of existingRows()) {
+    const id = canonicalId(r.ID);
+    const proj = projectIdOf(id);
+    if (proj && id.startsWith('ownmatch_') && id.endsWith(`_${proj}`)) onSheetKeys.add(`${id.slice('ownmatch_'.length, id.length - proj.length - 1)}|${proj}`);
+  }
+  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now, (e, p) => onSheetKeys.has(`${e}|${p}`));
   return { list, projects, judged, candidates, stats, auditHitKeys };
 }
 

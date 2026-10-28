@@ -28,7 +28,7 @@ import {
 } from '../../database/sheets.js';
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
-import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN, SalesHeaderMismatchError } from './salesList.js';
+import { writeSalesList, salesListConfigured, readSalesAllValues, projectIdOf, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN, SalesHeaderMismatchError } from './salesList.js';
 import type { Project, ProperEngineer, ProperCandidate, OwnMatch, ProperJudgment } from '../../types/index.js';
 
 export interface ProperRunResult {
@@ -287,6 +287,8 @@ export async function buildProperCandidates(
   engineers: ProperEngineer[],
   projects: Project[],
   now = new Date(),
+  // すでに営業リスト「全体」に行がある組か（社員ID, 案件ID）。上限は新しい行にだけ掛け、既存の行を上限で参考（D）に落として消さない
+  onSheet?: (engineerId: string, projectId: string) => boolean,
 ): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats; auditHitKeys: string[] }> {
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
   const deduped = dedupeProjects(projects);
@@ -373,6 +375,11 @@ export async function buildProperCandidates(
     .map((m, i) => ({ m, i, fit: judgmentFit(m.judgment) }))
     .sort((a, b) => cat(a.m) - cat(b.m) || b.fit - a.fit || a.i - b.i);
   const limit = maxCandidatesPerItem();
+  // 再送で案件IDが変わった行も同じ案件として見る（代表のIDに寄せた別名）
+  const aliasesOf = new Map<string, string[]>();
+  for (const [alias, to] of deduped.aliasOf) aliasesOf.set(to, [...(aliasesOf.get(to) ?? []), alias]);
+  const isOnSheet = (m: OwnMatch): boolean =>
+    !!onSheet && [m.projectId, ...(aliasesOf.get(m.projectId) ?? [])].some((id) => onSheet(m.ownEngineerId, id));
   const perEngineer = new Map<string, number>();
   const perProject = new Map<string, number>();
   const candidates: ProperCandidate[] = [];
@@ -384,14 +391,16 @@ export async function buildProperCandidates(
     // 基準を超える組（clearsBar）は上限に関係なく載せ、ほかは社員ごと・案件ごとに上限まで
     // 上限を超えた組も、AIが見送っていなければ「参考」として残す（営業から候補の数を求められているため。
     // 主な候補とは優先度で分け、見送り理由・精度チェックで参考の当たり率を測る）
-    const full = (perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit;
+    // シートに行がある組は上限の対象外（数えもしない）。上限だけで行が消えたり戻ったりするのを防ぐ
+    const onRow = isOnSheet(m);
+    const full = !onRow && ((perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit);
     // 必須の半分以上が経験なしの条件つきは、上限に関係なく「参考」に下げる（数は出しつつ主な候補の当たり率を保つ）
     const reference = (full && !clearsBar(m)) || weakOnRequired(m);
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
     seen.add(m.id);
-    if (!reference) {
+    if (!reference && !onRow) {
       perEngineer.set(m.ownEngineerId, (perEngineer.get(m.ownEngineerId) ?? 0) + 1);
       perProject.set(m.projectId, (perProject.get(m.projectId) ?? 0) + 1);
     }
@@ -557,7 +566,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const engineers = [...(sync ? await loadProperEngineers(sync.presentFileIds) : []), ...(await loadRosterSafely())];
   const since = new Date(Date.now() - properProjectLookbackDays() * 24 * 60 * 60 * 1000);
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
-  const { candidates, stats } = await buildProperCandidates(engineers, projects);
+  const { candidates, stats } = await buildProperCandidates(engineers, projects, new Date(), await sheetRowKeyChecker());
   logJudge(stats);
   const deduped = dedupeProjects(projects);
   const openProjects = { ids: new Set(deduped.kept.map((p) => p.id)), aliasOf: deduped.aliasOf };
@@ -597,6 +606,20 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   };
   logCounts('プロパー候補', result);
   return result;
+}
+
+// 営業リスト「全体」に今ある行の（社員ID, 案件ID）の照合。読めない・設定が無ければ undefined（上限は従来どおり全員に掛かる）
+async function sheetRowKeyChecker(): Promise<((engineerId: string, projectId: string) => boolean) | undefined> {
+  const values = await readSalesAllValues();
+  const idAt = values?.[0]?.indexOf('ID') ?? -1;
+  if (!values || idAt < 0) return undefined;
+  const keys = new Set<string>();
+  for (const row of values.slice(1)) {
+    const id = String(row[idAt] ?? '').trim();
+    const proj = projectIdOf(id);
+    if (proj && id.startsWith('ownmatch_') && id.endsWith(`_${proj}`)) keys.add(`${id.slice('ownmatch_'.length, id.length - proj.length - 1)}|${proj}`);
+  }
+  return (e, p) => keys.has(`${e}|${p}`);
 }
 
 // 担当者メールによるプロパー候補の下書き依頼を受けてよい社員（管理表で稼働可の社員）のID。確かめられなければ null
