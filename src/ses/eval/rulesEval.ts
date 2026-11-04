@@ -120,7 +120,7 @@ import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentReq
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { skillOverlap, groupSimilarEngineers, adaptJudgment } from '../proper/group.js';
 import { planFanout } from '../trial/fanout.js';
-import { rosterProfileText, rosterEngineersFromValues } from '../proper/roster.js';
+import { rosterProfileText, rosterEngineersFromValues, skillSheetTabOf } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
@@ -5226,6 +5226,20 @@ async function salesListRound2Checks(): Promise<void> {
       (rosterEng.profileText ?? '').includes('Javaでの受注管理の開発を3年担当') && (rosterEng.profileText ?? '').includes('<氏名>'), JSON.stringify(rosterEng?.profileText));
   const rosterInitials = rosterEngineersFromValues({ spreadsheetId: 'sheet_x', rows: [rosterRows[0], ['営業中', 'N.H', '即日', '■スキル：Java']], gidOf: new Map(), sheetTexts: new Map([['N.H', 'N.H のスキルシート']]) });
   check('要員リスト: 名前がイニシャルならそのまま使い、本文も変えない', rosterInitials[0]?.displayName === 'N.H' && rosterInitials[0]?.proposalLabel === 'N.H' && (rosterInitials[0]?.profileText ?? '').includes('N.H のスキルシート'));
+
+  const tabOf = skillSheetTabOf;
+  check('スキルシートのタブ: 区切り無し・全角＿・空白・前後の空白でも見つかる（元のタイトルを返す）',
+    tabOf('A.B', ['要員', 'スキルシートA.B']) === 'スキルシートA.B' && tabOf('A.B', ['スキルシート＿A.B']) === 'スキルシート＿A.B' &&
+      tabOf('A.B', ['スキルシート A.B']) === 'スキルシート A.B' && tabOf('A.B', [' スキルシート_A.B ']) === ' スキルシート_A.B ');
+  check('スキルシートのタブ: 「スキルシート_<名前>」と区切り無しの両方があれば前者を優先',
+    tabOf('A.B', ['スキルシートA.B', 'スキルシート_A.B']) === 'スキルシート_A.B');
+  check('スキルシートのタブ: 別の要員の名前を含むタブ・正規表現の特殊文字の読み替え・名前の無いタブは一致しない',
+    tabOf('A.B', ['スキルシート_A.BC']) === null && tabOf('A.B', ['スキルシートAxB']) === null && tabOf('A.B', ['スキルシート一覧']) === null);
+  const tabGid = rosterEngineersFromValues({
+    spreadsheetId: 'sheet_x', rows: [['状況', '名前', '稼働開始時期', 'サマリ'], ['営業中', 'A.B', '即日', '■スキル：Java']],
+    gidOf: new Map([['要員', 1], ['スキルシートA.B', 4242]]), sheetTexts: new Map(),
+  }, new Date('2026-10-04T00:00:00Z'));
+  check('要員リスト: 区切り無しのスキルシートのタブでもリンク（#gid）が入る', (tabGid[0]?.skillSheetUrl ?? '').endsWith('#gid=4242'), tabGid[0]?.skillSheetUrl);
 
   // ===== 試運転: 添付ファイルの読み取り =====
   section('試運転: 添付ファイルの読み取り（ses:trial:raw）');
