@@ -188,6 +188,18 @@ export function scrubRosterName(text: string, name: string): string {
   return out;
 }
 
+// 人がタブ名を付けるため、区切りの揺れ（無し・全角＿・空白・-）と前後の空白は許す。完全一致のタブがあれば常にそれを使う
+export function skillSheetTabOf(name: string, titles: Iterable<string>): string | null {
+  const n = name.trim();
+  if (!n) return null;
+  const all = [...titles];
+  const exact = `${SKILL_SHEET_TAB_PREFIX}${name}`;
+  if (all.includes(exact)) return exact;
+  const esc = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^${esc(SKILL_SHEET_TAB_PREFIX.replace(/_$/, ''))}[_＿\\-\\s]*${esc(n)}$`);
+  return all.find((t) => re.test(t.trim())) ?? null;
+}
+
 export function rosterEngineersFromValues(input: RosterInput, now = new Date()): ProperEngineer[] {
   const { spreadsheetId: id, rows, gidOf } = input;
   const headerAt = rosterHeaderAt(rows);
@@ -201,7 +213,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
     if (!name || (r[col('状況')] ?? '').trim() !== ROSTER_ACTIVE_STATUS) continue;
     const s = parseRosterSummary(r[col('サマリ')] ?? '');
     const skills = normalizeSkills(s.skills);
-    const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
+    const tab = skillSheetTabOf(name, gidOf.keys());
     const text = scrubRosterName(input.sheetTexts.get(name) ?? '', name);
     const level = mergeLevels(input.levels?.get(name) ?? null, summaryLevel(s));
     const available = (r[col('稼働開始時期')] ?? '').trim();
@@ -214,7 +226,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
       fullName: '',
       proposalLabel: label,
       fileId: '',
-      skillSheetUrl: gidOf.has(tab) ? `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gidOf.get(tab)}` : '',
+      skillSheetUrl: tab !== null ? `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gidOf.get(tab)}` : '',
       skills: normalizeSkills([...skills, ...level.skillYears.map((y) => y.skill)]),
       experienceYears: parseYears(head),
       requiredProjectRate: s.rateMan,
@@ -255,8 +267,8 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
   const levels = new Map<string, EngineerLevel | null>();
   let sheetFailures = 0;
   for (const name of activeRosterNames(rows)) {
-    const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
-    if (!gidOf.has(tab)) continue;
+    const tab = skillSheetTabOf(name, gidOf.keys());
+    if (tab === null) continue;
     try {
       const text = skillSheetText(await tabValues(sheets, id, tab));
       sheetTexts.set(name, text);
