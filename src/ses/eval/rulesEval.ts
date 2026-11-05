@@ -4874,8 +4874,16 @@ function salesListChecks(): void {
   check('優先度: 条件付きでも必須がすべて met/close（尚可だけ unmet）ならB・checks の無い古い判定もB',
     salesPriorityOf(withJ('conditional', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('B') &&
       salesPriorityOf(withJ('conditional')).startsWith('B'));
-  check('優先度: 推奨なら必須に unmet があってもCにせず今の規則（単価を満たせばA・満たさなければB）',
-    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('A') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨なら必須に unmet があってもCにせずB（単価を満たさなくてもB）',
+    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('B') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨・単価を満たし必須がすべて met/close ならA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }])).startsWith('A'));
+  check('優先度: 推奨・単価を満たしても必須の1つが unmet ならB（他の必須が met でも）',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, unmetReq])).startsWith('B'));
+  check('優先度: 推奨で必須 unmet があっても needsReview ならC',
+    salesPriorityOf(withJ('recommend', [unmetReq], { needsReview: true })).startsWith('C'));
+  check('優先度: 尚可の unmet は関係せずA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('A'));
   check('優先度: 必須 unmet の条件付きでも reference はD・needsReview はC（今の優先のまま）',
     salesPriorityOf({ ...condUnmet, reference: true }).startsWith('D') && salesPriorityOf({ ...condUnmet, needsReview: true, reference: true }).startsWith('C'));
   const shortY = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, shortYears: 3.5 };
