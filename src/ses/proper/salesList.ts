@@ -123,6 +123,8 @@ export function salesPriorityOf(c: ProperCandidate): string {
   if (unmetRequiredOf(c).length > 0) return SALES_PRIORITIES.c;
   if (c.judgment) {
     if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;
+    // 必須に経験なしの要件があるのに「提案推奨」と見えるのを避け、B までに抑える
+    if ((c.judgment.checks ?? []).some((k) => k.kind === '必須' && k.status === 'unmet')) return SALES_PRIORITIES.b;
     // 必須の年数が足りない組は交渉が要るため、A にせず B までに抑える（下げるだけで上げない）
     return yearShortRequiredOf(c).length > 0 ? SALES_PRIORITIES.b : SALES_PRIORITIES.a;
   }

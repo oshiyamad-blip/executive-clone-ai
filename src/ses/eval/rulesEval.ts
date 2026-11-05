@@ -3845,6 +3845,11 @@ function levelChecks(): void {
   const sl = summaryLevel(r);
   check('経験年数の欄から技術・工程の年数、備考から立場', sl.skillYears[0]?.skill === 'Java' && sl.skillYears[0]?.years === 2.3 && topPhaseOf(sl) === '詳細設計' && sl.role === 'PG', JSON.stringify(sl));
   check('所属が協力会社ならパートナー', parseRosterSummary('■所　属：協力会社（1社先）').affiliation === 'partner');
+  const alt = parseRosterSummary('■経 験：Java,Spring Boot,PostgreSQL\n■経験年数：4年1ヶ月');
+  check('スキルの欄が「■経験」の要員は、技術の並びをスキルに使う（経験年数は別）', alt.skills.length === 3 && alt.skills[1] === 'Spring Boot' && alt.experienceText === '4年1ヶ月', JSON.stringify(alt));
+  check('「■経験」が年数だけ・「■経験年数」だけならスキルは空・「■スキル」があればそちらだけ',
+    parseRosterSummary('■経　験：3年').skills.length === 0 && parseRosterSummary('■経験年数：4年1ヶ月').skills.length === 0 &&
+      JSON.stringify(parseRosterSummary('■スキル：Java\n■経験：Python,Go').skills) === '["Java"]');
   const now = new Date('2026-09-29T03:00:00Z');
   check('稼働開始時期「10月 or 11月」は早い方・「即日」は今日', rosterAvailableFrom('10月\nor\n11月', now) === '2026-10-01' && rosterAvailableFrom('即日', now) === '2026-09-29' && rosterAvailableFrom('1月', now) === '2027-01-01');
   const merged = mergeLevels({ skillYears: [{ skill: 'Java', years: 2 }], phaseYears: [], role: null }, sl);
@@ -4170,6 +4175,16 @@ async function properJudgeChecks(): Promise<void> {
     } finally {
       if (savedRegion === undefined) delete process.env.PROPER_DEFAULT_REGION;
       else process.env.PROPER_DEFAULT_REGION = savedRegion;
+    }
+    {
+      const hokkaido = { ...kanto, prefecture: '北海道' };
+      const sapporo = project({ id: 'p_spk', title: 'Oracle保守', requiredSkills: ['Oracle', 'JP1'], rateMax: 60, prefecture: '北海道', location: '札幌', remote: 'none', receivedAt: daysAgo(1) });
+      const tokyoOnsite = { ...sapporo, id: 'p_tokyo', prefecture: '東京都', location: '品川' };
+      const samePref = evaluateOwnMatch(hokkaido, sapporo, NOW) !== null;
+      const otherPref = evaluateOwnMatch(hokkaido, tokyoOnsite, NOW) === null;
+      const otherFull = evaluateOwnMatch(hokkaido, { ...tokyoOnsite, remote: 'full' }, NOW) !== null;
+      check('首都圏の外に住む社員: 住まいと同じ都道府県の常駐案件は出す・東京の常駐は出さない・東京のフルリモートは出す',
+        samePref && otherPref && otherFull, show([samePref, otherPref, otherFull]));
     }
     check('勤務地の表記: 伏見駅(愛知)は愛知県・名駅は愛知県・堂島は大阪府', normalizePrefecture('伏見駅(愛知)') === '愛知県' && normalizePrefecture('名駅') === '愛知県' && normalizePrefecture('堂島') === '大阪府');
   }
@@ -4860,8 +4875,16 @@ function salesListChecks(): void {
   check('優先度: 条件付きでも必須がすべて met/close（尚可だけ unmet）ならB・checks の無い古い判定もB',
     salesPriorityOf(withJ('conditional', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('B') &&
       salesPriorityOf(withJ('conditional')).startsWith('B'));
-  check('優先度: 推奨なら必須に unmet があってもCにせず今の規則（単価を満たせばA・満たさなければB）',
-    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('A') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨なら必須に unmet があってもCにせずB（単価を満たさなくてもB）',
+    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('B') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨・単価を満たし必須がすべて met/close ならA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }])).startsWith('A'));
+  check('優先度: 推奨・単価を満たしても必須の1つが unmet ならB（他の必須が met でも）',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, unmetReq])).startsWith('B'));
+  check('優先度: 推奨で必須 unmet があっても needsReview ならC',
+    salesPriorityOf(withJ('recommend', [unmetReq], { needsReview: true })).startsWith('C'));
+  check('優先度: 尚可の unmet は関係せずA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('A'));
   check('優先度: 必須 unmet の条件付きでも reference はD・needsReview はC（今の優先のまま）',
     salesPriorityOf({ ...condUnmet, reference: true }).startsWith('D') && salesPriorityOf({ ...condUnmet, needsReview: true, reference: true }).startsWith('C'));
   const shortY = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, shortYears: 3.5 };

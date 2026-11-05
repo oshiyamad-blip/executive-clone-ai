@@ -70,13 +70,16 @@ export function parseRosterSummary(summary: string): RosterSummary {
   const get = (k: string) => f.get(k) ?? '';
   const age = get('年齢').match(/\d{2}/);
   const rate = get('単価').match(/(\d+(?:\.\d+)?)\s*万/);
+  // 見出しが「■スキル」でなく「■経験」の要員がいる。技術の並びに見えるとき（区切りがあり年数でない）だけ使う
+  const alt = get('経験');
+  const skillText = get('スキル') || (/[、,，/／]/.test(alt) && !/年|ヶ月|か月|ヵ月/.test(alt) ? alt : '');
   return {
     age: age ? Number(age[0]) : null,
     // 「弊社社員」「弊社正社員」「弊社契約社員」は自社。それ以外（「協力会社」「BP」など）はパートナー
     affiliation: !get('所属') || /弊社|自社|当社/.test(get('所属')) ? 'proper' : 'partner',
     station: get('最寄'),
     rateMan: rate ? Number(rate[1]) : null,
-    skills: get('スキル').split(/[、,，/／\n]/).map((s) => s.trim()).filter(Boolean),
+    skills: skillText.split(/[、,，/／\n]/).map((s) => s.trim()).filter(Boolean),
     experienceText: get('経験年数'),
     note: get('備考'),
   };
