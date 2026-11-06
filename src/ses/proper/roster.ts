@@ -80,7 +80,8 @@ export function parseRosterSummary(summary: string): RosterSummary {
     station: get('最寄'),
     rateMan: rate ? Number(rate[1]) : null,
     skills: skillText.split(/[、,，/／\n]/).map((s) => s.trim()).filter(Boolean),
-    experienceText: get('経験年数'),
+    // 新しい研修明けの要員は「■経験年数」欄が無く社会人経験年数だけなので、既存の「なし（社会人経験…）」と同じ形にして未経験判定に載せる
+    experienceText: get('経験年数') || (get('社会人経験年数') ? `なし（社会人経験${get('社会人経験年数')}）` : ''),
     note: get('備考'),
   };
 }

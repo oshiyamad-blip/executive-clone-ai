@@ -125,7 +125,7 @@ import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
-import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
+import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
 import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
@@ -3850,6 +3850,9 @@ function levelChecks(): void {
   check('「■経験」が年数だけ・「■経験年数」だけならスキルは空・「■スキル」があればそちらだけ',
     parseRosterSummary('■経　験：3年').skills.length === 0 && parseRosterSummary('■経験年数：4年1ヶ月').skills.length === 0 &&
       JSON.stringify(parseRosterSummary('■スキル：Java\n■経験：Python,Go').skills) === '["Java"]');
+  check('「■社会人経験年数」だけの要員は IT 未経験', isItInexperienced(parseRosterSummary('■名　前：C.D\n■社会人経験年数：2年1ヶ月').experienceText));
+  check('「■経験年数」がある要員は社会人経験年数があっても未経験にしない', !isItInexperienced(parseRosterSummary('■経験年数：4年1ヶ月\n■社会人経験年数：6年').experienceText));
+  check('「■経験年数：なし（社会人経験…）」は未経験のまま', isItInexperienced(parseRosterSummary('■経験年数：なし（社会人経験6年5ヶ月）').experienceText));
   const now = new Date('2026-09-29T03:00:00Z');
   check('稼働開始時期「10月 or 11月」は早い方・「即日」は今日', rosterAvailableFrom('10月\nor\n11月', now) === '2026-10-01' && rosterAvailableFrom('即日', now) === '2026-09-29' && rosterAvailableFrom('1月', now) === '2027-01-01');
   const merged = mergeLevels({ skillYears: [{ skill: 'Java', years: 2 }], phaseYears: [], role: null }, sl);
