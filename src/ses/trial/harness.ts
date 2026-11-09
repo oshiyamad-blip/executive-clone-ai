@@ -27,7 +27,7 @@ import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPa
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { groupSimilarEngineers } from '../proper/group.js';
 import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
-import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, expiredIdsOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
@@ -205,7 +205,9 @@ function existingRows(): SheetRow[] {
 }
 
 function closedIds(): Set<string> {
-  return new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
+  const ids = new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
+  if (has('expired_values.json')) for (const id of expiredIdsOf(read<{ values: string[][] }>('expired_values.json').values ?? [])) ids.add(id);
+  return ids;
 }
 
 // 「クローズ済み」タブの行（closed_rows.json）から、要員＋案件名の照合と「見送り・募集終了」の行を取る（本番の writeSalesList と同じ関数）
