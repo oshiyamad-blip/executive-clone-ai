@@ -126,7 +126,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -4728,6 +4728,13 @@ function salesListChecks(): void {
   const noPlain = planSalesUpdate([salesRowOf(nego, undefined)], noRows, () => true);
   check('営業リストの更新: 新しい行の No. は「クローズ済み」「期限切れ」で使われた最大の次から振る（未指定なら全体の最大の次）',
     noUsed?.appends[0]?.[col('No')] === 16 && noPlain?.appends[0]?.[col('No')] === 11, JSON.stringify([noUsed?.appends[0]?.[col('No')], noPlain?.appends[0]?.[col('No')]]));
+  const expTab = [['No', 'ID', '要員'], ['1', 'ownmatch_x_pEXP', 'A.A'], ['2', '  ownmatch_y_pEXP2 ', 'A.A'], ['3', '', 'A.A'], ['4', '   ', 'A.A'], ['5']];
+  check('expiredIdsOf: 見出しの「ID」の列から集める（空セル・空白は除く）・「ID」の見出しが無ければ空',
+    [...expiredIdsOf(expTab)].join() === 'ownmatch_x_pEXP,ownmatch_y_pEXP2' && expiredIdsOf([['No'], ['1']]).size === 0 && expiredIdsOf([]).size === 0);
+  const expPlan = planSalesUpdate([salesRowOf(nego, undefined), salesRowOf({ ...base, id: 'ownmatch_a_pEXPIRED', projectId: 'pEXPIRED' }, undefined)], [header], () => false, undefined,
+    new Set([...expiredIdsOf([['ID'], ['ownmatch_a_pEXPIRED']])]));
+  check('営業リストの更新: 期限切れの ID を含む closedIds を渡すと、その候補は足さず他の候補は足す',
+    expPlan !== null && expPlan.appends.length === 1 && expPlan.appends[0][col('ID')] === nego.id, JSON.stringify(expPlan?.appends.map((a) => a[col('ID')])));
   check('maxNoOf: 見出しの「No」の列の数字の最大（数字でない値は無視・空は 0・「No」が無ければ A 列）',
     maxNoOf([['ID', 'No'], ['x', '12'], ['y', 'abc'], ['z', ''], ['w', '7']]) === 12 && maxNoOf([['No'], ['3'], ['21'], ['']]) === 21 &&
       maxNoOf([['ID'], ['5'], ['9']]) === 9 && maxNoOf([]) === 0 && maxNoOf([['No']]) === 0);

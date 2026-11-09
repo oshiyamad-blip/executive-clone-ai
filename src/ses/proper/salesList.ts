@@ -430,6 +430,18 @@ export interface ClosedState {
   mails: MailRef[]; // 要員＋営業元メール＋件名＋受信日時（切り替えで案件名の抽出結果が変わっても戻さないため）
   similar: ClosedSimilar[]; // 見送り・クローズの行の要員＋営業元会社＋案件名（案件名が少し違う再送を戻さないため）
 }
+// 「期限切れ」タブの ID 列（見出しの「ID」の列。無ければ空）
+export function expiredIdsOf(values: string[][]): Set<string> {
+  const at = (values[0] ?? []).map((h) => String(h ?? '').trim()).indexOf('ID');
+  const ids = new Set<string>();
+  if (at < 0) return ids;
+  for (const cells of values.slice(1)) {
+    const id = String(cells[at] ?? '').trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 export function closedStateOf(values: string[][]): ClosedState {
   const header = (values[0] ?? []).map((h) => String(h ?? '').trim());
   const at = (name: string) => header.indexOf(name);
@@ -1238,11 +1250,12 @@ export async function writeSalesList(
   const closedValues = ((await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${closedTab}!A:${LAST_COL}` }))).data.values ??
     []) as string[][];
   const closedState = closedStateOf(closedValues);
-  const closedIds = closedState.ids;
-  const expiredNos = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_EXPIRED_TAB)}!A:A` }))
+  const expiredValues = await withGoogleRetry(() => api.spreadsheets.values.get({ spreadsheetId, range: `${quoteTab(SALES_EXPIRED_TAB)}!A:${LAST_COL}` }))
     .then((res) => (res.data.values ?? []) as string[][])
     .catch(() => [] as string[][]);
-  const usedMaxNo = Math.max(maxNoOf(closedValues), maxNoOf(expiredNos));
+  const usedMaxNo = Math.max(maxNoOf(closedValues), maxNoOf(expiredValues));
+  // 期限切れへ移した組を次の回に新しい行として戻さないため
+  const closedIds = new Set([...closedState.ids, ...expiredIdsOf(expiredValues)]);
   const addedAt = jstLabel(new Date()); // この実行で足す行の「追加日時」
 
   // 要員の希望単価が変わった行は前回の判定のまま残さない（今回の候補に入っていれば新しい単価で書き直される）
