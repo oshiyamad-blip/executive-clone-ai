@@ -114,7 +114,7 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
 import { requiresMetroResidence } from '../residence.js';
 import { acceptsInexperienced } from '../inexperienced.js';
 import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, INEXPERIENCED_PARAGRAPH, type RawProperJudgment } from '../proper/judge.js';
@@ -150,7 +150,7 @@ import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { engineerBySubject, subjectPriority, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
-import { ageLimitOf } from '../match.js';
+import { ageLimitOf, isStartTooLate, isTimingWithinGrace } from '../match.js';
 import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
@@ -6239,6 +6239,7 @@ async function main(): Promise<void> {
     await inexperiencedChecks();
     labelMemoChecks();
     labelOutcomeChecks();
+    startWaitChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6860,4 +6861,35 @@ function labelOutcomeChecks(): void {
   check('提案済以降が 0 なら 0% で目標未達（クローズ・見送りは提案済以降に数えない）', miss.proposed === 0 && miss.proposedPct === 0 && miss.targetMet === false && miss.skippedPct === 10 && miss.skipReasons['募集終了'] === 2, show(miss));
   const lines = formatResult({ counts: { pairs: 0, withSales: 0, withMemo: 0, excludedNoEngineer: 0, skippedLines: 0, byEngineer: {}, byVerdict: {}, byPriority: {} }, recall: { ai: { total: 0, kept: 0, ratePct: null, missed: [] }, sales: { total: 0, kept: 0, ratePct: null, missed: [] }, negative: { total: 0, kept: 0, ratePct: null } }, outcome: miss, priority: null }, null).join('\n');
   check('表示に目標と「目標未達」が出る。載せた組が無ければ判定しない（null）', lines.includes('目標 5%') && lines.includes('目標未達') && outcomeOf([]).targetMet === null);
+}
+
+function startWaitChecks(): void {
+  section('プロパー: 案件の開始が稼働開始よりずっと後の組を外す（PROPER_MAX_START_WAIT_DAYS・既定45日）');
+  const own = (id: string, availableFrom: string | null): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills: ['Linux'], experienceYears: 3, requiredProjectRate: 30,
+    residence: '', prefecture: '東京都', availableDate: '', availableFrom, remoteWish: 'unknown', status: 'available',
+  });
+  const proj = (id: string, startDate: string | null) => project({ id, title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, startDate, prefecture: '東京都', location: id });
+  const idsOf = (list: ProperEngineer[], projects: Project[]) => ownPairsForJudge(list, projects, 100, NOW).map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`).sort();
+  const e = own('E1', '2026-12-01');
+  const pJan = proj('p_jan', '2027-01-15');
+  const pMar = proj('p_mar', '2027-03-01');
+  const pNone = proj('p_none', null);
+  check('稼働開始 12/1 の要員: 開始 1/15（45日後）の案件は通り、開始 3/1 の案件は外れ、開始日不明の案件は通る',
+    JSON.stringify(idsOf([e], [pJan, pMar, pNone])) === JSON.stringify(['E1|p_jan', 'E1|p_none']), JSON.stringify(idsOf([e], [pJan, pMar, pNone])));
+  check('外した組は startWaitSkipped に数える（通った組・日付不明は数えない）', startWaitSkippedCount([e], [pJan, pMar, pNone], NOW) === 1 && startWaitSkippedCount([e], [pJan, pNone], NOW) === 0);
+  check('稼働開始が不明（null）の要員は、遠い開始の案件も通る', JSON.stringify(idsOf([own('E2', null)], [pMar])) === JSON.stringify(['E2|p_mar']));
+  const past = own('E3', '2026-09-01');
+  check('稼働開始が今日より前なら今日から数える（今日 9/23 から 10/30 は37日で通り、12/1 は69日で外れる）',
+    JSON.stringify(idsOf([past], [proj('p_oct', '2026-10-30'), proj('p_dec', '2026-12-01')])) === JSON.stringify(['E3|p_oct']));
+  withEnv({ PROPER_MAX_START_WAIT_DAYS: '0' }, () => {
+    check('0 で無効: 開始 3/1 の案件も通り、数えない', JSON.stringify(idsOf([e], [pMar])) === JSON.stringify(['E1|p_mar']) && startWaitSkippedCount([e], [pMar], NOW) === 0);
+  });
+  withEnv({ PROPER_MAX_START_WAIT_DAYS: '120' }, () => {
+    check('上限を 120 日にすれば開始 3/1（90日後）は通る', JSON.stringify(idsOf([e], [pMar])) === JSON.stringify(['E1|p_mar']));
+  });
+  check('isStartTooLate: 境界（45日は通し、46日は外す）・日付が読めなければ通す・0 以下は無効',
+    !isStartTooLate('2027-01-15', '2026-12-01', NOW, 45) && isStartTooLate('2027-01-16', '2026-12-01', NOW, 45) &&
+      !isStartTooLate('不明', '2026-12-01', NOW, 45) && !isStartTooLate('2027-03-01', '2026-12-01', NOW, 0));
+  check('外部要員（BP）の時期判定 isTimingWithinGrace は変えない（開始がずっと後でも通る）', isTimingWithinGrace('2027-03-01', '2026-12-01', NOW));
 }

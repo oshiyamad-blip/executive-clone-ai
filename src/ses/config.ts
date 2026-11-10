@@ -869,6 +869,11 @@ export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
 }
 
+// 社員の稼働開始（今日より前なら今日）から案件の開始までがこの日数を超えるときは候補にしない（待機が長く出るため）。0 で無効
+export function properMaxStartWaitDays(): number {
+  return envNum('PROPER_MAX_START_WAIT_DAYS', 45, { min: 0, int: true });
+}
+
 // プロパー候補のAI判定に回す組の上限（社員ごと）。上限は安全弁（通常は足切りを通った組をすべて判定する）。超えた組は次の回に回る（判定の控えは数えない）
 export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
