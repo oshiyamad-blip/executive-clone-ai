@@ -4,7 +4,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { labelsDir, parseBackup, readLabelStore, writeBackupFiles, type BackupRow } from './labels.js';
+import { labelsDir, parseBackup, readLabelStore, salesMemosOf, writeBackupFiles, type BackupRow } from './labels.js';
 
 export function restoreFromBackup(backupDir: string, store: string): { files: number; rows: number; bad: number; known: number; missing: number; mailIds: number } {
   const byKey = new Map<string, BackupRow>();
@@ -33,7 +33,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   if (mode === 'backup') {
-    const w = writeBackupFiles(target, readLabelStore(labelsDir()).pairs, true);
+    const store = readLabelStore(labelsDir());
+    const w = writeBackupFiles(target, store.pairs, true, salesMemosOf(store.sales));
     console.log(JSON.stringify({ backupFiles: w.files.length, backupLines: w.lines, backupBytes: w.bytes }));
   } else {
     console.log(JSON.stringify(restoreFromBackup(target, labelsDir())));

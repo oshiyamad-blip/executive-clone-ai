@@ -21,7 +21,7 @@ const MISSED_MAX = 20;
 interface PriorityRow { n: number; checks: Record<string, number>; checked: number; validityPct: number | null; reasons: Record<string, number>; proposed: number; }
 export interface LabelsEvalResult {
   counts: {
-    pairs: number; withSales: number; excludedNoEngineer: number; skippedLines: number;
+    pairs: number; withSales: number; withMemo: number; excludedNoEngineer: number; skippedLines: number;
     byEngineer: Record<string, number>; byVerdict: Record<string, number>; byPriority: Record<string, number>;
   };
   recall: {
@@ -77,7 +77,8 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
   const usable = pairs.filter((p) => engineersByHash.has(p.engineerHash));
   const sales = latestSales(store.sales);
   const counts: LabelsEvalResult['counts'] = {
-    pairs: pairs.length, withSales: pairs.filter((p) => sales.has(p.key)).length, excludedNoEngineer: pairs.length - usable.length,
+    pairs: pairs.length, withSales: pairs.filter((p) => sales.has(p.key)).length,
+    withMemo: pairs.filter((p) => (sales.get(p.key)?.memo ?? '').trim() !== '').length, excludedNoEngineer: pairs.length - usable.length,
     skippedLines: store.skipped, byEngineer: {}, byVerdict: {}, byPriority: {},
   };
   for (const p of usable) {
@@ -134,7 +135,7 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
   const lines: string[] = [];
   const diff = (now: number | null, was: number | undefined | null) => (base && now !== null && was !== undefined && was !== null ? `（基準 ${was}% → ${Math.round((now - was) * 10) / 10 >= 0 ? '+' : ''}${Math.round((now - was) * 10) / 10}pt）` : '');
   const c = res.counts;
-  lines.push('=== ラベルの評価 ===', '', '■ 件数', `  組: ${c.pairs}（営業の評価あり ${c.withSales}・要員の控えなしで除外 ${c.excludedNoEngineer}・読めない行 ${c.skippedLines}）`);
+  lines.push('=== ラベルの評価 ===', '', '■ 件数', `  組: ${c.pairs}（営業の評価あり ${c.withSales}・うちメモあり ${c.withMemo ?? 0}・要員の控えなしで除外 ${c.excludedNoEngineer}・読めない行 ${c.skippedLines}）`);
   lines.push('  要員ごと:', table(c.byEngineer), '  verdict ごと:', table(c.byVerdict), '  保存時の優先度ごと:', table(c.byPriority));
   const rc = res.recall;
   lines.push('', '■ 足切りの再現率（今の足切りを通る割合）');
