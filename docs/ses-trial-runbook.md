@@ -14,6 +14,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 0. **本番バッチ（Claude API）が担当中でないか**（最初に確かめる）: 営業リストの `'_運用'!A1:B20` を `get_values` で読み（タブが無ければ `{"values":[]}` のファイルにする）、
    `npm run --silent ses:trial:handoff -- check <_運用の読み取りファイル> <実行ログの最後の行の C 列（epoch秒）> <実行開始のepoch秒>` を実行する
    （標準出力は `{"run":bool,"startEpoch":N,"mode":"api|trial|none","reason":"…"}`。本番が API の残高で動いているあいだは同じ営業リストに同時に書かない）
+   - 担当が `trial-pinned`（人が本番を止めるときに `_運用` の担当へ手で書く固定。本番は残高があっても戻らない）のときは mode が trial-pinned で `run: true`。回の終わりの書き込みでも `trial-pinned` のまま保つ
    - `run: false`（担当が api で、API最終実行が6時間以内）なら、メールチェック以降は行わず、実行ログに1行足して終える:
      A「<開始> （見送り・本番バッチが担当中）」、B と C は前の行の C のまま、D〜J は 0、K に reason、P は所要時間、Q は前の行の Q をそのまま写す、R は「対象外」、S は「0」。
      見送りの行は 3b の起点には使わない。最後の報告は「見送り（本番バッチが担当中）」の1行

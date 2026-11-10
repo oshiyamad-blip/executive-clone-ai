@@ -14,7 +14,8 @@ export const HANDOFF_TAB = '_運用';
 export const HANDOFF_RANGE = `${quoteTab(HANDOFF_TAB)}!A1:B6`;
 const READ_RANGE = `${quoteTab(HANDOFF_TAB)}!A1:B20`;
 
-export type HandoffOwner = 'api' | 'trial';
+// trial-pinned: 人が本番を止めるための固定。残高が戻っても本番は引き継ぎを戻さない
+export type HandoffOwner = 'api' | 'trial' | 'trial-pinned';
 export type CreditProbe = 'ok' | 'exhausted' | 'unknown';
 
 export interface HandoffState {
@@ -40,7 +41,7 @@ export function parseHandoff(values: string[][]): HandoffState {
     const v = String(row[1] ?? '').trim();
     if (v === '') continue;
     if (key === LABELS.owner) {
-      if (v === 'api' || v === 'trial') state.owner = v;
+      if (v === 'api' || v === 'trial' || v === 'trial-pinned') state.owner = v;
     } else if (key === LABELS.apiLastRun) {
       if (Number.isFinite(Date.parse(v))) state.apiLastRun = v.slice(0, 40);
     } else if (key === LABELS.apiReadEpoch) {
@@ -83,6 +84,7 @@ export interface ApiRunDecision {
 // 本番バッチが今回の回を担当するか。試運転が担当中なら、残高の確認（credit）が ok のときだけ戻る。
 // 担当が api・未定なら今までどおり実行する
 export function decideApiRun(state: HandoffState, nowMs: number, credit: CreditProbe = 'unknown'): ApiRunDecision {
+  if (state.owner === 'trial-pinned') return { run: false, floorMs: null, reason: '担当が試運転に固定されているため見送り' };
   if (state.owner !== 'trial') return { run: true, floorMs: null, reason: '本番バッチが担当' };
   if (credit !== 'ok') {
     return { run: false, floorMs: null, reason: credit === 'exhausted' ? '試運転が担当中のため見送り（API残高切れ）' : '試運転が担当中のため見送り（API残高を確かめられない）' };
@@ -172,6 +174,13 @@ export async function beginHandoff(now: Date = new Date()): Promise<HandoffBegin
   resetCreditExhausted();
   if (!handoffEnabled() || !salesListConfigured()) return { proceed: true, state: {} };
   const state = await readHandoff();
+  if (state.owner === 'trial-pinned') {
+    // 残高の確認も _運用 の書き換えもしない（人が固定を外すまで本番は動かさない）
+    const message = `SESバッチ: ${decideApiRun(state, now.getTime()).reason}`;
+    console.log(message);
+    recordHealEvent('info', message);
+    return { proceed: false, state };
+  }
   if (state.owner !== 'trial') return { proceed: true, state };
 
   const credit = await probeLlmCredit();
@@ -196,6 +205,7 @@ export async function beginHandoff(now: Date = new Date()): Promise<HandoffBegin
 // 書き込みまで正常に終えていれば本番の読了を進める
 export async function finishHandoff(begin: HandoffBegin, now: Date, completed: boolean): Promise<void> {
   if (!handoffEnabled() || !salesListConfigured()) return;
+  if (begin.state.owner === 'trial-pinned') return;
   if (creditExhaustedInRun()) {
     const next: HandoffState = { ...begin.state, owner: 'trial', reason: `API残高切れ（${formatJst(now.getTime())}）` };
     await writeHandoff(next);
