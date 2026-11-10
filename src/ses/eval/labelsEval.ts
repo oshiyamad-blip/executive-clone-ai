@@ -7,10 +7,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { buildProperCandidates } from '../proper/index.js';
 import { __setProperJudgeForTest, __setCachedProjectIdsForTest } from '../proper/judge.js';
-import { salesPriorityOf } from '../proper/salesList.js';
+import { salesPriorityOf, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
 import { jstDateOf } from '../dates.js';
 import {
-  labelsDir, readLabelStore, latestSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
+  labelsDir, readLabelStore, latestSales, type LabelSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
   type LabelPair, type PrefilterRecall,
 } from './labels.js';
 import type { ProperEngineer } from '../../types/index.js';
@@ -19,6 +19,33 @@ const MARKS = ['◎', '○', '△', '×'] as const;
 const MISSED_MAX = 20;
 
 interface PriorityRow { n: number; checks: Record<string, number>; checked: number; validityPct: number | null; reasons: Record<string, number>; proposed: number; }
+// 目標: 載せた組のうち提案済以降に進む割合（docs/ses-improvement-proposals-2026-11.md 4.2）
+export const PROPOSED_TARGET_PCT = 5;
+export interface OutcomeResult {
+  listed: number;
+  proposed: number;
+  proposedPct: number | null;
+  targetPct: number;
+  targetMet: boolean | null; // 載せた組が無ければ null
+  skipped: number;
+  skippedPct: number | null;
+  skipReasons: Record<string, number>;
+}
+export const NO_SKIP_REASON = '（理由なし）';
+
+export function outcomeOf(listed: Array<Pick<LabelSales, 'status' | 'skipReason'>>): OutcomeResult {
+  const proposed = listed.filter((s) => PROPOSED_OR_LATER.includes(s.status)).length;
+  const skippedRows = listed.filter((s) => s.status === SALES_SKIPPED_STATUS);
+  const skipReasons: Record<string, number> = {};
+  for (const s of skippedRows) bump(skipReasons, s.skipReason.trim() || NO_SKIP_REASON);
+  const proposedPct = pct(proposed, listed.length);
+  return {
+    listed: listed.length, proposed, proposedPct, targetPct: PROPOSED_TARGET_PCT,
+    targetMet: proposedPct === null ? null : proposedPct >= PROPOSED_TARGET_PCT,
+    skipped: skippedRows.length, skippedPct: pct(skippedRows.length, listed.length), skipReasons,
+  };
+}
+
 export interface LabelsEvalResult {
   counts: {
     pairs: number; withSales: number; withMemo: number; excludedNoEngineer: number; skippedLines: number;
@@ -30,6 +57,8 @@ export interface LabelsEvalResult {
     negative: { total: number; kept: number; ratePct: number | null };
   };
   // rows・checks・validityPct は営業の評価だけ（Claude確認を除く）。以前の基準 JSON は Claude 分を含んでいた
+  // 営業リストに載せた組（営業の評価がある組）のうち、提案済以降に進んだ割合と見送りの内訳
+  outcome: OutcomeResult;
   priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number; claude: { checked: number; good: number; validityPct: number | null } } | null;
 }
 
@@ -125,7 +154,8 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
     claude.validityPct = pct(claude.good, claude.checked);
     priority = { rows, changedFromStored: changed, compared, claude };
   }
-  return { counts, recall, priority };
+  const outcome = outcomeOf(pairs.map((p) => sales.get(p.key)).filter((x): x is LabelSales => x !== undefined));
+  return { counts, recall, outcome, priority };
 }
 
 const fmt = (v: number | null) => (v === null ? '-' : `${v}%`);
@@ -144,6 +174,11 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
   lines.push(`  負例（reject）が通る割合: ${rc.negative.kept}/${rc.negative.total} = ${fmt(rc.negative.ratePct)} ${diff(rc.negative.ratePct, base?.recall.negative.ratePct)}`);
   if (rc.ai.missed.length > 0) lines.push(`  落ちたAI正例（最大${MISSED_MAX}件）: ${rc.ai.missed.join(', ')}`);
   if (rc.sales.missed.length > 0) lines.push(`  落ちた営業正例（最大${MISSED_MAX}件）: ${rc.sales.missed.join(', ')}`);
+  const oc = res.outcome;
+  lines.push('', '■ 載せた行の結果（営業リストに載せた組＝営業の評価がある組）');
+  lines.push(`  提案済以降: ${oc.proposed}/${oc.listed} = ${fmt(oc.proposedPct)}（目標 ${oc.targetPct}%）${oc.targetMet === null ? '' : oc.targetMet ? ' 目標達成' : ' 目標未達'}`);
+  lines.push(`  見送り: ${oc.skipped}/${oc.listed} = ${fmt(oc.skippedPct)}`);
+  for (const [reason, n] of Object.entries(oc.skipReasons).sort(([a], [b]) => a.localeCompare(b))) lines.push(`      見送り理由 ${reason}: ${n}`);
   lines.push('', '■ 優先度の妥当さ（営業の最新の評価がある組・今のコードで再計算）');
   if (!res.priority) {
     lines.push('  まだありません');
