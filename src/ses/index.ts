@@ -1,5 +1,6 @@
 import '../env.js';
 import { collectSesMail } from './collect.js';
+import { shouldSkipProperAfterCollectFailure } from './collectGate.js';
 import { parseAttachments } from './parse.js';
 import { extractItems, itemIdOf, type ExtractFlush } from './extract.js';
 import { matchAll, parseMatchId, resetPrimarySelectTally, resetJudgeTally, type PairScope } from './match.js';
@@ -267,7 +268,11 @@ async function runLiveBatch(opts: SesBatchOptions, requestedDrafts: PendingDraft
     console.warn(`SES通知: 知らせていないマッチの控えを書けません: ${safeErr(err)}`);
   }
 
-  const proper = pastRunDeadline() ? skipProperForDeadline() : await runProperStage([]);
+  const proper = pastRunDeadline()
+    ? skipProperForDeadline()
+    : shouldSkipProperAfterCollectFailure(lastCollectFailed)
+      ? skipProperForCollectFailure()
+      : await runProperStage([]);
   try {
     // 送れた（または送る先が無い）ときだけ控えを消す。送れなければ次の回のサマリに持ち越す
     if ((await notifyResults(saved, requestedDrafts, proper, carried.rows)) !== 'failed') await clearUnnotified();
@@ -546,12 +551,14 @@ async function collectAndParse(): Promise<{
   let excludedMailIds: string[] = [];
   let unparsableMailIds: string[] = [];
   let collectFailed = false;
+  lastCollectFailed = false;
   try {
     const collected = await collectSesMail();
     ({ mails, excludedMailIds } = collected);
     unparsableMailIds = collected.unparsableMailIds ?? [];
   } catch (err) {
     collectFailed = true;
+    lastCollectFailed = true;
     console.error(`SES収集: 失敗: ${safeErr(err)}`);
     recordFatal('メール収集に失敗しました');
   }
@@ -711,6 +718,15 @@ async function pruneStalePersonalData(): Promise<void> {
   } catch (err) {
     console.warn(`SES: 保存期間を過ぎた行の整理に失敗: ${safeErr(err)}`);
   }
+}
+
+// 直近の collectAndParse で収集が例外になったか（回の初めにリセットされる）
+let lastCollectFailed = false;
+
+function skipProperForCollectFailure(): null {
+  console.log('SES: メール収集に失敗したため、プロパーの判定と営業リストの更新を行いません');
+  recordHealEvent('warn', 'メール収集に失敗したため、プロパー候補の判定と営業リストの更新は次回の実行に回しました');
+  return null;
 }
 
 function skipProperForDeadline(): null {

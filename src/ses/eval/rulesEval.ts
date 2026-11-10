@@ -39,6 +39,7 @@ import { isModelUnavailableError, isCreditExhausted } from '../../llm/errors.js'
 import { handoffEnabled, salesMinPriority } from '../config.js';
 import { parseHandoff, handoffRows, decideApiRun, formatJst, type HandoffState } from '../handoff.js';
 import { trialCheck, trialRows } from '../trial/handoff.js';
+import { shouldSkipProperAfterCollectFailure } from '../collectGate.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
 import { withExtractModelFallback, shouldFallbackExtractModel } from '../extractModelFallback.js';
 import {
@@ -5604,6 +5605,9 @@ function handoffChecks(): void {
     r1.range === "'_運用'!A1:B6" && r1.values.length === 6 && p1.owner === 'api' && p1.trialReadEpoch === nowSec && p1.apiReadEpoch === full.apiReadEpoch && p1.reason === full.reason && p1.apiLastRun === full.apiLastRun, show(r1));
   const r2 = parseHandoff(trialRows({}, nowSec, nowSec).values);
   check('試運転 rows: 担当が未定（タブが無い）なら trial にして理由を書く', r2.owner === 'trial' && r2.trialReadEpoch === nowSec && r2.reason === '試運転が担当（2026/10/25 12:00）', show(r2));
+
+  check('メール収集に失敗した回はプロパーの判定と営業リストの更新を見送る',
+    shouldSkipProperAfterCollectFailure(true) && !shouldSkipProperAfterCollectFailure(false));
 
   check('SES_HANDOFF: 既定は有効・0 / false で無効（今までどおり常に本番）',
     withEnv({ SES_HANDOFF: undefined }, handoffEnabled) && withEnv({ SES_HANDOFF: '1' }, handoffEnabled) && !withEnv({ SES_HANDOFF: '0' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'false' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'FALSE' }, handoffEnabled));
