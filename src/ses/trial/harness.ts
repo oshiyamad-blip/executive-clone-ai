@@ -21,6 +21,7 @@ import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from 
 import { attachmentMaterial } from './rawAttach.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, salesMemosOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
+import { salesKeepHours } from '../config.js';
 import { ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
@@ -420,6 +421,12 @@ if (phase === 'prompts') {
     const received = parseJstLabel(String(prev[COL['受信日時']]));
     return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
   };
+  // 追加から SALES_KEEP_HOURS 時間以内の行は、候補から外れても残す（要員が営業中で希望単価も同じ行だけ。受信の遡りは見ない）
+  const engineerActive = (id: string, prev: Array<string | number>) => {
+    const c = canonical(id);
+    const e = list.find((x) => c.startsWith(`ownmatch_${x.id}_`));
+    return Boolean(e) && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
+  };
   assertSheetHeader();
   const closed = closedState();
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
@@ -428,6 +435,8 @@ if (phase === 'prompts') {
     closedSimilar: closed.similar,
     endedRowIds: closed.endedRowIds,
     addedAt: jstLabel(now),
+    keepHours: salesKeepHours(),
+    engineerActive,
     usedMaxNo: has('used_nos.json') ? maxNoOf(read<{ values: string[][] }>('used_nos.json').values) : 0,
   });
   if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
@@ -466,7 +475,7 @@ if (phase === 'prompts') {
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, belowMinPriority: plan.belowMin, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, belowMinPriority: plan.belowMin, keptRecent: plan.keptRecent, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
 } else if (phase === 'labels') {
   const { list, projects, judged, candidates } = await judgedCandidates();
   const store = labelsDir();
