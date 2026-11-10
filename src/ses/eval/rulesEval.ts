@@ -5606,6 +5606,14 @@ function handoffChecks(): void {
   const r2 = parseHandoff(trialRows({}, nowSec, nowSec).values);
   check('試運転 rows: 担当が未定（タブが無い）なら trial にして理由を書く', r2.owner === 'trial' && r2.trialReadEpoch === nowSec && r2.reason === '試運転が担当（2026/10/25 12:00）', show(r2));
 
+  const pinned: HandoffState = { ...full, owner: 'trial-pinned' };
+  check('trial-pinned: parseHandoff が受け付け、往復しても保たれる',
+    parseHandoff([['担当', 'trial-pinned']]).owner === 'trial-pinned' && parseHandoff(handoffRows(pinned)).owner === 'trial-pinned');
+  check('trial-pinned: decideApiRun は残高が ok でも実行しない（理由に固定と書く）',
+    ['ok', 'exhausted', 'unknown'].every((c) => { const d = decideApiRun(pinned, now, c as 'ok'); return !d.run && d.floorMs === null && d.reason.includes('固定'); }));
+  const pc = trialCheck(pinned, nowSec - 300, nowSec);
+  check('trial-pinned: 試運転の判定は実行する（担当が試運転）', pc.run && pc.mode === 'trial-pinned', show(pc));
+  check('trial-pinned: 試運転が書く状態の担当は trial-pinned のまま', parseHandoff(trialRows(pinned, nowSec, nowSec).values).owner === 'trial-pinned');
   check('メール収集に失敗した回はプロパーの判定と営業リストの更新を見送る',
     shouldSkipProperAfterCollectFailure(true) && !shouldSkipProperAfterCollectFailure(false));
 

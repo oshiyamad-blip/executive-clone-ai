@@ -17,7 +17,7 @@ export const API_STALE_SECONDS = 6 * 60 * 60;
 export interface HandoffCheck {
   run: boolean;
   startEpoch: number;
-  mode: 'api' | 'trial' | 'none';
+  mode: 'api' | 'trial' | 'trial-pinned' | 'none';
   reason: string;
 }
 
@@ -32,10 +32,10 @@ export function trialCheck(state: HandoffState, logEndEpoch: number, nowEpoch: n
     }
     return { run: true, startEpoch, mode, reason: '本番バッチが6時間以上動いていないため試運転で続ける' };
   }
-  return { run: true, startEpoch, mode, reason: mode === 'trial' ? '試運転が担当' : '担当が未定のため試運転で続ける' };
+  return { run: true, startEpoch, mode, reason: mode === 'trial-pinned' ? '試運転に固定されている' : mode === 'trial' ? '試運転が担当' : '担当が未定のため試運転で続ける' };
 }
 
-// 試運転の回の終わりに書く表。担当は今の値のまま（未定なら trial）、試運転読了だけ更新する
+// 試運転の回の終わりに書く表。担当は今の値のまま（trial-pinned も保つ。未定なら trial）、試運転読了だけ更新する
 export function trialRows(state: HandoffState, trialReadEpoch: number, nowEpoch: number): { range: string; values: string[][] } {
   const owner = state.owner ?? 'trial';
   const next: HandoffState = {
