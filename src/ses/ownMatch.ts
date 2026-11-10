@@ -16,7 +16,7 @@ import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
 import { defaultOwnRegion, isFullRemoteLocation, wideRegionOf } from './prefecture.js';
 import { livesOutsideMetro, projectRequiresMetroResidence } from './residence.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
-import { isTimingWithinGrace, ageLimitOf } from './match.js';
+import { isTimingWithinGrace, isStartTooLate, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
 import { writeReviewOwnMatches } from './review.js';
 import { loadFixtureOwnEngineers } from './fixtures/ownEngineers.js';
@@ -30,6 +30,7 @@ import {
   logRedact,
   properRateToleranceMan,
   properInexperiencedStrict,
+  properMaxStartWaitDays,
 } from './config.js';
 import { acceptsInexperienced } from './inexperienced.js';
 import { evaluateLevel } from './level.js';
@@ -94,6 +95,7 @@ export interface OwnMatchOptions {
   ignoreInexperiencedGate?: boolean;
   // 首都圏在住が条件（地方不可）の案件 × 首都圏の外に住む社員の除外を掛けない（除外した組の数を数えるため）
   ignoreMetroGate?: boolean;
+  ignoreStartWaitGate?: boolean; // 開始時期の待機の上限（PROPER_MAX_START_WAIT_DAYS）を無視する（除外数を数えるため）
 }
 
 // 「地方不可」の案件は、フルリモート・本人と同じ地方でも、1都3県の外に住む社員は組まない
@@ -173,6 +175,8 @@ function evaluateOwnMatchDetailed(own: OwnEngineer, project: Project, now: Date,
     ? true
     : isTimingWithinGrace(project.startDate as string, own.availableFrom as string, now);
   if (!timingUnknown && !timingOk) return null;
+  // 案件の開始が要員の稼働開始よりずっと後なら、待機が長く出るので外す（外部要員の突合 match.ts は変えない）
+  if (!timingUnknown && !opts.ignoreStartWaitGate && isStartTooLate(project.startDate as string, own.availableFrom as string, now, properMaxStartWaitDays())) return null;
 
   // 金額: 案件単価 ≥ 必要案件単価。どちらか不明なら要確認。許容幅までの不足は単価交渉として残し、それを超える不足は除外
   const rate = projectRateMan(project);
@@ -299,6 +303,18 @@ export function metroResidenceSkippedCount(own: OwnEngineer[], projects: Project
   for (const engineer of own.filter((o) => o.status === 'available' && livesOutsideMetro(o.prefecture))) {
     for (const project of projects.filter((p) => p.status === 'open' && projectRequiresMetroResidence(p))) {
       if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreMetroGate: true })) n += 1;
+    }
+  }
+  return n;
+}
+
+// 案件の開始が稼働開始より PROPER_MAX_START_WAIT_DAYS 日を超えて後なので、AI判定に回さなかった組の数（ほかのルールの足切りは通る組だけ数える）
+export function startWaitSkippedCount(own: OwnEngineer[], projects: Project[], now = new Date()): number {
+  if (properMaxStartWaitDays() <= 0) return 0;
+  let n = 0;
+  for (const engineer of own.filter((o) => o.status === 'available')) {
+    for (const project of projects.filter((p) => p.status === 'open')) {
+      if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreStartWaitGate: true }) && !evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true })) n += 1;
     }
   }
   return n;
