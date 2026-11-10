@@ -216,6 +216,7 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
+import { outcomeOf, formatResult } from './labelsEval.js';
 import { appendLabels, salesMemosOf, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
@@ -6204,6 +6205,7 @@ async function main(): Promise<void> {
     handoffChecks();
     await inexperiencedChecks();
     labelMemoChecks();
+    labelOutcomeChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6811,4 +6813,18 @@ function labelMemoChecks(): void {
   const same2 = compareBackup(parseBackup(noted).rows, parseBackup(noted).rows);
   const diff2 = compareBackup(parseBackup(noted).rows, parseBackup(plain).rows);
   check('compareBackup は memo の違いも検出する', same2.ok && !diff2.ok);
+}
+
+function labelOutcomeChecks(): void {
+  section('判定ラベル: 載せた行の結果（提案済以降の割合・目標 5%・見送りの内訳）');
+  const rows = (statuses: Array<[string, string]>) => statuses.map(([status, skipReason]) => ({ status, skipReason }));
+  const base: Array<[string, string]> = Array.from({ length: 17 }, () => ['未着手', '']);
+  const met = outcomeOf(rows([...base, ['提案済', ''], ['成約', ''], ['見送り', '単価が安い']]));
+  check('提案済・成約は提案済以降に数え、割合は載せた組（20）が分母。10% は目標 5% を超える', met.listed === 20 && met.proposed === 2 && met.proposedPct === 10 && met.targetMet === true, show(met));
+  const edge = outcomeOf(rows([...base, ['面談済', ''], ['見送り', '単価が安い'], ['見送り', '']]));
+  check('ちょうど 5%（1/20）は達成。見送りは理由別に数え、理由なしは別枠', edge.proposedPct === 5 && edge.targetMet === true && edge.skipped === 2 && edge.skipReasons['単価が安い'] === 1 && edge.skipReasons['（理由なし）'] === 1, show(edge));
+  const miss = outcomeOf(rows([...base, ['クローズ', ''], ['見送り', '募集終了'], ['見送り', '募集終了']]));
+  check('提案済以降が 0 なら 0% で目標未達（クローズ・見送りは提案済以降に数えない）', miss.proposed === 0 && miss.proposedPct === 0 && miss.targetMet === false && miss.skippedPct === 10 && miss.skipReasons['募集終了'] === 2, show(miss));
+  const lines = formatResult({ counts: { pairs: 0, withSales: 0, withMemo: 0, excludedNoEngineer: 0, skippedLines: 0, byEngineer: {}, byVerdict: {}, byPriority: {} }, recall: { ai: { total: 0, kept: 0, ratePct: null, missed: [] }, sales: { total: 0, kept: 0, ratePct: null, missed: [] }, negative: { total: 0, kept: 0, ratePct: null } }, outcome: miss, priority: null }, null).join('\n');
+  check('表示に目標と「目標未達」が出る。載せた組が無ければ判定しない（null）', lines.includes('目標 5%') && lines.includes('目標未達') && outcomeOf([]).targetMet === null);
 }
