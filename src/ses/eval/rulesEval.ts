@@ -3149,7 +3149,9 @@ async function securityAuditRound4Checks(): Promise<void> {
   const isolatedText = await spreadsheetBufferToTextIsolated(legit);
   let timedOut = '';
   try {
-    await spreadsheetBufferToTextIsolated(legit, 1);
+    // 小さな正常ファイルだと、ワーカーが温まっていれば 1ms 以内に解析が終わって時間切れにならないことがある。
+    // 解析に必ず 1ms 以上かかる大きなファイル（dense: 60万セル）で確かめる
+    await spreadsheetBufferToTextIsolated(dense, 1);
   } catch (err) {
     timedOut = String(err);
   }
