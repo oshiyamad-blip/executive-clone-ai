@@ -19,7 +19,7 @@ import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '..
 import { parseJstLabel } from './jstLabel.js';
 import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
-import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
+import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, salesMemosOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
@@ -507,7 +507,7 @@ if (phase === 'prompts') {
       }
       const key = salesKeyOf(canonical(r.ID ?? ''));
       if (!key) continue;
-      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '' });
+      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '', memo: (r['メモ'] ?? '').trim() });
     }
   }
   const added = appendLabels(store, {
@@ -516,7 +516,7 @@ if (phase === 'prompts') {
     sales,
   });
   const total = readLabelStore(store);
-  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1');
+  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1', salesMemosOf(total.sales));
   const { addedPairs: _added, ...counts } = added;
   console.log(JSON.stringify({ ...counts, missingProject, fbExcluded, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
 } else if (phase === 'labels_verify') {

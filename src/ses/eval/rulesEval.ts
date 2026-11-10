@@ -217,7 +217,7 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
-import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
+import { appendLabels, salesMemosOf, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -6236,6 +6236,7 @@ async function main(): Promise<void> {
     pauseGateChecks();
     handoffChecks();
     await inexperiencedChecks();
+    labelMemoChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6805,4 +6806,42 @@ function labelBackupChecks(
   check('compareBackup: 値が違って戻った行も missing', !changed.ok && changed.missing[0] === p1.key);
   const withBad = compareBackup(written, written, 1);
   check('compareBackup: 読み戻しに壊れた行があれば（全行そろっていても）ok でない', !withBad.ok && withBad.bad === 1);
+}
+
+function labelMemoChecks(): void {
+  section('判定ラベル: 営業のメモ（取り込み・古い行の読み込み・メモが空なら控えの行が変わらない）');
+  const eng = { id: 'own_m', displayName: 'M.M', skills: ['Java'] } as unknown as ProperEngineer;
+  const pair: LabelPair = {
+    key: 'own_m|proj_0000000m', engineerId: eng.id, engineerLabel: 'M.M', projectId: 'proj_0000000m', runId: 'run_m', judgedAt: '2026-10-01T00:00:00.000Z',
+    engineerHash: engineerHashOf(eng), project: { sourceMailId: 'sesmail_m' } as unknown as LabelPair['project'], priority: 'B 通常',
+    judgment: { verdict: 'recommend', requirements: [], rateReason: '' } as unknown as RawProperJudgment,
+  };
+  const sale = (over: Partial<LabelSales> = {}): LabelSales => ({
+    key: pair.key, seenAt: '2026-10-01T00:00:00.000Z', tab: '全体', status: '未着手', skipReason: '', check: '', checkMemo: '', priority: 'B', ...over,
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'ses-labels-memo-'));
+  try {
+    appendLabels(dir, { sales: [sale()] });
+    const noMemo = appendLabels(dir, { sales: [sale({ seenAt: '2026-10-02T00:00:00.000Z', memo: '' })] });
+    check('memo が空（古い行との比較も）なら営業の評価は増えない', noMemo.sales === 0 && readLabelStore(dir).sales.length === 1);
+    const withMemo = appendLabels(dir, { sales: [sale({ seenAt: '2026-10-03T00:00:00.000Z', memo: '先方に確認中' })] });
+    const store = readLabelStore(dir);
+    check('memo が入ったら営業の評価を1行足し、最新の memo を取り出せる', withMemo.sales === 1 && salesMemosOf(store.sales).get(pair.key) === '先方に確認中');
+    appendFileSync(join(dir, 'sales.jsonl'), `${JSON.stringify({ key: 'own_m|proj_old', seenAt: '2026-09-01T00:00:00.000Z', tab: '全体', status: '', skipReason: '', check: '', checkMemo: '', priority: 'A' })}\n`);
+    const old = latestSales(readLabelStore(dir).sales).get('own_m|proj_old');
+    check('memo の無い古い行も読め、メモ一覧には出ない', old !== undefined && old.memo === undefined && !salesMemosOf(readLabelStore(dir).sales).has('own_m|proj_old'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const plain = backupLineOf(pair);
+  check('memo が空なら控えの行は今までと同じ（10列・memo を渡さないときと同じ文字列）', plain.split('\t').length === 10 && backupLineOf(pair, '') === plain && backupLineOf(pair, '  ') === plain);
+  const noted = backupLineOf(pair, '先方確認中\t急ぎ');
+  const row = parseBackup(noted).rows[0];
+  check('memo ありは11列で往復でき、タブは空白になり、crc が合う', noted.split('\t').length === 11 && parseBackup(noted).bad === 0 && row?.memo === '先方確認中 急ぎ' && row.key === pair.key);
+  check('古い10列の行は memo が空として読める', parseBackup(plain).rows[0]?.memo === '' && parseBackup(plain).bad === 0);
+  const sheet = planLabelSheet([noted], [BACKUP_HEADER, plain]);
+  check('控えの表計算: 古い10列の行は memo が付いた行へ rewrite、同じ行は触らない', sheet.rewrite === 1 && sheet.append === 0 && planLabelSheet([plain], [BACKUP_HEADER, plain]).elements.length === 0 && planLabelSheet([noted], [BACKUP_HEADER, noted]).elements.length === 0);
+  const same2 = compareBackup(parseBackup(noted).rows, parseBackup(noted).rows);
+  const diff2 = compareBackup(parseBackup(noted).rows, parseBackup(plain).rows);
+  check('compareBackup は memo の違いも検出する', same2.ok && !diff2.ok);
 }

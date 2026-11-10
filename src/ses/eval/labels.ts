@@ -30,6 +30,7 @@ export interface LabelSales {
   check: string;
   checkMemo: string;
   priority: string;
+  memo?: string; // 営業リストの「メモ」列。古い行には無い
 }
 export interface LabelStore { pairs: LabelPair[]; engineers: LabelEngineer[]; sales: LabelSales[]; skipped: number; }
 
@@ -95,8 +96,16 @@ export function latestSales(sales: LabelSales[]): Map<string, LabelSales> {
   return latest;
 }
 
-const SALES_FIELDS = ['status', 'skipReason', 'check', 'checkMemo', 'priority', 'tab'] as const;
-const sameSales = (a: LabelSales, b: LabelSales) => SALES_FIELDS.every((f) => a[f] === b[f]);
+const SALES_FIELDS = ['status', 'skipReason', 'check', 'checkMemo', 'priority', 'tab', 'memo'] as const;
+// memo は古い行に無いので、無い・空は同じとみなす（古いストアが取り込みで一斉に増えないように）
+const sameSales = (a: LabelSales, b: LabelSales) => SALES_FIELDS.every((f) => (a[f] ?? '') === (b[f] ?? ''));
+
+// key ごとの最新の営業メモ（空は含めない）
+export function salesMemosOf(sales: LabelSales[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [key, s] of latestSales(sales)) if ((s.memo ?? '').trim()) out.set(key, (s.memo ?? '').trim());
+  return out;
+}
 
 // 同じ組・同じ要員は書かない。営業の評価は、最新の行から変わったときだけ足す
 export function appendLabels(
@@ -149,11 +158,15 @@ export interface BackupRow {
   priority: string;
   req: string;
   rateReason: string;
+  memo: string; // 営業のメモ。無ければ ''
 }
 
-// 控えの1行（タブ区切り）。列: v1, key, sourceMailId, runId, judgedAt, verdict, priority, req, rateReason, crc
+// 控えの1行（タブ区切り）。列: v1, key, sourceMailId, runId, judgedAt, verdict, priority, req, rateReason, [memo], crc
+// memo は営業のメモがあるときだけ crc の前に足す（無ければ今までと同じ10列。古い控えの行もそのまま読める）
 export const BACKUP_HEADER = 'v1\tkey\tsourceMailId\trunId\tjudgedAt\tverdict\tpriority\treq\trateReason\tcrc';
 const BACKUP_COLUMNS = 10;
+const BACKUP_COLUMNS_WITH_MEMO = 11;
+export const isBackupColumnCount = (n: number): boolean => n === BACKUP_COLUMNS || n === BACKUP_COLUMNS_WITH_MEMO;
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -192,10 +205,12 @@ function reqCodeOf(judgment: RawProperJudgment): string {
     .join('');
 }
 
-export function backupLineOf(p: LabelPair): string {
+export function backupLineOf(p: LabelPair, memo = ''): string {
   const m = /^[ABCD]/.exec(p.priority ?? '');
+  const memoText = flat(memo).trim();
   const body = [
     'v1', p.key, p.project.sourceMailId, p.runId, p.judgedAt, p.judgment.verdict, m ? m[0] : '-', reqCodeOf(p.judgment), p.judgment.rateReason || '-',
+    ...(memoText ? [memoText] : []),
   ].map((v) => flat(String(v ?? ''))).join('\t');
   return `${body}\t${crc32Hex(body)}`;
 }
@@ -209,19 +224,19 @@ export function parseBackup(text: string): { rows: BackupRow[]; bad: number } {
     const line = raw.replace(/\r$/, '');
     if (!line.trim() || line === BACKUP_HEADER) continue;
     const cols = line.split('\t');
-    if (cols.length !== BACKUP_COLUMNS || cols[0] !== 'v1') {
+    if (!isBackupColumnCount(cols.length) || cols[0] !== 'v1') {
       bad += 1;
       continue;
     }
     const body = cols.slice(0, -1).join('\t');
-    if (crc32Hex(body) !== cols[BACKUP_COLUMNS - 1]) {
+    if (crc32Hex(body) !== cols[cols.length - 1]) {
       bad += 1;
       continue;
     }
     const [, key, sourceMailId, runId, judgedAt, verdict, priority, req, rateReason] = cols as [string, string, string, string, string, string, string, string, string];
     if (seen.has(key)) continue;
     seen.add(key);
-    rows.push({ key, sourceMailId, runId, judgedAt, verdict, priority, req, rateReason });
+    rows.push({ key, sourceMailId, runId, judgedAt, verdict, priority, req, rateReason, memo: cols.length === BACKUP_COLUMNS_WITH_MEMO ? (cols[9] as string) : '' });
   }
   return { rows, bad };
 }
@@ -250,8 +265,13 @@ export function compareBackup(
 export const BACKUP_SPLIT_BYTES = 15000;
 
 // 見出し行＋行を、split があれば指定バイトごとのファイルに分けて書く。0件は書かない。書いたファイル名と合計を返す
-export function writeBackupFiles(outDir: string, pairs: LabelPair[], split: boolean): { files: string[]; lines: number; bytes: number } {
-  const lines = pairs.map(backupLineOf);
+export function writeBackupFiles(
+  outDir: string,
+  pairs: LabelPair[],
+  split: boolean,
+  memos: Map<string, string> = new Map(),
+): { files: string[]; lines: number; bytes: number } {
+  const lines = pairs.map((p) => backupLineOf(p, memos.get(p.key) ?? ''));
   if (lines.length === 0) return { files: [], lines: 0, bytes: 0 };
   mkdirSync(outDir, { recursive: true });
   const groups: string[][] = [];
