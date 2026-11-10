@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { buildProperCandidates } from '../proper/index.js';
 import { __setProperJudgeForTest, __setCachedProjectIdsForTest } from '../proper/judge.js';
-import { salesPriorityOf, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
+import { salesPriorityOf, salesPriorityWithoutHighRateRule, belowMinPriority, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
 import { jstDateOf } from '../dates.js';
 import {
   labelsDir, readLabelStore, latestSales, type LabelSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
@@ -59,15 +59,19 @@ export interface LabelsEvalResult {
   // rows・checks・validityPct は営業の評価だけ（Claude確認を除く）。以前の基準 JSON は Claude 分を含んでいた
   // 営業リストに載せた組（営業の評価がある組）のうち、提案済以降に進んだ割合と見送りの内訳
   outcome: OutcomeResult;
-  priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number; claude: { checked: number; good: number; validityPct: number | null } } | null;
+  priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number;
+    // 高単価×必須△・年数不足の規則（PROPER_HIGH_RATE_GAP_MAN）を当てて載らなくなる組と、そのうち営業が提案済以降にした組（0 でなければ規則を見直す）
+    highRateRule?: { dropped: number; droppedProposed: number; proposedKeys: string[] }; claude: { checked: number; good: number; validityPct: number | null } } | null;
 }
 
 const pct = (a: number, b: number): number | null => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
 const bump = (m: Record<string, number>, k: string) => { m[k] = (m[k] ?? 0) + 1; };
 
 // 保存した判定をそのまま返す判定器で今のコードの優先度を計算する。要員ごと・judgedAt の日付（JST）ごとにまとめて1回で通す
-async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<string, ProperEngineer>): Promise<Map<string, string>> {
+// highRateDropped: 高単価×必須△・年数不足の規則（B4）で、規則が無ければ載っていた組が載らなくなるものの key
+async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<string, ProperEngineer>): Promise<{ priorities: Map<string, string>; highRateDropped: Set<string> }> {
   const out = new Map<string, string>();
+  const highRateDropped = new Set<string>();
   const judgments = new Map(pairs.map((p) => [p.key, p.judgment]));
   __setProperJudgeForTest(async (e, p) => {
     const j = judgments.get(`${e.id}|${p.id}`);
@@ -89,6 +93,9 @@ async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<str
     try {
       const { candidates } = await buildProperCandidates([engineer], projects, at);
       const byKey = new Map(candidates.map((c) => [`${c.ownEngineerId}|${c.projectId}`, salesPriorityOf(c)]));
+      for (const c of candidates) {
+        if (belowMinPriority(salesPriorityOf(c)) && !belowMinPriority(salesPriorityWithoutHighRateRule(c))) highRateDropped.add(`${c.ownEngineerId}|${c.projectId}`);
+      }
       for (const p of group) out.set(p.key, byKey.get(p.key) ?? PRIORITY_NONE);
     } catch (err) {
       console.error(`優先度の再計算に失敗しました（飛ばします）: ${err instanceof Error ? err.constructor.name : 'Error'}`);
@@ -96,7 +103,7 @@ async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<str
   }
   __setProperJudgeForTest(null);
   __setCachedProjectIdsForTest(null);
-  return out;
+  return { priorities: out, highRateDropped };
 }
 
 export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
@@ -125,10 +132,11 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
   let priority: LabelsEvalResult['priority'] = null;
   const rated = usable.filter((p) => sales.has(p.key));
   if (rated.length > 0) {
-    const now = await recomputedPriorities(rated, engineersByHash);
+    const { priorities: now, highRateDropped } = await recomputedPriorities(rated, engineersByHash);
     const rows: Record<string, PriorityRow> = {};
     let changed = 0;
     let compared = 0;
+    const highRateRule = { dropped: 0, droppedProposed: 0, proposedKeys: [] as string[] };
     const claude = { checked: 0, good: 0, validityPct: null as number | null };
     for (const p of rated) {
       const prio = now.get(p.key);
@@ -136,6 +144,13 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
       const s = sales.get(p.key);
       if (!s) continue;
       compared += 1;
+      if (highRateDropped.has(p.key)) {
+        highRateRule.dropped += 1;
+        if (PROPOSED_OR_LATER.includes(s.status)) {
+          highRateRule.droppedProposed += 1;
+          highRateRule.proposedKeys.push(p.key);
+        }
+      }
       if ((p.priority || PRIORITY_NONE) !== prio) changed += 1;
       const row = (rows[prio] ??= { n: 0, checks: {}, checked: 0, validityPct: null, reasons: {}, proposed: 0 });
       row.n += 1;
@@ -152,7 +167,7 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
     }
     for (const row of Object.values(rows)) row.validityPct = pct((row.checks['◎'] ?? 0) + (row.checks['○'] ?? 0), row.checked);
     claude.validityPct = pct(claude.good, claude.checked);
-    priority = { rows, changedFromStored: changed, compared, claude };
+    priority = { rows, changedFromStored: changed, compared, claude, highRateRule: { ...highRateRule, proposedKeys: highRateRule.proposedKeys.slice(0, MISSED_MAX) } };
   }
   const outcome = outcomeOf(pairs.map((p) => sales.get(p.key)).filter((x): x is LabelSales => x !== undefined));
   return { counts, recall, outcome, priority };
@@ -190,6 +205,11 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
     }
     const cl = res.priority.claude;
     lines.push(`  Claude確認: チェック${cl.checked}件・妥当率${fmt(cl.validityPct)}`);
+    const hr = res.priority.highRateRule;
+    if (hr) {
+      lines.push(`  高単価×必須△・年数不足の規則で載らなくなる組: ${hr.dropped}（うち営業が提案済以降にした組 ${hr.droppedProposed}${hr.droppedProposed > 0 ? '。規則を見直す' : ''}）`);
+      if (hr.proposedKeys.length > 0) lines.push(`    提案済以降だった組（最大${MISSED_MAX}件）: ${hr.proposedKeys.join(', ')}`);
+    }
     lines.push(`  保存時と優先度が違う組: ${res.priority.changedFromStored}/${res.priority.compared}`);
   }
   return lines;

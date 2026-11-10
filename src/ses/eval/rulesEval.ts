@@ -127,7 +127,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -6240,6 +6240,7 @@ async function main(): Promise<void> {
     labelMemoChecks();
     labelOutcomeChecks();
     startWaitChecks();
+    highRateWeakChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6892,4 +6893,33 @@ function startWaitChecks(): void {
     !isStartTooLate('2027-01-15', '2026-12-01', NOW, 45) && isStartTooLate('2027-01-16', '2026-12-01', NOW, 45) &&
       !isStartTooLate('不明', '2026-12-01', NOW, 45) && !isStartTooLate('2027-03-01', '2026-12-01', NOW, 0));
   check('外部要員（BP）の時期判定 isTimingWithinGrace は変えない（開始がずっと後でも通る）', isTimingWithinGrace('2027-03-01', '2026-12-01', NOW));
+}
+
+function highRateWeakChecks(): void {
+  section('営業リスト: 高単価かつ必須が△・年数不足の組は C に下げる（PROPER_HIGH_RATE_GAP_MAN・既定15万円）');
+  const base = {
+    id: 'ownmatch_h_p1', ownEngineerId: 'h', ownEngineerName: 'H.H', projectId: 'p1', projectTitle: 'Java開発', projectRate: 70,
+    requiredProjectRate: 55, rateGapMan: 15, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '必要案件単価55万円に対し案件単価70万円。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'H.H',
+  };
+  const met = { kind: '必須' as const, requirement: 'Java', status: 'met' as const, quote: 'Java' };
+  const close = { kind: '必須' as const, requirement: 'SQL', status: 'close' as const, quote: 'SQL' };
+  const shortYears = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, quote: 'Java 5年以上', shortYears: 3.5 };
+  const niceClose = { kind: '尚可' as const, requirement: 'AWS', status: 'close' as const, quote: 'AWS' };
+  const withJ = (checks: Array<Record<string, unknown>>, over: Record<string, unknown> = {}, judgmentOver: Record<string, unknown> = {}) =>
+    ({ ...base, ...over, judgment: { verdict: 'recommend', work: '', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks, ...judgmentOver } }) as unknown as ProperCandidate;
+  check('+15万かつ必須△（近い経験）なら C（推奨・単価を満たしていても）', salesPriorityOf(withJ([met, close])).startsWith('C'));
+  check('+15万かつ必須の年数不足なら C', salesPriorityOf(withJ([met, shortYears])).startsWith('C'));
+  check('+15万でも必須がすべて○なら今までどおり A（尚可だけ△でも変えない）', salesPriorityOf(withJ([met])).startsWith('A') && salesPriorityOf(withJ([met, niceClose])).startsWith('A'));
+  check('+14万なら必須△でも今までどおり（推奨・必須△は A）', salesPriorityOf(withJ([met, close], { rateGapMan: 14 })).startsWith('A'));
+  check('単価が読めない（差が null）なら対象外', salesPriorityOf(withJ([met, close], { rateGapMan: null })).startsWith('A'));
+  check('IT 未経験×未経験可の組は対象外（B のまま）', salesPriorityOf(withJ([met, close], {}, { inexperiencedOk: true })).startsWith('B'));
+  check('Cになった組は SALES_MIN_PRIORITY=B の既定で載らない', belowMinPriority(salesPriorityOf(withJ([met, close]))) && !belowMinPriority(salesPriorityOf(withJ([met]))));
+  check('規則を入れる前の優先度（ラベルの確認用）は A のまま', salesPriorityWithoutHighRateRule(withJ([met, close])).startsWith('A'));
+  withEnv({ PROPER_HIGH_RATE_GAP_MAN: '0' }, () => {
+    check('0 で無効（+15万・必須△でも今までどおり A）', salesPriorityOf(withJ([met, close])).startsWith('A') && !isHighRateWeakRequired(withJ([met, close])));
+  });
+  withEnv({ PROPER_HIGH_RATE_GAP_MAN: '10' }, () => {
+    check('しきい値を 10 にすれば +14万でも C', salesPriorityOf(withJ([met, close], { rateGapMan: 14 })).startsWith('C'));
+  });
 }

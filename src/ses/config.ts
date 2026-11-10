@@ -874,6 +874,11 @@ export function properMaxStartWaitDays(): number {
   return envNum('PROPER_MAX_START_WAIT_DAYS', 45, { min: 0, int: true });
 }
 
+// 案件単価が希望よりこの額（万円/月）以上高く、必須に「近い経験」か年数不足がある組は優先度 C に下げる（営業の見送りと重なる型）。0 で無効
+export function properHighRateGapMan(): number {
+  return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
+}
+
 // プロパー候補のAI判定に回す組の上限（社員ごと）。上限は安全弁（通常は足切りを通った組をすべて判定する）。超えた組は次の回に回る（判定の控えは数えない）
 export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });
