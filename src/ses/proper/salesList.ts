@@ -11,7 +11,7 @@
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
-import { properSalesSpreadsheetId, salesExpiredKeep, salesMinPriority } from '../config.js';
+import { properHighRateGapMan, properSalesSpreadsheetId, salesExpiredKeep, salesMinPriority } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import { norm } from './judge.js';
 import { normalizeSubject } from '../resend.js';
@@ -112,15 +112,34 @@ function yearShortRequiredOf(c: ProperCandidate): Array<{ requirement: string; s
   return (c.judgment?.checks ?? []).flatMap((k) => (k.kind === '必須' && typeof k.shortYears === 'number' ? [{ requirement: k.requirement, shortYears: k.shortYears }] : []));
 }
 
+// 高単価（希望より PROPER_HIGH_RATE_GAP_MAN 万円以上）なのに、必須に「近い経験」（△）か年数不足がある組。単価が読めない・IT 未経験×未経験可の組は対象外
+export function isHighRateWeakRequired(c: ProperCandidate): boolean {
+  const gap = properHighRateGapMan();
+  if (gap <= 0 || c.rateGapMan === null || c.rateGapMan === undefined || c.rateGapMan < gap) return false;
+  if (!c.judgment || c.judgment.inexperiencedOk) return false;
+  return (c.judgment.checks ?? []).some((k) => k.kind === '必須' && k.status === 'close') || yearShortRequiredOf(c).length > 0;
+}
+
 // 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。上限超え等の参考 → D。
 // 条件付きで経験の無い必須がある組も C。
 // AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
 export function salesPriorityOf(c: ProperCandidate): string {
+  return priorityOf(c, true);
+}
+
+// 高単価×必須△・年数不足の規則を入れる前の優先度（過去のラベルに規則を当てたとき、載らなくなる組を数えるため）
+export function salesPriorityWithoutHighRateRule(c: ProperCandidate): string {
+  return priorityOf(c, false);
+}
+
+function priorityOf(c: ProperCandidate, highRateRule: boolean): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
   if (c.reference) return SALES_PRIORITIES.d;
   // IT 未経験の社員 × 未経験可の案件は、必須の技術が経験なしでも C にせず、条件交渉の B にする（確認事項の先頭に注記がある）
   if (c.judgment?.inexperiencedOk) return SALES_PRIORITIES.b;
   if (unmetRequiredOf(c).length > 0) return SALES_PRIORITIES.c;
+  // 高単価の案件は求める水準も高く、必須が近い経験どまり・年数不足の組は営業が見送りやすい。C にして営業リストの下限（B）で載せない
+  if (highRateRule && isHighRateWeakRequired(c)) return SALES_PRIORITIES.c;
   if (c.judgment) {
     if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;
     // 必須に経験なしの要件があるのに「提案推奨」と見えるのを避け、B までに抑える
