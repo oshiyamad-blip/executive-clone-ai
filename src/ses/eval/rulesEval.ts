@@ -127,7 +127,7 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, addedWithinHours, jstLabel, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -6208,6 +6208,8 @@ async function main(): Promise<void> {
     labelOutcomeChecks();
     startWaitChecks();
     highRateWeakChecks();
+    await salesKeepWriteChecks();
+    salesKeepChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6889,4 +6891,105 @@ function highRateWeakChecks(): void {
   withEnv({ PROPER_HIGH_RATE_GAP_MAN: '10' }, () => {
     check('しきい値を 10 にすれば +14万でも C', salesPriorityOf(withJ([met, close], { rateGapMan: 14 })).startsWith('C'));
   });
+}
+
+function salesKeepChecks(): void {
+  section('営業リスト: 候補から外れた未着手の行を追加から SALES_KEEP_HOURS（既定48時間）は残す');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const sheetRow = (id: string, over: Record<string, string> = {}) => {
+    const r = header.map(() => '');
+    r[col('ID')] = id; r[col('No')] = '7'; r[col('要員')] = 'A.A'; r[col('対応状況')] = '未着手'; r[col('優先度')] = 'B 通常'; r[col('追加日時')] = '2026/10/01 08:00';
+    for (const [k, v] of Object.entries(over)) r[col(k)] = v;
+    return r;
+  };
+  const target = 'ownmatch_a_proj_0000000a';
+  const plan = (rows: string[][], addedAt: string, over: { keepHours?: number; active?: boolean } = {}) =>
+    planSalesUpdate([], [header, ...rows], () => false, undefined, undefined, {
+      addedAt, keepHours: over.keepHours ?? 48, engineerActive: () => over.active ?? true,
+    });
+  const kept = (p: ReturnType<typeof plan>) => (p?.rows ?? []).map((r) => String(r[col('ID')]));
+  const at10h = '2026/10/01 18:00';
+  const at50h = '2026/10/03 10:00';
+  const a = plan([sheetRow(target)], at10h);
+  check('追加10時間後の未着手の行は、候補に無くても残す（消さず・期限切れへも移さない）', kept(a).join() === target && a?.deleteIds.length === 0 && a.expireIds.length === 0 && a.keptRecent === 1, show(a));
+  const b = plan([sheetRow(target)], at50h);
+  check('追加50時間後は今までどおり片付ける（入力が無ければ消す）', kept(b).length === 0 && b?.deleteIds.join() === target && b.keptRecent === 0);
+  const acc = plan([sheetRow(target, { 精度チェック: '○ 概ね妥当' })], at10h);
+  const accOld = plan([sheetRow(target, { 精度チェック: '○ 概ね妥当' })], at50h);
+  check('精度チェックだけの行も、10時間後は残し、50時間後は期限切れへ移す', kept(acc).join() === target && accOld?.expireIds.join() === target);
+  check('SALES_KEEP_HOURS=0（未指定も）なら今までどおりすぐ片付ける',
+    plan([sheetRow(target)], at10h, { keepHours: 0 })?.deleteIds.join() === target &&
+      planSalesUpdate([], [header, sheetRow(target)], () => false, undefined, undefined, { addedAt: at10h })?.deleteIds.join() === target);
+  const ended = plan([sheetRow(target), sheetRow('ownmatch_b_proj_0000000a', { 要員: 'B.B', 対応状況: '見送り', 見送り理由: '募集終了' })], at10h);
+  check('募集終了の案件の行は、追加10時間後でも片付ける（控えへ移す）', kept(ended).length === 0 && ended?.endedIds.join() === target);
+  check('要員が営業中でない行（engineerActive が偽）は残さない', plan([sheetRow(target)], at10h, { active: false })?.deleteIds.join() === target);
+  check('優先度が下限より低い行（C）は、追加10時間後でも残さない', plan([sheetRow(target, { 優先度: 'C 要確認' })], at10h)?.deleteIds.join() === target);
+  check('追加日時が読めない・空の行は今までどおり片付ける', plan([sheetRow(target, { 追加日時: '' })], at10h)?.deleteIds.join() === target && plan([sheetRow(target, { 追加日時: '不明' })], at10h)?.deleteIds.join() === target);
+  const dup = plan([sheetRow(target), sheetRow('ownmatch_a_proj_0000000b')], at10h);
+  check('残した行は今回の候補に引き当てた行と重ならない（候補に同じ行があれば通常の更新）',
+    (() => {
+      const fresh = planSalesUpdate([sheetRow(target)], [header, sheetRow(target)], () => false, undefined, undefined, { addedAt: at10h, keepHours: 48, engineerActive: () => true });
+      return fresh?.updates.length === 1 && fresh.keptRecent === 0 && kept(dup).length === 2;
+    })());
+  check('addedWithinHours: ちょうど48時間は内、読めなければ偽、0 以下は偽', addedWithinHours('2026/10/01 08:00', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/03 08:01', 48) &&
+    !addedWithinHours('x', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/01 09:00', 0));
+}
+
+// 本番の書き込み（writeSalesList）にも効くこと。Googleには接続せず、書き込みを記録するだけの Sheets API に差し替える
+async function salesKeepWriteChecks(): Promise<void> {
+  section('営業リストの書き込み: 追加から間もない行は候補から外れても消さない（SALES_KEEP_HOURS）');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const cand = {
+    id: 'ownmatch_a_proj_0000000p', ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: 'proj_0000000p', projectTitle: 'Java開発', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '［条件］外国籍不可。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'A.A',
+  };
+  const engineer = { id: 'a', displayName: 'A.A', proposalLabel: 'A.A', requiredProjectRate: 55, availableDate: '', experienceYears: 3, skills: ['Java'] } as unknown as ProperEngineer;
+  const run = async (addedHoursAgo: number, keepHours: string | undefined, engineers: ProperEngineer[]) => {
+    const row = header.map(() => '');
+    row[col('ID')] = 'ownmatch_a_proj_0000000q'; row[col('No')] = '3'; row[col('要員')] = 'A.A'; row[col('対応状況')] = '未着手'; row[col('優先度')] = 'B 通常';
+    row[col('希望単価(万)')] = '55'; row[col('追加日時')] = jstLabel(new Date(Date.now() - addedHoursAgo * 3_600_000));
+    const requests: unknown[] = [];
+    const expiredAppends: unknown[] = [];
+    const api = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: ['全体', 'クローズ済み', '精度集計', '要員一覧', '期限切れ'].map((title, i) => ({ properties: { sheetId: i + 1, title, gridProperties: { rowCount: 1000, columnCount: header.length + 1 } } })) } }),
+        batchUpdate: async (p: { requestBody: { requests: unknown[] } }) => (requests.push(...p.requestBody.requests), { data: {} }),
+        values: {
+          get: async (p: { range: string }) => ({ data: { values: p.range.startsWith("'全体'") ? (/A1:/.test(p.range) ? [header] : [header, row]) : [] } }),
+          update: async () => ({ data: {} }),
+          append: async (p: { range: string; requestBody: { values: unknown[][] } }) => (p.range.startsWith("'期限切れ'") && expiredAppends.push(...p.requestBody.values), { data: {} }),
+          batchUpdate: async () => ({ data: {} }),
+          batchClear: async () => ({ data: {} }),
+        },
+      },
+    };
+    const savedId = process.env.PROPER_SALES_SPREADSHEET_ID;
+    const savedKeep = process.env.SALES_KEEP_HOURS;
+    process.env.PROPER_SALES_SPREADSHEET_ID = 'sheet_selftest_sales';
+    if (keepHours === undefined) delete process.env.SALES_KEEP_HOURS;
+    else process.env.SALES_KEEP_HOURS = keepHours;
+    __setSalesSheetsApiForTest(api as unknown as import('googleapis').sheets_v4.Sheets);
+    try {
+      await writeSalesList([cand], [], engineers);
+    } finally {
+      __setSalesSheetsApiForTest(null);
+      if (savedId === undefined) delete process.env.PROPER_SALES_SPREADSHEET_ID;
+      else process.env.PROPER_SALES_SPREADSHEET_ID = savedId;
+      if (savedKeep === undefined) delete process.env.SALES_KEEP_HOURS;
+      else process.env.SALES_KEEP_HOURS = savedKeep;
+    }
+    const deleted = requests.some((r) => (r as { deleteDimension?: unknown }).deleteDimension);
+    return { deleted, expired: expiredAppends.length };
+  };
+  const recent = await run(10, undefined, [engineer]);
+  check('追加10時間後の行は、候補に無く案件が募集中でなくても（要員は営業中）残す（既定48時間）', !recent.deleted && recent.expired === 0, JSON.stringify(recent));
+  const old = await run(50, undefined, [engineer]);
+  check('追加50時間後は今までどおり控えへ移して消す', old.deleted, JSON.stringify(old));
+  const off = await run(10, '0', [engineer]);
+  check('SALES_KEEP_HOURS=0 なら10時間後でも今までどおり消す', off.deleted, JSON.stringify(off));
+  const gone = await run(10, undefined, []);
+  check('要員が営業中でなくなった行は10時間後でも消す', gone.deleted, JSON.stringify(gone));
 }
