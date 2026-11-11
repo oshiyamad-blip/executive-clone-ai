@@ -70,14 +70,18 @@ export function parseRosterSummary(summary: string): RosterSummary {
   const get = (k: string) => f.get(k) ?? '';
   const age = get('年齢').match(/\d{2}/);
   const rate = get('単価').match(/(\d+(?:\.\d+)?)\s*万/);
+  // 見出しが「■スキル」でなく「■経験」の要員がいる。技術の並びに見えるとき（区切りがあり年数でない）だけ使う
+  const alt = get('経験');
+  const skillText = get('スキル') || (/[、,，/／]/.test(alt) && !/年|ヶ月|か月|ヵ月/.test(alt) ? alt : '');
   return {
     age: age ? Number(age[0]) : null,
     // 「弊社社員」「弊社正社員」「弊社契約社員」は自社。それ以外（「協力会社」「BP」など）はパートナー
     affiliation: !get('所属') || /弊社|自社|当社/.test(get('所属')) ? 'proper' : 'partner',
     station: get('最寄'),
     rateMan: rate ? Number(rate[1]) : null,
-    skills: get('スキル').split(/[、,，/／\n]/).map((s) => s.trim()).filter(Boolean),
-    experienceText: get('経験年数'),
+    skills: skillText.split(/[、,，/／\n]/).map((s) => s.trim()).filter(Boolean),
+    // 新しい研修明けの要員は「■経験年数」欄が無く社会人経験年数だけなので、既存の「なし（社会人経験…）」と同じ形にして未経験判定に載せる
+    experienceText: get('経験年数') || (get('社会人経験年数') ? `なし（社会人経験${get('社会人経験年数')}）` : ''),
     note: get('備考'),
   };
 }
@@ -188,6 +192,18 @@ export function scrubRosterName(text: string, name: string): string {
   return out;
 }
 
+// 人がタブ名を付けるため、区切りの揺れ（無し・全角＿・空白・-）と前後の空白は許す。完全一致のタブがあれば常にそれを使う
+export function skillSheetTabOf(name: string, titles: Iterable<string>): string | null {
+  const n = name.trim();
+  if (!n) return null;
+  const all = [...titles];
+  const exact = `${SKILL_SHEET_TAB_PREFIX}${name}`;
+  if (all.includes(exact)) return exact;
+  const esc = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^${esc(SKILL_SHEET_TAB_PREFIX.replace(/_$/, ''))}[_＿\\-\\s]*${esc(n)}$`);
+  return all.find((t) => re.test(t.trim())) ?? null;
+}
+
 export function rosterEngineersFromValues(input: RosterInput, now = new Date()): ProperEngineer[] {
   const { spreadsheetId: id, rows, gidOf } = input;
   const headerAt = rosterHeaderAt(rows);
@@ -201,7 +217,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
     if (!name || (r[col('状況')] ?? '').trim() !== ROSTER_ACTIVE_STATUS) continue;
     const s = parseRosterSummary(r[col('サマリ')] ?? '');
     const skills = normalizeSkills(s.skills);
-    const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
+    const tab = skillSheetTabOf(name, gidOf.keys());
     const text = scrubRosterName(input.sheetTexts.get(name) ?? '', name);
     const level = mergeLevels(input.levels?.get(name) ?? null, summaryLevel(s));
     const available = (r[col('稼働開始時期')] ?? '').trim();
@@ -214,7 +230,7 @@ export function rosterEngineersFromValues(input: RosterInput, now = new Date()):
       fullName: '',
       proposalLabel: label,
       fileId: '',
-      skillSheetUrl: gidOf.has(tab) ? `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gidOf.get(tab)}` : '',
+      skillSheetUrl: tab !== null ? `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gidOf.get(tab)}` : '',
       skills: normalizeSkills([...skills, ...level.skillYears.map((y) => y.skill)]),
       experienceYears: parseYears(head),
       requiredProjectRate: s.rateMan,
@@ -255,8 +271,8 @@ export async function loadRosterEngineers(now = new Date()): Promise<ProperEngin
   const levels = new Map<string, EngineerLevel | null>();
   let sheetFailures = 0;
   for (const name of activeRosterNames(rows)) {
-    const tab = `${SKILL_SHEET_TAB_PREFIX}${name}`;
-    if (!gidOf.has(tab)) continue;
+    const tab = skillSheetTabOf(name, gidOf.keys());
+    if (tab === null) continue;
     try {
       const text = skillSheetText(await tabValues(sheets, id, tab));
       sheetTexts.set(name, text);

@@ -800,6 +800,11 @@ export function properSalesSpreadsheetId(): string {
   return driveIdFrom(process.env.PROPER_SALES_SPREADSHEET_ID);
 }
 
+// 営業リストで、候補から外れた未着手の行を「追加日時」からこの時間は残す（営業が見た行が数時間で消えないように）。0 で今までどおり（すぐ片付ける）
+export function salesKeepHours(): number {
+  return envNum('SALES_KEEP_HOURS', 48, { min: 0 });
+}
+
 // 営業リストの「期限切れ」タブ（候補から外れて消した行の控え）に残す行数。超えたら古い行（上）から消す。0 で上限なし
 export function salesExpiredKeep(): number {
   return envNum('SALES_EXPIRED_KEEP', 3000, { min: 0, int: true });
@@ -852,6 +857,16 @@ export function properMasterInMainTenant(): boolean {
 // 0 にすると必要案件単価以上の案件だけにする
 export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
+}
+
+// 社員の稼働開始（今日より前なら今日）から案件の開始までがこの日数を超えるときは候補にしない（待機が長く出るため）。0 で無効
+export function properMaxStartWaitDays(): number {
+  return envNum('PROPER_MAX_START_WAIT_DAYS', 45, { min: 0, int: true });
+}
+
+// 案件単価が希望よりこの額（万円/月）以上高く、必須に「近い経験」か年数不足がある組は優先度 C に下げる（営業の見送りと重なる型）。0 で無効
+export function properHighRateGapMan(): number {
+  return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
 }
 
 // プロパー候補のAI判定に回す組の上限（社員ごと）。上限は安全弁（通常は足切りを通った組をすべて判定する）。超えた組は次の回に回る（判定の控えは数えない）

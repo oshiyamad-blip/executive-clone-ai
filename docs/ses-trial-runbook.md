@@ -14,6 +14,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 0. **本番バッチ（Claude API）が担当中でないか**（最初に確かめる）: 営業リストの `'_運用'!A1:B20` を `get_values` で読み（タブが無ければ `{"values":[]}` のファイルにする）、
    `npm run --silent ses:trial:handoff -- check <_運用の読み取りファイル> <実行ログの最後の行の C 列（epoch秒）> <実行開始のepoch秒>` を実行する
    （標準出力は `{"run":bool,"startEpoch":N,"mode":"api|trial|none","reason":"…"}`。本番が API の残高で動いているあいだは同じ営業リストに同時に書かない）
+   - 担当が `trial-pinned`（人が本番を止めるときに `_運用` の担当へ手で書く固定。本番は残高があっても戻らない）のときは mode が trial-pinned で `run: true`。回の終わりの書き込みでも `trial-pinned` のまま保つ
    - `run: false`（担当が api で、API最終実行が6時間以内）なら、メールチェック以降は行わず、実行ログに1行足して終える:
      A「<開始> （見送り・本番バッチが担当中）」、B と C は前の行の C のまま、D〜J は 0、K に reason、P は所要時間、Q は前の行の Q をそのまま写す、R は「対象外」、S は「0」。
      見送りの行は 3b の起点には使わない。最後の報告は「見送り（本番バッチが担当中）」の1行
@@ -46,13 +47,25 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 1. **一覧**: 区切りは `npm run --silent ses:trial:windows -- <startEpochSec> <endEpochSec>` で作る（標準出力は `[[after,before],...]`）。
    平日（JST の月〜金）の 08:00〜21:00 は30分ごと、夜間・土日は続いている間を1つの区切りにまとめる（祝日は見ない）。夜間・休日の区切りは1担当でページを最後までたどる。
    区切りごとにサブエージェントへ一覧を頼む。
+   - Gmail の検索が `after:`/`before:` の秒指定を受け付けず（0件）、`nextPageToken` も返さない（1回50スレッドまで）ときは、時間単位で一覧する。
+     `npm run --silent ses:trial:listhours -- plan <startEpochSec> <endEpochSec>` の出力 `{"hours":[0..H],"groups":[[..],..],"queries":[..]}` の区切り（group）ごとに一覧担当を1つ起動する
+     （平日 08:00〜21:00 の時間は1時間ずつ、それ以外は6時間まで。毎分の上限があるので同時は4担当まで）。
+     担当は時間 h ごとに `queries[h]`（`label:SES newer_than:{h+1}h older_than:{h}h` に、件名だけで明らかな要員メールの除外 `-subject:"要員紹介"` などを足したもの。h=0 は `newer_than:1h`。`listQueryOf`）を `THREAD_VIEW_MINIMAL`・`pageSize: 50` で呼ぶ。
+     50件返ったら取りこぼしがあるので、まず送信元ドメインで分ける: その時間に多かった送信元ドメイン（上位）を `from:(<ドメイン> OR <ドメイン> …)` と `-from:(同じ並び)` に分けて呼び直す。
+     それでも50件のものは、その時間のクエリを `has:attachment` と `-has:attachment` に分ける。`larger:`/`smaller:` のサイズ指定は結果が大きく重なり、きれいに分割できなかったので使わない。
+     internalDate は最新メッセージIDから `Number(BigInt('0x'+id) >> 20n)`（ms）で出す。
+     `Resource has been exhausted` が返ったら60秒待って同じ呼び出しをやり直す（3回まで）。それでも失敗したら、取れた分を書いたうえで取れなかった時間・条件を報告する。
+     行は `list/sNN.tsv` に書く（形式は上と同じ）。全担当が終わったら `npm run --silent ses:trial:listhours -- fix <RUN_DIR> <startEpochSec> [endEpochSec]` で範囲外を落として重複を除き、`list/w00.tsv` にまとめる
+     （標準出力は件数だけ `{"read":N,"kept":K,"dropped":D}`）。そのあとは同じくチャンク分けへ進む。
    Gmail の `search_threads` を `label:SES after:<始まり> before:<終わり>`（epoch秒）、`THREAD_VIEW_MINIMAL`、`pageSize: 50` で呼び、
    次のページが無くなるまで取り、各スレッドについて `スレッドID<TAB>最新メッセージID<TAB>internalDate<TAB>送信者<TAB>件名<TAB>メッセージ数` の行を `list/wNN.tsv` に書く
    （最新メッセージID・internalDate・件名・送信者は、そのスレッドのうち区切りの時間内に受信した一番新しいメッセージのもの。メッセージ数はスレッド全体。
    プレビューに出るのは古い5通までなので、メッセージ数が5を超えるスレッドは最新メッセージIDを空にする。件名のタブ・改行は空白に置き換える）
 2. **チャンク分け**: `npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1] [max=0]` を実行する（`max` は新しい順に残すスレッド数。0 は上限なし。再開した回だけ 1000 を付ける。環境変数 `SES_TRIAL_MAX_THREADS` でも可で、引数が優先）。試運転は `keep=0.5`（使用量を抑えるため件名の点数 `subjectPriority` の上位半分だけ抽出する。外したメールは `<RUN_DIR>/deferred.jsonl` に残る）で行う。スレッドIDの重複を除き（internalDate が大きい行）、受信時刻の順に30件ずつ
    `chunks/cNN`（各行 `スレッドID<TAB>受信日時ISO<TAB>最新メッセージID<TAB>メッセージ数`）に分ける。件名だけで明らかな要員メール（`engineerBySubject`）は抽出に回さず `out/skip.jsonl` に書く。
-   古い形の一覧（`スレッドID<TAB>スレッドID<TAB>internalDate<TAB>送信者`）も読める。標準出力は件数だけ（`threads`・`capped`（max で外した数）・`skippedBySubject`・`deferred`（keep で外した数）・`chunks`）
+   前の回（兄弟の `run_*`、または `CARRY_DIRS`）で1案件と抽出したメールと同じ送信者・同じ件名の再送（受信が新しく、遡り期間内）は抽出に回さず、前の行を写して `out/resent.jsonl` に書く
+   （一覧・まとめの件名は、案件名が件名に含まれるときだけ。2案件以上のメールは対象外）。
+   古い形の一覧（`スレッドID<TAB>スレッドID<TAB>internalDate<TAB>送信者`）も読める。標準出力は件数だけ（`threads`・`capped`（max で外した数）・`skippedBySubject`・`deferred`（keep で外した数）・`chunks`・`resent`（再送として使い回した数））
 3. **抽出**: チャンクごとにサブエージェントを起動する（下の「抽出の指示」をそのまま渡す）。結果は `out/cNN.jsonl`
    （チャンクごとに Agent を個別に同時起動する。1つのワークフローにまとめると同時に動く数が絞られ、約2倍の時間がかかる）
 4. すべてのチャンクで行数が入力（`chunks/cNN` の行数）と一致することを確かめる。足りないチャンクは同じ指示で再実行する
@@ -113,20 +126,24 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    要るのは No・要員・案件名・優先度・案件単価(万)・希望単価(万)・判定理由・交渉ポイント・確認事項・判定の理由・対応状況・見送り理由・担当営業・メモ・精度チェック・精度メモ・営業元メール・メール件名・受信日時・追加日時・最終更新・前回優先度・ID の列だけでよい（行の順番どおり。
    営業元メール・メール件名・受信日時は ID の付け替え（本番への切り替え）の照合に、優先度から判定の理由までと最終更新・前回優先度は変化の検知に使う）。
    「クローズ済み」タブの ID 列を `closed_ids.json`（文字列の配列）に書く。
+   「期限切れ」タブの読み取り結果を `expired_values.json`（`{ "values": [[...], ...] }`）に置けば、その ID も照合から外れる（本番の writeSalesList と同じ）。
    「クローズ済み」タブの行も `existing.json` と同じ形で `closed_rows.json` に書く（ラベルの取り込み用。`PHASE=prep`・`final` が要員＋案件名・要員＋営業元メール＋件名＋受信日時の照合と「見送り・募集終了」の行の判定にも使うので、要員・案件名・営業元メール・メール件名・受信日時・対応状況・見送り理由・ID の列は必須）。
-   「期限切れ」タブは照合に使わない（読まない）。
+   「期限切れ」タブは ID の照合（上の `expired_values.json`）にだけ使う。
    対応状況・見送り理由・精度チェックの件数は、ここで取った値から採点（4.）で数える
 3. `PHASE=prep` を実行する。`pairs.json`（要員ごとの判定する組）と `system_<要員>.txt`（判定の指示＋経歴）ができる。
    すでにシートにある組・クローズした組は判定し直さない
    前の回（同じ親ディレクトリの `run_*`）の抽出結果のうち受信が遡り期間内の案件も材料にし、前の回で判定済みの組は判定しない。
    判定の上限（要員ごと150組（安全弁）。通常は足切りを通った組をすべて判定する）は未判定の組だけを数えるので、上限で漏れた組は次の回に回る。出力の `carried`（前の回から回ってきた組）・`overCap`（まだ残っている組）を実行ログに書く。
    前の回の作業ディレクトリは遡り期間（14日）のあいだ消さない
+   案件の開始が要員の稼働開始（今日より前なら今日）より `PROPER_MAX_START_WAIT_DAYS`（既定45日。0 で無効）日を超えて後の組は、待機が長く出るため `PHASE=prep` が判定に回さない（出力の `startWaitSkipped`＝外した組の数。日付が読めない組は通す。外部要員の突合は変えない）
 4. **AI判定**: 要員ごとにサブエージェントを起動し、下の「判定の指示」を渡す。担当は1担当9組・同時に20担当まで。足りなければ空いたら順に起動する。結果は `judged_<要員>.json`
    似た要員（同じ単価・希望、スキルの重なり係数が `PROPER_GROUP_SIMILARITY` 以上）は、`PHASE=prep` が同じ案件の組を代表の1人にだけ残し、他の人の組は `group_pending.json` に回している（出力の `grouped`＝外した組の数）。
    判定のあと `PHASE=fanout` を実行する。代表の判定を似た要員の経歴で照合し、合えば `judged_<要員>.json` に足す。出力は `{"shared":N,"fallback":M}`。
    `fallback` が1以上なら、`pairs_fallback.json`（`pairs.json` と同じ形）を同じ「判定の指示」で判定する（指示の `pairs.json` を `pairs_fallback.json` に読み替える）。結果は各 `judged_<要員>.json` の末尾に足す。
    実行ログの「判定した組」には「（似た要員への使い回し N 組）」を添える
 5. `PHASE=final` の前に、「クローズ済み」と「期限切れ」の A 列を読み、つないで `used_nos.json`（`{"values":[[...],...]}`。見出しを含んでよい）に置く（新しい行の No. が控えの No. と重ならないようにする。無ければ「全体」の最大の次から振る）
+   `PHASE=final` は、優先度を決めるとき、案件単価が希望より `PROPER_HIGH_RATE_GAP_MAN`（既定15万円。0 で無効）以上高く、必須に「近い経験」（△）か年数不足がある組を C にする（`SALES_MIN_PRIORITY` が B なので載らない。IT 未経験×未経験可の組・単価が読めない組は対象外）。
+   また、追加日時から `SALES_KEEP_HOURS`（既定48時間。0 で今までどおり）以内の行は、今回の候補に無くても `deleteIds`・`expireIds` に入れず残す（出力の `keptRecent`＝残した行数。募集終了の案件・要員が営業中でない（希望単価が変わった）行・優先度が下限より低い行・追加日時が読めない行は今までどおり片付ける）
    `PHASE=final` を実行する。`plan.json` と `writes/wNN.json`（書き込みの範囲と値、1ファイル約15KB。書き込みは下の 6. で `ses:trial:writeplan` が変わったセルだけの `wf/wNN.json` に作り直す）ができる
    出力の `gated` が true（AI判定の失敗が多い回）のときは `plan.json`・`writes/` を作らないので、書き込みはしない（判定をやり直す）
    出力の `rekeyed`（案件IDの付け替え行数）・`deletes`（期限切れの控えへ移す行数）は実行ログに件数で書く

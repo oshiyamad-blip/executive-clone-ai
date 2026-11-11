@@ -663,6 +663,17 @@ export function isTimingWithinGrace(startDateIso: string, availableFromIso: stri
   return available <= Math.max(start, today) + graceMs;
 }
 
+// 案件の開始が、要員の稼働開始（今日より前なら今日）よりずっと後で、待機が出る組か（isTimingWithinGrace の反対側）。
+// 待機が maxDays 日を超えたら true。maxDays が 0 以下・日付が読めないときは false（通す）
+export function isStartTooLate(startDateIso: string, availableFromIso: string, now: Date, maxDays: number): boolean {
+  if (!(maxDays > 0)) return false;
+  const start = new Date(startDateIso).getTime();
+  const available = new Date(availableFromIso).getTime();
+  if (Number.isNaN(start) || Number.isNaN(available)) return false;
+  const today = Date.parse(`${jstDateOf(now)}T00:00:00Z`);
+  return start - Math.max(available, today) > maxDays * 24 * 60 * 60 * 1000;
+}
+
 // 最終判定を同時に走らせる数（1件ずつだと候補の多い回で実行時間の上限に届くため。APIのレート制限の内に収める）
 const JUDGE_CONCURRENCY = 3;
 

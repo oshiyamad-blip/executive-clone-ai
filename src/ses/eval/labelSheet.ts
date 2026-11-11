@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BACKUP_HEADER, backupLineOf, labelsDir, parseBackup, readLabelStore } from './labels.js';
+import { BACKUP_HEADER, backupLineOf, isBackupColumnCount, labelsDir, parseBackup, readLabelStore, salesMemosOf } from './labels.js';
 import { packElements, sheetRowsOf, type WriteElement } from '../trial/writePlan.js';
 
 export interface LabelSheetPlan {
@@ -21,7 +21,7 @@ export const DEFAULT_SHEET_NAME = 'ラベル控え';
 const clean = (s: string): string => s.replace(/\r$/, '');
 const keyOfLine = (line: string): string | null => {
   const cols = line.split('\t');
-  return cols[0] === 'v1' && cols.length === 10 && cols[1] ? (cols[1] as string) : null;
+  return cols[0] === 'v1' && isBackupColumnCount(cols.length) && cols[1] ? (cols[1] as string) : null;
 };
 
 const rangeOf = (sheetName: string, from: number, to: number): string => `'${sheetName.replace(/'/g, "''")}'!A${from}:A${to}`;
@@ -113,7 +113,9 @@ function sheetColumnA(readBackFile: string): string[] {
 }
 
 export function planCli(readBackFile: string, outDir: string, sheetName: string, fileBytes: number) {
-  const store = readLabelStore(labelsDir()).pairs.map(backupLineOf);
+  const labels = readLabelStore(labelsDir());
+  const memos = salesMemosOf(labels.sales);
+  const store = labels.pairs.map((p) => backupLineOf(p, memos.get(p.key) ?? ''));
   const plan = planLabelSheet(store, sheetColumnA(readBackFile), sheetName);
   mkdirSync(outDir, { recursive: true });
   for (const n of readdirSync(outDir)) if (/^ls\d+\.json$/.test(n)) rmSync(join(outDir, n));

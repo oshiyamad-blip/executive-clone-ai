@@ -45,6 +45,7 @@
     "ses:trial:chunks": "tsx src/ses/trial/chunks.ts",
     "ses:trial:writeplan": "tsx src/ses/trial/writePlan.ts",
     "ses:trial:windows": "tsx src/ses/trial/windows.ts",
+    "ses:trial:listhours": "tsx src/ses/trial/listHours.ts",
     "ses:trial:gate": "tsx src/ses/trial/gate.ts",
     "ses:trial:handoff": "tsx src/ses/trial/handoff.ts",
     "ses:labels:sheet": "tsx src/ses/eval/labelSheet.ts",

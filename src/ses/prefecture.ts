@@ -225,6 +225,12 @@ export function wideRegionOf(prefecture: string | null): string | null {
   return Object.entries(REGIONS).find(([, prefs]) => prefs.includes(prefecture))?.[0] ?? null;
 }
 
+// 都道府県を読めない社員（名簿が最寄り駅だけ等）の既定の地方。空文字なら使わない
+export function defaultOwnRegion(): string | null {
+  const v = (process.env.PROPER_DEFAULT_REGION ?? '関東').trim();
+  return v === '' ? null : v;
+}
+
 // 居住地を都道府県・市区町村までにする（最初の数字以降の丁目・番地・建物を落とす）。
 // 突合・文面に使うのは都道府県だけのため、メール・スキルシートに番地まで書かれていても保存しない
 export function coarseResidence(raw: string): string {

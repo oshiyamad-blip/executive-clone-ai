@@ -39,6 +39,7 @@ import { isModelUnavailableError, isCreditExhausted } from '../../llm/errors.js'
 import { handoffEnabled, salesMinPriority } from '../config.js';
 import { parseHandoff, handoffRows, decideApiRun, formatJst, type HandoffState } from '../handoff.js';
 import { trialCheck, trialRows } from '../trial/handoff.js';
+import { shouldSkipProperAfterCollectFailure } from '../collectGate.js';
 import { retirementNotice } from '../../llm/modelLifecycle.js';
 import { withExtractModelFallback, shouldFallbackExtractModel } from '../extractModelFallback.js';
 import {
@@ -113,19 +114,20 @@ import { isLastChance } from '../schedule.js';
 import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
-import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
+import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
+import { requiresMetroResidence } from '../residence.js';
 import { acceptsInexperienced } from '../inexperienced.js';
 import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, INEXPERIENCED_PARAGRAPH, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { skillOverlap, groupSimilarEngineers, adaptJudgment } from '../proper/group.js';
 import { planFanout } from '../trial/fanout.js';
-import { rosterProfileText, rosterEngineersFromValues } from '../proper/roster.js';
+import { rosterProfileText, rosterEngineersFromValues, skillSheetTabOf } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
-import { parseRosterSummary, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, maxNoOf, closedStateOf, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, addedWithinHours, jstLabel, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -148,12 +150,13 @@ import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
 import { engineerBySubject, subjectPriority, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
-import { ageLimitOf } from '../match.js';
+import { ageLimitOf, isStartTooLate, isTimingWithinGrace } from '../match.js';
 import { rowToProperEngineer, properLabelOf, PROPER_MASTER_COLUMNS } from '../proper/master.js';
 import { readRawAttachments, rawMimeOf, attachmentMaterial, pdfBufferToText, ATTACH_TEXT_MAX } from '../trial/rawAttach.js';
 import { bodyHeadShortPct, quoteMissingPct } from '../trial/bodyHeadGap.js';
 import { fixRunDir } from '../trial/bodyFix.js';
 import { windowsOf } from '../trial/windows.js';
+import { fixListRows, hourGroups, internalDateOfId, listQueryOf } from '../trial/listHours.js';
 import { planLabelSheet, packLabelElements, exportCli } from './labelSheet.js';
 import { chunkRunDir } from '../trial/chunks.js';
 import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
@@ -213,7 +216,8 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
-import { appendLabels, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
+import { outcomeOf, formatResult } from './labelsEval.js';
+import { appendLabels, salesMemosOf, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
 import { htmlToPlainText } from '../mail/htmlText.js';
@@ -3145,7 +3149,9 @@ async function securityAuditRound4Checks(): Promise<void> {
   const isolatedText = await spreadsheetBufferToTextIsolated(legit);
   let timedOut = '';
   try {
-    await spreadsheetBufferToTextIsolated(legit, 1);
+    // 小さな正常ファイルだと、ワーカーが温まっていれば 1ms 以内に解析が終わって時間切れにならないことがある。
+    // 解析に必ず 1ms 以上かかる大きなファイル（dense: 60万セル）で確かめる
+    await spreadsheetBufferToTextIsolated(dense, 1);
   } catch (err) {
     timedOut = String(err);
   }
@@ -3842,6 +3848,14 @@ function levelChecks(): void {
   const sl = summaryLevel(r);
   check('経験年数の欄から技術・工程の年数、備考から立場', sl.skillYears[0]?.skill === 'Java' && sl.skillYears[0]?.years === 2.3 && topPhaseOf(sl) === '詳細設計' && sl.role === 'PG', JSON.stringify(sl));
   check('所属が協力会社ならパートナー', parseRosterSummary('■所　属：協力会社（1社先）').affiliation === 'partner');
+  const alt = parseRosterSummary('■経 験：Java,Spring Boot,PostgreSQL\n■経験年数：4年1ヶ月');
+  check('スキルの欄が「■経験」の要員は、技術の並びをスキルに使う（経験年数は別）', alt.skills.length === 3 && alt.skills[1] === 'Spring Boot' && alt.experienceText === '4年1ヶ月', JSON.stringify(alt));
+  check('「■経験」が年数だけ・「■経験年数」だけならスキルは空・「■スキル」があればそちらだけ',
+    parseRosterSummary('■経　験：3年').skills.length === 0 && parseRosterSummary('■経験年数：4年1ヶ月').skills.length === 0 &&
+      JSON.stringify(parseRosterSummary('■スキル：Java\n■経験：Python,Go').skills) === '["Java"]');
+  check('「■社会人経験年数」だけの要員は IT 未経験', isItInexperienced(parseRosterSummary('■名　前：C.D\n■社会人経験年数：2年1ヶ月').experienceText));
+  check('「■経験年数」がある要員は社会人経験年数があっても未経験にしない', !isItInexperienced(parseRosterSummary('■経験年数：4年1ヶ月\n■社会人経験年数：6年').experienceText));
+  check('「■経験年数：なし（社会人経験…）」は未経験のまま', isItInexperienced(parseRosterSummary('■経験年数：なし（社会人経験6年5ヶ月）').experienceText));
   const now = new Date('2026-09-29T03:00:00Z');
   check('稼働開始時期「10月 or 11月」は早い方・「即日」は今日', rosterAvailableFrom('10月\nor\n11月', now) === '2026-10-01' && rosterAvailableFrom('即日', now) === '2026-09-29' && rosterAvailableFrom('1月', now) === '2027-01-01');
   const merged = mergeLevels({ skillYears: [{ skill: 'Java', years: 2 }], phaseYears: [], role: null }, sl);
@@ -4153,6 +4167,33 @@ async function properJudgeChecks(): Promise<void> {
       evaluateOwnMatch(kanto, nagoya, NOW) === null &&
       evaluateOwnMatch(kanto, { ...nagoya, remote: 'full' }, NOW) !== null &&
       evaluateOwnMatch({ ...kanto, prefecture: '群馬県' }, { ...nagoya, prefecture: '東京都', location: '品川' }, NOW) !== null);
+  {
+    const noPref = { ...kanto, prefecture: null };
+    const savedRegion = process.env.PROPER_DEFAULT_REGION;
+    try {
+      delete process.env.PROPER_DEFAULT_REGION;
+      const offPref = evaluateOwnMatch(noPref, nagoya, NOW) === null;
+      const fullPref = evaluateOwnMatch(noPref, { ...nagoya, remote: 'full' }, NOW) !== null;
+      process.env.PROPER_DEFAULT_REGION = '';
+      const disabled = evaluateOwnMatch(noPref, nagoya, NOW) !== null;
+      check('都道府県が読めない社員は既定の地方（関東）で見る（愛知の常駐は出さない・フルリモートは出す・PROPER_DEFAULT_REGION が空なら見ない）',
+        offPref && fullPref && disabled, show([offPref, fullPref, disabled]));
+    } finally {
+      if (savedRegion === undefined) delete process.env.PROPER_DEFAULT_REGION;
+      else process.env.PROPER_DEFAULT_REGION = savedRegion;
+    }
+    {
+      const hokkaido = { ...kanto, prefecture: '北海道' };
+      const sapporo = project({ id: 'p_spk', title: 'Oracle保守', requiredSkills: ['Oracle', 'JP1'], rateMax: 60, prefecture: '北海道', location: '札幌', remote: 'none', receivedAt: daysAgo(1) });
+      const tokyoOnsite = { ...sapporo, id: 'p_tokyo', prefecture: '東京都', location: '品川' };
+      const samePref = evaluateOwnMatch(hokkaido, sapporo, NOW) !== null;
+      const otherPref = evaluateOwnMatch(hokkaido, tokyoOnsite, NOW) === null;
+      const otherFull = evaluateOwnMatch(hokkaido, { ...tokyoOnsite, remote: 'full' }, NOW) !== null;
+      check('首都圏の外に住む社員: 住まいと同じ都道府県の常駐案件は出す・東京の常駐は出さない・東京のフルリモートは出す',
+        samePref && otherPref && otherFull, show([samePref, otherPref, otherFull]));
+    }
+    check('勤務地の表記: 伏見駅(愛知)は愛知県・名駅は愛知県・堂島は大阪府', normalizePrefecture('伏見駅(愛知)') === '愛知県' && normalizePrefecture('名駅') === '愛知県' && normalizePrefecture('堂島') === '大阪府');
+  }
   __setProperJudgeForTest(async (e) => {
     if (e.id === 'E_fail') throw new Error('overloaded');
     if (e.id === 'E_rej') return raw({ verdict: 'reject' });
@@ -4215,6 +4256,12 @@ async function properJudgeChecks(): Promise<void> {
     check('社員ごとの上限を超えた組も、AIが見送っていなければ「参考」として残す（主な候補は上限まで）',
       capped.candidates.length === 7 && capped.candidates.filter((c) => c.reference).length === 2 &&
         capped.candidates.filter((c) => !c.reference).length === 5, JSON.stringify(capped.candidates.map((c) => c.reference ?? false)));
+    const more = [...many, ...[7, 8].map((i) => project({ id: `p_many${i}`, title: `Oracle保守${i}`, requiredSkills: ['Oracle', 'JP1'], rateMax: 60, location: ['川崎', '千葉'][i - 7], receivedAt: daysAgo(1) }))];
+    const sheetIds = new Set(['p_many5', 'p_many6']);
+    const onSheetCapped = await buildProperCandidates([eng('E_ok', ['Oracle', 'JP1'])], more, NOW, (_e, pid) => sheetIds.has(pid));
+    const refIds = onSheetCapped.candidates.filter((c) => c.reference).map((c) => c.projectId).sort().join();
+    check('すでに営業リストに行がある組は上限で「参考」に落とさない（上限は新しい行にだけ。シートに無い上限超えの組は参考のまま）',
+      onSheetCapped.candidates.length === 9 && refIds === 'p_many7,p_many8', refIds);
     // 判定の控えにある組は上限に数えず、控えに無い組だけが上限まで新しく判定される。上限で漏れた組は次の回に回る
     const savedPerItem = process.env.PROPER_JUDGE_PER_ENGINEER;
     const calledIds: string[] = [];
@@ -4684,6 +4731,13 @@ function salesListChecks(): void {
   const noPlain = planSalesUpdate([salesRowOf(nego, undefined)], noRows, () => true);
   check('営業リストの更新: 新しい行の No. は「クローズ済み」「期限切れ」で使われた最大の次から振る（未指定なら全体の最大の次）',
     noUsed?.appends[0]?.[col('No')] === 16 && noPlain?.appends[0]?.[col('No')] === 11, JSON.stringify([noUsed?.appends[0]?.[col('No')], noPlain?.appends[0]?.[col('No')]]));
+  const expTab = [['No', 'ID', '要員'], ['1', 'ownmatch_x_pEXP', 'A.A'], ['2', '  ownmatch_y_pEXP2 ', 'A.A'], ['3', '', 'A.A'], ['4', '   ', 'A.A'], ['5']];
+  check('expiredIdsOf: 見出しの「ID」の列から集める（空セル・空白は除く）・「ID」の見出しが無ければ空',
+    [...expiredIdsOf(expTab)].join() === 'ownmatch_x_pEXP,ownmatch_y_pEXP2' && expiredIdsOf([['No'], ['1']]).size === 0 && expiredIdsOf([]).size === 0);
+  const expPlan = planSalesUpdate([salesRowOf(nego, undefined), salesRowOf({ ...base, id: 'ownmatch_a_pEXPIRED', projectId: 'pEXPIRED' }, undefined)], [header], () => false, undefined,
+    new Set([...expiredIdsOf([['ID'], ['ownmatch_a_pEXPIRED']])]));
+  check('営業リストの更新: 期限切れの ID を含む closedIds を渡すと、その候補は足さず他の候補は足す',
+    expPlan !== null && expPlan.appends.length === 1 && expPlan.appends[0][col('ID')] === nego.id, JSON.stringify(expPlan?.appends.map((a) => a[col('ID')])));
   check('maxNoOf: 見出しの「No」の列の数字の最大（数字でない値は無視・空は 0・「No」が無ければ A 列）',
     maxNoOf([['ID', 'No'], ['x', '12'], ['y', 'abc'], ['z', ''], ['w', '7']]) === 12 && maxNoOf([['No'], ['3'], ['21'], ['']]) === 21 &&
       maxNoOf([['ID'], ['5'], ['9']]) === 9 && maxNoOf([]) === 0 && maxNoOf([['No']]) === 0);
@@ -4834,8 +4888,16 @@ function salesListChecks(): void {
   check('優先度: 条件付きでも必須がすべて met/close（尚可だけ unmet）ならB・checks の無い古い判定もB',
     salesPriorityOf(withJ('conditional', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('B') &&
       salesPriorityOf(withJ('conditional')).startsWith('B'));
-  check('優先度: 推奨なら必須に unmet があってもCにせず今の規則（単価を満たせばA・満たさなければB）',
-    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('A') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨なら必須に unmet があってもCにせずB（単価を満たさなくてもB）',
+    salesPriorityOf(withJ('recommend', [unmetReq])).startsWith('B') && salesPriorityOf(withJ('recommend', [unmetReq], { meetsRate: false })).startsWith('B'));
+  check('優先度: 推奨・単価を満たし必須がすべて met/close ならA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '必須', requirement: 'SQL', status: 'close' }])).startsWith('A'));
+  check('優先度: 推奨・単価を満たしても必須の1つが unmet ならB（他の必須が met でも）',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, unmetReq])).startsWith('B'));
+  check('優先度: 推奨で必須 unmet があっても needsReview ならC',
+    salesPriorityOf(withJ('recommend', [unmetReq], { needsReview: true })).startsWith('C'));
+  check('優先度: 尚可の unmet は関係せずA',
+    salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'met' }, { kind: '尚可', requirement: 'AWS', status: 'unmet' }])).startsWith('A'));
   check('優先度: 必須 unmet の条件付きでも reference はD・needsReview はC（今の優先のまま）',
     salesPriorityOf({ ...condUnmet, reference: true }).startsWith('D') && salesPriorityOf({ ...condUnmet, needsReview: true, reference: true }).startsWith('C'));
   const shortY = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, shortYears: 3.5 };
@@ -5141,6 +5203,28 @@ async function salesListRound2Checks(): Promise<void> {
   check('クローズ済みの照合: 同じメールの候補が複数ある（1通に複数案件）ときはメールでは照合しない（別の案件を巻き込まない）', notUnique !== null && notUnique.appends.length === 2);
   const otherEngineer = planSalesUpdate([salesRowOf({ ...base, id: 'ownmatch_b_proj_prod1', properLabel: 'B.B', projectId: 'proj_prod1', projectTitle: '本番での案件名の表記です' }, proj(at, 'Java案件のご紹介'))], [header], () => false, (id) => id, st.ids, { closedKeys: st.keys, closedMails: st.mails, addedAt: stamp });
   check('クローズ済みの照合: 要員が違えば戻る', otherEngineer !== null && otherEngineer.appends.length === 1);
+  // 少し違う案件名での再送（同じ要員・同じ営業元会社）
+  const cl = (title: string, agency = '株式会社テスト商事', engineer = 'A.A') => [{ engineer, agency, title }];
+  const sim = (closed: string, next: string, agency = '(株)テスト商事（旧：サンプル）', engineer = 'A.A') => similarClosedProject(engineer, agency, next, cl(closed));
+  check('クローズ済みの照合（案件名が似ている再送）: 案件番号の付け外し・括弧や中黒の違い・語の挿入でも同じ案件とみなす',
+    sim('I-24274【Windows/Linux】営業店システムにおけるバックアップ・リストア仕組み構築案件', '【Windows/Linux】営業店システムにおけるバックアップ・リストア仕組み構築案件') &&
+      sim('Azure・PL案件（Windows Server/Azure 要件定義～構築）', 'Azure・Windows Server PL案件（要件定義～構築）') &&
+      sim('No.658 証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築 インフラ設計構築', '証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築（インフラ設計構築）'));
+  check('クローズ済みの照合（案件名が似ている再送）: 営業元会社が違う・要員が違う・短い案件名・まったく別の案件は戻す',
+    !sim('証券会社向けEOS対応、基幹システムリプレイス', '証券会社向けEOS対応、基幹システムリプレイス', '別会社') &&
+      !sim('証券会社向けEOS対応、基幹システムリプレイス', '証券会社向けEOS対応、基幹システムリプレイス', undefined, 'B.B') &&
+      !sim('AWS構築', 'AWS構築（債権回収）') &&
+      !sim('証券会社向けEOS対応、基幹システムリプレイス', '小売業向け在庫管理システムの画面開発（React/TypeScript）') &&
+      !similarClosedProject('A.A', '', '証券会社向けEOS対応、基幹システムリプレイス', cl('証券会社向けEOS対応、基幹システムリプレイス', '')));
+  const simTitle = 'No.658 証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築 インフラ設計構築';
+  const withAgency = (r: ReturnType<typeof candOf>, agency: string) => r.map((v, i) => (i === col('営業元会社') ? agency : v)) as typeof r;
+  const simClosedTab = [header, withAgency(asSheet(candOf('ownmatch_a_sesmail_s1', simTitle, '案件のご紹介'), { 対応状況: '見送り', 見送り理由: '単価が安い' }) as unknown as ReturnType<typeof candOf>, '株式会社テスト商事')] as string[][];
+  const simSt = closedStateOf(simClosedTab);
+  const reSent = withAgency(candOf('ownmatch_a_proj_s2', '証券会社向けEOS対応、基幹システムリプレイス、基盤更改、クラウド基盤新規構築（インフラ設計構築）', '【再送】案件のご紹介', new Date(at.getTime() + 3 * 24 * 60 * 60 * 1000)), '(株)テスト商事');
+  const unrelated = withAgency(candOf('ownmatch_a_proj_s3', '小売業向け在庫管理システムの画面開発（React/TypeScript）', '別件のご紹介', new Date(at.getTime() + 3 * 24 * 60 * 60 * 1000)), '(株)テスト商事');
+  const simPlan = planSalesUpdate([reSent, unrelated], [header], () => false, (id) => id, simSt.ids, { closedSimilar: simSt.similar, addedAt: stamp });
+  check('クローズ済みの照合（案件名が似ている再送）: 似た案件名の候補は足さず、別の案件は足す',
+    simSt.similar.length === 1 && simPlan !== null && simPlan.appends.length === 1 && simPlan.appends[0][col('ID')] === 'ownmatch_a_proj_s3');
 
   // ===== 氏名を外に出さない =====
   section('要員の氏名: displayName・営業リスト・タブ名・判定の入力に出ない');
@@ -5179,6 +5263,20 @@ async function salesListRound2Checks(): Promise<void> {
       (rosterEng.profileText ?? '').includes('Javaでの受注管理の開発を3年担当') && (rosterEng.profileText ?? '').includes('<氏名>'), JSON.stringify(rosterEng?.profileText));
   const rosterInitials = rosterEngineersFromValues({ spreadsheetId: 'sheet_x', rows: [rosterRows[0], ['営業中', 'N.H', '即日', '■スキル：Java']], gidOf: new Map(), sheetTexts: new Map([['N.H', 'N.H のスキルシート']]) });
   check('要員リスト: 名前がイニシャルならそのまま使い、本文も変えない', rosterInitials[0]?.displayName === 'N.H' && rosterInitials[0]?.proposalLabel === 'N.H' && (rosterInitials[0]?.profileText ?? '').includes('N.H のスキルシート'));
+
+  const tabOf = skillSheetTabOf;
+  check('スキルシートのタブ: 区切り無し・全角＿・空白・前後の空白でも見つかる（元のタイトルを返す）',
+    tabOf('A.B', ['要員', 'スキルシートA.B']) === 'スキルシートA.B' && tabOf('A.B', ['スキルシート＿A.B']) === 'スキルシート＿A.B' &&
+      tabOf('A.B', ['スキルシート A.B']) === 'スキルシート A.B' && tabOf('A.B', [' スキルシート_A.B ']) === ' スキルシート_A.B ');
+  check('スキルシートのタブ: 「スキルシート_<名前>」と区切り無しの両方があれば前者を優先',
+    tabOf('A.B', ['スキルシートA.B', 'スキルシート_A.B']) === 'スキルシート_A.B');
+  check('スキルシートのタブ: 別の要員の名前を含むタブ・正規表現の特殊文字の読み替え・名前の無いタブは一致しない',
+    tabOf('A.B', ['スキルシート_A.BC']) === null && tabOf('A.B', ['スキルシートAxB']) === null && tabOf('A.B', ['スキルシート一覧']) === null);
+  const tabGid = rosterEngineersFromValues({
+    spreadsheetId: 'sheet_x', rows: [['状況', '名前', '稼働開始時期', 'サマリ'], ['営業中', 'A.B', '即日', '■スキル：Java']],
+    gidOf: new Map([['要員', 1], ['スキルシートA.B', 4242]]), sheetTexts: new Map(),
+  }, new Date('2026-10-04T00:00:00Z'));
+  check('要員リスト: 区切り無しのスキルシートのタブでもリンク（#gid）が入る', (tabGid[0]?.skillSheetUrl ?? '').endsWith('#gid=4242'), tabGid[0]?.skillSheetUrl);
 
   // ===== 試運転: 添付ファイルの読み取り =====
   section('試運転: 添付ファイルの読み取り（ses:trial:raw）');
@@ -5384,6 +5482,7 @@ function bodyFixMessageChecks(): void {
 }
 
 // 一覧の区切り: 平日の昼は30分ごと・夜間と土日は続く間を1つにまとめる（JST。作り物の時刻だけ）
+const at2 = (g: number[][], i: number): number[] => g[i] ?? [];
 function trialWindowsChecks(): void {
   section('試運転: 一覧の区切り');
   const jst = (d: number, h: number): number => Date.UTC(2026, 9, d, h - 9) / 1000; // 2026-10 の d 日 h 時（JST）。5日=月・9日=金・10日=土
@@ -5404,6 +5503,22 @@ function trialWindowsChecks(): void {
   const odd = windowsOf(jst(6, 12) + 600, jst(6, 21) + 600);
   check('windowsOf: 30分刻みは start から（08:00 にそろえなくてよい）・21:00 をまたぐ区切りは 21:00 で切る',
     at(odd, 0)[1] === jst(6, 12) + 2400 && odd.length === 19 && at(odd, 17)[1] === jst(6, 21) && at(odd, 18)[1] === jst(6, 21) + 600, show(odd.length));
+  // 時間単位の一覧: 平日の昼は1時間ずつ・それ以外は6時間まで。id から internalDate を出し、行は範囲で絞って threadId で重複を除く
+  const id = '1a17f409f017c769';
+  check('internalDateOfId: 16進IDを 20bit 右に寄せた ms', internalDateOfId(id) === Number(BigInt('0x' + id) >> 20n) && internalDateOfId(id) > 1.5e12 && internalDateOfId(id) < 2e12, show(internalDateOfId(id)));
+  const busyNow = jst(6, 10) + 1800; // 火 10:30。0〜1 時間前は 09:30〜10:30
+  const gb = hourGroups(busyNow - 5 * 3600, busyNow, busyNow);
+  check('hourGroups: 平日 10:30 から5時間前まで（08:00 以降の昼は1時間ずつ）', gb.hours.length === 5 && gb.groups.length >= 3 && at2(gb.groups, 0).length === 1 && at2(gb.groups, 1).length === 1, show(gb.groups));
+  const sunNow = jst(11, 3); // 日 03:00（JST）
+  const q0 = listQueryOf(0);
+  const q3 = listQueryOf(3);
+  check('listQueryOf: 時間ごとの範囲に要員メールの件名の除外が付く（「要員」単独は除外しない）',
+    q0.startsWith('label:SES newer_than:1h ') && q3.startsWith('label:SES newer_than:4h older_than:3h ') && q3.includes('-subject:"要員紹介"') && !/-subject:"?(要員|人材|技術者)"?( |$)/.test(q3), q3);
+  const gs = hourGroups(sunNow - 14 * 3600, sunNow, sunNow);
+  check('hourGroups: 日曜の夜は6時間ずつ（14時間 → 6+6+2）、先頭は 0 時間前', gs.hours.length === 14 && gs.groups.map((g) => g.length).join() === '6,6,2' && at2(gs.groups, 0)[0] === 0, show(gs.groups));
+  const rowsIn = [`T1\tM1\t${5000}\tf\ts\t1`, `T1\tM2\t${9000}\tf\ts\t2`, `T2\tM3\t${1000}\tf\ts\t1`, `T3\tM4\t${99000}\tf\ts\t1`, ''];
+  const fx = fixListRows(rowsIn, 3, 20);
+  check('fixListRows: start 未満・end 超過を落とし、threadId の重複は internalDate が大きい行を残す', fx.read === 4 && fx.rows.length === 1 && fx.rows[0]?.includes('\tM2\t') === true && fx.dropped === 3 && fixListRows(rowsIn, 3).rows.length === 2, show(fx));
 }
 
 // Claude API の残高があるあいだは本番バッチ、尽きたら試運転に引き継ぐ担当の持ち合い（作り物のデータだけ）
@@ -5461,6 +5576,17 @@ function handoffChecks(): void {
     r1.range === "'_運用'!A1:B6" && r1.values.length === 6 && p1.owner === 'api' && p1.trialReadEpoch === nowSec && p1.apiReadEpoch === full.apiReadEpoch && p1.reason === full.reason && p1.apiLastRun === full.apiLastRun, show(r1));
   const r2 = parseHandoff(trialRows({}, nowSec, nowSec).values);
   check('試運転 rows: 担当が未定（タブが無い）なら trial にして理由を書く', r2.owner === 'trial' && r2.trialReadEpoch === nowSec && r2.reason === '試運転が担当（2026/10/25 12:00）', show(r2));
+
+  const pinned: HandoffState = { ...full, owner: 'trial-pinned' };
+  check('trial-pinned: parseHandoff が受け付け、往復しても保たれる',
+    parseHandoff([['担当', 'trial-pinned']]).owner === 'trial-pinned' && parseHandoff(handoffRows(pinned)).owner === 'trial-pinned');
+  check('trial-pinned: decideApiRun は残高が ok でも実行しない（理由に固定と書く）',
+    ['ok', 'exhausted', 'unknown'].every((c) => { const d = decideApiRun(pinned, now, c as 'ok'); return !d.run && d.floorMs === null && d.reason.includes('固定'); }));
+  const pc = trialCheck(pinned, nowSec - 300, nowSec);
+  check('trial-pinned: 試運転の判定は実行する（担当が試運転）', pc.run && pc.mode === 'trial-pinned', show(pc));
+  check('trial-pinned: 試運転が書く状態の担当は trial-pinned のまま', parseHandoff(trialRows(pinned, nowSec, nowSec).values).owner === 'trial-pinned');
+  check('メール収集に失敗した回はプロパーの判定と営業リストの更新を見送る',
+    shouldSkipProperAfterCollectFailure(true) && !shouldSkipProperAfterCollectFailure(false));
 
   check('SES_HANDOFF: 既定は有効・0 / false で無効（今までどおり常に本番）',
     withEnv({ SES_HANDOFF: undefined }, handoffEnabled) && withEnv({ SES_HANDOFF: '1' }, handoffEnabled) && !withEnv({ SES_HANDOFF: '0' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'false' }, handoffEnabled) && !withEnv({ SES_HANDOFF: 'FALSE' }, handoffEnabled));
@@ -5658,7 +5784,7 @@ function trialUsageChecks(): void {
       c0[0] === `t2\t${new Date(2500).toISOString()}\tm2b\t8` && c1[0] === `t4\t${new Date(4000).toISOString()}\t\t`, show(c0[0]));
     check('chunks: skip.jsonl の行は kind engineer・bodyHead 空・skippedBySubject true',
       skip.length === 1 && skip[0].threadId === 't1' && skip[0].kind === 'engineer' && skip[0].bodyHead === '' && skip[0].skippedBySubject === true && skip[0].messageId === 'm1' && skip[0].receivedAt === new Date(1000).toISOString());
-    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）。max=0 は capped 0', JSON.stringify(res) === '{"threads":4,"capped":0,"skippedBySubject":1,"deferred":0,"chunks":2}');
+    check('chunks: 結果は件数だけ（スレッドID・件名を含まない）。max=0 は capped 0', JSON.stringify(res) === '{"threads":4,"capped":0,"skippedBySubject":1,"deferred":0,"chunks":2,"resent":0}');
     check('chunks: keep=1 は今と同じ動き（deferred 0・deferred.jsonl は空）',
       res.deferred === 0 && readFileSyncB(join(dir, 'deferred.jsonl'), 'utf8') === '');
   } finally {
@@ -5696,7 +5822,7 @@ function trialUsageChecks(): void {
       resK.chunks === 1 && cK.join(',') === 'k1,k3,k4', show(cK));
     check('chunks: 外した分は deferred.jsonl に threadId・messageId・subject・from・receivedAt・priority で入る（out/ には書かない）。件数は deferred 2',
       resK.deferred === 2 && defK.length === 2 && defK.map((d) => d.threadId).sort().join(',') === 'k2,k5' && defK.every((d) => typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined) &&
-      JSON.stringify(resK) === '{"threads":5,"capped":0,"skippedBySubject":0,"deferred":2,"chunks":1}', show(resK));
+      JSON.stringify(resK) === '{"threads":5,"capped":0,"skippedBySubject":0,"deferred":2,"chunks":1,"resent":0}', show(resK));
     check('chunks: keep で外した行には reason lowPriority が付く', defK.every((d) => d.reason === 'lowPriority'), show(defK.map((d) => d.reason)));
   } finally {
     rmSync(dirK, { recursive: true, force: true });
@@ -5721,13 +5847,13 @@ function trialUsageChecks(): void {
     const skipM = readFileSyncB(join(dirM, 'out', 'skip.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     const defM = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     check('chunks: max=3 は新しい順に3スレッド（x6・x5・x4）だけが以降に回り、外した3スレッドは deferred.jsonl に reason olderThanResumeCap で入る',
-      JSON.stringify(resM) === '{"threads":6,"capped":3,"skippedBySubject":1,"deferred":0,"chunks":1}' &&
+      JSON.stringify(resM) === '{"threads":6,"capped":3,"skippedBySubject":1,"deferred":0,"chunks":1,"resent":0}' &&
       cM.join(',') === 'x4,x6' && defM.length === 3 && defM.map((d) => d.threadId).sort().join(',') === 'x1,x2,x3' && defM.every((d) => d.reason === 'olderThanResumeCap' && typeof d.priority === 'number' && typeof d.receivedAt === 'string' && d.messageId !== undefined), show([resM, cM, defM.length]));
     check('chunks: 件名で要員の判定は残った3件にだけかかる（x5 は skip.jsonl・外した x2 は skip.jsonl に入らない）',
       skipM.length === 1 && skipM[0].threadId === 'x5', show(skipM.map((s) => s.threadId)));
     const resM0 = chunkRunDir(dirM, 10, 1, 0);
     check('chunks: max=0 は上限なし（今と同じ。capped 0・6スレッド全部が対象で deferred.jsonl は空）',
-      JSON.stringify(resM0) === '{"threads":6,"capped":0,"skippedBySubject":2,"deferred":0,"chunks":1}' && readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8') === '', show(resM0));
+      JSON.stringify(resM0) === '{"threads":6,"capped":0,"skippedBySubject":2,"deferred":0,"chunks":1,"resent":0}' && readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8') === '', show(resM0));
     const resMK = chunkRunDir(dirM, 10, 0.5, 5);
     const defMK = readFileSyncB(join(dirM, 'deferred.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
     check('chunks: max と keep の組み合わせで数が合う（max=5 で x1 を外し、残り5のうち要員2を除いた3の半分＝切り上げ2を残し1を lowPriority で外す）',
@@ -5735,6 +5861,67 @@ function trialUsageChecks(): void {
       defMK.length === 2 && defMK.filter((d) => d.reason === 'olderThanResumeCap').length === 1 && defMK.filter((d) => d.reason === 'lowPriority').length === 1, show([resMK, defMK.map((d) => d.reason)]));
   } finally {
     rmSync(dirM, { recursive: true, force: true });
+  }
+
+  // 前の回で1案件と抽出済みの再送は抽出に回さず、前の行を写して out/resent.jsonl に書く
+  const parentR = mkdtempSync(join(tmpdir(), 'ses-chunks-resent-'));
+  try {
+    const prevDir = join(parentR, 'run_a');
+    const curDir = join(parentR, 'run_b');
+    mkdirSyncBf(join(prevDir, 'out'), { recursive: true });
+    mkdirSyncBf(join(curDir, 'list'), { recursive: true });
+    const nowMs = Date.now();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const prevRow = (id: string, from: string, subj: string, at: number, titles: string[]) =>
+      JSON.stringify({ threadId: id, messageId: `m_${id}`, subject: subj, from, receivedAt: iso(at), kind: 'project', extraction: { projects: titles.map((title) => ({ title })) }, bodyHead: 'x' });
+    const A = 'a@example.invalid';
+    writeFileSyncForEval(join(prevDir, 'out', 'c00.jsonl'), [
+      prevRow('p1', A, '【X社】在庫管理システム改修 Java', nowMs - 3 * 86_400_000, ['在庫管理システム改修']),
+      prevRow('p2', A, '二案件のまとめ Java', nowMs - 3 * 86_400_000, ['案件甲', '案件乙']),
+      prevRow('p3', A, '【X社】新着案件のご連絡', nowMs - 3 * 86_400_000, ['販売管理システム刷新']),
+      prevRow('p4', A, '【Y社】販売管理システム刷新 新着案件', nowMs - 3 * 86_400_000, ['販売管理システム刷新']),
+      prevRow('p5', A, '会計システム保守 COBOL', nowMs - 3 * 86_400_000, ['会計システム保守']),
+      prevRow('p6', A, '古い案件 Python', nowMs - 40 * 86_400_000, ['古い案件']),
+      prevRow('p7', `担当 <${A}>`, 'ネットワーク構築 Cisco', nowMs - 3 * 86_400_000, ['ネットワーク構築']),
+      prevRow('p8', A, '基盤更改 Linux', nowMs - 86_400_000, ['基盤更改']),
+    ].join('\n') + '\nnot json\n');
+    const nrow = (t: string, d: number, from: string, subj: string) => [t, t, String(d), from, subj, '1'].join('\t');
+    const at = nowMs - 86_400_000;
+    writeFileSyncForEval(join(curDir, 'list', 'w00.tsv'), [
+      nrow('n1', at, A, '【X社】在庫管理システム改修 Java'),
+      nrow('n2', at, A, '二案件のまとめ Java'),
+      nrow('n3', at, A, '【X社】新着案件のご連絡'),
+      nrow('n4', at, A, '【Y社】販売管理システム刷新 新着案件'),
+      nrow('n5', at, 'other@example.invalid', '会計システム保守 COBOL'),
+      nrow('n6', at, A, '古い案件 Python'),
+      nrow('p7', at, A, 'ネットワーク構築 Cisco'),
+      nrow('p8', at, A, '基盤更改 Linux'),
+    ].join('\n') + '\n');
+    const savedCarry = process.env.CARRY_DIRS;
+    delete process.env.CARRY_DIRS;
+    let resR: ReturnType<typeof chunkRunDir>;
+    try {
+      resR = chunkRunDir(curDir, 10);
+    } finally {
+      if (savedCarry !== undefined) process.env.CARRY_DIRS = savedCarry;
+    }
+    const inChunks = readFileSyncB(join(curDir, 'chunks', 'c00'), 'utf8').trim().split('\n').map((l) => l.split('\t')[0]).sort();
+    const resent = readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    check('chunks: 同じ送信者・具体的な件名で前の回に1案件と抽出済みなら再送として抽出に回さず（n1・n4）、out/resent.jsonl に新しい threadId・receivedAt と resentOf で書く',
+      resent.map((r) => r.threadId).sort().join(',') === 'n1,n4,p7' && !inChunks.includes('n1') && !inChunks.includes('n4') &&
+      resent[0].messageId === resent[0].threadId && resent[0].resentOf === 'm_p1' && resent[0].receivedAt === iso(at) && resent[0].kind === 'project' && resent[0].bodyHead === 'x', show([resR, inChunks, resent]));
+    check('chunks: 前の行が2案件・汎用の件名で案件名が件名に無い・送信者が違う・前の行が期間より古いものは再送にしない',
+      inChunks.join(',') === 'n2,n3,n5,n6,p8', show(inChunks));
+    check('chunks: 同じスレッドに入った新しいメッセージも再送とみなす（p7。前の行の送信者が「名前 <アドレス>」でもアドレスで比べる）。受信が新しくなければ抽出に回す（p8）',
+      resent.some((r) => r.threadId === 'p7' && r.resentOf === 'm_p7') && inChunks.includes('p8'), show(resent.map((r) => r.threadId)));
+    check('chunks: 結果の JSON に resent の件数が入る（最後のキー）',
+      JSON.stringify(resR) === '{"threads":8,"capped":0,"skippedBySubject":0,"deferred":0,"chunks":1,"resent":3}', show(resR));
+    const resR2 = chunkRunDir(curDir, 10);
+    check('chunks: 作り直しても resent.jsonl は同じ（冪等）。前の回が無ければ空ファイルを書く',
+      resR2.resent === 3 && readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8').trim().split('\n').length === 3 &&
+      (rmSync(prevDir, { recursive: true, force: true }), chunkRunDir(curDir, 10).resent === 0 && readFileSyncB(join(curDir, 'out', 'resent.jsonl'), 'utf8') === ''));
+  } finally {
+    rmSync(parentR, { recursive: true, force: true });
   }
 
   // 書き込みの差分
@@ -5892,6 +6079,29 @@ async function inexperiencedChecks(): Promise<void> {
   }
   check('試運転の選び方は本番と同じ関数: 監視の組にも除外した組は入らない', auditPairsForJudge([newbieSkilled], [pNg], 10, NOW).length === 0);
 
+  // 首都圏在住が条件（地方不可）
+  const metro = (text: string) => requiresMetroResidence(text);
+  check('requiresMetroResidence: 「地方不可」「地方在住不可」「地方在住の方不可」「地方の方不可」「地方NG」は true',
+    ['地方不可', '地方在住不可', '地方在住の方不可', '地方の方不可', '地方NG', '基本リモート・不定期に出社・地方不可'].every(metro));
+  check('requiresMetroResidence: 「首都圏在住」「都内在住」「1都3県在住」「一都三県在住」「１都３県在住」は true',
+    ['首都圏在住の方', '都内在住', '1都3県在住', '一都三県在住', '１都３県在住'].every(metro));
+  check('requiresMetroResidence: 「地方可」「地方在住可」「地方の方も歓迎」と無関係な文は false',
+    !['地方可', '地方在住可', '地方の方も歓迎', 'Java開発。週2出社'].some(metro));
+  const gunma = own('G1', { skills: ['Linux'], prefecture: '群馬県' });
+  const tokyo = own('T1', { skills: ['Linux'], prefecture: '東京都' });
+  const unknownPref = own('U1', { skills: ['Linux'], prefecture: null });
+  const pMetro = project({ id: 'p_metro', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, prefecture: '東京都', detail: '基本リモート・不定期に出社・地方不可' });
+  const pKanto = project({ id: 'p_kanto', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, prefecture: '東京都', location: '品川', detail: '基本リモート' });
+  check('組の選び方: 群馬在住の要員 × 「地方不可」の案件は外れ、数に数える',
+    idsOf([gunma], [pMetro]).length === 0 && metroResidenceSkippedCount([gunma], [pMetro], NOW) === 1);
+  check('組の選び方: 東京在住の要員 × 「地方不可」の案件は通る（数えない）',
+    JSON.stringify(idsOf([tokyo], [pMetro])) === JSON.stringify(['T1|p_metro']) && metroResidenceSkippedCount([tokyo], [pMetro], NOW) === 0);
+  check('組の選び方: 群馬在住の要員 × 「地方不可」の無い関東の案件は今までどおり通る',
+    JSON.stringify(idsOf([gunma], [pKanto])) === JSON.stringify(['G1|p_kanto']) && metroResidenceSkippedCount([gunma], [pKanto], NOW) === 0);
+  check('組の選び方: 都道府県が分からない要員は「地方不可」の案件にも通る',
+    JSON.stringify(idsOf([unknownPref], [pMetro])) === JSON.stringify(['U1|p_metro']) && metroResidenceSkippedCount([unknownPref], [pMetro], NOW) === 0);
+  check('監視の組にも「地方不可」で除いた組は入らない', auditPairsForJudge([gunma], [pMetro], 10, NOW).length === 0);
+
   // 指示文
   check('judgeSystemFor: 未経験の社員の指示文にだけ段落が入り、<engineer_profile> の前に置く',
     judgeSystemFor(newbie).includes(INEXPERIENCED_PARAGRAPH) && judgeSystemFor(newbie).indexOf(INEXPERIENCED_PARAGRAPH) < judgeSystemFor(newbie).indexOf('<engineer_profile>') &&
@@ -5994,6 +6204,12 @@ async function main(): Promise<void> {
     pauseGateChecks();
     handoffChecks();
     await inexperiencedChecks();
+    labelMemoChecks();
+    labelOutcomeChecks();
+    startWaitChecks();
+    highRateWeakChecks();
+    await salesKeepWriteChecks();
+    salesKeepChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -6563,4 +6779,217 @@ function labelBackupChecks(
   check('compareBackup: 値が違って戻った行も missing', !changed.ok && changed.missing[0] === p1.key);
   const withBad = compareBackup(written, written, 1);
   check('compareBackup: 読み戻しに壊れた行があれば（全行そろっていても）ok でない', !withBad.ok && withBad.bad === 1);
+}
+
+function labelMemoChecks(): void {
+  section('判定ラベル: 営業のメモ（取り込み・古い行の読み込み・メモが空なら控えの行が変わらない）');
+  const eng = { id: 'own_m', displayName: 'M.M', skills: ['Java'] } as unknown as ProperEngineer;
+  const pair: LabelPair = {
+    key: 'own_m|proj_0000000m', engineerId: eng.id, engineerLabel: 'M.M', projectId: 'proj_0000000m', runId: 'run_m', judgedAt: '2026-10-01T00:00:00.000Z',
+    engineerHash: engineerHashOf(eng), project: { sourceMailId: 'sesmail_m' } as unknown as LabelPair['project'], priority: 'B 通常',
+    judgment: { verdict: 'recommend', requirements: [], rateReason: '' } as unknown as RawProperJudgment,
+  };
+  const sale = (over: Partial<LabelSales> = {}): LabelSales => ({
+    key: pair.key, seenAt: '2026-10-01T00:00:00.000Z', tab: '全体', status: '未着手', skipReason: '', check: '', checkMemo: '', priority: 'B', ...over,
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'ses-labels-memo-'));
+  try {
+    appendLabels(dir, { sales: [sale()] });
+    const noMemo = appendLabels(dir, { sales: [sale({ seenAt: '2026-10-02T00:00:00.000Z', memo: '' })] });
+    check('memo が空（古い行との比較も）なら営業の評価は増えない', noMemo.sales === 0 && readLabelStore(dir).sales.length === 1);
+    const withMemo = appendLabels(dir, { sales: [sale({ seenAt: '2026-10-03T00:00:00.000Z', memo: '先方に確認中' })] });
+    const store = readLabelStore(dir);
+    check('memo が入ったら営業の評価を1行足し、最新の memo を取り出せる', withMemo.sales === 1 && salesMemosOf(store.sales).get(pair.key) === '先方に確認中');
+    appendFileSync(join(dir, 'sales.jsonl'), `${JSON.stringify({ key: 'own_m|proj_old', seenAt: '2026-09-01T00:00:00.000Z', tab: '全体', status: '', skipReason: '', check: '', checkMemo: '', priority: 'A' })}\n`);
+    const old = latestSales(readLabelStore(dir).sales).get('own_m|proj_old');
+    check('memo の無い古い行も読め、メモ一覧には出ない', old !== undefined && old.memo === undefined && !salesMemosOf(readLabelStore(dir).sales).has('own_m|proj_old'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const plain = backupLineOf(pair);
+  check('memo が空なら控えの行は今までと同じ（10列・memo を渡さないときと同じ文字列）', plain.split('\t').length === 10 && backupLineOf(pair, '') === plain && backupLineOf(pair, '  ') === plain);
+  const noted = backupLineOf(pair, '先方確認中\t急ぎ');
+  const row = parseBackup(noted).rows[0];
+  check('memo ありは11列で往復でき、タブは空白になり、crc が合う', noted.split('\t').length === 11 && parseBackup(noted).bad === 0 && row?.memo === '先方確認中 急ぎ' && row.key === pair.key);
+  check('古い10列の行は memo が空として読める', parseBackup(plain).rows[0]?.memo === '' && parseBackup(plain).bad === 0);
+  const sheet = planLabelSheet([noted], [BACKUP_HEADER, plain]);
+  check('控えの表計算: 古い10列の行は memo が付いた行へ rewrite、同じ行は触らない', sheet.rewrite === 1 && sheet.append === 0 && planLabelSheet([plain], [BACKUP_HEADER, plain]).elements.length === 0 && planLabelSheet([noted], [BACKUP_HEADER, noted]).elements.length === 0);
+  const same2 = compareBackup(parseBackup(noted).rows, parseBackup(noted).rows);
+  const diff2 = compareBackup(parseBackup(noted).rows, parseBackup(plain).rows);
+  check('compareBackup は memo の違いも検出する', same2.ok && !diff2.ok);
+}
+
+function labelOutcomeChecks(): void {
+  section('判定ラベル: 載せた行の結果（提案済以降の割合・目標 5%・見送りの内訳）');
+  const rows = (statuses: Array<[string, string]>) => statuses.map(([status, skipReason]) => ({ status, skipReason }));
+  const base: Array<[string, string]> = Array.from({ length: 17 }, () => ['未着手', '']);
+  const met = outcomeOf(rows([...base, ['提案済', ''], ['成約', ''], ['見送り', '単価が安い']]));
+  check('提案済・成約は提案済以降に数え、割合は載せた組（20）が分母。10% は目標 5% を超える', met.listed === 20 && met.proposed === 2 && met.proposedPct === 10 && met.targetMet === true, show(met));
+  const edge = outcomeOf(rows([...base, ['面談済', ''], ['見送り', '単価が安い'], ['見送り', '']]));
+  check('ちょうど 5%（1/20）は達成。見送りは理由別に数え、理由なしは別枠', edge.proposedPct === 5 && edge.targetMet === true && edge.skipped === 2 && edge.skipReasons['単価が安い'] === 1 && edge.skipReasons['（理由なし）'] === 1, show(edge));
+  const miss = outcomeOf(rows([...base, ['クローズ', ''], ['見送り', '募集終了'], ['見送り', '募集終了']]));
+  check('提案済以降が 0 なら 0% で目標未達（クローズ・見送りは提案済以降に数えない）', miss.proposed === 0 && miss.proposedPct === 0 && miss.targetMet === false && miss.skippedPct === 10 && miss.skipReasons['募集終了'] === 2, show(miss));
+  const lines = formatResult({ counts: { pairs: 0, withSales: 0, withMemo: 0, excludedNoEngineer: 0, skippedLines: 0, byEngineer: {}, byVerdict: {}, byPriority: {} }, recall: { ai: { total: 0, kept: 0, ratePct: null, missed: [] }, sales: { total: 0, kept: 0, ratePct: null, missed: [] }, negative: { total: 0, kept: 0, ratePct: null } }, outcome: miss, priority: null }, null).join('\n');
+  check('表示に目標と「目標未達」が出る。載せた組が無ければ判定しない（null）', lines.includes('目標 5%') && lines.includes('目標未達') && outcomeOf([]).targetMet === null);
+}
+
+function startWaitChecks(): void {
+  section('プロパー: 案件の開始が稼働開始よりずっと後の組を外す（PROPER_MAX_START_WAIT_DAYS・既定45日）');
+  const own = (id: string, availableFrom: string | null): ProperEngineer => ({
+    id, displayName: id, fullName: '', proposalLabel: id, fileId: '', skillSheetUrl: '', skills: ['Linux'], experienceYears: 3, requiredProjectRate: 30,
+    residence: '', prefecture: '東京都', availableDate: '', availableFrom, remoteWish: 'unknown', status: 'available',
+  });
+  const proj = (id: string, startDate: string | null) => project({ id, title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, startDate, prefecture: '東京都', location: id });
+  const idsOf = (list: ProperEngineer[], projects: Project[]) => ownPairsForJudge(list, projects, 100, NOW).map((p) => `${p.match.ownEngineerId}|${p.match.projectId}`).sort();
+  const e = own('E1', '2026-12-01');
+  const pJan = proj('p_jan', '2027-01-15');
+  const pMar = proj('p_mar', '2027-03-01');
+  const pNone = proj('p_none', null);
+  check('稼働開始 12/1 の要員: 開始 1/15（45日後）の案件は通り、開始 3/1 の案件は外れ、開始日不明の案件は通る',
+    JSON.stringify(idsOf([e], [pJan, pMar, pNone])) === JSON.stringify(['E1|p_jan', 'E1|p_none']), JSON.stringify(idsOf([e], [pJan, pMar, pNone])));
+  check('外した組は startWaitSkipped に数える（通った組・日付不明は数えない）', startWaitSkippedCount([e], [pJan, pMar, pNone], NOW) === 1 && startWaitSkippedCount([e], [pJan, pNone], NOW) === 0);
+  check('稼働開始が不明（null）の要員は、遠い開始の案件も通る', JSON.stringify(idsOf([own('E2', null)], [pMar])) === JSON.stringify(['E2|p_mar']));
+  const past = own('E3', '2026-09-01');
+  check('稼働開始が今日より前なら今日から数える（今日 9/23 から 10/30 は37日で通り、12/1 は69日で外れる）',
+    JSON.stringify(idsOf([past], [proj('p_oct', '2026-10-30'), proj('p_dec', '2026-12-01')])) === JSON.stringify(['E3|p_oct']));
+  withEnv({ PROPER_MAX_START_WAIT_DAYS: '0' }, () => {
+    check('0 で無効: 開始 3/1 の案件も通り、数えない', JSON.stringify(idsOf([e], [pMar])) === JSON.stringify(['E1|p_mar']) && startWaitSkippedCount([e], [pMar], NOW) === 0);
+  });
+  withEnv({ PROPER_MAX_START_WAIT_DAYS: '120' }, () => {
+    check('上限を 120 日にすれば開始 3/1（90日後）は通る', JSON.stringify(idsOf([e], [pMar])) === JSON.stringify(['E1|p_mar']));
+  });
+  check('isStartTooLate: 境界（45日は通し、46日は外す）・日付が読めなければ通す・0 以下は無効',
+    !isStartTooLate('2027-01-15', '2026-12-01', NOW, 45) && isStartTooLate('2027-01-16', '2026-12-01', NOW, 45) &&
+      !isStartTooLate('不明', '2026-12-01', NOW, 45) && !isStartTooLate('2027-03-01', '2026-12-01', NOW, 0));
+  check('外部要員（BP）の時期判定 isTimingWithinGrace は変えない（開始がずっと後でも通る）', isTimingWithinGrace('2027-03-01', '2026-12-01', NOW));
+}
+
+function highRateWeakChecks(): void {
+  section('営業リスト: 高単価かつ必須が△・年数不足の組は C に下げる（PROPER_HIGH_RATE_GAP_MAN・既定15万円）');
+  const base = {
+    id: 'ownmatch_h_p1', ownEngineerId: 'h', ownEngineerName: 'H.H', projectId: 'p1', projectTitle: 'Java開発', projectRate: 70,
+    requiredProjectRate: 55, rateGapMan: 15, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '必要案件単価55万円に対し案件単価70万円。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'H.H',
+  };
+  const met = { kind: '必須' as const, requirement: 'Java', status: 'met' as const, quote: 'Java' };
+  const close = { kind: '必須' as const, requirement: 'SQL', status: 'close' as const, quote: 'SQL' };
+  const shortYears = { kind: '必須' as const, requirement: 'Java 5年以上', status: 'close' as const, quote: 'Java 5年以上', shortYears: 3.5 };
+  const niceClose = { kind: '尚可' as const, requirement: 'AWS', status: 'close' as const, quote: 'AWS' };
+  const withJ = (checks: Array<Record<string, unknown>>, over: Record<string, unknown> = {}, judgmentOver: Record<string, unknown> = {}) =>
+    ({ ...base, ...over, judgment: { verdict: 'recommend', work: '', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks, ...judgmentOver } }) as unknown as ProperCandidate;
+  check('+15万かつ必須△（近い経験）なら C（推奨・単価を満たしていても）', salesPriorityOf(withJ([met, close])).startsWith('C'));
+  check('+15万かつ必須の年数不足なら C', salesPriorityOf(withJ([met, shortYears])).startsWith('C'));
+  check('+15万でも必須がすべて○なら今までどおり A（尚可だけ△でも変えない）', salesPriorityOf(withJ([met])).startsWith('A') && salesPriorityOf(withJ([met, niceClose])).startsWith('A'));
+  check('+14万なら必須△でも今までどおり（推奨・必須△は A）', salesPriorityOf(withJ([met, close], { rateGapMan: 14 })).startsWith('A'));
+  check('単価が読めない（差が null）なら対象外', salesPriorityOf(withJ([met, close], { rateGapMan: null })).startsWith('A'));
+  check('IT 未経験×未経験可の組は対象外（B のまま）', salesPriorityOf(withJ([met, close], {}, { inexperiencedOk: true })).startsWith('B'));
+  check('Cになった組は SALES_MIN_PRIORITY=B の既定で載らない', belowMinPriority(salesPriorityOf(withJ([met, close]))) && !belowMinPriority(salesPriorityOf(withJ([met]))));
+  check('規則を入れる前の優先度（ラベルの確認用）は A のまま', salesPriorityWithoutHighRateRule(withJ([met, close])).startsWith('A'));
+  withEnv({ PROPER_HIGH_RATE_GAP_MAN: '0' }, () => {
+    check('0 で無効（+15万・必須△でも今までどおり A）', salesPriorityOf(withJ([met, close])).startsWith('A') && !isHighRateWeakRequired(withJ([met, close])));
+  });
+  withEnv({ PROPER_HIGH_RATE_GAP_MAN: '10' }, () => {
+    check('しきい値を 10 にすれば +14万でも C', salesPriorityOf(withJ([met, close], { rateGapMan: 14 })).startsWith('C'));
+  });
+}
+
+function salesKeepChecks(): void {
+  section('営業リスト: 候補から外れた未着手の行を追加から SALES_KEEP_HOURS（既定48時間）は残す');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const sheetRow = (id: string, over: Record<string, string> = {}) => {
+    const r = header.map(() => '');
+    r[col('ID')] = id; r[col('No')] = '7'; r[col('要員')] = 'A.A'; r[col('対応状況')] = '未着手'; r[col('優先度')] = 'B 通常'; r[col('追加日時')] = '2026/10/01 08:00';
+    for (const [k, v] of Object.entries(over)) r[col(k)] = v;
+    return r;
+  };
+  const target = 'ownmatch_a_proj_0000000a';
+  const plan = (rows: string[][], addedAt: string, over: { keepHours?: number; active?: boolean } = {}) =>
+    planSalesUpdate([], [header, ...rows], () => false, undefined, undefined, {
+      addedAt, keepHours: over.keepHours ?? 48, engineerActive: () => over.active ?? true,
+    });
+  const kept = (p: ReturnType<typeof plan>) => (p?.rows ?? []).map((r) => String(r[col('ID')]));
+  const at10h = '2026/10/01 18:00';
+  const at50h = '2026/10/03 10:00';
+  const a = plan([sheetRow(target)], at10h);
+  check('追加10時間後の未着手の行は、候補に無くても残す（消さず・期限切れへも移さない）', kept(a).join() === target && a?.deleteIds.length === 0 && a.expireIds.length === 0 && a.keptRecent === 1, show(a));
+  const b = plan([sheetRow(target)], at50h);
+  check('追加50時間後は今までどおり片付ける（入力が無ければ消す）', kept(b).length === 0 && b?.deleteIds.join() === target && b.keptRecent === 0);
+  const acc = plan([sheetRow(target, { 精度チェック: '○ 概ね妥当' })], at10h);
+  const accOld = plan([sheetRow(target, { 精度チェック: '○ 概ね妥当' })], at50h);
+  check('精度チェックだけの行も、10時間後は残し、50時間後は期限切れへ移す', kept(acc).join() === target && accOld?.expireIds.join() === target);
+  check('SALES_KEEP_HOURS=0（未指定も）なら今までどおりすぐ片付ける',
+    plan([sheetRow(target)], at10h, { keepHours: 0 })?.deleteIds.join() === target &&
+      planSalesUpdate([], [header, sheetRow(target)], () => false, undefined, undefined, { addedAt: at10h })?.deleteIds.join() === target);
+  const ended = plan([sheetRow(target), sheetRow('ownmatch_b_proj_0000000a', { 要員: 'B.B', 対応状況: '見送り', 見送り理由: '募集終了' })], at10h);
+  check('募集終了の案件の行は、追加10時間後でも片付ける（控えへ移す）', kept(ended).length === 0 && ended?.endedIds.join() === target);
+  check('要員が営業中でない行（engineerActive が偽）は残さない', plan([sheetRow(target)], at10h, { active: false })?.deleteIds.join() === target);
+  check('優先度が下限より低い行（C）は、追加10時間後でも残さない', plan([sheetRow(target, { 優先度: 'C 要確認' })], at10h)?.deleteIds.join() === target);
+  check('追加日時が読めない・空の行は今までどおり片付ける', plan([sheetRow(target, { 追加日時: '' })], at10h)?.deleteIds.join() === target && plan([sheetRow(target, { 追加日時: '不明' })], at10h)?.deleteIds.join() === target);
+  const dup = plan([sheetRow(target), sheetRow('ownmatch_a_proj_0000000b')], at10h);
+  check('残した行は今回の候補に引き当てた行と重ならない（候補に同じ行があれば通常の更新）',
+    (() => {
+      const fresh = planSalesUpdate([sheetRow(target)], [header, sheetRow(target)], () => false, undefined, undefined, { addedAt: at10h, keepHours: 48, engineerActive: () => true });
+      return fresh?.updates.length === 1 && fresh.keptRecent === 0 && kept(dup).length === 2;
+    })());
+  check('addedWithinHours: ちょうど48時間は内、読めなければ偽、0 以下は偽', addedWithinHours('2026/10/01 08:00', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/03 08:01', 48) &&
+    !addedWithinHours('x', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/01 09:00', 0));
+}
+
+// 本番の書き込み（writeSalesList）にも効くこと。Googleには接続せず、書き込みを記録するだけの Sheets API に差し替える
+async function salesKeepWriteChecks(): Promise<void> {
+  section('営業リストの書き込み: 追加から間もない行は候補から外れても消さない（SALES_KEEP_HOURS）');
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const col = (n: string) => header.indexOf(n);
+  const cand = {
+    id: 'ownmatch_a_proj_0000000p', ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: 'proj_0000000p', projectTitle: 'Java開発', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '［条件］外国籍不可。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'A.A',
+  };
+  const engineer = { id: 'a', displayName: 'A.A', proposalLabel: 'A.A', requiredProjectRate: 55, availableDate: '', experienceYears: 3, skills: ['Java'] } as unknown as ProperEngineer;
+  const run = async (addedHoursAgo: number, keepHours: string | undefined, engineers: ProperEngineer[]) => {
+    const row = header.map(() => '');
+    row[col('ID')] = 'ownmatch_a_proj_0000000q'; row[col('No')] = '3'; row[col('要員')] = 'A.A'; row[col('対応状況')] = '未着手'; row[col('優先度')] = 'B 通常';
+    row[col('希望単価(万)')] = '55'; row[col('追加日時')] = jstLabel(new Date(Date.now() - addedHoursAgo * 3_600_000));
+    const requests: unknown[] = [];
+    const expiredAppends: unknown[] = [];
+    const api = {
+      spreadsheets: {
+        get: async () => ({ data: { sheets: ['全体', 'クローズ済み', '精度集計', '要員一覧', '期限切れ'].map((title, i) => ({ properties: { sheetId: i + 1, title, gridProperties: { rowCount: 1000, columnCount: header.length + 1 } } })) } }),
+        batchUpdate: async (p: { requestBody: { requests: unknown[] } }) => (requests.push(...p.requestBody.requests), { data: {} }),
+        values: {
+          get: async (p: { range: string }) => ({ data: { values: p.range.startsWith("'全体'") ? (/A1:/.test(p.range) ? [header] : [header, row]) : [] } }),
+          update: async () => ({ data: {} }),
+          append: async (p: { range: string; requestBody: { values: unknown[][] } }) => (p.range.startsWith("'期限切れ'") && expiredAppends.push(...p.requestBody.values), { data: {} }),
+          batchUpdate: async () => ({ data: {} }),
+          batchClear: async () => ({ data: {} }),
+        },
+      },
+    };
+    const savedId = process.env.PROPER_SALES_SPREADSHEET_ID;
+    const savedKeep = process.env.SALES_KEEP_HOURS;
+    process.env.PROPER_SALES_SPREADSHEET_ID = 'sheet_selftest_sales';
+    if (keepHours === undefined) delete process.env.SALES_KEEP_HOURS;
+    else process.env.SALES_KEEP_HOURS = keepHours;
+    __setSalesSheetsApiForTest(api as unknown as import('googleapis').sheets_v4.Sheets);
+    try {
+      await writeSalesList([cand], [], engineers);
+    } finally {
+      __setSalesSheetsApiForTest(null);
+      if (savedId === undefined) delete process.env.PROPER_SALES_SPREADSHEET_ID;
+      else process.env.PROPER_SALES_SPREADSHEET_ID = savedId;
+      if (savedKeep === undefined) delete process.env.SALES_KEEP_HOURS;
+      else process.env.SALES_KEEP_HOURS = savedKeep;
+    }
+    const deleted = requests.some((r) => (r as { deleteDimension?: unknown }).deleteDimension);
+    return { deleted, expired: expiredAppends.length };
+  };
+  const recent = await run(10, undefined, [engineer]);
+  check('追加10時間後の行は、候補に無く案件が募集中でなくても（要員は営業中）残す（既定48時間）', !recent.deleted && recent.expired === 0, JSON.stringify(recent));
+  const old = await run(50, undefined, [engineer]);
+  check('追加50時間後は今までどおり控えへ移して消す', old.deleted, JSON.stringify(old));
+  const off = await run(10, '0', [engineer]);
+  check('SALES_KEEP_HOURS=0 なら10時間後でも今までどおり消す', off.deleted, JSON.stringify(off));
+  const gone = await run(10, undefined, []);
+  check('要員が営業中でなくなった行は10時間後でも消す', gone.deleted, JSON.stringify(gone));
 }

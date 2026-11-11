@@ -19,15 +19,16 @@ import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '..
 import { parseJstLabel } from './jstLabel.js';
 import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
-import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
+import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, salesMemosOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
-import { ownPairsForJudge, inexperiencedSkippedCount } from '../ownMatch.js';
+import { salesKeepHours } from '../config.js';
+import { ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
 import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { groupSimilarEngineers } from '../proper/group.js';
 import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
-import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
+import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, expiredIdsOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
 import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
@@ -205,7 +206,9 @@ function existingRows(): SheetRow[] {
 }
 
 function closedIds(): Set<string> {
-  return new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
+  const ids = new Set(has('closed_ids.json') ? read<string[]>('closed_ids.json') : []);
+  if (has('expired_values.json')) for (const id of expiredIdsOf(read<{ values: string[][] }>('expired_values.json').values ?? [])) ids.add(id);
+  return ids;
 }
 
 // 「クローズ済み」タブの行（closed_rows.json）から、要員＋案件名の照合と「見送り・募集終了」の行を取る（本番の writeSalesList と同じ関数）
@@ -271,7 +274,15 @@ async function judgedCandidates() {
   __setCachedProjectIdsForTest(async (e) => done.get(e.id) ?? new Set<string>());
   // 判定する組は prep で選んである。ここでは判定した組をすべて候補にする（設定できる最大）
   process.env.PROPER_JUDGE_PER_ENGINEER = '300';
-  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now);
+  // シートにある行の組は上限の対象外（上限だけで行が消えないように。再送で案件IDが変わった行は buildProperCandidates が別名で照合する）
+  const canonicalId = legacyCanonical(list);
+  const onSheetKeys = new Set<string>();
+  for (const r of existingRows()) {
+    const id = canonicalId(r.ID);
+    const proj = projectIdOf(id);
+    if (proj && id.startsWith('ownmatch_') && id.endsWith(`_${proj}`)) onSheetKeys.add(`${id.slice('ownmatch_'.length, id.length - proj.length - 1)}|${proj}`);
+  }
+  const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now, (e, p) => onSheetKeys.has(`${e}|${p}`));
   return { list, projects, judged, candidates, stats, auditHitKeys };
 }
 
@@ -304,6 +315,8 @@ if (phase === 'prompts') {
   const everyPair = ownPairsForJudge(list, kept, Number.MAX_SAFE_INTEGER, now);
   // 本番と同じ ownPairsForJudge を通るため、IT 未経験の社員 × 未経験可でない案件の除外はここでも効いている（除外した組の数だけ別に数える）
   const inexperiencedSkipped = inexperiencedSkippedCount(list, kept, now);
+  const metroResidenceSkipped = metroResidenceSkippedCount(list, kept, now);
+  const startWaitSkipped = startWaitSkippedCount(list, kept, now);
   const siblingMails = everyPair.flatMap((p) => mailOfPair(p.match) ?? []);
   const closedPair = (m: { id: string; projectId: string; ownEngineerId: string; projectTitle: string }) => {
     const key = closedKeyOf(labelOf.get(m.ownEngineerId) ?? '', m.projectTitle);
@@ -361,7 +374,7 @@ if (phase === 'prompts') {
   for (const e of list) writeFileSync(join(dir, `system_${e.proposalLabel || e.displayName}.txt`), judgeSystemFor(e));
   writeFileSync(join(dir, 'pairs.json'), JSON.stringify(pairs, null, 1));
   writeFileSync(join(dir, 'audit.json'), JSON.stringify(auditKeys, null, 1));
-  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, inexperiencedSkipped, reused: reused.length, grouped: groupPending.length }));
+  console.log(JSON.stringify({ audit: auditKeys.length, engineers: list.map((e) => e.proposalLabel || e.displayName), projects: projects.length, kept: kept.length, carried, overCap: all.length - selected.length, pairs: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])), skipped: skip.size, inexperiencedSkipped, metroResidenceSkipped, startWaitSkipped, reused: reused.length, grouped: groupPending.length }));
 } else if (phase === 'fanout') {
   const list = engineers();
   const { projects } = projectsOf(carriedRows().rows);
@@ -408,13 +421,22 @@ if (phase === 'prompts') {
     const received = parseJstLabel(String(prev[COL['受信日時']]));
     return Boolean(e) && Number.isFinite(received) && received >= since && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
   };
+  // 追加から SALES_KEEP_HOURS 時間以内の行は、候補から外れても残す（要員が営業中で希望単価も同じ行だけ。受信の遡りは見ない）
+  const engineerActive = (id: string, prev: Array<string | number>) => {
+    const c = canonical(id);
+    const e = list.find((x) => c.startsWith(`ownmatch_${x.id}_`));
+    return Boolean(e) && String(e?.requiredProjectRate ?? '') === String(prev[COL['希望単価(万)']] ?? '').trim();
+  };
   assertSheetHeader();
   const closed = closedState();
   const plan = planSalesUpdate(fresh, sheetValues(existing), stillOpen, alias, new Set([...closedIds()].map(alias)), {
     closedKeys: closed.keys,
     closedMails: closed.mails,
+    closedSimilar: closed.similar,
     endedRowIds: closed.endedRowIds,
     addedAt: jstLabel(now),
+    keepHours: salesKeepHours(),
+    engineerActive,
     usedMaxNo: has('used_nos.json') ? maxNoOf(read<{ values: string[][] }>('used_nos.json').values) : 0,
   });
   if (!plan) throw new Error('営業リストの見出しが既定の並びではありません（列が並べ替えられています）');
@@ -453,7 +475,7 @@ if (phase === 'prompts') {
     closedRows: plan.closedRows,
     closedStatus: SALES_CLOSED_STATUS,
   }, null, 1));
-  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, belowMinPriority: plan.belowMin, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
+  console.log(JSON.stringify({ gated: false, audited: stats.audited, auditHits: stats.auditHits, auditHitKeys, judge: stats, fresh: fresh.length, updates: plan.updates.length, appends: plan.appends.length, deletes: plan.deleteIds.length, rekeyed: plan.rekeyed, belowMinPriority: plan.belowMin, keptRecent: plan.keptRecent, closes: plan.closeIds.length, expires: plan.expireIds.length, ends: plan.endedIds.length, chunks: chunks.length }));
 } else if (phase === 'labels') {
   const { list, projects, judged, candidates } = await judgedCandidates();
   const store = labelsDir();
@@ -495,7 +517,7 @@ if (phase === 'prompts') {
       }
       const key = salesKeyOf(canonical(r.ID ?? ''));
       if (!key) continue;
-      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '' });
+      sales.push({ key, seenAt: nowIso, tab, status: r['対応状況'] ?? '', skipReason: r['見送り理由'] ?? '', check: r['精度チェック'] ?? '', checkMemo: r['精度メモ'] ?? '', priority: r['優先度'] ?? '', memo: (r['メモ'] ?? '').trim() });
     }
   }
   const added = appendLabels(store, {
@@ -504,7 +526,7 @@ if (phase === 'prompts') {
     sales,
   });
   const total = readLabelStore(store);
-  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1');
+  const backup = writeBackupFiles(dir, process.env.LABELS_BACKUP_ALL === '1' ? total.pairs : added.addedPairs, process.env.LABELS_BACKUP_ALL === '1', salesMemosOf(total.sales));
   const { addedPairs: _added, ...counts } = added;
   console.log(JSON.stringify({ ...counts, missingProject, fbExcluded, store: { pairs: total.pairs.length, sales: total.sales.length }, backupLines: backup.lines, backupBytes: backup.bytes, backupFiles: backup.files.length }));
 } else if (phase === 'labels_verify') {

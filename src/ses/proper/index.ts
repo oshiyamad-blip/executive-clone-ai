@@ -6,7 +6,7 @@
 import { isDemo, properEnabled, properMasterEnabled, properProjectLookbackDays, properJudgePerEngineer, properAuditSample, properFailGatePct, properJudgeBudgetJpy, maxCandidatesPerItem } from '../config.js';
 import { loadRosterEngineers, rosterConfigured } from './roster.js';
 import { safeErr } from '../redact.js';
-import { ownPairsForJudge, auditPairsForJudge, signedMan } from '../ownMatch.js';
+import { ownPairsForJudge, auditPairsForJudge, signedMan, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
 import { getLlmUsageLog } from '../../llm/usage.js';
 import { usageCostJpy } from '../../llm/pricing.js';
 import { judgeProperPairs, cachedProjectIdsFor, pruneJudgeCache, properBudgetExhausted } from './judge.js';
@@ -28,7 +28,7 @@ import {
 } from '../../database/sheets.js';
 import { syncProperMaster, loadProperEngineers, properLabelOf, properMasterConfigured, type ProperSyncResult } from './master.js';
 import { buildProperProposalDraft } from './proposal.js';
-import { writeSalesList, salesListConfigured, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN, SalesHeaderMismatchError } from './salesList.js';
+import { writeSalesList, salesListConfigured, readSalesAllValues, projectIdOf, salesRowOf, mergeSalesRows, HIGH_RATE_GAP_MAN, SalesHeaderMismatchError } from './salesList.js';
 import type { Project, ProperEngineer, ProperCandidate, OwnMatch, ProperJudgment } from '../../types/index.js';
 
 export interface ProperRunResult {
@@ -56,6 +56,8 @@ export interface JudgeStats {
   rejected: number; // AIが見送りとした組
   outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
+  metroResidenceSkipped: number; // 「地方不可」の案件 × 首都圏の外に住む社員として、判定に回さなかった組
+  startWaitSkipped: number; // 案件の開始が稼働開始より PROPER_MAX_START_WAIT_DAYS 日超後で、判定に回さなかった組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
   deferred: number; // 費用の上限・実行の期限で判定せず次回に回した組（失敗に数えない。下の2つの合計）
   deferredBudget: number;
@@ -286,6 +288,8 @@ export async function buildProperCandidates(
   engineers: ProperEngineer[],
   projects: Project[],
   now = new Date(),
+  // すでに営業リスト「全体」に行がある組か（社員ID, 案件ID）。上限は新しい行にだけ掛け、既存の行を上限で参考（D）に落として消さない
+  onSheet?: (engineerId: string, projectId: string) => boolean,
 ): Promise<{ candidates: ProperCandidate[]; stats: JudgeStats; auditHitKeys: string[] }> {
   const engineerById = new Map(engineers.map((e) => [e.id, e]));
   const deduped = dedupeProjects(projects);
@@ -297,7 +301,7 @@ export async function buildProperCandidates(
   for (const e of engineers) cachedByEngineer.set(e.id, await cachedProjectIdsFor(e));
   const pairs = selectPairsForJudge(all, (id) => cachedByEngineer.get(id), perItem, perItem);
   const stats: JudgeStats = {
-    prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, overCap: all.length - pairs.length,
+    prefiltered: all.length, judged: 0, cached: 0, rejected: 0, outOfArea: 0, failed: 0, metroResidenceSkipped: metroResidenceSkippedCount(engineers, projects, now), startWaitSkipped: startWaitSkippedCount(engineers, projects, now), overCap: all.length - pairs.length,
     deferred: 0, deferredBudget: 0, deferredDeadline: 0,
     audited: 0, auditHits: 0, auditTokens: { input: 0, output: 0, costJpy: 0 }, gated: false,
   };
@@ -372,6 +376,11 @@ export async function buildProperCandidates(
     .map((m, i) => ({ m, i, fit: judgmentFit(m.judgment) }))
     .sort((a, b) => cat(a.m) - cat(b.m) || b.fit - a.fit || a.i - b.i);
   const limit = maxCandidatesPerItem();
+  // 再送で案件IDが変わった行も同じ案件として見る（代表のIDに寄せた別名）
+  const aliasesOf = new Map<string, string[]>();
+  for (const [alias, to] of deduped.aliasOf) aliasesOf.set(to, [...(aliasesOf.get(to) ?? []), alias]);
+  const isOnSheet = (m: OwnMatch): boolean =>
+    !!onSheet && [m.projectId, ...(aliasesOf.get(m.projectId) ?? [])].some((id) => onSheet(m.ownEngineerId, id));
   const perEngineer = new Map<string, number>();
   const perProject = new Map<string, number>();
   const candidates: ProperCandidate[] = [];
@@ -383,14 +392,16 @@ export async function buildProperCandidates(
     // 基準を超える組（clearsBar）は上限に関係なく載せ、ほかは社員ごと・案件ごとに上限まで
     // 上限を超えた組も、AIが見送っていなければ「参考」として残す（営業から候補の数を求められているため。
     // 主な候補とは優先度で分け、見送り理由・精度チェックで参考の当たり率を測る）
-    const full = (perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit;
+    // シートに行がある組は上限の対象外（数えもしない）。上限だけで行が消えたり戻ったりするのを防ぐ
+    const onRow = isOnSheet(m);
+    const full = !onRow && ((perEngineer.get(m.ownEngineerId) ?? 0) >= limit || (perProject.get(m.projectId) ?? 0) >= limit);
     // 必須の半分以上が経験なしの条件つきは、上限に関係なく「参考」に下げる（数は出しつつ主な候補の当たり率を保つ）
     const reference = (full && !clearsBar(m)) || weakOnRequired(m);
     const engineer = engineerById.get(m.ownEngineerId);
     const project = projectById.get(m.projectId);
     if (!engineer || !project) continue;
     seen.add(m.id);
-    if (!reference) {
+    if (!reference && !onRow) {
       perEngineer.set(m.ownEngineerId, (perEngineer.get(m.ownEngineerId) ?? 0) + 1);
       perProject.set(m.projectId, (perProject.get(m.projectId) ?? 0) + 1);
     }
@@ -449,6 +460,12 @@ function logJudge(s: JudgeStats): void {
     `プロパー判定: 足切り通過${s.prefiltered}組 → AI判定${s.judged}組（控えの再利用${s.cached}）・見送り${s.rejected}・勤務地が別の地方${s.outOfArea}・失敗${s.failed}` +
       (s.overCap > 0 ? `・上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組${s.overCap}` : ''),
   );
+  if (s.metroResidenceSkipped > 0) {
+    console.log(`プロパー判定: 「地方不可」の案件で首都圏の外に住む要員の組を判定に回さなかった組${s.metroResidenceSkipped}`);
+  }
+  if (s.startWaitSkipped > 0) {
+    console.log(`プロパー判定: 案件の開始が稼働開始よりだいぶ後（PROPER_MAX_START_WAIT_DAYS 超）で判定に回さなかった組${s.startWaitSkipped}`);
+  }
   if (s.deferred > 0) {
     console.warn(
       `プロパー判定: 判定${s.judged - s.cached}組（控え${s.cached}組）・先送り${s.deferred}組（費用の上限${s.deferredBudget}／時間${s.deferredDeadline}。次回の実行で続きを判定します）`,
@@ -553,7 +570,7 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   const engineers = [...(sync ? await loadProperEngineers(sync.presentFileIds) : []), ...(await loadRosterSafely())];
   const since = new Date(Date.now() - properProjectLookbackDays() * 24 * 60 * 60 * 1000);
   const projects = await fetchOpenProjects(PROJECT_FETCH_LIMIT, { receivedSince: since });
-  const { candidates, stats } = await buildProperCandidates(engineers, projects);
+  const { candidates, stats } = await buildProperCandidates(engineers, projects, new Date(), await sheetRowKeyChecker());
   logJudge(stats);
   const deduped = dedupeProjects(projects);
   const openProjects = { ids: new Set(deduped.kept.map((p) => p.id)), aliasOf: deduped.aliasOf };
@@ -593,6 +610,20 @@ export async function runProperFlow(demoProjects: Project[] = []): Promise<Prope
   };
   logCounts('プロパー候補', result);
   return result;
+}
+
+// 営業リスト「全体」に今ある行の（社員ID, 案件ID）の照合。読めない・設定が無ければ undefined（上限は従来どおり全員に掛かる）
+async function sheetRowKeyChecker(): Promise<((engineerId: string, projectId: string) => boolean) | undefined> {
+  const values = await readSalesAllValues();
+  const idAt = values?.[0]?.indexOf('ID') ?? -1;
+  if (!values || idAt < 0) return undefined;
+  const keys = new Set<string>();
+  for (const row of values.slice(1)) {
+    const id = String(row[idAt] ?? '').trim();
+    const proj = projectIdOf(id);
+    if (proj && id.startsWith('ownmatch_') && id.endsWith(`_${proj}`)) keys.add(`${id.slice('ownmatch_'.length, id.length - proj.length - 1)}|${proj}`);
+  }
+  return (e, p) => keys.has(`${e}|${p}`);
 }
 
 // 担当者メールによるプロパー候補の下書き依頼を受けてよい社員（管理表で稼働可の社員）のID。確かめられなければ null
