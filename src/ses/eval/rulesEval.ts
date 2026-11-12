@@ -3840,6 +3840,12 @@ function levelChecks(): void {
   const STATIONS: Array<[string, string]> = [['東陽町', '東京都'], ['九段下 or 勝どき', '東京都'], ['溜池山王・国会議事堂前', '東京都'], ['浅草橋（基本出社）', '東京都'], ['天王町 / 保土ヶ谷', '神奈川県'], ['与野', '埼玉県'], ['大阪市中央区京橋', '大阪府']];
   const wrong = STATIONS.filter(([t, p]) => normalizePrefecture(t) !== p);
   check('オフィス街の駅名から都道府県を読む（市名が前にあればそちら）', wrong.length === 0, wrong.map(([t]) => `${t}→${normalizePrefecture(t)}`).join(' / '));
+  const STATIONS2: Array<[string, string]> = [['南郷18丁目駅', '北海道'], ['大通駅', '北海道'], ['八幡宿駅', '千葉県'], ['江北駅', '東京都'], ['片倉町駅', '神奈川県']];
+  const wrong2 = STATIONS2.filter(([t, p]) => normalizePrefecture(t) !== p);
+  check('札幌・千葉・東京北部・横浜の駅名だけの記載から都道府県を読む', wrong2.length === 0, wrong2.map(([t]) => `${t}→${normalizePrefecture(t)}`).join(' / '));
+  check('駅名の追加が紛らわしい地名を巻き込まない（みなと大通り・南郷町・川崎市麻生区・大船渡）',
+    normalizePrefecture('みなと大通り') === null && normalizePrefecture('南郷町') === null && normalizePrefecture('川崎市麻生区') === '神奈川県' && normalizePrefecture('大船渡') === null,
+    ['みなと大通り', '南郷町', '川崎市麻生区', '大船渡'].map((t) => `${t}→${normalizePrefecture(t)}`).join(' / '));
 
   section('要員リストの読み取り（サマリの■の欄・架空の値）');
   const summary = '■名　前：A.B\n■年　齢：26歳\n■所　属：弊社社員\n■最　寄：大宮駅（埼玉県）\n■単　価：52万円 ※ご相談可能です\n■スキル：Java、Spring Boot、PostgreSQL\n■経験年数：Java案件：2年3ヶ月（詳細設計〜テスト 2年）\n■備　考：PGとして参画';
