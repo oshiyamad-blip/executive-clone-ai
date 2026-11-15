@@ -5345,8 +5345,38 @@ async function salesListRound2Checks(): Promise<void> {
     { projectId: 'p2', judgment: { requirements: [{ quote: '【必須】Java 3年以上' }, { quote: '尚可 AWS' }] } },
     { projectId: 'pX', judgment: { requirements: [{ quote: '案件のメール不明' }] } },
   ];
-  check('本文の写しのずれ: quote が bodyHead（＋attachmentText）に無い割合（空白・改行・全角半角は無視。空の quote・メール不明は数えない）',
-    quoteMissingPct(gapRows, gapJudged, gapProj) === 40 && quoteMissingPct(gapRows, [], gapProj) === null);
+  check('本文の写しのずれ: quote が bodyHead（＋attachmentText）に無い割合（案件が1件だけのメールの判定に絞る。空白・改行・全角半角は無視。空の quote・メール不明は数えない）',
+    quoteMissingPct(gapRows, gapJudged, gapProj) === 33.3 && quoteMissingPct(gapRows, [], gapProj) === null);
+  const quoteRows = [
+    { messageId: 'q1', kind: 'project', extraction: { projects: [{}] }, bodyHead: 'あ'.repeat(100) },
+    { messageId: 'q3', kind: 'project', extraction: { projects: [{}, {}, {}] }, bodyHead: 'あ'.repeat(100) },
+  ];
+  const quoteProj = new Map([['a', 'sesmail_q1'], ['b', 'sesmail_q3']]);
+  const qj = (id: string) => [{ projectId: id, judgment: { requirements: [{ quote: '本文に無い決まり' }] } }];
+  check('本文の写しのずれ: 案件1件のメールで引用が無ければ数え、案件3件のメールで引用が無くても数えない',
+    quoteMissingPct(quoteRows, qj('a'), quoteProj) === 100 && quoteMissingPct(quoteRows, qj('b'), quoteProj) === null &&
+      quoteMissingPct(quoteRows, [...qj('a'), ...qj('b'), { projectId: 'a', judgment: { requirements: [{ quote: 'ああ' }] } }], quoteProj) === 50);
+  const tWb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(tWb, xlsxUtils.aoa_to_sheet([
+    ['項目', '案件A', '案件B'], ['メインスキル', 'Java', 'Python'], ['単金', '80万', '70万'], ['作業場所', '東京', ''],
+    ['面談回数', '1回', '2回'], ['案件概要', '業務システム開発\n詳細設計から', 'データ基盤構築'],
+  ]), 'T');
+  const tText = spreadsheetBufferToText(writeXlsx(tWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+  check('表計算の添付: 1列目が項目名で各列が1案件の表は、【案件 N】の列ごとのまとまりにする（空の項目は出さない・値の改行はそのまま）',
+    tText.startsWith('【シート: T】\n【案件 1】\n項目: 案件A\nメインスキル: Java\n単金: 80万\n作業場所: 東京\n面談回数: 1回\n案件概要: 業務システム開発\n詳細設計から\n\n【案件 2】\n') &&
+      tText.includes('単金: 70万') && !tText.includes('作業場所: \n') && !tText.split('【案件 2】')[1].includes('作業場所'), tText);
+  const nWb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(nWb, xlsxUtils.aoa_to_sheet([['案件名', '単金', '作業場所', '面談回数'], ['A開発', '80万', '東京', '1回'], ['B開発', '70万', '大阪', '2回']]), 'N');
+  xlsxUtils.book_append_sheet(nWb, xlsxUtils.aoa_to_sheet([['メインスキル', 'Java', 'Go'], ['単金', '80万', '70万'], ['作業場所', '東京', '大阪']]), 'F');
+  const nText = spreadsheetBufferToText(writeXlsx(nWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+  check('表計算の添付: 行が案件の普通の表と、項目名が3行以下の表はこれまでどおり CSV',
+    !nText.includes('【案件') && nText.includes('案件名,単金,作業場所,面談回数\nA開発,80万,東京,1回') && nText.includes('メインスキル,Java,Go'), nText);
+  const lWb = xlsxUtils.book_new();
+  xlsxUtils.book_append_sheet(lWb, xlsxUtils.aoa_to_sheet([['案件名', '単金', '場所'], ['基幹システム新規開発（Java）', '60万', '東京'],
+    ['物流システム新規構築支援', '65万', '大阪'], ['ECサイト新規開発プロジェクト', '70万', '東京'], ['業務アプリ新規開発メンバー', '55万', '横浜']]), 'L');
+  const lText = spreadsheetBufferToText(writeXlsx(lWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+  check('表計算の添付: 行が案件の表で1列目の案件名に「新規」などの語があっても、列が案件の表と取り違えない（項目名は12文字以下）',
+    !lText.includes('【案件') && lText.includes('案件名,単金,場所'), lText);
   const mat = attachmentMaterial('本文の先頭', '■案件名\nJava開発A', 'あ'.repeat(9000), ['list.xlsx']);
   check('試運転の案件の材料: 抽出の入力は本文の後ろに【添付: 名前】つきで（40000文字まで）、案件詳細は本文の抜粋の後ろに「【添付より】」で600文字まで',
     mat.body.startsWith('本文の先頭\n\n【添付: list.xlsx】\n') && mat.body.length === '本文の先頭\n\n【添付: list.xlsx】\n'.length + 9000 &&

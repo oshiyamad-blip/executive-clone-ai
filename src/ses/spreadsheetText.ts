@@ -265,7 +265,10 @@ function workbookToText(data: Buffer): string {
     if (!sheet) continue;
     const head = `【シート: ${name}】\n`;
     const budget = SPREADSHEET_MAX_TEXT_CHARS - total - head.length;
-    const part = `${head}${sheetToCsvBounded(sheet, Math.max(0, budget) + 1)}`;
+    const limit = Math.max(0, budget) + 1;
+    const grid = sheetToGridBounded(sheet, limit);
+    const body = isTransposedProjectTable(grid) ? transposedToText(grid).slice(0, limit) : sheetToCsvBounded(sheet, limit);
+    const part = `${head}${body}`;
     if (total + part.length > SPREADSHEET_MAX_TEXT_CHARS) {
       parts.push(`${part.slice(0, Math.max(0, SPREADSHEET_MAX_TEXT_CHARS - total))}\n…（長いため以降を省略）`);
       break;
@@ -315,4 +318,74 @@ function sheetToCsvBounded(sheet: WorkSheet, maxChars: number): string {
     length += line.length + 1;
   }
   return lines.join('\n');
+}
+
+// 案件の項目名の語（1列目にこれらを含む行が並ぶ表は、縦横が入れ替わった「列が案件」の表）
+const PROJECT_LABEL_WORDS = ['案件名', '案件概要', '概要', '単金', '単価', '作業場所', '勤務地', '場所', 'メインスキル', 'スキル', '必須', '尚可', '期間', '開始', '面談', '精算', '商流', '担当者', '新規'];
+
+// シートの値の2次元配列（行・列・文字数の上限まで。文字列にした値。空の行は出さない）
+export function sheetToGridBounded(sheet: WorkSheet, maxChars: number): string[][] {
+  const ref = sheet['!ref'];
+  if (!ref) return [];
+  const range = xlsxUtils.decode_range(ref);
+  const lastRow = Math.min(range.e.r, range.s.r + SPREADSHEET_MAX_ROWS - 1);
+  const lastCol = Math.min(range.e.c, range.s.c + SPREADSHEET_MAX_COLS - 1);
+  const dense = (sheet as { '!data'?: Array<Array<CellObject | undefined> | undefined> })['!data'];
+  const rows: string[][] = [];
+  let length = 0;
+  for (let r = range.s.r; r <= lastRow && length <= maxChars; r++) {
+    const row = dense ? dense[r] : undefined;
+    if (dense && !row) continue;
+    const values: string[] = [];
+    for (let c = range.s.c; c <= lastCol; c++) {
+      const cell = dense ? row?.[c] : (sheet[xlsxUtils.encode_cell({ r, c })] as CellObject | undefined);
+      let text = '';
+      if (cell && cell.v !== undefined && cell.v !== null) {
+        try {
+          text = xlsxUtils.format_cell(cell);
+        } catch {
+          text = String(cell.v);
+        }
+      }
+      values.push(text);
+    }
+    if (values.every((v) => v === '')) continue;
+    rows.push(values);
+    length += values.reduce((n, v) => n + v.length + 1, 0);
+  }
+  return rows;
+}
+
+// 1列目が案件の項目名（4行以上）で、2列目以降に値のある列が2列以上ある「列が案件」の表か
+export function isTransposedProjectTable(grid: string[][]): boolean {
+  const labelRows = grid.filter((row) => {
+    const label = (row[0] ?? '').trim();
+    // 項目名は短い（行が案件の表の1列目に並ぶ案件名「〇〇新規開発」などを項目名と取り違えない）
+    return label !== '' && label.length <= 12 && PROJECT_LABEL_WORDS.some((w) => label.includes(w));
+  }).length;
+  if (labelRows < 4) return false;
+  const width = Math.max(0, ...grid.map((row) => row.length));
+  let filled = 0;
+  for (let c = 1; c < width; c++) {
+    if (grid.some((row) => (row[c] ?? '').trim() !== '')) filled += 1;
+  }
+  return filled >= 2;
+}
+
+// 列ごとに「【案件 N】」のまとまりにする（値が空の項目は出さない。まとまりの間は空行）
+export function transposedToText(grid: string[][]): string {
+  const width = Math.max(0, ...grid.map((row) => row.length));
+  const blocks: string[] = [];
+  for (let c = 1; c < width; c++) {
+    const lines: string[] = [];
+    for (const row of grid) {
+      const value = (row[c] ?? '').trim();
+      const label = (row[0] ?? '').trim();
+      if (value === '') continue;
+      lines.push(`${label}: ${value}`);
+    }
+    if (lines.length === 0) continue;
+    blocks.push(`【案件 ${blocks.length + 1}】\n${lines.join('\n')}`);
+  }
+  return blocks.join('\n\n');
 }
