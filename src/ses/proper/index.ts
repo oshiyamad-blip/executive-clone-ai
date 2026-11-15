@@ -57,7 +57,7 @@ export interface JudgeStats {
   outOfArea: number; // 勤務地をルールで読めず、AIが読んだ出社先が本人と違う地方だった組
   failed: number; // AI判定に失敗した組
   metroResidenceSkipped: number; // 「地方不可」の案件 × 首都圏の外に住む社員として、判定に回さなかった組
-  startWaitSkipped: number; // 案件の開始が稼働開始より PROPER_MAX_START_WAIT_DAYS 日超後で、判定に回さなかった組
+  startWaitSkipped: number; // 案件の開始が稼働開始から1か月（PROPER_MAX_START_WAIT_MONTHS）超後で、判定に回さなかった組
   overCap: number; // 判定の上限（PROPER_JUDGE_PER_ENGINEER）で判定しなかった組
   deferred: number; // 費用の上限・実行の期限で判定せず次回に回した組（失敗に数えない。下の2つの合計）
   deferredBudget: number;
@@ -464,7 +464,7 @@ function logJudge(s: JudgeStats): void {
     console.log(`プロパー判定: 「地方不可」の案件で首都圏の外に住む要員の組を判定に回さなかった組${s.metroResidenceSkipped}`);
   }
   if (s.startWaitSkipped > 0) {
-    console.log(`プロパー判定: 案件の開始が稼働開始よりだいぶ後（PROPER_MAX_START_WAIT_DAYS 超）で判定に回さなかった組${s.startWaitSkipped}`);
+    console.log(`プロパー判定: 案件の開始が稼働開始から1か月超後（PROPER_MAX_START_WAIT_MONTHS 超）で判定に回さなかった組${s.startWaitSkipped}`);
   }
   if (s.deferred > 0) {
     console.warn(
