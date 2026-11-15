@@ -859,9 +859,16 @@ export function properRateToleranceMan(): number {
   return envNum('PROPER_RATE_TOLERANCE_MAN', 5, { min: 0 });
 }
 
-// 社員の稼働開始（今日より前なら今日）から案件の開始までがこの日数を超えるときは候補にしない（待機が長く出るため）。0 で無効
+// 社員の稼働開始（今日より前なら今日）から案件の開始までがこの日数を超えるときは候補にしない（待機が長く出るため）。
+// 既定 0（無効）。1 以上にすると PROPER_MAX_START_WAIT_MONTHS より優先して日数で判定する（明示した日数の上書き用）
 export function properMaxStartWaitDays(): number {
-  return envNum('PROPER_MAX_START_WAIT_DAYS', 45, { min: 0, int: true });
+  return envNum('PROPER_MAX_START_WAIT_DAYS', 0, { min: 0, int: true });
+}
+
+// 社員の稼働開始（今日より前なら今日）から暦でこの月数後の同じ日より後に始まる案件は候補にしない（月末は存在する末日に寄せる）。
+// 既定 1。0 で無効（PROPER_MAX_START_WAIT_DAYS が 1 以上ならそちらが優先）
+export function properMaxStartWaitMonths(): number {
+  return envNum('PROPER_MAX_START_WAIT_MONTHS', 1, { min: 0, int: true });
 }
 
 // 案件単価が希望よりこの額（万円/月）以上高く、必須に「近い経験」か年数不足がある組は優先度 C に下げる（営業の見送りと重なる型）。0 で無効

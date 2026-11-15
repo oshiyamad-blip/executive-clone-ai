@@ -193,6 +193,7 @@
 #### B2. 開始時期の両側を見る
 
 - **実装済み（4cf565c）**: `PROPER_MAX_START_WAIT_DAYS`（既定45日、0で無効）。プロパーの組だけに効き、除外数は `startWaitSkipped`（本文の `timingLateSkipped` ではなく既存の `metroResidenceSkipped` に揃えた名前）。外す形で実装した。
+- **11/15 ユーザー判断で稼働開始＋1か月に変更**（`PROPER_MAX_START_WAIT_MONTHS` 既定1。DAYS は既定0で、設定すれば日数が優先）。営業の見送りメモに「開始時期が希望と不一致」が5件あったため。
 
 - **ねらい**: P5。「案件の開始が、要員の稼働開始よりずっと後」の組を外すか、B に下げます。
 - **変える場所**: `src/ses/match.ts` の `isTimingWithinGrace`（657 行）と、それを使う `ownMatch.ts` 171〜174 行。設定は `src/ses/config.ts`。
