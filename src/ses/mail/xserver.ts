@@ -12,7 +12,7 @@ import { safeErr, SafeLogError, logId } from '../redact.js';
 import { recordHealEvent } from '../heal/events.js';
 import { attachmentsWithinLimits, MAIL_MAX_BYTES, capMailBody } from './attachmentLimits.js';
 import { collectSinceMs, receivedSince, nthNewestUid } from './since.js';
-import { chooseMailBody, sheetLinksInHtml } from './htmlText.js';
+import { chooseMailBody, listPageUrlOf, sheetLinksInHtml } from './htmlText.js';
 import { formatMailboxes, messageIdMailId, type MailboxValue } from './ownMail.js';
 import { checkAuthResults, authResultsWarning, type HeaderField } from './authResults.js';
 import {
@@ -401,6 +401,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): ParsedRawMai
   const body = bodyText(p);
   const auth = checkAuthResults(headerFields(p), xserverAuthservIds(), { requireReceivedBy: true });
   const authDomain = auth.authDomain;
+  const listPageUrl = listPageUrlOf(p.text, typeof p.html === 'string' ? p.html : '');
   const mail: SesRawMail = {
     id,
     from: addrText(p.from),
@@ -415,6 +416,7 @@ function toSesRawMail(p: ParsedMail, id: string, receivedAt: Date): ParsedRawMai
     receivedAt,
     attachments,
     sheetLinks: [...new Set([...sheetLinksInHtml(typeof p.html === 'string' ? p.html : ''), ...extractSheetLinks(body)])],
+    ...(listPageUrl ? { listPageUrl } : {}),
     ...(authDomain ? { authDomain } : {}),
   };
   return { mail, droppedAttachments: dropped, trustedAuthResults: auth.trusted, receivedByUsWithoutResult: auth.receivedByUsWithoutResult };

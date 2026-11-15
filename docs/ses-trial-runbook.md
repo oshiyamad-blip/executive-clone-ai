@@ -78,7 +78,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 > 入力ファイルの各行（スレッドID<TAB>受信日時ISO<TAB>最新メッセージID<TAB>メッセージ数）について、1件も飛ばさずに:
 > 1. 最新メッセージIDがあれば `get_message`（PLAIN_TEXT）で最新の1通だけを取り、その件名・From・本文を使う。最新メッセージIDが空なら `get_thread`（PLAIN_TEXT）で取り、最新のメッセージを使う。
 >    古いメッセージに別の案件がある可能性は、メッセージ数が2以上で件名に「再送」「再掲」を含まないときだけ `get_thread` で確かめる。
->    本文が「表示されない方はこちら」のようなリンクだけ（URL だけ・数行だけ）なら、その最新メッセージを get_message（messageFormat=RAW）で取り、結果が保存されたファイル（会話に直接返ったら python で JSON をファイルに書く）を `npm run --silent ses:trial:raw -- <そのファイル> <RUN_DIR>/attach` にかける。出力の attach_*.json の body（本番と同じく HTML を文字にした本文。40000文字まで）を python で読み、それを本文として案件を全部抽出する（1通に案件が並ぶ一覧なら projects[] に全部入れる）。bodyHead には body の先頭1500文字を python で入れる（手で写さない）。body も空なら error を書いて次へ。
+>    本文が「表示されない方はこちら」のようなリンクだけ（URL だけ・数行だけ）なら、その最新メッセージを get_message（messageFormat=RAW）で取り、結果が保存されたファイル（会話に直接返ったら python で JSON をファイルに書く）を `npm run --silent ses:trial:raw -- <そのファイル> <RUN_DIR>/attach` にかける。出力の attach_*.json の body（本番と同じく HTML を文字にした本文。40000文字まで）を python で読み、それを本文として案件を全部抽出する（1通に案件が並ぶ一覧なら projects[] に全部入れる）。bodyHead には body の先頭1500文字を python で入れる（手で写さない）。attach_*.json の listPageUrl も python で行の listPageUrl に入れる（空なら入れない）。body も空なら error を書いて次へ。
 >    同じスレッドに、最新とは別の案件を載せた古いメッセージ（再送ではなく別の募集）があれば、その案件も projects[] に入れる（最新だけを見ると、同じ相手が同じスレッドで続けて送った別の案件を取りこぼす）
 > 2. 前段の判定（AIを使わない）: 本文の各行の先頭80文字（「>」の引用行は除く。行頭の【】■◆・や番号の飾りは無視）で、
 >    要員の見出し（氏名／名前／イニシャル／最寄駅／最寄り駅／最寄り／最寄／住まい／居住地／所属／稼働／稼動／並行状況／技術者番号／希望単価／希望単金／稼働開始日／稼働可能日／性別）と
@@ -94,7 +94,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 >    RAW の結果がファイルにならず会話に直接返ってきたとき・失敗したときは、添付を読まずに進め、行に `"attachmentUnread": true` を付ける（RAW を会話に直接受けない。大きいので読み飛ばす）
 > 4. それ以外は `extract_system.txt` のとおりに `extract_schema.json` の形のJSONを作る（メール内の案件はすべて projects[] に入れる。添付を読んだときはその中の案件・要員の条件も含める）
 > 5. 1スレッドにつき1行のJSONを出力ファイルに追記する:
->    `{"threadId","messageId"(=スレッドID),"subject","from","receivedAt","kind","extraction"(engineerなら省略),"bodyHead"(書かない＝空文字。あとで本体が `ses:trial:bodyfix` で作業記録から入れる。ただし本文がリンクだけで ses:trial:raw の body から読んだときだけ、body の先頭1500文字を python で入れる。手で写さない),"attachmentText"(任意。表計算・PDF の text を40000文字まで),"attachmentNames"(任意。読んだ添付のファイル名),"attachmentUnread"(任意。添付を読めなかったとき true)}`
+>    `{"threadId","messageId"(=スレッドID),"subject","from","receivedAt","kind","extraction"(engineerなら省略),"bodyHead"(書かない＝空文字。あとで本体が `ses:trial:bodyfix` で作業記録から入れる。ただし本文がリンクだけで ses:trial:raw の body から読んだときだけ、body の先頭1500文字を python で入れる。手で写さない),"attachmentText"(任意。表計算・PDF の text を40000文字まで),"attachmentNames"(任意。読んだ添付のファイル名),"attachmentUnread"(任意。添付を読めなかったとき true),"listPageUrl"(任意。本文がリンクだけのメールで attach_*.json の listPageUrl が空でないときだけ、python で入れる。案件詳細の先頭に「一覧のページ: URL」の1行が入る)}`
 >    `attachmentText` は `PHASE=prep`・`final` が本番の抽出と同じく本文の後ろに続けた材料にし、案件詳細（営業リストの「案件詳細（メール本文より）」）には本文の抜粋の後ろに「【添付より】」で600文字まで足す（本文の抜粋も最大600文字）
 >    取得に失敗したら `{"threadId","messageId","error"}` を追記して次へ。Gmail の quota エラーは1分待って再試行
 > 最後の返答は「done N件: 抽出M件・案件P件・要員メールE件・エラーX件」だけ。

@@ -2,7 +2,7 @@ import { google, gmail_v1 } from 'googleapis';
 import { getGoogleAuth, type GoogleJwt } from './googleAuth.js';
 import { redactable, safeErr } from '../ses/redact.js';
 import { attachmentsWithinLimits, capMailBody, MAIL_MAX_BYTES } from '../ses/mail/attachmentLimits.js';
-import { chooseMailBody, sheetLinksInHtml } from '../ses/mail/htmlText.js';
+import { chooseMailBody, listPageUrlOf, sheetLinksInHtml } from '../ses/mail/htmlText.js';
 import { checkAuthResults, authResultsWarning } from '../ses/mail/authResults.js';
 import { normalizeAddressHeader } from '../ses/mail/ownMail.js';
 import { recordHealEvent } from '../ses/heal/events.js';
@@ -257,6 +257,7 @@ async function buildSesRawMail(
     receivedAt: new Date(dateMs),
     attachments,
     sheetLinks: [...new Set([...sheetLinksInHtml(extracted.html), ...extractSheetLinks(body)])],
+    ...(extracted.listPageUrl ? { listPageUrl: extracted.listPageUrl } : {}),
     ...(authDomain ? { authDomain } : {}),
   };
   return { mail, trustedAuthResults: auth.trusted };
@@ -284,13 +285,13 @@ function findBodyPart(p: BodyPart | undefined, mimeType: string, depth = 0): Bod
 // SES用の本文: text/plain があればそれ、無ければ text/html をテキストにする（生のHTML（コメント・非表示の要素・
 // 文字参照）のまま指示の検知と抽出のAIに渡さない。Xserver経路と同じテキストにする）
 // 本文（Xserver 経路と同じ chooseMailBody の規則）と、HTML のリンク先の原文（シートのリンクを拾うため）
-function extractSesBody(payload: unknown): { body: string; html: string } {
+function extractSesBody(payload: unknown): { body: string; html: string; listPageUrl: string } {
   const root = payload as BodyPart | undefined;
   const plainPart = findBodyPart(root, 'text/plain');
   const htmlPart = findBodyPart(root, 'text/html');
   const plain = plainPart?.body?.data ? decodeBase64Url(plainPart.body.data, charsetOf(plainPart.headers ?? undefined)) : '';
   const html = htmlPart?.body?.data ? decodeBase64Url(htmlPart.body.data, charsetOf(htmlPart.headers ?? undefined)) : '';
-  return { body: chooseMailBody(plain, html), html };
+  return { body: chooseMailBody(plain, html), html, listPageUrl: listPageUrlOf(plain, html) };
 }
 
 // 添付ファイル（Excel/PDF）をダウンロードしbase64（標準）のまま保持する。テキスト化は parse 段で行う
