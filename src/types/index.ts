@@ -336,6 +336,7 @@ export interface SesRawMail {
   receivedAt: Date;
   attachments: SesAttachment[];
   sheetLinks: string[]; // 本文中の Google スプレッドシートURL
+  listPageUrl?: string; // 本文が「表示されない方はこちら URL」だけで HTML 側に案件一覧があるメールの、一覧ページの URL（案件詳細の先頭に載せる）
   authDomain?: string; // 受信サーバーの送信ドメイン認証で DMARC に合格した From のドメイン（無ければ未設定。再送スキップの送り主の識別用）
 }
 

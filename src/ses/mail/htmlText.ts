@@ -141,6 +141,27 @@ export function chooseMailBody(plain: string | undefined | null, html: string | 
   return plain ?? '';
 }
 
+// 本文が HTML 側から選ばれたメール（chooseMailBody と同じ条件）で、text/plain に書かれた一覧ページのリンク（最初の URL）。
+// 営業リストの案件詳細から、HTML にだけある案件一覧のページへ1クリックで飛べるようにする。配信停止の URL は使わない。無ければ ''
+const UNSUBSCRIBE_URL = /unsubscribe|optout|opt-out|配信停止|配信解除|解除/i;
+export function listPageUrlOf(plain: string | undefined | null, html: string | undefined | null): string {
+  const p = (plain ?? '').trim();
+  if (!p || !html) return '';
+  const h = htmlToPlainText(html).trim();
+  if (!(h.length > 0 && (STUB_PATTERN.test(p.slice(0, 2000)) || p.length * 3 < h.length))) return '';
+  for (const m of p.matchAll(/https?:\/\/[^\s<>"'「」]+/g)) {
+    const url = m[0].replace(/[)）\]】』。、，．,.;；:!！?？]+$/, '');
+    const at = m.index ?? 0;
+    if (url.length > 'https://'.length && !UNSUBSCRIBE_URL.test(url) && !UNSUBSCRIBE_URL.test(p.slice(Math.max(0, at - 12), at))) return url;
+  }
+  return '';
+}
+
+// 案件詳細の先頭に一覧のページの1行を足す（URL が無ければそのまま。詳細が空でもこの1行は入れる）
+export function withListPageLine(detail: string, url: string | undefined | null): string {
+  return url ? `一覧のページ: ${url}\n${detail}` : detail;
+}
+
 // HTMLのリンク先（href）にある Google スプレッドシートのURL（表示テキストと違うことがあるため、リンク先を優先して拾う）
 export function sheetLinksInHtml(html: string | undefined | null): string[] {
   if (!html) return [];

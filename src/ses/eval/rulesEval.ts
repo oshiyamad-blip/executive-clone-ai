@@ -146,7 +146,7 @@ import {
 import { freshnessOf, allocateWithCaps } from '../ranking.js';
 import { pickForExtraction, nextRunAt, startRunClock, stopRunClock } from '../schedule.js';
 import { shouldSendSummary } from '../notify.js';
-import { chooseMailBody, sheetLinksInHtml } from '../mail/htmlText.js';
+import { chooseMailBody, sheetLinksInHtml, listPageUrlOf, withListPageLine } from '../mail/htmlText.js';
 import { engineerBySubject, subjectPriority, classifyMailKind, splitByKind, engineersToKeep, isClosedNotice, mentionsTitle } from '../mailKind.js';
 import { flowConstraints, violatesHops } from '../constraints.js';
 import { marketLabelOf, primarySkillOf, regionOf, marketSummaryLines, recordMarketHighlights, resetMarketHighlights } from '../marketRate.js';
@@ -214,7 +214,7 @@ import { lastChanceBudgetJpy } from '../matchRun.js';
 import { carriedText, CARRIED_UNSAFE_TEXT, signUnnotified, verifiedUnnotified } from '../notify.js';
 import { SafeLogError } from '../redact.js';
 import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, readReviewMatches } from '../review.js';
-import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, EXTRACT_SCHEMA } from '../extract.js';
+import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, withDetail, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
 import { outcomeOf, formatResult } from './labelsEval.js';
@@ -3661,6 +3661,23 @@ function mailBodyChecks(): void {
   const plain = '【案件名】：在庫管理改修\n【単価】：70万円/月\n【場所】：田町';
   check('ふつうの text/plain はそのまま使う', chooseMailBody(plain, html) === plain);
   const links = sheetLinksInHtml('<a href="https://docs.google.com/spreadsheets/d/AbC_123-x/edit?usp=sharing&amp;x=1">一覧はこちら</a>');
+  const listHtml = '<html><body><p>■案件名：架空の一覧案件A</p><p>■単価：60万円</p></body></html>';
+  const listPlain = 'HTMLメールが表示されない方はこちら https://list.example.com/view?id=1';
+  check('一覧ページのリンク: 本文がリンクだけで HTML に一覧があれば、その URL', listPageUrlOf(listPlain, listHtml) === 'https://list.example.com/view?id=1', listPageUrlOf(listPlain, listHtml));
+  check('一覧ページのリンク: 十分長い普通の text/plain（HTML を選ばない）や HTML が無いときは空',
+    listPageUrlOf('【案件名】：在庫管理改修\n【単価】：70万円/月\n【場所】：田町\nhttps://list.example.com/a', html) === '' && listPageUrlOf(listPlain, '') === '' && listPageUrlOf('', listHtml) === '');
+  check('一覧ページのリンク: 配信停止の URL は使わず次の URL を見る',
+    listPageUrlOf('表示されない方はこちら\n配信停止: https://list.example.com/unsubscribe?u=1\n一覧: https://list.example.com/view?id=2', listHtml) === 'https://list.example.com/view?id=2' &&
+      listPageUrlOf('表示されない方はこちら\n配信停止はこちら https://list.example.com/x', listHtml) === '');
+  check('一覧ページのリンク: 末尾の「）」「。」は URL に含めない',
+    listPageUrlOf('表示されない方はこちら（https://list.example.com/view?id=3）。', listHtml) === 'https://list.example.com/view?id=3' &&
+      listPageUrlOf('表示されない方は https://list.example.com/view?id=4。', listHtml) === 'https://list.example.com/view?id=4');
+  const baseProject = { id: 'p1' } as unknown as Project;
+  check('本番の抽出: listPageUrl のあるメールの案件詳細は「一覧のページ: URL」で始まる（詳細が空でも1行は入る）・URL が無ければ従来どおり',
+    withDetail(baseProject, '■案件名\n架空A', 'https://list.example.com/view?id=1').detail === '一覧のページ: https://list.example.com/view?id=1\n■案件名\n架空A' &&
+      withDetail(baseProject, '', 'https://list.example.com/view?id=1').detail === '一覧のページ: https://list.example.com/view?id=1\n' &&
+      withDetail(baseProject, '本文').detail === '本文' && withDetail(baseProject, '').detail === undefined);
+  check('試運転: 行に listPageUrl があれば案件詳細の先頭に入り、無ければ今までどおり', withListPageLine('本文', 'https://list.example.com/v') === '一覧のページ: https://list.example.com/v\n本文' && withListPageLine('本文', undefined) === '本文' && withListPageLine('本文', '') === '本文');
   check('シートのリンクは HTML のリンク先から拾う（表示テキストに URL が無くても）', links.length === 1 && links[0].startsWith('https://docs.google.com/spreadsheets/d/AbC_123-x/edit') && !links[0].includes('"'), links.join());
 }
 
@@ -5347,6 +5364,7 @@ async function salesListRound2Checks(): Promise<void> {
     check('添付の読み取り: 本文がリンクだけのメールは、本番と同じく HTML を文字にした本文を body に返す（bodyChars つき）',
       linkOnly.body.includes('架空の基幹システム開発') && linkOnly.body.includes('架空のインフラ運用') && !linkOnly.body.includes('<p>') &&
         linkOnly.bodyChars === linkOnly.body.length && eml.body.includes('body text'), JSON.stringify({ chars: linkOnly.bodyChars }));
+    check('添付の読み取り: リンクだけのメールは listPageUrl（本文のリンク）を返し、普通のメールは空', linkOnly.listPageUrl === 'https://list.example/view' && eml.listPageUrl === '', linkOnly.listPageUrl);
     let bad = '';
     try {
       rawMimeOf(Buffer.from('{"other":1}'));

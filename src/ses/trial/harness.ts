@@ -19,6 +19,7 @@ import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '..
 import { parseJstLabel } from './jstLabel.js';
 import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
+import { withListPageLine } from '../mail/htmlText.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, salesMemosOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
 import { salesKeepHours } from '../config.js';
@@ -56,6 +57,8 @@ interface OutRow {
   attachmentText?: string;
   attachmentNames?: string[];
   attachmentUnread?: boolean;
+  // 本文がリンクだけで HTML 側に一覧があるメールの一覧ページの URL（ses:trial:raw の listPageUrl）。案件詳細の先頭に載せる
+  listPageUrl?: string;
   error?: string;
 }
 
@@ -95,7 +98,7 @@ function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; fail
     ps.forEach((raw, i) => {
       try {
         const p = buildProject(raw, mail, i, null) as Project;
-        const detail = attach(r, projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i)).detail;
+        const detail = withListPageLine(attach(r, projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i)).detail, r.listPageUrl);
         if (detail) p.detail = detail;
         p.replyTarget = { from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', messageId: '', references: '' };
         if (r.extraction?.injectionSuspected) p.injectionSuspected = true;

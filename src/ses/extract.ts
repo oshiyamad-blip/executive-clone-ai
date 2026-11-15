@@ -25,6 +25,7 @@ import { toInitials } from './pii.js';
 import { PHASES, ROLES, sanitizeProjectLevel, hasLevelRequirement } from './level.js';
 import { capSubject } from '../collectors/email.js';
 import { looksLikeInjection, dataSafe } from './injection.js';
+import { withListPageLine } from './mail/htmlText.js';
 import type { SesRawMail, ExtractedItem, Project, Engineer, RemoteOption, ReplyTarget } from '../types/index.js';
 
 export { validIsoDate } from './dates.js';
@@ -792,7 +793,7 @@ async function extractFromMail(mail: SesRawMail, attempt?: HealAttempt): Promise
   const items: ExtractedItem[] = [
     ...parsed.projects.map((p, i) => ({
       kind: 'project' as const,
-      project: withDetail(buildProject(p, mail, i, numbers), projectExcerpt(mail.body, parsed.projects.map((x) => x.title), i)),
+      project: withDetail(buildProject(p, mail, i, numbers), projectExcerpt(mail.body, parsed.projects.map((x) => x.title), i), mail.listPageUrl),
     })),
     ...parsed.engineers.map((e, i) => ({ kind: 'engineer' as const, engineer: buildEngineer(e, mail, i, numbers) })),
   ];
@@ -936,8 +937,10 @@ export function buildProject(raw: RawProject, mail: SesRawMail, index: number, n
   };
 }
 
-function withDetail(project: Project, detail: string): Project {
-  return detail ? { ...project, detail } : project;
+// 案件詳細を付ける。一覧ページの URL があれば先頭に1行足す（詳細が空でもこの1行は入れる）
+export function withDetail(project: Project, detail: string, listPageUrl?: string): Project {
+  const d = withListPageLine(detail, listPageUrl);
+  return d ? { ...project, detail: d } : project;
 }
 
 const EXCERPT_MAX = 600;
