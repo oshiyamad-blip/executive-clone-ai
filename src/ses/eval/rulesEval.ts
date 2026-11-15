@@ -5308,6 +5308,13 @@ async function salesListRound2Checks(): Promise<void> {
     const viaJson = await readRawAttachments(wrapped, outDir, 'case2');
     check('添付の読み取り（RAW の保存ファイル）: JSON の raw（base64url の MIME）も同じ結果・Message-ID が無ければ false',
       viaJson.attachments.length === 2 && viaJson.attachments.find((a) => a.kind === 'sheet')?.textChars === sheet?.textChars && viaJson.messageIdHeaderPresent === false && rawMimeOf(wrapped).toString().startsWith('From: Sales'));
+    const htmlOnly = ['From: Sales <sales@partner.example>', 'To: us@our.example', 'Subject: list', 'MIME-Version: 1.0', 'Content-Type: multipart/alternative; boundary="ALT"', '',
+      '--ALT', 'Content-Type: text/plain; charset=utf-8', '', 'https://list.example/view', '--ALT', 'Content-Type: text/html; charset=utf-8', '',
+      '<html><body><p>■案件名：架空の基幹システム開発</p><p>■必須スキル：Java、Spring Boot、PostgreSQL、詳細設計から結合テストまでの経験</p><p>■場所：東京都内（一部リモート）</p><table><tr><td>■案件名：架空のインフラ運用</td></tr></table></body></html>', '--ALT--', ''].join('\r\n');
+    const linkOnly = await readRawAttachments(Buffer.from(htmlOnly), outDir, 'case_html');
+    check('添付の読み取り: 本文がリンクだけのメールは、本番と同じく HTML を文字にした本文を body に返す（bodyChars つき）',
+      linkOnly.body.includes('架空の基幹システム開発') && linkOnly.body.includes('架空のインフラ運用') && !linkOnly.body.includes('<p>') &&
+        linkOnly.bodyChars === linkOnly.body.length && eml.body.includes('body text'), JSON.stringify({ chars: linkOnly.bodyChars }));
     let bad = '';
     try {
       rawMimeOf(Buffer.from('{"other":1}'));

@@ -1,7 +1,8 @@
 // 試運転で案件メールの添付（表計算・PDF）を読む CLI。Gmail の get_message(messageFormat=RAW) の結果を、本番と同じ解析にかける。
 //   npm run ses:trial:raw -- <入力> <出力ディレクトリ>
 // 入力は RAW の保存ファイル（JSON の raw に base64url の MIME）か .eml。出力ディレクトリに次を書く:
-//   attach_<入力のファイル名>.json = { attachments: [{ name, kind: 'sheet'|'pdf'|'other', textChars, text?, textError?, pdfPath? }], messageIdHeaderPresent }
+//   attach_<入力のファイル名>.json = { attachments: [{ name, kind: 'sheet'|'pdf'|'other', textChars, text?, textError?, pdfPath? }], messageIdHeaderPresent, body, bodyChars }
+//   body は本番と同じ選び方の本文（本文がリンクだけ・スタブのメールは HTML を文字にしたもの）。試運転で本文がリンクだけの案件一覧メールを抽出するのに使う
 //   PDF は unpdf で文字にして text に入れる（試運転のコンテナには PDF を画像にする道具が無いため。本番は文字にせず Claude に文書として渡している）。
 //   文字にできない PDF（画像だけ・暗号化・壊れている）は text を空にして textError: true。<入力のファイル名>_<番号>.pdf も今までどおり書く
 // 標準出力には件数と文字数だけを出す（添付の名前・中身・Message-ID の値は出さない。ファイルの JSON にだけ書く）。
@@ -30,6 +31,9 @@ export interface RawAttachment {
 export interface RawAttachResult {
   attachments: RawAttachment[];
   messageIdHeaderPresent: boolean;
+  // 本番と同じ選び方の本文（text/plain がリンクだけ・スタブなら HTML を文字にしたもの）。抽出の上限（MAX_ATTACHMENT_CHARS）まで
+  body: string;
+  bodyChars: number;
 }
 
 // 案件詳細（p.detail）の後ろに足す添付の文字の上限
@@ -95,7 +99,8 @@ export async function readRawAttachments(file: Buffer, outDir: string, baseName:
       attachments.push({ name: a.filename, kind: 'other', textChars: 0 });
     }
   }
-  return { attachments, messageIdHeaderPresent: mail.messageIdHeader !== '' };
+  const body = mail.body ?? '';
+  return { attachments, messageIdHeaderPresent: mail.messageIdHeader !== '', body: body.slice(0, ATTACH_TEXT_MAX), bodyChars: body.length };
 }
 
 async function main(): Promise<void> {
@@ -122,6 +127,7 @@ async function main(): Promise<void> {
       pdfTextChars: result.attachments.filter((a) => a.kind === 'pdf').map((a) => a.textChars),
       pdfTextErrors: result.attachments.filter((a) => a.textError).length,
       messageIdHeaderPresent: result.messageIdHeaderPresent,
+      bodyChars: result.bodyChars,
       outFile,
     }),
   );
