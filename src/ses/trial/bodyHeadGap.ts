@@ -27,10 +27,14 @@ export function bodyHeadShortPct(rows: GapRow[]): number | null {
 }
 
 // 判定の requirements の quote（メール本文のままの決まり）のうち、その案件のメールの bodyHead（＋attachmentText）に含まれない割合。
-// quote が空のもの・案件のメールが分からないものは数えない
+// bodyHead は先頭1500文字の写しで、案件が並ぶ一覧メールでは後ろの案件の引用が写しの外に出て割合が高く出るため、
+// 案件がちょうど1件のメールの判定だけを数える（2件以上・0件・不明は数えない）。quote が空のものも数えない
 export function quoteMissingPct(rows: GapRow[], judgments: GapJudgment[], mailIdOfProject: Map<string, string>): number | null {
   const material = new Map<string, string>();
-  for (const r of rows) material.set(`sesmail_${r.messageId}`, squash(`${r.bodyHead ?? ''}${r.attachmentText ?? ''}`));
+  for (const r of rows) {
+    if (r.extraction?.projects?.length !== 1) continue;
+    material.set(`sesmail_${r.messageId}`, squash(`${r.bodyHead ?? ''}${r.attachmentText ?? ''}`));
+  }
   let total = 0;
   let missing = 0;
   for (const j of judgments) {
