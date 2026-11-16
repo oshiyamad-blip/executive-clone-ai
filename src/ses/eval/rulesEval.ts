@@ -5240,6 +5240,19 @@ async function salesListRound2Checks(): Promise<void> {
   const two = planSalesUpdate([newOne], [header, prevMailRow('ownmatch_a_sesmail_x1'), prevMailRow('ownmatch_a_sesmail_x2')], () => false, (id) => id, new Set(), { addedAt: stamp });
   check('ID の付け替え: 同じメールの既存の行が2つ以上なら付け替えない（新しい行は足し、既存の行は入力があれば残す）',
     two !== null && two.rekeyed === 0 && two.appends.length === 1 && two.rows.filter((r) => r[col('メモ')] === '先方に連絡済').length === 2);
+  // 営業元（U〜W）: 新しいメールで取り出せず空になっても、行に入っていた値は消さない（新しい値が入っていればそちらを使う）
+  const keepId = 'ownmatch_a_proj_keep1';
+  const prevKeep = asSheet(candOf(keepId, '案件名です', '件名です'), { ID: keepId, No: '7', 追加日時: earlier });
+  const emptyAgent = { ...proj(at, '件名です'), agentCompany: '', agentContact: '', agentEmail: '' } as Project;
+  const keepPlan = planSalesUpdate([salesRowOf({ ...base, id: keepId, projectId: 'proj_keep1', projectTitle: '案件名です' }, emptyAgent)], [header, prevKeep], () => false, (id) => id, new Set(), { addedAt: stamp });
+  const keepVals = keepPlan?.updates[0]?.values;
+  check('営業元の引き継ぎ: 更新で営業元会社・担当者・メールが空なら、既存の行の値を残す',
+    !!keepVals && keepVals[col('営業元会社')] === 'S社' && keepVals[col('営業元担当者')] === '山田' && keepVals[col('営業元メール')] === 'sales@partner.example', JSON.stringify(keepVals?.slice(col('営業元会社'), col('営業元メール') + 1)));
+  const newAgent = { ...proj(at, '件名です'), agentCompany: '新社', agentContact: '', agentEmail: 'new@partner.example' } as Project;
+  const winPlan = planSalesUpdate([salesRowOf({ ...base, id: keepId, projectId: 'proj_keep1', projectTitle: '案件名です' }, newAgent)], [header, prevKeep], () => false, (id) => id, new Set(), { addedAt: stamp });
+  const winVals = winPlan?.updates[0]?.values;
+  check('営業元の引き継ぎ: 新しい値が空でない列はそちらが勝ち、空の列だけ既存の値で埋める',
+    !!winVals && winVals[col('営業元会社')] === '新社' && winVals[col('営業元担当者')] === '山田' && winVals[col('営業元メール')] === 'new@partner.example');
   const late = planSalesUpdate([candOf('ownmatch_a_proj_prod1', '本番での案件名の表記です', 'Java案件のご紹介', new Date(at.getTime() + 40 * 60 * 1000))], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
   const otherEmail = planSalesUpdate([candOf('ownmatch_a_proj_prod1', '本番での案件名の表記です', 'Java案件のご紹介', at, 'other@partner.example')], [header, prevMailRow('ownmatch_a_sesmail_x1')], () => false, (id) => id, new Set(), { addedAt: stamp });
   check('ID の付け替え: 受信が30分を超えて違う・営業元メールが違う行は同じ行とみなさない',
@@ -5516,6 +5529,24 @@ function bodyFixChecks(): void {
     check('bodyFix: 件数は rows 4・replaced 2・notFound 1・skippedLinkOnly 1・transcripts 1', res.rows === 4 && res.replaced === 2 && res.notFound === 1 && res.skippedLinkOnly === 1 && res.transcripts === 1, show(res));
     check('bodyFix: 書き換え前の元が out_backup に残る（2回目の実行でも元のまま）',
       (() => { fixRunDir(join(dir, 'run'), join(dir, 'sub')); return readFileSyncB(join(dir, 'run', 'out_backup', 'c01.jsonl'), 'utf8') === original && readdirSyncBf(join(dir, 'run', 'out_backup')).length === 1; })());
+    // HTMLだけのメール（plaintextBody が空）は本番と同じく HTML を文字にした本文、plain があれば plain
+    const htmlRun = join(dir, 'run2');
+    mkdirSyncBf(join(htmlRun, 'out'), { recursive: true });
+    const htmlTdir = join(dir, 'sub2');
+    mkdirSyncBf(htmlTdir, { recursive: true });
+    const htmlText = '合成の案件本文です。担当工程は設計から結合テストまで。'.repeat(8);
+    const htmlThread = (id: string, plain: string, html: string) => JSON.stringify({ id, messages: [{ id: 'm0', internalDate: '1', plaintextBody: plain, htmlBody: html }] });
+    writeFileSyncForEval(join(htmlTdir, 'a.jsonl'), [
+      userLine([{ type: 'tool_result', tool_use_id: 'h1', content: htmlThread('thH', '', `<html><body><p>${htmlText}</p></body></html>`) }]),
+      userLine([{ type: 'tool_result', tool_use_id: 'h2', content: htmlThread('thP', 'PLAIN'.repeat(60), '<p>HTML</p>') }]),
+    ].join('\n'));
+    const hFile = join(htmlRun, 'out', 'c01.jsonl');
+    writeFileSyncForEval(hFile, ['thH', 'thP'].map((id) => JSON.stringify({ threadId: id, messageId: id, kind: 'project', bodyHead: '' })).join('\n'));
+    const hres = fixRunDir(htmlRun, htmlTdir);
+    const [hh, hp] = readFileSyncB(hFile, 'utf8').split('\n').map((x) => JSON.parse(x) as { bodyHead?: string });
+    check('bodyFix: HTMLだけのメール（plaintextBody が空）は htmlBody を文字にした本文を bodyHead にし、skippedLinkOnly に数えない',
+      !!hh.bodyHead && hh.bodyHead.includes('合成の案件本文です') && !hh.bodyHead.includes('<') && hres.skippedLinkOnly === 0, show(hh.bodyHead?.slice(0, 40)));
+    check('bodyFix: plaintextBody がある（HTMLより十分長い）メールは従来どおり plain を使う', hp.bodyHead === 'PLAIN'.repeat(60) && hres.replaced === 2, show(hp.bodyHead?.slice(0, 20)));
     const cli = JSON.stringify(res);
     check('bodyFix: 標準出力に出す内容は件数の JSON だけ（本文・件名・スレッドIDを含まない）',
       cli === JSON.stringify({ rows: 4, replaced: 2, notFound: 1, skippedLinkOnly: 1, skippedBySubject: 0, transcripts: 1 }) && logs.length === 0 && !cli.includes('thA') && !cli.includes('あ'));
