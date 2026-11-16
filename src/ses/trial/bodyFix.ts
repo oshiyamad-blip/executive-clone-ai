@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, copyFileSync, writeFileSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { chooseMailBody } from '../mail/htmlText.js';
 
 export const BODY_HEAD_CHARS = 1500;
 export const BODY_HEAD_ENGINEER_CHARS = 500;
@@ -11,6 +12,7 @@ const MAX_LINE_CHARS = 30_000_000;
 interface ThreadMessage {
   internalDate?: unknown;
   plaintextBody?: unknown;
+  htmlBody?: unknown;
 }
 interface Thread {
   id: string;
@@ -139,14 +141,17 @@ const dateOf = (m: ThreadMessage): number => {
   return Number.isFinite(n) ? n : -Infinity;
 };
 
-// internalDate が一番大きいメッセージの plaintextBody（無ければ null）
+// internalDate が一番大きいメッセージの本文（本番と同じ chooseMailBody。HTMLだけのメールは文字にした本文。どちらも無ければ null）
 export function latestBody(th: Thread): string | null {
   let best: ThreadMessage | null = null;
   for (const m of th.messages) {
     if (!m || typeof m !== 'object') continue;
     if (!best || dateOf(m) > dateOf(best)) best = m;
   }
-  return best && typeof best.plaintextBody === 'string' ? best.plaintextBody : null;
+  if (!best) return null;
+  const plain = typeof best.plaintextBody === 'string' ? best.plaintextBody : null;
+  const html = typeof best.htmlBody === 'string' ? best.htmlBody : null;
+  return plain === null && html === null ? null : chooseMailBody(plain, html);
 }
 
 export function fixRunDir(runDir: string, transcriptDir: string): BodyFixResult {

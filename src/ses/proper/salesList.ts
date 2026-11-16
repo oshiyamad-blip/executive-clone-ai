@@ -786,6 +786,10 @@ export function planSalesUpdate(
       HUMAN_COLS.forEach((c) => {
         next[c] = prev[c];
       });
+      // 新しいメールから営業元を取り出せなかった回に、行に入っていた営業元を空で消さない
+      ['営業元会社', '営業元担当者', '営業元メール'].forEach((n) => {
+        if (String(next[COL[n]] ?? '').trim() === '' && String(prev[COL[n]] ?? '').trim() !== '') next[COL[n]] = prev[COL[n]];
+      });
       carryStamps(next, prev, opts.addedAt ?? '');
       updates.push({ row: i + 2, values: next });
       rows.push(next);
