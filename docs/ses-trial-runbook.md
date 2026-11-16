@@ -78,7 +78,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 > 入力ファイルの各行（スレッドID<TAB>受信日時ISO<TAB>最新メッセージID<TAB>メッセージ数）について、1件も飛ばさずに:
 > 1. 最新メッセージIDがあれば `get_message`（PLAIN_TEXT）で最新の1通だけを取り、その件名・From・本文を使う。最新メッセージIDが空なら `get_thread`（PLAIN_TEXT）で取り、最新のメッセージを使う。
 >    古いメッセージに別の案件がある可能性は、メッセージ数が2以上で件名に「再送」「再掲」を含まないときだけ `get_thread` で確かめる。
->    本文が「表示されない方はこちら」のようなリンクだけ（URL だけ・数行だけ）なら、その最新メッセージを get_message（messageFormat=RAW）で取り、結果が保存されたファイル（会話に直接返ったら python で JSON をファイルに書く）を `npm run --silent ses:trial:raw -- <そのファイル> <RUN_DIR>/attach` にかける。出力の attach_*.json の body（本番と同じく HTML を文字にした本文。40000文字まで）を python で読み、それを本文として案件を全部抽出する（1通に案件が並ぶ一覧なら projects[] に全部入れる）。bodyHead には body の先頭1500文字を python で入れる（手で写さない）。attach_*.json の listPageUrl も python で行の listPageUrl に入れる（空なら入れない）。body も空なら error を書いて次へ。
+>    本文が「表示されない方はこちら」のようなリンクだけ（URL だけ・数行だけ）なら、HTML の本文に案件が入っていることが多い。その最新メッセージを get_message（messageFormat=FULL_CONTENT）で取り、htmlBody のタグを除いた文章から案件を全部抽出する（1通に案件が並ぶ一覧なら projects[] に全部入れる）。結果が会話に直接返ってもファイルに保存されても、htmlBody は python で読んでタグを除く（手で写さない。保存されなかったときは、返った JSON をそのまま python のファイルに書いてから読む）。bodyHead は書かない（本体の ses:trial:bodyfix が本番と同じ方法で HTML から作る）。listPageUrl には plaintextBody の最初の URL（配信停止の URL は除く）を python で入れる。htmlBody も外部のページ（スプレッドシートなど）へのリンクだけで案件が書かれていなければ、projects は空にして error は書かない（外部のページは開かない）。htmlBody が空のときだけ、従来どおり get_message（messageFormat=RAW）を `npm run --silent ses:trial:raw -- <ファイル> <RUN_DIR>/attach` にかけ、attach_*.json の body から抽出する。
 >    同じスレッドに、最新とは別の案件を載せた古いメッセージ（再送ではなく別の募集）があれば、その案件も projects[] に入れる（最新だけを見ると、同じ相手が同じスレッドで続けて送った別の案件を取りこぼす）
 > 2. 前段の判定（AIを使わない）: 本文の各行の先頭80文字（「>」の引用行は除く。行頭の【】■◆・や番号の飾りは無視）で、
 >    要員の見出し（氏名／名前／イニシャル／最寄駅／最寄り駅／最寄り／最寄／住まい／居住地／所属／稼働／稼動／並行状況／技術者番号／希望単価／希望単金／稼働開始日／稼働可能日／性別）と
