@@ -3837,6 +3837,10 @@ function levelChecks(): void {
     minYearsBySkill: [{ skill: 'Java', years: 3 }, { skill: 'Spring', years: 7 }], minTotalYears: null, topPhase: '詳細設計', roleLevel: 'PG', juniorOk: false, selfDriven: true };
   const built = buildProject(raw, mail, 0, sourceNumbers('Java 3年以上 60万'));
   check('案件の年数は本文に現れる数値だけを通す（本文に無い7年は捨てる）', built.level?.skillYears.length === 1 && built.level.skillYears[0].years === 3 && built.level.topPhase === '詳細設計' && built.level.selfDriven, JSON.stringify(built.level));
+  const shifted = buildProject({ ...raw, minYearsBySkill: 'someone@example.com', requiredSkills: 'Java' } as unknown as typeof raw, mail, 0, null);
+  check('欄ずれ（配列でない値）でも案件を落とさず、年数・必須は空として扱う', (shifted.level?.skillYears.length ?? 0) === 0 && shifted.requiredSkills.length === 0, JSON.stringify(shifted.level));
+  const mixed = buildProject({ ...raw, minYearsBySkill: [{ skill: 'Java', years: 3 }, 'x@example.com', { skill: 'Go' }] as unknown as typeof raw.minYearsBySkill }, mail, 0, null);
+  check('年数の配列に混じった不正な要素だけを捨てる', mixed.level?.skillYears.length === 1 && mixed.level.skillYears[0].skill === 'Java', JSON.stringify(mixed.level));
 
   section('レベルの軸: 社員の照合への組み込み');
   const ownL = (over: Partial<OwnEngineer> = {}): OwnEngineer => ({
