@@ -906,11 +906,21 @@ export function itemIdOf(kind: 'proj' | 'eng', mailId: string, index: number): s
   return hashId(kind, [mailId, kind, String(index)]);
 }
 
+// サブエージェントの出力は欄がずれて配列でない値（文字列など）が入ることがある。1件のために案件ごと落とさず、空として扱う
+function stringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function skillYearsOf(v: unknown): Array<{ skill: string; years: number }> {
+  if (!Array.isArray(v)) return [];
+  return v.filter((s): s is { skill: string; years: number } => !!s && typeof s === 'object' && typeof s.skill === 'string' && typeof s.years === 'number');
+}
+
 // 抽出結果（LLMの出力）→ 案件。単金・日付の検証と補正はここで決定的に行う（numbers=null は原文照合を省く）
 export function buildProject(raw: RawProject, mail: SesRawMail, index: number, numbers: Set<string> | null): Project {
   const { required: requiredSkills, preferred: preferredSkills } = normalizeRequirementLists(
-    requirementItems(raw.requiredSkills),
-    requirementItems(raw.preferredSkills),
+    requirementItems(stringArray(raw.requiredSkills)),
+    requirementItems(stringArray(raw.preferredSkills)),
   );
   // 未知語の集計（営業元の会社名・担当者名・メールアドレスと同じ語は人名・社名の混入として数えない）
   tallySkillTokens(requirementMembers([...requiredSkills, ...preferredSkills]), [raw.agentCompany, raw.agentContact, raw.agentEmail]);
@@ -984,7 +994,7 @@ export function projectExcerpt(body: string, titles: string[], index: number): s
 // 案件のレベルの条件。年数は本文に現れる数値だけを通す（単金・年齢と同じく、照合の結果を左右する数値のため）
 function levelOf(raw: RawProject, numbers: Set<string> | null): { level?: Project['level'] } {
   const level = sanitizeProjectLevel({
-    skillYears: (raw.minYearsBySkill ?? []).map((s) => ({ skill: s.skill, years: sourceBacked(s.years, numbers) })),
+    skillYears: skillYearsOf(raw.minYearsBySkill).map((s) => ({ skill: s.skill, years: sourceBacked(s.years, numbers) })),
     totalYears: raw.minTotalYears === null || raw.minTotalYears === undefined ? null : sourceBacked(raw.minTotalYears, numbers),
     topPhase: raw.topPhase ?? null,
     role: raw.roleLevel ?? null,

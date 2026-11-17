@@ -81,6 +81,17 @@ function outRows(base = dir): OutRow[] {
 
 const attach = (r: OutRow, excerpt = '') => attachmentMaterial(r.bodyHead ?? '', excerpt, r.attachmentText, r.attachmentNames);
 
+// 配列のはずの欄が配列でない案件の数（抽出の欄ずれの検知）
+function malformedFieldCount(rows: OutRow[]): number {
+  let n = 0;
+  for (const r of rows) {
+    for (const raw of (r.extraction?.projects ?? []) as Array<Record<string, unknown>>) {
+      if (['minYearsBySkill', 'requiredSkills', 'preferredSkills'].some((k) => raw[k] !== undefined && raw[k] !== null && !Array.isArray(raw[k]))) n += 1;
+    }
+  }
+  return n;
+}
+
 function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; failed: number } {
   const seen = new Set<string>();
   const projects: Project[] = [];
@@ -582,7 +593,7 @@ if (phase === 'prompts') {
   }
   const mailIdOfProject = new Map(projects.map((p) => [p.id, p.sourceMailId]));
   const score = {
-    mails: rows.length, engineerMails, extractErrors: errors, closedNotices: closed, buildFailures: failed,
+    mails: rows.length, engineerMails, extractErrors: errors, closedNotices: closed, buildFailures: failed, malformedFields: malformedFieldCount(rows),
     projects: projects.length, keptAfterDedupe: kept.length, dedupeRemoved: projects.length - kept.length,
     rateMissingPct: pct(projects.filter((p) => p.rateMax === null && p.rateMin === null).length, projects.length),
     requiredEmptyPct: pct(projects.filter((p) => p.requiredSkills.length === 0).length, projects.length),
