@@ -37,7 +37,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
      （平日の夜 21:00〜08:00 や土日の区切りのように8時間より長い区切りも、重なっていれば丸ごと一覧する）。スレッドが1000に届かなければ、
      それまでに一覧した一番古い区切りの始まりからさらに8時間前までと重なる区切りを一覧し、1000に届くか、前の回の対象の終わりに着くまで繰り返す
      （区切りを飛ばさない。1000を超えた分はチャンク分けの max で新しい順に削られる）。
-     チャンク分けは `npm run --silent ses:trial:chunks -- <RUN_DIR> 45 0.5 1000`（新しい順に1000スレッドまで。外した分は `deferred.jsonl` の `reason: olderThanResumeCap`）。
+     チャンク分けは `npm run --silent ses:trial:chunks -- <RUN_DIR> 45 1 1000`（新しい順に1000スレッドまで。外した分は `deferred.jsonl` の `reason: olderThanResumeCap`）。
      実行ログの B（対象の始まり）は実際に一覧した一番古い区切りの始まりにし、D 列に「再開（新しい順に1000通まで）」と添える。通常の回（再開でない回）は今どおり（max は付けない）
 3. `npm install`（未導入なら）のあと、`RUN_DIR=... PHASE=prompts npx tsx src/ses/trial/harness.ts` を実行する。
    抽出の指示文（`extract_system.txt`）とJSONの形（`extract_schema.json`）ができる
@@ -61,7 +61,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    次のページが無くなるまで取り、各スレッドについて `スレッドID<TAB>最新メッセージID<TAB>internalDate<TAB>送信者<TAB>件名<TAB>メッセージ数` の行を `list/wNN.tsv` に書く
    （最新メッセージID・internalDate・件名・送信者は、そのスレッドのうち区切りの時間内に受信した一番新しいメッセージのもの。メッセージ数はスレッド全体。
    プレビューに出るのは古い5通までなので、メッセージ数が5を超えるスレッドは最新メッセージIDを空にする。件名のタブ・改行は空白に置き換える）
-2. **チャンク分け**: `npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1] [max=0]` を実行する（`max` は新しい順に残すスレッド数。0 は上限なし。再開した回だけ 1000 を付ける。環境変数 `SES_TRIAL_MAX_THREADS` でも可で、引数が優先）。試運転は `keep=0.5`（使用量を抑えるため件名の点数 `subjectPriority` の上位半分だけ抽出する。外したメールは `<RUN_DIR>/deferred.jsonl` に残る）で行う。スレッドIDの重複を除き（internalDate が大きい行）、受信時刻の順に30件ずつ
+2. **チャンク分け**: `npm run ses:trial:chunks -- <RUN_DIR> [chunkSize=30] [keep=1] [max=0]` を実行する（`max` は新しい順に残すスレッド数。0 は上限なし。再開した回だけ 1000 を付ける。環境変数 `SES_TRIAL_MAX_THREADS` でも可で、引数が優先）。試運転は `keep=1`（後回しにせず全部抽出する。ユーザーの判断。以前は使用量を抑えるため `keep=0.5` で件名の点数 `subjectPriority` の上位半分だけ抽出し、外したメールを `<RUN_DIR>/deferred.jsonl` に残していた）で行う。スレッドIDの重複を除き（internalDate が大きい行）、受信時刻の順に30件ずつ
    `chunks/cNN`（各行 `スレッドID<TAB>受信日時ISO<TAB>最新メッセージID<TAB>メッセージ数`）に分ける。件名だけで明らかな要員メール（`engineerBySubject`）は抽出に回さず `out/skip.jsonl` に書く。
    前の回（兄弟の `run_*`、または `CARRY_DIRS`）で1案件と抽出したメールと同じ送信者・同じ件名の再送（受信が新しく、遡り期間内）は抽出に回さず、前の行を写して `out/resent.jsonl` に書く
    （一覧・まとめの件名は、案件名が件名に含まれるときだけ。2案件以上のメールは対象外）。
