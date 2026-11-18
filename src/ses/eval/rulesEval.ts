@@ -4045,6 +4045,10 @@ async function properJudgeChecks(): Promise<void> {
   const inj = verifyJudgment(raw({ injectionSuspected: true }), profile, { requiredSkills: ['Oracle'] });
   check('案件メールに指示らしき記載があれば人の確認に回す', inj.reviewNotes.some((n) => n.includes('AIへの指示')));
   check('本人の希望は懸念として残す', verifyJudgment(raw({ preferenceFit: '希望はDB運用保守で合う' }), profile, { requiredSkills: [] }).concerns.includes('本人の希望: 希望はDB運用保守で合う'));
+  const strConcerns = verifyJudgment(raw({ concerns: '現場が遠方' as unknown as string[] }), profile, { requiredSkills: [] });
+  check('懸念が文字列で返っても落ちず、1件の懸念として残す', strConcerns.concerns.includes('現場が遠方'));
+  const badShape = [7, undefined, null].map((v) => { try { return verifyJudgment(raw({ concerns: v as unknown as string[], requirements: v as unknown as RawProperJudgment['requirements'] }), profile, { requiredSkills: [] }); } catch { return null; } });
+  check('懸念・要件が配列でなくても落ちない', badShape.every((r) => r !== null && r.concerns.length === 0));
 
   // 必須の「N年以上」: 社員側の年数が足りなければ met → close（作り物の経歴）
   const yrsProfile = 'Java でのWeb開発（2年7か月）。実務経験3年。';

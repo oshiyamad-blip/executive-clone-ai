@@ -268,7 +268,12 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
   const met: string[] = [];
   const gaps: string[] = [];
   const reviewNotes: string[] = [];
-  const concerns = raw.concerns.map((c) => c.trim()).filter(Boolean);
+  // 判定の出力で懸念や要件の欄が配列にならず文字列などで返ることがあるため、形を揃えてから使う
+  const rawConcerns: unknown = raw.concerns;
+  const concernList: string[] = Array.isArray(rawConcerns) ? rawConcerns.filter((c): c is string => typeof c === 'string')
+    : typeof rawConcerns === 'string' ? [rawConcerns] : [];
+  const concerns = concernList.map((c) => c.trim()).filter(Boolean);
+  const requirements = Array.isArray(raw.requirements) ? raw.requirements : [];
   let substantive = 0;
   const heldTech = new Set<string>(); // 満たす・近い経験とした要件の技術名
   const askedTech = new Set<string>(); // 要件に出てくる技術名
@@ -277,8 +282,8 @@ export function verifyJudgment(raw: RawProperJudgment, profile: string, project:
   let metCount = 0;
   let unmetCount = 0;
   const checks: RequirementCheck[] = [];
-  const quotes = raw.requirements.map((r) => norm(r.quote ?? r.requirement));
-  for (const r of raw.requirements) {
+  const quotes = requirements.map((r) => norm(r.quote ?? r.requirement));
+  for (const r of requirements) {
     const name = r.requirement.trim();
     if (!name) continue;
     if (isFragmentRequirement(name, quotes)) continue;
