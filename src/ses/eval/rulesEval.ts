@@ -6997,13 +6997,13 @@ function startWaitChecks(): void {
   const pJan = proj('p_jan', '2027-01-01');
   const pMar = proj('p_mar', '2027-03-01');
   const pNone = proj('p_none', null);
-  check('稼働開始 12/1 の要員: 開始 1/1（ちょうど1か月後）の案件は通り、開始 3/1 の案件は外れ、開始日不明の案件は通る',
-    JSON.stringify(idsOf([e], [pJan, pMar, pNone])) === JSON.stringify(['E1|p_jan', 'E1|p_none']), JSON.stringify(idsOf([e], [pJan, pMar, pNone])));
-  check('外した組は startWaitSkipped に数える（通った組・日付不明は数えない）', startWaitSkippedCount([e], [pJan, pMar, pNone], NOW) === 1 && startWaitSkippedCount([e], [pJan, pNone], NOW) === 0);
+  check('稼働開始 12/1 の要員: 開始 1/1（ちょうど1か月後）と 3/1 の案件は外れ、12/31 と開始日不明の案件は通る',
+    JSON.stringify(idsOf([e], [pJan, pMar, pNone, proj('p_dec31', '2026-12-31')])) === JSON.stringify(['E1|p_dec31', 'E1|p_none']), JSON.stringify(idsOf([e], [pJan, pMar, pNone, proj('p_dec31', '2026-12-31')])));
+  check('外した組は startWaitSkipped に数える（通った組・日付不明は数えない）', startWaitSkippedCount([e], [pJan, pMar, pNone], NOW) === 2 && startWaitSkippedCount([e], [pNone], NOW) === 0);
   check('稼働開始が不明（null）の要員は、遠い開始の案件も通る', JSON.stringify(idsOf([own('E2', null)], [pMar])) === JSON.stringify(['E2|p_mar']));
   const past = own('E3', '2026-09-01');
-  check('稼働開始が今日より前なら今日から数える（今日 9/23 の1か月後 10/23 までは通り、10/24 は外れる）',
-    JSON.stringify(idsOf([past], [proj('p_oct', '2026-10-23'), proj('p_dec', '2026-10-24')])) === JSON.stringify(['E3|p_oct']));
+  check('稼働開始が今日より前なら今日から数える（今日 9/23 の1か月後 10/23 の前日 10/22 までは通り、10/23 は外れる）',
+    JSON.stringify(idsOf([past], [proj('p_oct', '2026-10-22'), proj('p_dec', '2026-10-23')])) === JSON.stringify(['E3|p_oct']));
   withEnv({ PROPER_MAX_START_WAIT_MONTHS: '0' }, () => {
     check('MONTHS=0 で無効: 開始 3/1 の案件も通り、数えない', JSON.stringify(idsOf([e], [pMar])) === JSON.stringify(['E1|p_mar']) && startWaitSkippedCount([e], [pMar], NOW) === 0);
   });
@@ -7018,14 +7018,19 @@ function startWaitChecks(): void {
   });
   const today = new Date('2026-11-15T01:00:00Z');
   const M = { days: 0, months: 1 };
-  check('isStartTooLate(1か月): 稼働開始 12/1 は 1/1 ちょうどが通り、1/2 は外れる',
-    !isStartTooLate('2027-01-01', '2026-12-01', today, M) && isStartTooLate('2027-01-02', '2026-12-01', today, M));
-  check('isStartTooLate(1か月): 稼働開始が今日（11/15）より前なら基準は今日（上限 12/15 は通り、12/16 は外れる）',
-    !isStartTooLate('2026-12-15', '2026-11-01', today, M) && isStartTooLate('2026-12-16', '2026-11-01', today, M));
-  check('isStartTooLate(1か月): 月末の調整（1/31 の1か月後は 2/28 まで通り、3/1 は外れる）',
-    !isStartTooLate('2027-02-28', '2027-01-31', today, M) && isStartTooLate('2027-03-01', '2027-01-31', today, M));
-  check('isStartTooLate: 1か月で月末が閏年なら 2/29 まで通る（2028-01-31 → 2028-02-29）',
-    !isStartTooLate('2028-02-29', '2028-01-31', today, M) && isStartTooLate('2028-03-01', '2028-01-31', today, M));
+  check('isStartTooLate(1か月): 稼働開始 12/1 は 12/31 が通り、1/1 ちょうどと 1/2 は外れる',
+    !isStartTooLate('2026-12-31', '2026-12-01', today, M) && isStartTooLate('2027-01-01', '2026-12-01', today, M) && isStartTooLate('2027-01-02', '2026-12-01', today, M));
+  const today20 = new Date('2026-11-20T01:00:00Z');
+  check('isStartTooLate(1か月): 今日 11/20・稼働開始 12/1 は 1/1 が外れ、12/31 は通る',
+    isStartTooLate('2027-01-01', '2026-12-01', today20, M) && !isStartTooLate('2026-12-31', '2026-12-01', today20, M));
+  check('isStartTooLate(1か月): 稼働開始が今日（11/20）より前なら基準は今日（12/20 は外れ、12/19 は通る）',
+    isStartTooLate('2026-12-20', '2026-11-01', today20, M) && !isStartTooLate('2026-12-19', '2026-11-01', today20, M));
+  check('isStartTooLate(1か月): 稼働開始が今日（11/15）より前なら基準は今日（12/15 は外れ、12/14 は通る）',
+    !isStartTooLate('2026-12-14', '2026-11-01', today, M) && isStartTooLate('2026-12-15', '2026-11-01', today, M));
+  check('isStartTooLate(1か月): 月末の調整（1/31 の1か月後 2/28 は外れ、2/27 は通る）',
+    !isStartTooLate('2027-02-27', '2027-01-31', today, M) && isStartTooLate('2027-02-28', '2027-01-31', today, M) && isStartTooLate('2027-03-01', '2027-01-31', today, M));
+  check('isStartTooLate: 1か月で月末が閏年なら 2/29 から外れる（2028-01-31 → 2028-02-29）',
+    !isStartTooLate('2028-02-28', '2028-01-31', today, M) && isStartTooLate('2028-02-29', '2028-01-31', today, M));
   check('isStartTooLate: days=0 かつ months=0 は常に通す', !isStartTooLate('2030-01-01', '2026-12-01', today, { days: 0, months: 0 }));
   check('isStartTooLate: days を明示すれば日数で判定し months より優先（45日は通し、46日は外す）',
     !isStartTooLate('2027-01-15', '2026-12-01', today, { days: 45, months: 1 }) && isStartTooLate('2027-01-16', '2026-12-01', today, { days: 45, months: 1 }));
