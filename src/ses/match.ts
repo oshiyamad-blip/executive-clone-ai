@@ -665,7 +665,7 @@ export function isTimingWithinGrace(startDateIso: string, availableFromIso: stri
 
 // 案件の開始が、要員の稼働開始（今日より前なら今日）よりずっと後で、待機が出る組か（isTimingWithinGrace の反対側）。
 // limit.days が 1 以上ならその日数を超えたら true（優先）。そうでなく limit.months が 1 以上なら、基準日（稼働開始か今日の遅いほう）の
-// 暦で months か月後の同じ日（無い日はその月の末日）より開始が後なら true（ちょうどその日は通す）。
+// 暦で months か月後の同じ日（無い日はその月の末日）以降の開始なら true（1か月後の同じ日以降は組まない。営業が「開始時期不一致」で見送っているため）。
 // どちらも 0 以下・日付が読めないときは false（通す）
 export function isStartTooLate(startDateIso: string, availableFromIso: string, now: Date, limit: { days: number; months: number }): boolean {
   if (!(limit.days > 0) && !(limit.months > 0)) return false;
@@ -679,7 +679,7 @@ export function isStartTooLate(startDateIso: string, availableFromIso: string, n
   const y = b.getUTCFullYear();
   const m = b.getUTCMonth() + limit.months;
   const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-  return start > Date.UTC(y, m, Math.min(b.getUTCDate(), lastDay));
+  return start >= Date.UTC(y, m, Math.min(b.getUTCDate(), lastDay));
 }
 
 // 最終判定を同時に走らせる数（1件ずつだと候補の多い回で実行時間の上限に届くため。APIのレート制限の内に収める）
