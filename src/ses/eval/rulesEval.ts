@@ -115,7 +115,7 @@ import { storableUnknownToken } from '../skillStats.js';
 import { LlmOutputError } from '../../llm/errors.js';
 import { mergeDraftColumns, isDraftStateActionable, DRAFT_STATE, type DraftColumns } from '../../database/mapping.js';
 import { evaluateOwnMatch, matchOwnEngineersToProjects, coversCoreTech, sharesTech, auditPairsForJudge, ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
-import { requiresMetroResidence } from '../residence.js';
+import { requiresKantoResidence, requiresMetroResidence } from '../residence.js';
 import { acceptsInexperienced } from '../inexperienced.js';
 import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentRequirement, norm as judgeNorm, evidenceMentionsTech, isTruncatedRequirement, isGenericRequirement, __setProperJudgeForTest, __setCachedProjectIdsForTest, judgeUserPrompt, judgeSystemFor, INEXPERIENCED_PARAGRAPH, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
@@ -6206,6 +6206,20 @@ async function inexperiencedChecks(): Promise<void> {
   check('組の選び方: 都道府県が分からない要員は「地方不可」の案件にも通る',
     JSON.stringify(idsOf([unknownPref], [pMetro])) === JSON.stringify(['U1|p_metro']) && metroResidenceSkippedCount([unknownPref], [pMetro], NOW) === 0);
   check('監視の組にも「地方不可」で除いた組は入らない', auditPairsForJudge([gunma], [pMetro], 10, NOW).length === 0);
+
+  // 関東圏内が条件（1都6県）
+  check('requiresKantoResidence: 「関東圏内」「関東圏在住の方のみ」「関東在住」「関東の方のみ」は true',
+    ['関東圏内', '関東圏在住の方のみ', '関東在住', '関東の方のみ'].every(requiresKantoResidence));
+  check('requiresKantoResidence: 「【関東】」「関東出社可能」「関東以外も可」は false',
+    !['【関東】', '関東出社可能', '関東以外も可'].some(requiresKantoResidence));
+  const hokkaido = own('H1', { skills: ['Linux'], prefecture: '北海道' });
+  const pKantoOnly = project({ id: 'p_kanto_only', title: 'Linux運用', requiredSkills: ['Linux'], rateMax: 40, prefecture: '東京都', location: '新宿（フルリモート不可・関東圏内）', detail: '' });
+  check('組の選び方: 北海道在住の要員 × 「関東圏内」の案件は外れ、数に数える',
+    idsOf([hokkaido], [pKantoOnly]).length === 0 && metroResidenceSkippedCount([hokkaido], [pKantoOnly], NOW) === 1);
+  check('組の選び方: 群馬在住の要員 × 「関東圏内」の案件は通る（数えない）',
+    JSON.stringify(idsOf([gunma], [pKantoOnly])) === JSON.stringify(['G1|p_kanto_only']) && metroResidenceSkippedCount([gunma], [pKantoOnly], NOW) === 0);
+  check('組の選び方: 東京在住の要員 × 「関東圏内」の案件は通る',
+    JSON.stringify(idsOf([tokyo], [pKantoOnly])) === JSON.stringify(['T1|p_kanto_only']) && metroResidenceSkippedCount([tokyo], [pKantoOnly], NOW) === 0);
 
   // 指示文
   check('judgeSystemFor: 未経験の社員の指示文にだけ段落が入り、<engineer_profile> の前に置く',

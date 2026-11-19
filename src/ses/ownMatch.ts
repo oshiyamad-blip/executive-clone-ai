@@ -14,7 +14,7 @@ import { extractItems } from './extract.js';
 import { assessSkills, directSkillRate, impliedSkillNote, fmtMan, roundManDown, skillMatch } from './pricing.js';
 import { parseRequirements, skillCategory, techNamesIn } from './skillDict.js';
 import { defaultOwnRegion, isFullRemoteLocation, wideRegionOf } from './prefecture.js';
-import { livesOutsideMetro, projectRequiresMetroResidence } from './residence.js';
+import { excludedByResidence, livesOutsideMetro, projectRequiresKantoResidence, projectRequiresMetroResidence } from './residence.js';
 import { loadSkillEquivalences } from './skillEquiv.js';
 import { isTimingWithinGrace, isStartTooLate, ageLimitOf } from './match.js';
 import { INJECTION_REVIEW_REASON, OUTGOING_TEXT_REVIEW_REASON, unsafeOutgoingText } from './injection.js';
@@ -101,7 +101,7 @@ export interface OwnMatchOptions {
 
 // 「地方不可」の案件は、フルリモート・本人と同じ地方でも、1都3県の外に住む社員は組まない
 function excludedAsOutsideMetro(own: OwnEngineer, project: Project, opts: OwnMatchOptions): boolean {
-  return !opts.ignoreMetroGate && livesOutsideMetro(own.prefecture) && projectRequiresMetroResidence(project);
+  return !opts.ignoreMetroGate && excludedByResidence(own.prefecture, project);
 }
 
 // IT 未経験の社員 × 未経験可の記載が無い案件は、AI判定に回さない（理由「IT未経験のため対象外（未経験可の記載なし）」。PROPER_INEXPERIENCED_STRICT で無効）
@@ -302,8 +302,8 @@ export function inexperiencedSkippedCount(own: OwnEngineer[], projects: Project[
 export function metroResidenceSkippedCount(own: OwnEngineer[], projects: Project[], now = new Date()): number {
   let n = 0;
   for (const engineer of own.filter((o) => o.status === 'available' && livesOutsideMetro(o.prefecture))) {
-    for (const project of projects.filter((p) => p.status === 'open' && projectRequiresMetroResidence(p))) {
-      if (evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreMetroGate: true })) n += 1;
+    for (const project of projects.filter((p) => p.status === 'open' && (projectRequiresMetroResidence(p) || projectRequiresKantoResidence(p)))) {
+      if (excludedByResidence(engineer.prefecture, project) && evaluateOwnMatchDetailed(engineer, project, now, { forJudge: true, ignoreMetroGate: true })) n += 1;
     }
   }
   return n;
