@@ -4175,6 +4175,11 @@ async function properJudgeChecks(): Promise<void> {
   check('凡例に理由の列の案内を添える', marked.split('\n')[0].includes('判定の理由'), marked.split('\n')[0]);
   check('照合結果が無ければ本文はそのまま', markRequirementsInMail(mail, []) === mail);
   check('本文が無くても要件の一覧は出す', markRequirementsInMail('', withOpt.checks ?? []).includes('○ 必須: Oracle'));
+  const longLine = `【必須スキル】Javaの経験${'あ'.repeat(250)}`;
+  const longMarked = markRequirementsInMail(longLine, [{ kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }]);
+  check('改行の無い長い1行には記号を付けず、要件は冒頭の一覧に回す', longMarked.split('\n').includes(longLine) && !longMarked.includes(`○ ${longLine}`) && longMarked.split('\n').includes('○ 必須: Java'), longMarked);
+  const shortMarked = markRequirementsInMail('【必須スキル】\n・Javaの経験', [{ kind: '必須', requirement: 'Java', quote: 'Java', status: 'met' }]);
+  check('短い箇条書きの行には従来どおり記号を付ける', shortMarked.includes('\n○ ・Javaの経験'), shortMarked);
 
   const summary = '■名　前：Y.Y\n■年　齢：24歳\n■性　別：男性\n■最　寄：新所沢駅（埼玉県）\n■単　価：50万円\n■備　考：希望はDB運用保守案件です。';
   const pt = rosterProfileText(summary, 'Oracle DB上でのデータ作成');

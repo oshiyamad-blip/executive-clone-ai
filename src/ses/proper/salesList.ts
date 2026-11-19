@@ -188,6 +188,8 @@ export function jstLabel(d: Date): string {
 
 const CHECK_MARKS: Record<RequirementCheck['status'], string> = { met: '○', close: '△', unmet: '×' };
 const BULLET = /^\s*(?:[・\-*●○◯◎►▶>＞]|\d+[.．)）])/;
+// 改行の無い本文全体の1行に記号を付けても読めないため、この長さ（前後の空白を除く）を超える行には付けない
+export const MARK_LINE_MAX = 200;
 export const CHECK_LEGEND = '【要件の照合】○ 経験あり　△ 近い経験　× 経験なし（AIの判定を経歴と照合した結果。理由は右の「判定の理由」列）';
 
 // メール本文の必須・尚可の行の先頭に ○△× を付ける。1行に複数の要件がある行は行末に記号だけを要件の順に添え、
@@ -206,7 +208,7 @@ export function markRequirementsInMail(detail: string, checks: RequirementCheck[
     inSkill.push(skill);
   }
   const lineOf = (q: string): number => {
-    const hits = lines.flatMap((l, i) => (norm(l).includes(q) ? [i] : []));
+    const hits = lines.flatMap((l, i) => (l.trim().length <= MARK_LINE_MAX && norm(l).includes(q) ? [i] : []));
     // 要件の範囲が読めるメールで範囲外にしか無い語（案件名・見出しの飾り）には付けず、冒頭の一覧に回す
     return hits.find((i) => inSkill[i]) ?? hits.find((i) => BULLET.test(lines[i])) ?? (inSkill.includes(true) ? -1 : (hits[0] ?? -1));
   };
