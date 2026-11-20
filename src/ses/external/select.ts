@@ -3,7 +3,7 @@
 // 1回・1日の上限の内で上から採る
 import { properHighRateGapMan } from '../config.js';
 import { primarySelectDetailed, comparePairs, isStartTooLate } from '../match.js';
-import { engineerBlocksResale, projectBlocksResale } from './resale.js';
+import { engineerBlocksResale, engineerDepth, projectAllowedDepth, projectBlocksResale } from './resale.js';
 import { externalHardMismatches, type HardRule } from './hardRules.js';
 import type { Engineer, MatchPair, Project } from '../../types/index.js';
 
@@ -29,6 +29,7 @@ export interface ExtSelectStats {
   restrictedProjects: number;
   sameAgent: number;
   samePerson: number; // 同じ会社の別の営業担当が送ってきた同じ要員（新しい1通だけ残して外した数）
+  depthExceeded: number; // 要員の商流の段数が案件の許す段数（「1社先まで」など）を超えて外した組の数
   hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢で決まりごとに外した組の数
   candidates: number;
   selected: number;
@@ -89,8 +90,16 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const projects = openProjects.filter((p) => !projectBlocksResale(p));
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
   const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0 };
+  let depthExceeded = 0;
   const candidates = selection.pairs
     .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))
+    .filter((p) => {
+      const allowed = projectAllowedDepth(p.project);
+      const depth = engineerDepth(p.engineer, mailTextOf(p.engineer));
+      const over = allowed !== null && depth !== null && depth > allowed;
+      if (over) depthExceeded += 1;
+      return !over;
+    })
     .filter((p) => {
       const hits = externalHardMismatches(p.engineer, mailTextOf(p.engineer), p.project);
       for (const h of hits) hardExcluded[h.rule] += 1;
@@ -128,6 +137,7 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       restrictedProjects: openProjects.length - projects.length,
       sameAgent: selection.stats.reasons.sameAgent,
       samePerson,
+      depthExceeded,
       hardExcluded,
       candidates: candidates.length,
       selected: pairs.length,
