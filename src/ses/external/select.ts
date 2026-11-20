@@ -1,6 +1,7 @@
 // 外部マッチ（試行）: 提携先の要員 × すでに抽出した他社の案件の組から、AI判定に回す少数の組を選ぶ（純関数）。
 // 商流・再委託で紹介できない要員・案件と、同じ営業元の組は除く。組は合う順に並べ、要員ごと・案件ごとの上限と、
 // 1回・1日の上限の内で上から採る
+import { properHighRateGapMan } from '../config.js';
 import { primarySelectDetailed, comparePairs, isStartTooLate } from '../match.js';
 import { engineerBlocksResale, projectBlocksResale } from './resale.js';
 import { externalHardMismatches, type HardRule } from './hardRules.js';
@@ -28,7 +29,7 @@ export interface ExtSelectStats {
   restrictedProjects: number;
   sameAgent: number;
   samePerson: number; // 同じ会社の別の営業担当が送ってきた同じ要員（新しい1通だけ残して外した数）
-  hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・年齢で決まりごとに外した組の数
+  hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢で決まりごとに外した組の数
   candidates: number;
   selected: number;
 }
@@ -70,7 +71,7 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const openProjects = input.projects.filter((p) => p.status === 'open' && !p.injectionSuspected);
   const projects = openProjects.filter((p) => !projectBlocksResale(p));
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
-  const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, age: 0 };
+  const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0 };
   const candidates = selection.pairs
     .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))
     .filter((p) => {
@@ -79,6 +80,15 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       return hits.length === 0;
     })
     .sort(comparePairs);
+  // 判定のあとで高単価×必須△の規則に落ちる組が多いので、単価差が額未満の組を先にする（各グループの中は comparePairs のまま）
+  const gap = properHighRateGapMan();
+  if (gap > 0) {
+    const high = (p: MatchPair): boolean => {
+      const rate = p.project.rateMax ?? p.project.rateMin;
+      return typeof rate === 'number' && typeof p.engineer.desiredRate === 'number' && rate - p.engineer.desiredRate >= gap;
+    };
+    candidates.sort((a, b) => Number(high(a)) - Number(high(b)));
+  }
   const perEngineer = input.perEngineer ?? 2;
   const perProject = input.perProject ?? 2;
   const limit = Math.max(0, Math.min(input.perRun, input.dailyCap - input.addedToday));

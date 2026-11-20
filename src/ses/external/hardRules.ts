@@ -3,7 +3,7 @@
 import { ageLimitOf } from '../match.js';
 import type { Engineer, Project } from '../../types/index.js';
 
-export type HardRule = 'nationality' | 'utilization' | 'remote' | 'age';
+export type HardRule = 'nationality' | 'utilization' | 'remote' | 'hybrid' | 'age';
 export interface HardMismatch {
   rule: HardRule;
   reason: string;
@@ -88,6 +88,22 @@ export function projectNeedsAttendance(text: string, remote: Project['remote'] |
   return PROJECT_ATTEND.some((re) => re.test(s)) || remote === 'none';
 }
 
+// 在宅のある働き方（ハイブリッド以上）を必須とする要員 × 在宅の無い案件。任意の言い方（出社も可・できれば）は外さない
+const ENGINEER_HYBRID = /ハイブリッド(?:環境|勤務|ワーク)?\s*以上\s*(?:希望|必須)|リモート併用\s*(?:希望|必須)|一部リモート\s*(?:希望|必須)|週\s*[1-5]\s*[日回]\s*以上\s*(?:の)?\s*(?:リモート|在宅)\s*(?:勤務)?\s*(?:希望|必須)/;
+const HYBRID_OPTIONAL = /出社(?:も|は)?\s*(?:可|OK)|できれば|可能であれば|可能なら|あれば|尚可|歓迎|相談|応相談/;
+const PROJECT_NO_REMOTE = /フル出社|完全常駐|在宅(?:勤務)?\s*(?:なし|無し|不可)|(?<!フル|完全)リモート(?:勤務|ワーク)?\s*(?:なし|無し|不可|NG|×)|テレワーク\s*(?:なし|無し|不可)/;
+const PROJECT_HAS_REMOTE = /ハイブリッド|リモート併用|一部リモート|週\s*[1-4]\s*[日回]\s*(?:程度)?\s*(?:は|の)?\s*(?:リモート|在宅)|リモート(?:可|OK)|在宅(?:可|OK)/;
+
+export function engineerNeedsHybrid(text: string): boolean {
+  return norm(text).split('\n').some((l) => ENGINEER_HYBRID.test(l) && !HYBRID_OPTIONAL.test(l));
+}
+
+export function projectHasNoRemote(text: string, remote: Project['remote'] | undefined): boolean {
+  const s = norm(text);
+  if (PROJECT_HAS_REMOTE.test(s) || PROJECT_REMOTE_OK.test(s)) return false;
+  return PROJECT_NO_REMOTE.test(s) || remote === 'none';
+}
+
 // --- 4. 年齢 ---
 export function ageOverLimit(age: number | null | undefined, text: string): number | null {
   if (age === null || age === undefined) return null;
@@ -105,6 +121,7 @@ export function externalHardMismatches(e: EngineerLike, mailText: string, p: Pro
   if (projectForbidsForeign(pText) && engineerIsForeign(eText)) out.push({ rule: 'nationality', reason: '案件は外国籍不可・要員は外国籍' });
   if (engineerPartTime(e, eText) && !projectAllowsPartTime(pText)) out.push({ rule: 'utilization', reason: '要員は常時稼働でなく、案件は稼働の減を許していない' });
   if (engineerNeedsFullRemote(eText) && projectNeedsAttendance(pText, p.remote)) out.push({ rule: 'remote', reason: '要員はフルリモート必須・案件は出社が要る' });
+  if (engineerNeedsHybrid(eText) && projectHasNoRemote(pText, p.remote)) out.push({ rule: 'hybrid', reason: '要員は在宅のある働き方が必須・案件は出社のみ' });
   const limit = ageOverLimit(e.age, pText);
   if (limit !== null) out.push({ rule: 'age', reason: `案件の年齢上限${limit}歳を超える（${e.age}歳）` });
   return out;
