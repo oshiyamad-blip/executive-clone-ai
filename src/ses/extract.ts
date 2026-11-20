@@ -91,6 +91,7 @@ export const EXTRACT_SYSTEM = `あなたはSES（システムエンジニアリ�
 - 案件の businessFlow（商流メモ）には、参画の条件を原文の言い回しのまま入れてください: 商流・再委託の範囲（貴社社員まで／貴社1社先まで など）、
   所属・雇用形態（個人事業主・フリーランスの可否）、外国籍の可否と日本語の条件、年齢の条件（「年齢：〜45歳」「30代前半まで」など）、
   面談回数、精算幅。見出しの無い一覧でも、これらの語が書かれた行は businessFlow に含めてください（条件はコードで照合します）
+- 要員の businessFlow（所属・商流メモ）には、所属・商流・再委託の条件を原文の言い回しのまま入れてください（「貴社社員まで」「再委託不可」「プロパーのみ」「個人事業主」など。無ければ空文字）
 - 案件情報も要員情報も含まれないメール（雑談・事務連絡等）の場合は projects, engineers とも空配列にしてください
 - 営業元の会社名・担当者名・メールアドレスは、記載があれば必ず抽出してください（紹介メールの宛先に使用します）
 - 要員の displayName はイニシャルだけにしてください（例: "K.S."）。フルネームが書かれていても出力しないでください。
@@ -205,6 +206,7 @@ const ENGINEER_ITEM_SCHEMA = {
     agentCompany: { type: 'string' },
     agentContact: { type: 'string' },
     agentEmail: { type: 'string' },
+    businessFlow: { type: 'string' },
   },
   required: [
     'displayName',
@@ -222,6 +224,7 @@ const ENGINEER_ITEM_SCHEMA = {
     'agentCompany',
     'agentContact',
     'agentEmail',
+    'businessFlow',
   ],
 } as const;
 
@@ -278,6 +281,8 @@ export interface RawEngineer {
   agentCompany: string;
   agentContact: string;
   agentEmail: string;
+  // 所属・商流・再委託の条件の原文（外部マッチで転売不可の要員を外すのに使う）。古い抽出結果には無いことがある
+  businessFlow?: string;
 }
 
 export interface RawExtraction {
@@ -1037,6 +1042,7 @@ export function buildEngineer(raw: RawEngineer, mail: SesRawMail, index: number,
     agentCompany: raw.agentCompany,
     agentContact: raw.agentContact,
     agentEmail: raw.agentEmail,
+    businessFlow: raw.businessFlow ?? '',
     sourceMailId: mail.id,
     receivedAt: mail.receivedAt,
     status: 'available',

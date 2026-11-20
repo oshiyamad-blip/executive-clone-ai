@@ -287,3 +287,22 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 定期実行が自分で開始時刻を変えることはしない（直近の所要時間を最後の報告に書き、見直しは人が決める）。
 
 失敗して途中で止まったときも、分かったところまでを1行残す（対象の終わりは、最後まで取り込めたチャンクの受信時刻にする。次の回がそこから続ける）。
+
+## 6. 外部マッチ（試行 2026/11/20〜11/27）
+
+提携先の要員メールの要員 × すでに抽出した他社の案件を、少数だけ AI 判定して営業リストの別タブ「外部マッチ」に足す試行。「全体」タブには混ぜない。
+
+1. 抽出（手順1）: 要員メール（kind=engineer）も `extraction.engineers` を埋める（本番の要員の項目の形。所属・商流・再委託の条件の原文は `businessFlow`、無ければ空文字）。`extraction` が無い行は無視される。
+2. `PHASE=prep` のあとに `PHASE=ext_prep`（`RUN_DIR` は同じ）。入力は任意で、無ければ空として扱う:
+   - `ext_existing_ids.json`: シートの「外部マッチ」タブの ID 列（`ext_<要員ID>_<案件ID>`）の配列。読み戻した値から作る
+   - `ext_state.json`: `{"addedToday": n}`（今日 JST にすでに判定した組の数）
+   - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・candidates・selected・pairsByKey
+   - 再委託・転売の制限（再委託不可・貴社まで・貴社社員まで・プロパーのみ・エンド直のみ など。「1社先まで」だけなら外さない）がある要員・案件、同じ営業元の組は組にしない。1人の要員・1件の案件につき 2 組まで
+3. 判定は手順2の「判定の指示」と同じワークフローで、`runDir=<RUN_DIR>/ext`（`judge_instructions.md` を `ext/` にコピーしておく）。結果は `ext/judged_<キー>.json`。
+4. `PHASE=ext_final`: 入力は `ext_sheet.json`（`{"values": [[見出し…], …行]}`＝「外部マッチ」タブの今の値。タブが無い・空なら見出しだけとして扱う）。出力は `ext_writes.json`（`[{range, values}]`）と `ext_notify.json`。要約は judged・appended・A・B・dropped。
+   - 優先度は「A 提案推奨」（提案推奨で必須が全部○）と「B 条件交渉」（条件付き、または必須に△・年数不足）。必須に×がある組・見送りは載せない
+   - 既存の行の人の入力列には触れない（追記だけ）。No はこのタブで 1 から
+5. 書き込み: タブ「外部マッチ」が無ければ、見出し（`extHeaderRow()` ＝ `src/ses/external/sheet.ts` の `EXT_HEADER`、29列 A〜AC）で作る。`ext_writes.json` の各要素を `update_values` で書き、書いたあと ID 列を読み戻して確かめる。
+6. 通知: `appended` が 1 以上なら、`ext_notify.json` の No・優先度・要員（イニシャル）・案件名・単価をユーザーにプッシュ通知する。会社名・担当者名は載せない。
+7. 環境変数: `EXT_PER_RUN`（1回に判定する組の上限。既定 8）・`EXT_DAILY_CAP`（1日 JST に新しく判定する組の上限。既定 30）・`EXT_ENGINEER_LOOKBACK_DAYS`（要員メールを遡る日数。既定 7）。
+8. 試行は 11/27 まで。終わったら、続けるかどうかをユーザーが決める（続けない場合は ext 系の段を回さない）。

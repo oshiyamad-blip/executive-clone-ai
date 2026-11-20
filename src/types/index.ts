@@ -174,6 +174,7 @@ export interface Engineer {
   agentCompany: string;
   agentContact: string;
   agentEmail: string;
+  businessFlow?: string; // 所属・商流・再委託の条件の原文（外部マッチで転売不可を外す）
   sourceMailId: string;
   replyTarget?: ReplyTarget; // 元の要員メールへ全員に返信するための情報
   receivedAt: Date;

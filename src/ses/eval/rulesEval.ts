@@ -258,6 +258,11 @@ import type {
   MatchResult,
 } from '../../types/index.js';
 
+import { hasResaleRestriction, projectBlocksResale, engineerBlocksResale } from '../external/resale.js';
+import { selectExternalPairs, extPairId } from '../external/select.js';
+import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
+import { extPerRun, extDailyCap, extEngineerLookbackDays } from '../config.js';
+
 let passed = 0;
 let failed = 0;
 
@@ -2112,7 +2117,7 @@ function reviewRound3Checks(): void {
 const RULE_ENV_PREFIXES = [
   'SKILL_', 'MATCH_', 'MIN_GROSS_', 'MAX_CANDIDATES', 'MAX_PROJECTS_PER_ENGINEER', 'NEGOTIATION_', 'ENABLE_NEGOTIATION', 'HOURLY_',
   'SES_STALE_DAYS', 'SES_OWN_DOMAINS', 'ANTHROPIC_MODEL_', 'JPY_PER_USD', 'SES_PRICING_', 'SES_RETENTION_',
-  'SES_PAUSE_', 'SES_RESUME_', 'PROPER_GROUP_',
+  'SES_PAUSE_', 'SES_RESUME_', 'PROPER_GROUP_', 'EXT_',
 ];
 
 // ===== レビュー指摘（第4回）: 工程の範囲・略語・業種/役割の含意・選択肢・文面の表示名・判定の失敗の分類 等 =====
@@ -6329,6 +6334,7 @@ async function main(): Promise<void> {
     highRateWeakChecks();
     await salesKeepWriteChecks();
     salesKeepChecks();
+    externalMatchChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -7133,4 +7139,76 @@ async function salesKeepWriteChecks(): Promise<void> {
   check('SALES_KEEP_HOURS=0 なら10時間後でも今までどおり消す', off.deleted, JSON.stringify(off));
   const gone = await run(10, undefined, []);
   check('要員が営業中でなくなった行は10時間後でも消す', gone.deleted, JSON.stringify(gone));
+}
+
+
+// ===== 外部マッチ（試行）: 転売不可の除外・組の選び方・優先度 =====
+function externalMatchChecks(): void {
+  section('外部マッチ: 商流・再委託の制限の検知（hasResaleRestriction）');
+  const restricted = ['再委託不可', '再委託は不可', '再々委託禁止', '貴社まで', '貴社社員まで', '貴社正社員まで', '貴社所属まで', '弊社社員まで', '御社まで',
+    'プロパーのみ', '正社員のみ', 'エンド直のみ', '1社先まで不可', '２社先不可', '商流制限あり', '商流：貴社社員まで', '転売不可', '二次請け不可', '貴社社員様まで'];
+  for (const t of restricted) check(`制限あり: 「${t}」`, hasResaleRestriction(t));
+  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください'];
+  for (const t of open) check(`制限なし: 「${t}」`, !hasResaleRestriction(t));
+  check('案件は題名・商流・詳細のどれかに制限があれば外す', projectBlocksResale({ title: 'Java案件', businessFlow: '', detail: '【条件】再委託不可' }) &&
+    projectBlocksResale({ title: 'x', businessFlow: '貴社社員まで' }) && !projectBlocksResale({ title: 'x', businessFlow: '1社先まで', detail: 'Java' }));
+  check('要員は商流の欄と本文のどちらの制限でも外す', engineerBlocksResale({ businessFlow: 'プロパーのみ' }, '') && engineerBlocksResale({ businessFlow: '' }, '貴社所属まで') &&
+    !engineerBlocksResale({ businessFlow: '' }, '1社先まで可'));
+
+  section('外部マッチ: 組の選び方（selectExternalPairs）');
+  const now = new Date();
+  const base = { now, existingIds: new Set<string>(), addedToday: 0, perRun: 8, dailyCap: 30 };
+  const pj = (id: string, over: Partial<Project> = {}) => project({ id, title: `案件${id}`, requiredSkills: ['Java'], rateMax: 80, agentEmail: `s_${id}@partner-${id}.example`, ...over });
+  const en = (id: string, over: Partial<Engineer> = {}) => engineer(['Java'], { id: `eng_${id}`, desiredRate: 60, agentEmail: `s_${id}@vendor-${id}.example`, agentCompany: `要員元${id}`, ...over });
+  const ids = (r: ReturnType<typeof selectExternalPairs>) => r.pairs.map((p) => extPairId(p.engineer.id, p.project.id)).sort();
+  const one = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1')] });
+  check('合う組が1つ選ばれる', one.pairs.length === 1 && one.stats.selected === 1 && ids(one)[0] === 'ext_eng_e1_p1', JSON.stringify(one.stats));
+  const resaleP = selectExternalPairs({ ...base, projects: [pj('p1', { businessFlow: '再委託不可' }), pj('p2', { businessFlow: '1社先まで' })], engineers: [en('e1')] });
+  check('転売不可の案件は外し、「1社先まで」の案件は残す', ids(resaleP).join() === 'ext_eng_e1_p2' && resaleP.stats.restrictedProjects === 1, JSON.stringify(resaleP.stats));
+  const resaleE = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { businessFlow: '貴社社員まで' }), en('e2')] });
+  check('転売不可の要員は外す', ids(resaleE).join() === 'ext_eng_e2_p1' && resaleE.stats.restrictedEngineers === 1, JSON.stringify(resaleE.stats));
+  const mailBlocked = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1'), en('e2')], mailTextOf: (e) => (e.id === 'eng_e1' ? '弊社社員まで' : '') });
+  check('要員メール本文の制限でも外す', ids(mailBlocked).join() === 'ext_eng_e2_p1');
+  const same = selectExternalPairs({ ...base, projects: [pj('p1', { agentEmail: 'x@same-co.example' })], engineers: [en('e1', { agentEmail: 'y@same-co.example' })] });
+  check('同じ営業元の組は外す', same.pairs.length === 0 && same.stats.sameAgent === 1, JSON.stringify(same.stats));
+  const inj = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { injectionSuspected: true })] });
+  check('指示混入の疑いのある要員は外す', inj.pairs.length === 0);
+  const late = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { availableFrom: new Date(now.getTime() + 60 * 86400000).toISOString() }), en('e2', { availableFrom: new Date(now.getTime() + 10 * 86400000).toISOString() })] });
+  check('稼働開始が1か月より先の要員は外す', ids(late).join() === 'ext_eng_e2_p1');
+  const many = selectExternalPairs({ ...base, projects: [pj('p1'), pj('p2'), pj('p3')], engineers: [en('e1')] });
+  check('1人の要員は2件まで', many.pairs.length === 2, String(many.pairs.length));
+  const manyE = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1'), en('e2'), en('e3')] });
+  check('1件の案件は2人まで', manyE.pairs.length === 2, String(manyE.pairs.length));
+  const grid = { ...base, projects: ['1', '2', '3', '4', '5', '6'].map((i) => pj(`p${i}`)), engineers: ['1', '2', '3', '4', '5', '6'].map((i) => en(`e${i}`)) };
+  check('1回の上限（perRun）で打ち切る', selectExternalPairs({ ...grid, perRun: 3 }).pairs.length === 3);
+  check('1日の上限から今日の分を引く（30−28＝2）', selectExternalPairs({ ...grid, perRun: 8, dailyCap: 30, addedToday: 28 }).pairs.length === 2);
+  check('1日の上限に達していれば0件', selectExternalPairs({ ...grid, addedToday: 30 }).pairs.length === 0);
+  const full = selectExternalPairs({ ...grid });
+  const skip = new Set([ids(full)[0]]);
+  const rest = selectExternalPairs({ ...grid, existingIds: skip });
+  check('すでにある組の ID は選ばない', !ids(rest).includes(ids(full)[0]) && rest.stats.candidates === full.stats.candidates - 1, JSON.stringify(rest.stats));
+  check('既定の上限は 8・30・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 8 && extDailyCap() === 30 && extEngineerLookbackDays() === 7));
+
+  section('外部マッチ: 優先度と行（extPriorityOf・extRowOf・nextExtRow）');
+  const chk = (kind: '必須' | '尚可', status: 'met' | 'close' | 'unmet', shortYears?: number) => ({ kind, requirement: `${kind}要件`, quote: '', status, ...(shortYears === undefined ? {} : { shortYears }) });
+  check('提案推奨で必須が全部 met → A', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'met'), chk('尚可', 'unmet')] })?.startsWith('A') === true);
+  check('提案推奨でも必須に近い経験（△）→ B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close')] })?.startsWith('B') === true);
+  check('提案推奨でも必須に年数不足 → B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close', 1.5)] })?.startsWith('B') === true);
+  check('条件付き（必須に経験なし無し）→ B', extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'met')] })?.startsWith('B') === true);
+  check('必須に経験なし（×）は載せない', extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'unmet')] }) === null && extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'unmet')] }) === null);
+  check('見送りは載せない', extPriorityOf({ verdict: 'reject', checks: [] }) === null);
+  const j = { verdict: 'recommend' as const, work: '基幹の保守', met: [], gaps: [], levelFit: '経験十分', pitch: '', concerns: ['面談2回'], reviewNotes: [], checks: [chk('必須', 'met')] };
+  const e1 = en('e1', { businessFlow: '1社先まで' });
+  const row = extRowOf({ no: 3, priority: 'A 提案推奨', engineer: e1, project: pj('p1'), judgment: j, addedAt: now });
+  const col = (n: string) => row[EXT_HEADER.indexOf(n)];
+  check('行は見出しと同じ列数で、ID は ext_<要員ID>_<案件ID>・対応状況は未着手・人の入力列は空', row.length === EXT_HEADER.length && col('ID') === 'ext_eng_e1_p1' && col('対応状況') === '未着手' &&
+    col('見送り理由') === '' && col('担当営業') === '' && col('メモ') === '' && col('No') === 3 && col('差(万)') === 20, JSON.stringify(row));
+  check('確認することに懸念と要員の商流が入る', String(col('確認すること')).includes('面談2回') && String(col('確認すること')).includes('要員の商流・所属: 1社先まで'));
+  check('最終列は AC（29列）', EXT_HEADER.length === 29 && EXT_LAST_COLUMN === 'AC');
+  const header = extHeaderRow();
+  const sheet = [header, header.map((_, i) => (i === 0 ? '5' : i === EXT_HEADER.length - 1 ? 'ext_a_b' : ''))];
+  const nx = nextExtRow(sheet);
+  check('次の行は表の下・No は最大+1・既存 ID を返す', nx.row === 3 && nx.no === 6 && nx.ids.has('ext_a_b'));
+  const empty = nextExtRow([]);
+  check('タブが空なら2行目・No は 1 から', empty.row === 2 && empty.no === 1);
 }

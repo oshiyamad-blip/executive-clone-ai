@@ -12,6 +12,8 @@
 //   PHASE=score    取り込み・判定・営業の入力の数字（score.json。本文の写しのずれ bodyHeadShortPct・quoteMissingPct を含む）
 //   PHASE=labels   この回の判定と営業の評価をラベルストア（SES_LABELS_DIR）に足す（評価は src/ses/eval/labelsEval.ts）。
 //                  増えた組は labels_backup.tsv に書く（LABELS_BACKUP_ALL=1 でストア全体を labels_backup_NN.tsv に分けて書く）
+//   PHASE=ext_prep  外部マッチ（試行）: 提携先の要員メール × 他社の案件 → 判定に回す少数の組（ext/pairs.json・system_<キー>.txt・meta.json）
+//   PHASE=ext_final 外部マッチ: ext/judged_<キー>.json → 「外部マッチ」タブへの追記（ext_writes.json・ext_notify.json）
 //   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -24,14 +26,20 @@ import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, re
 import { isClosedNotice } from '../mailKind.js';
 import { salesKeepHours } from '../config.js';
 import { ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
-import { judgeSystemFor, judgeUserPrompt, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
+import { judgeSystemFor, judgeUserPrompt, profileTextOf, verifyJudgment, verifyOptsFor, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { groupSimilarEngineers } from '../proper/group.js';
 import { planFanout, type PendingPair, type JudgedRow } from './fanout.js';
 import { planSalesUpdate, maxNoOf, salesPriorityOf, salesRowOf, staffListValues, staffFilterFormula, staffTabName, summaryValues, jstLabel, closedStateOf, expiredIdsOf, closedKeyOf, closedByMail, mailRefOf, projectIdOf, SALES_EXPIRED_TAB, SALES_COLUMNS, SALES_CLOSED_STATUS, type ClosedState } from '../proper/salesList.js';
 import { bodyHeadShortPct, quoteMissingPct, type GapJudgment } from './bodyHeadGap.js';
-import type { Project, ProperEngineer, SesRawMail } from '../../types/index.js';
+import { buildEngineer, type RawEngineer } from '../extract.js';
+import { dedupeEngineers } from '../store.js';
+import { extDailyCap, extEngineerLookbackDays, extPerRun } from '../config.js';
+import { extOwnEngineer, extKeyOf } from '../external/profile.js';
+import { selectExternalPairs, extPairId } from '../external/select.js';
+import { EXT_HEADER, EXT_LAST_COLUMN, EXT_TAB, extHeaderRow, extPriorityOf, extRowOf, nextExtRow } from '../external/sheet.js';
+import type { Engineer, Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
 const dir = process.env.RUN_DIR as string;
 if (!dir) throw new Error('RUN_DIR を指定してください');
@@ -142,10 +150,10 @@ function carryDirs(): string[] {
 }
 
 // この回の抽出結果＋前の回の抽出結果のうち受信が遡り期間内のもの（同じ threadId は1回だけ）。読めない回は飛ばす
-function carriedRows(): { rows: OutRow[]; carriedRows: OutRow[] } {
+function carriedRows(days = LOOKBACK_DAYS): { rows: OutRow[]; carriedRows: OutRow[] } {
   const own = outRows();
   const seen = new Set(own.map((r) => r.threadId));
-  const since = now.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const since = now.getTime() - days * 24 * 60 * 60 * 1000;
   const prev: OutRow[] = [];
   for (const d of carryDirs()) {
     try {
@@ -298,6 +306,36 @@ async function judgedCandidates() {
   }
   const { candidates, stats, auditHitKeys } = await buildProperCandidates(list, projects, now, (e, p) => onSheetKeys.has(`${e}|${p}`));
   return { list, projects, judged, candidates, stats, auditHitKeys };
+}
+
+// ===== 外部マッチ（試行）: 提携先の要員メールの抽出（extraction.engineers）から要員を作る =====
+function externalEngineers(): { engineers: Engineer[]; bodyOf: Map<string, string>; mailOf: Map<string, { subject: string }> } {
+  const seen = new Set<string>();
+  const built: Engineer[] = [];
+  const bodyOf = new Map<string, string>();
+  const mailOf = new Map<string, { subject: string }>();
+  for (const r of carriedRows(extEngineerLookbackDays()).rows) {
+    if (seen.has(r.messageId) || !r.extraction || r.extraction.injectionSuspected) continue;
+    const raws = (r.extraction.engineers ?? []) as RawEngineer[];
+    if (raws.length === 0) continue;
+    seen.add(r.messageId);
+    const mail = {
+      id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: r.bodyHead ?? '',
+      messageIdHeader: '', references: '', receivedAt: new Date(r.receivedAt), attachments: [], sheetLinks: [],
+    } as SesRawMail;
+    raws.forEach((raw, i) => {
+      try {
+        const e = buildEngineer(raw, mail, i, null);
+        e.replyTarget = { from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', messageId: '', references: '' };
+        built.push(e);
+        bodyOf.set(e.id, r.bodyHead ?? '');
+        mailOf.set(e.id, { subject: r.subject ?? '' });
+      } catch {
+        // 欄がずれた1件は飛ばす
+      }
+    });
+  }
+  return { engineers: dedupeEngineers(built), bodyOf, mailOf };
 }
 
 // ===== 段 =====
@@ -605,6 +643,86 @@ if (phase === 'prompts') {
   };
   writeFileSync(join(dir, 'score.json'), JSON.stringify(score, null, 1));
   console.log(JSON.stringify(score));
+} else if (phase === 'ext_prep') {
+  // 要員: この回＋前の回（EXT_ENGINEER_LOOKBACK_DAYS 日以内）の要員メールの抽出。案件: prep と同じ重複統合後の募集中案件
+  const { engineers: engs, bodyOf, mailOf } = externalEngineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const kept = dedupeProjects(projects).kept;
+  const existingIds = new Set(has('ext_existing_ids.json') ? read<string[]>('ext_existing_ids.json') : []);
+  const addedToday = has('ext_state.json') ? Number(read<{ addedToday?: number }>('ext_state.json').addedToday ?? 0) || 0 : 0;
+  const sel = selectExternalPairs({ projects: kept, engineers: engs, now, existingIds, addedToday, perRun: extPerRun(), dailyCap: extDailyCap(), mailTextOf: (e) => bodyOf.get(e.id) ?? '' });
+  const extDir = join(dir, 'ext');
+  mkdirSync(extDir, { recursive: true });
+  const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
+  const meta: Record<string, Record<string, unknown>> = {};
+  for (const p of sel.pairs) {
+    const key = extKeyOf(p.engineer.id);
+    (pairs[key] ??= []).push({ projectId: p.project.id, title: p.project.title, user: judgeUserPrompt(p.project) });
+    if (meta[key]) continue;
+    const e = p.engineer;
+    const own = extOwnEngineer(e, bodyOf.get(e.id) ?? '');
+    writeFileSync(join(extDir, `system_${key}.txt`), judgeSystemFor(own));
+    meta[key] = {
+      engineerId: e.id, initials: e.displayName, agentCompany: e.agentCompany, agentContact: e.agentContact, agentEmail: e.agentEmail,
+      subject: mailOf.get(e.id)?.subject ?? '', receivedAt: jstLabel(e.receivedAt), desiredRate: e.desiredRate, availableDate: e.availableDate, residence: e.residence,
+    };
+  }
+  writeFileSync(join(extDir, 'pairs.json'), JSON.stringify(pairs, null, 1));
+  writeFileSync(join(extDir, 'meta.json'), JSON.stringify(meta, null, 1));
+  console.log(JSON.stringify({ ...sel.stats, pairsByKey: Object.fromEntries(Object.entries(pairs).map(([k, v]) => [k, v.length])) }));
+} else if (phase === 'ext_final') {
+  const { engineers: engs, bodyOf } = externalEngineers();
+  const { projects } = projectsOf(carriedRows().rows);
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  const extDir = join(dir, 'ext');
+  const meta = existsSync(join(extDir, 'meta.json')) ? (JSON.parse(readFileSync(join(extDir, 'meta.json'), 'utf8')) as Record<string, { engineerId: string }>) : {};
+  const pairsFile = existsSync(join(extDir, 'pairs.json')) ? (JSON.parse(readFileSync(join(extDir, 'pairs.json'), 'utf8')) as Record<string, Array<{ projectId: string }>>) : {};
+  const sheet = has('ext_sheet.json') ? read<{ values?: string[][] }>('ext_sheet.json').values ?? [] : [];
+  const values = sheet.length > 0 ? sheet : [extHeaderRow()];
+  if (sheet.length > 0 && (sheet[0].length !== EXT_HEADER.length || sheet[0].some((h, i) => h !== EXT_HEADER[i]))) {
+    throw new Error(`「${EXT_TAB}」タブの見出しが今の列の並びと違います（シート ${sheet[0].length}列・今の並び ${EXT_HEADER.length}列）`);
+  }
+  const next = nextExtRow(values);
+  const writes: Array<{ range: string; values: Array<Array<string | number>> }> = [];
+  const notify: Array<{ no: number; priority: string; engineer: string; project: string; rate: unknown; projectRate: unknown }> = [];
+  let judged = 0;
+  let dropped = 0;
+  let nextNo = next.no;
+  let nextRow = next.row;
+  const counts = { A: 0, B: 0 };
+  for (const [key, m] of Object.entries(meta)) {
+    const f = join(extDir, `judged_${key}.json`);
+    if (!existsSync(f)) continue;
+    const engineer = engs.find((e) => e.id === m.engineerId) as Engineer | undefined;
+    if (!engineer) continue;
+    const own = extOwnEngineer(engineer, bodyOf.get(engineer.id) ?? '');
+    const rows = JSON.parse(readFileSync(f, 'utf8')) as Array<{ projectId: string; judgment: RawProperJudgment }>;
+    // 判定は pairs.json の並びで返る。pairs に無い案件・案件が見つからない組は飛ばす
+    const allowed = new Set((pairsFile[key] ?? []).map((x) => x.projectId));
+    for (const r of rows) {
+      const project = projectById.get(r.projectId);
+      if (!project || !allowed.has(r.projectId) || !r.judgment) continue;
+      judged += 1;
+      const id = extPairId(engineer.id, project.id);
+      if (next.ids.has(id)) continue;
+      const j = verifyJudgment(r.judgment, profileTextOf(own), project, verifyOptsFor(own, project));
+      const priority = extPriorityOf(j);
+      if (!priority) {
+        dropped += 1;
+        continue;
+      }
+      const row = extRowOf({ no: nextNo, priority, engineer, project, judgment: j, addedAt: now });
+      writes.push({ range: `'${EXT_TAB}'!A${nextRow}:${EXT_LAST_COLUMN}${nextRow}`, values: [row] });
+      notify.push({ no: nextNo, priority, engineer: engineer.displayName, project: project.title, rate: engineer.desiredRate, projectRate: project.rateMax ?? project.rateMin });
+      counts[priority.startsWith('A') ? 'A' : 'B'] += 1;
+      next.ids.add(id);
+      nextNo += 1;
+      nextRow += 1;
+    }
+  }
+  writeFileSync(join(dir, 'ext_writes.json'), JSON.stringify(writes));
+  writeFileSync(join(dir, 'ext_notify.json'), JSON.stringify(notify, null, 1));
+  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped }));
 } else {
   throw new Error(`PHASE が不明です: ${phase}`);
 }
