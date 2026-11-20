@@ -127,7 +127,8 @@ import {
   EMPTY_PROJECT_LEVEL, type EngineerLevel, type ProjectLevel,
 } from '../level.js';
 import { parseRosterSummary, isItInexperienced, summaryLevel, rosterAvailableFrom, mergeLevels } from '../proper/roster.js';
-import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, addedWithinHours, jstLabel, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { salesPriorityOf, salesNotesOf, salesRowOf, mergeSalesRows, summaryValues, staffListValues, staffFilterFormula, staffTabName, formatRequests, sideTabFormatRequests, planSalesUpdate, addedWithinHours, jstLabel, salesPriorityWithoutHighRateRule, isHighRateWeakRequired, isBasicDesignMissing, salesPriorityWithoutBasicDesignRule, belowMinPriority, maxNoOf, expiredIdsOf, closedStateOf, similarClosedProject, projectIdOf, expiredOverflow, SALES_EXPIRED_TAB, SALES_COLUMNS, markRequirementsInMail, EVIDENCE_SHOW_MAX, writeSalesList, salesHeaderDiff, SalesHeaderMismatchError, __setSalesSheetsApiForTest } from '../proper/salesList.js';
+import { hasBasicDesignExperience } from '../proper/basicDesign.js';
 import { mergeUnknownSkillTokens } from '../skillStats.js';
 import { resolveDateText, sanitizeIsoDate, resolveItemDate, jstDateOf } from '../dates.js';
 import {
@@ -3819,12 +3820,17 @@ function levelChecks(): void {
   check('条件の無い案件は ok', evaluateLevel(lvl({}), eng, 2.4).verdict === 'ok');
   const y5 = evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 5 }] }), eng, 2.4);
   check('経験年数は足りなくても除外しない（Java 5年以上に 2.4年 → ok・年数交渉の注記）', y5.verdict === 'ok' && y5.yearGaps.length === 1 && y5.gapScore > 0 && y5.gapScore < 1, JSON.stringify(y5));
-  check('工程: 基本設計からは1段上で経験交渉、要件定義からは2段上で除外',
-    evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ topPhase: '要件定義' }), eng, 2.4).verdict === 'exclude');
+  withEnv({ PROPER_BASIC_DESIGN_STRICT: '0' }, () => {
+    check('工程: 基本設計からは1段上で経験交渉、要件定義からは2段上で除外（PROPER_BASIC_DESIGN_STRICT=0 の今までの動き）',
+      evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ topPhase: '要件定義' }), eng, 2.4).verdict === 'exclude');
+  });
   check('工程: 製造からの案件は ok（上流の経験があれば下流も担える）', evaluateLevel(lvl({ topPhase: '製造' }), eng, 2.4).verdict === 'ok');
   check('立場: SE は1段上で経験交渉、PL は2段上で除外', evaluateLevel(lvl({ role: 'SE' }), eng, 2.4).verdict === 'negotiate' && evaluateLevel(lvl({ role: 'PL' }), eng, 2.4).verdict === 'exclude');
   check('工程と立場の両方が1段ずつ足りなければ除外', evaluateLevel(lvl({ topPhase: '基本設計', role: 'SE' }), eng, 2.4).verdict === 'exclude');
-  check('年数の不足は工程の不足と重なっても除外の理由にしない', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate');
+  withEnv({ PROPER_BASIC_DESIGN_STRICT: '0' }, () => {
+    check('年数の不足は工程の不足と重なっても除外の理由にしない', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate');
+  });
+  basicDesignLevelChecks(eng, lvl);
   const noYears = evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 2 }] }), eng, 5);
   check('技術ごとの年数が分からなければ確認事項（合計年数で足りる場合は落とさない）', noYears.verdict === 'ok' && noYears.unknowns.length === 1);
   check('合計年数が必要年数に届かなければ技術の年数も足りないとみなす（年数交渉）', evaluateLevel(lvl({ skillYears: [{ skill: 'Oracle', years: 5 }] }), eng, 2.4).yearGaps.length === 1);
@@ -6399,6 +6405,7 @@ async function main(): Promise<void> {
     labelOutcomeChecks();
     startWaitChecks();
     highRateWeakChecks();
+    basicDesignPriorityChecks();
     await salesKeepWriteChecks();
     salesKeepChecks();
     externalMatchChecks();
@@ -7076,6 +7083,65 @@ function startWaitChecks(): void {
     !isStartTooLate('2027-01-15', '2026-12-01', today, { days: 45, months: 1 }) && isStartTooLate('2027-01-16', '2026-12-01', today, { days: 45, months: 1 }));
   check('isStartTooLate: 日付が読めなければ通す', !isStartTooLate('不明', '2026-12-01', today, M) && !isStartTooLate('2027-03-01', '不明', today, M));
   check('外部要員（BP）の時期判定 isTimingWithinGrace は変えない（開始がずっと後でも通る）', isTimingWithinGrace('2027-03-01', '2026-12-01', NOW));
+}
+
+function basicDesignLevelChecks(eng: EngineerLevel, lvl: (over: Partial<ProjectLevel>) => ProjectLevel): void {
+  section('レベルの軸: 基本設計が必須の案件は、基本設計の経験が無い要員を除外（PROPER_BASIC_DESIGN_STRICT・既定は有効）');
+  const bd = evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4);
+  check('基本設計から・要員の最上流が詳細設計 → 除外（理由に「基本設計が必須」）', bd.verdict === 'exclude' && bd.gaps.some((g) => g.includes('基本設計が必須') && g.includes('詳細設計')), JSON.stringify(bd));
+  const prod = { ...eng, phaseYears: [{ phase: '製造' as const, years: 2 }, { phase: 'テスト' as const, years: 1 }] };
+  check('要員の最上流が製造・テストでも除外', evaluateLevel(lvl({ topPhase: '基本設計' }), prod, 2.4).verdict === 'exclude');
+  const withBasic = { ...eng, phaseYears: [{ phase: '基本設計' as const, years: 2 }, { phase: '詳細設計' as const, years: 2 }] };
+  check('基本設計の経験があれば ok', evaluateLevel(lvl({ topPhase: '基本設計' }), withBasic, 2.4).verdict === 'ok');
+  check('年数の不足が重なっていても、工程で除外なら除外', evaluateLevel(lvl({ skillYears: [{ skill: 'Java', years: 3 }], topPhase: '基本設計' }), eng, 2.4).verdict === 'exclude');
+  const req = evaluateLevel(lvl({ topPhase: '要件定義' }), withBasic, 2.4);
+  check('要件定義の1段不足は今までどおり経験交渉', req.verdict === 'negotiate' && !req.gaps.some((g) => g.includes('基本設計が必須')), JSON.stringify(req));
+  check('詳細設計が必須の案件に製造からの要員は今までどおり経験交渉', evaluateLevel(lvl({ topPhase: '詳細設計' }), prod, 2.4).verdict === 'negotiate');
+  const unknownEng = { skillYears: [], phaseYears: [], role: null };
+  const unk = evaluateLevel(lvl({ topPhase: '基本設計' }), unknownEng, 2.4);
+  check('要員の工程が不明なら今までどおり（除外せず確認事項）', unk.verdict === 'ok' && unk.unknowns.length === 1, JSON.stringify(unk));
+  withEnv({ PROPER_BASIC_DESIGN_STRICT: '0' }, () => {
+    check('0 で無効（今までどおり1段の不足は経験交渉）', evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate');
+  });
+  withEnv({ PROPER_BASIC_DESIGN_STRICT: 'false' }, () => {
+    check('false でも無効', evaluateLevel(lvl({ topPhase: '基本設計' }), eng, 2.4).verdict === 'negotiate');
+  });
+}
+
+function basicDesignPriorityChecks(): void {
+  section('営業リスト: 必須に基本設計があり経歴に基本設計の無い組は C（PROPER_BASIC_DESIGN_STRICT）');
+  const base = {
+    id: 'ownmatch_b_p1', ownEngineerId: 'b', ownEngineerName: 'B.B', projectId: 'p1', projectTitle: 'Java開発', projectRate: 60,
+    requiredProjectRate: 55, rateGapMan: 5, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '必要案件単価55万円に対し案件単価60万円。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'B.B',
+  };
+  const basicReq = { kind: '必須' as const, requirement: 'Java開発経験（基本設計～）', status: 'met' as const, quote: 'Java開発経験（基本設計～）' };
+  const javaReq = { kind: '必須' as const, requirement: 'Java', status: 'met' as const, quote: 'Java' };
+  const basicNice = { kind: '尚可' as const, requirement: '基本設計の経験', status: 'unmet' as const, quote: '基本設計の経験' };
+  const withJ = (checks: Array<Record<string, unknown>>, over: Record<string, unknown> = {}, judgmentOver: Record<string, unknown> = {}) =>
+    ({ ...base, ...over, judgment: { verdict: 'recommend', work: '', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks, ...judgmentOver } }) as unknown as ProperCandidate;
+  const none = { engineerHasBasicDesign: false };
+  check('必須に基本設計があり経歴に無ければ C（AI判定が○でも）', salesPriorityOf(withJ([basicReq], none)).startsWith('C'));
+  check('外部設計・概要設計の語でも C', salesPriorityOf(withJ([{ ...basicReq, requirement: '外部設計から' }], none)).startsWith('C') && salesPriorityOf(withJ([{ ...basicReq, requirement: '概要設計経験' }], none)).startsWith('C'));
+  check('C は SALES_MIN_PRIORITY=B の既定で載らない', belowMinPriority(salesPriorityOf(withJ([basicReq], none))));
+  check('案件の必須スキルに基本設計があるときも対象', salesPriorityOf(withJ([javaReq], { ...none, missingSkills: ['基本設計'] })).startsWith('C'));
+  check('経歴に基本設計がある組は今までどおり A', salesPriorityOf(withJ([basicReq], { engineerHasBasicDesign: true })).startsWith('A'));
+  check('経歴の有無が読めない候補（未設定）は対象外', salesPriorityOf(withJ([basicReq])).startsWith('A'));
+  check('尚可にだけ基本設計がある組は対象外', salesPriorityOf(withJ([javaReq, basicNice], none)).startsWith('A'));
+  check('IT 未経験×未経験可の組は対象外（B のまま）', salesPriorityOf(withJ([basicReq], none, { inexperiencedOk: true })).startsWith('B'));
+  check('規則を入れる前の優先度（ラベルの確認用）は A のまま', salesPriorityWithoutBasicDesignRule(withJ([basicReq], none)).startsWith('A'));
+  const row = salesRowOf(withJ([basicReq], none), undefined);
+  check('確認事項に「基本設計の経験が経歴に無い（必須）」を足す', String(row[SALES_COLUMNS.findIndex((c) => c.name === '確認事項')]).includes('基本設計の経験が経歴に無い（必須）'));
+  const okRow = salesRowOf(withJ([basicReq], { engineerHasBasicDesign: true }), undefined);
+  check('経歴に基本設計があれば確認事項に足さない', !String(okRow[SALES_COLUMNS.findIndex((c) => c.name === '確認事項')]).includes('基本設計の経験が経歴に無い'));
+  withEnv({ PROPER_BASIC_DESIGN_STRICT: '0' }, () => {
+    check('0 で無効（今までどおり A）', salesPriorityOf(withJ([basicReq], none)).startsWith('A') && !isBasicDesignMissing(withJ([basicReq], none)));
+  });
+  check('経歴の判定: 工程の年数に基本設計 / プロフィールの文に語があれば有り、どちらも無ければ無し',
+    hasBasicDesignExperience({ level: { skillYears: [], phaseYears: [{ phase: '基本設計', years: 1 }], role: null } }) &&
+    hasBasicDesignExperience({ profileText: '・外部設計から運用まで担当' }) &&
+    !hasBasicDesignExperience({ level: { skillYears: [], phaseYears: [{ phase: '詳細設計', years: 2 }], role: null }, profileText: '詳細設計・製造を担当' }) &&
+    !hasBasicDesignExperience({}));
 }
 
 function highRateWeakChecks(): void {

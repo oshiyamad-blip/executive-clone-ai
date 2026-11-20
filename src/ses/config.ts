@@ -902,6 +902,13 @@ export function properHighRateGapMan(): number {
   return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
 }
 
+// 基本設計が必須の案件に、基本設計の経験が無い自社社員を載せない（level.ts で工程が基本設計からの案件に詳細設計以下の要員は除外、
+// 営業リストでは必須に基本設計があり経歴に無い組を C にする）。既定は有効。false/0 で今までどおり（1段の不足は経験交渉の B）
+export function properBasicDesignStrict(): boolean {
+  const v = env('PROPER_BASIC_DESIGN_STRICT').toLowerCase();
+  return !(v === 'false' || v === '0');
+}
+
 // 待機中（稼働可能日が今日以前）の自社社員は、推奨・必須すべて○で単価だけ許容幅内で足りない組を B でなく A にする。false/0 で無効（既定は有効）
 export function properIdlePriority(): boolean {
   const v = env('PROPER_IDLE_PRIORITY').toLowerCase();

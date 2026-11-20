@@ -11,10 +11,11 @@
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
-import { properHighRateGapMan, properIdlePriority, properSalesSpreadsheetId, salesExpiredKeep, salesKeepHours, salesMinPriority } from '../config.js';
+import { properBasicDesignStrict, properHighRateGapMan, properIdlePriority, properSalesSpreadsheetId, salesExpiredKeep, salesKeepHours, salesMinPriority } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import { jstDateOf } from '../dates.js';
 import { norm, isHighRateWeakJudgment } from './judge.js';
+import { requiresBasicDesign } from './basicDesign.js';
 import { normalizeSubject } from '../resend.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import type { Project, ProperCandidate, ProperEngineer, RateReason, RequirementCheck } from '../../types/index.js';
@@ -118,11 +119,18 @@ export function isHighRateWeakRequired(c: ProperCandidate): boolean {
   return isHighRateWeakJudgment(c.judgment, c.rateGapMan, properHighRateGapMan());
 }
 
+// 基本設計が必須（必須の要件の文に基本設計・外部設計・概要設計）なのに、要員の経歴に基本設計の経験が無い組（PROPER_BASIC_DESIGN_STRICT）。
+// 営業の実績で「基本設計の経験なし」の見送りになりやすい型。経歴の有無が読めない候補（未設定）・IT 未経験×未経験可の組は対象外
+export function isBasicDesignMissing(c: ProperCandidate): boolean {
+  if (!properBasicDesignStrict() || c.engineerHasBasicDesign !== false || !c.judgment || c.judgment.inexperiencedOk) return false;
+  return requiresBasicDesign(c.judgment, [...(c.matchedSkills ?? []), ...(c.missingSkills ?? [])]);
+}
+
 // 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。上限超え等の参考 → D。
 // 条件付きで経験の無い必須がある組も C。
 // AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
 export function salesPriorityOf(c: ProperCandidate, now = new Date()): string {
-  return priorityOf(c, true, now);
+  return priorityOf(c, { highRate: true, basicDesign: true }, now);
 }
 
 // 待機中（稼働可能日が今日（JST）以前。不明は待機中としない）の要員の、推奨・必須すべて○（unmet・close なし）で、A に届かない理由が単価不足だけの組。B でなく A にする（本人の了承が前提）
@@ -137,17 +145,23 @@ export function isIdleRateShortUpgrade(c: ProperCandidate, now = new Date()): bo
 
 // 高単価×必須△・年数不足の規則を入れる前の優先度（過去のラベルに規則を当てたとき、載らなくなる組を数えるため）
 export function salesPriorityWithoutHighRateRule(c: ProperCandidate, now = new Date()): string {
-  return priorityOf(c, false, now);
+  return priorityOf(c, { highRate: false, basicDesign: true }, now);
 }
 
-function priorityOf(c: ProperCandidate, highRateRule: boolean, now: Date): string {
+// 基本設計の規則（PROPER_BASIC_DESIGN_STRICT）を入れる前の優先度（過去のラベルに規則を当てたとき、載らなくなる組を数えるため）
+export function salesPriorityWithoutBasicDesignRule(c: ProperCandidate, now = new Date()): string {
+  return priorityOf(c, { highRate: true, basicDesign: false }, now);
+}
+
+function priorityOf(c: ProperCandidate, rules: { highRate: boolean; basicDesign: boolean }, now: Date): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
   if (c.reference) return SALES_PRIORITIES.d;
   // IT 未経験の社員 × 未経験可の案件は、必須の技術が経験なしでも C にせず、条件交渉の B にする（確認事項の先頭に注記がある）
   if (c.judgment?.inexperiencedOk) return SALES_PRIORITIES.b;
   if (unmetRequiredOf(c).length > 0) return SALES_PRIORITIES.c;
   // 高単価の案件は求める水準も高く、必須が近い経験どまり・年数不足の組は営業が見送りやすい。C にして営業リストの下限（B）で載せない
-  if (highRateRule && isHighRateWeakRequired(c)) return SALES_PRIORITIES.c;
+  if (rules.basicDesign && isBasicDesignMissing(c)) return SALES_PRIORITIES.c;
+  if (rules.highRate && isHighRateWeakRequired(c)) return SALES_PRIORITIES.c;
   if (c.judgment) {
     if (isIdleRateShortUpgrade(c, now)) return SALES_PRIORITIES.a;
     if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;
@@ -316,7 +330,8 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined, now
   const idleNote = !c.needsReview && !c.reference && !c.judgment?.inexperiencedOk && isIdleRateShortUpgrade(c, now)
     ? `待機中のため、単価が${Math.abs(c.rateGapMan ?? 0)}万円足りなくても A（本人の了承が前提）`
     : '';
-  row[COL['確認事項']] = [unmet.length > 0 ? `要確認: 経験の無い必須があります（${unmet.join('、')}）` : '', confirm, idleNote].filter(Boolean).join('\n');
+  const basicNote = !c.needsReview && !c.reference && isBasicDesignMissing(c) ? '基本設計の経験が経歴に無い（必須）' : '';
+  row[COL['確認事項']] = [unmet.length > 0 ? `要確認: 経験の無い必須があります（${unmet.join('、')}）` : '', basicNote, confirm, idleNote].filter(Boolean).join('\n');
   row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {

@@ -423,6 +423,7 @@ export interface ProperCandidate extends OwnMatch {
   properLabel: string; // 「プロパー」列の表示（提案用表記。氏名はプロパー管理表にだけ置く）。ログに出さない
   draftToProject?: DraftRef; // 案件の元メールへの全員に返信（提案文面。テンプレート生成）
   engineerAvailableFrom?: string | null; // 要員の稼働可能日 ISO（待機中の判定用。不明・未設定は待機中としない）
+  engineerHasBasicDesign?: boolean; // 要員の経歴に基本設計（外部設計・概要設計）の経験があるか（優先度の規則用。未設定は判定しない）
   reference?: boolean; // 社員ごとの上限を超えた、AIが見送らなかった組（営業リストでは「D 参考」。数を出しつつ主な候補と分ける）
 }
 
