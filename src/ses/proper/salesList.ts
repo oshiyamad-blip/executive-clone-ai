@@ -14,7 +14,7 @@ import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } fr
 import { properHighRateGapMan, properIdlePriority, properSalesSpreadsheetId, salesExpiredKeep, salesKeepHours, salesMinPriority } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
 import { jstDateOf } from '../dates.js';
-import { norm } from './judge.js';
+import { norm, isHighRateWeakJudgment } from './judge.js';
 import { normalizeSubject } from '../resend.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import type { Project, ProperCandidate, ProperEngineer, RateReason, RequirementCheck } from '../../types/index.js';
@@ -115,10 +115,7 @@ function yearShortRequiredOf(c: ProperCandidate): Array<{ requirement: string; s
 
 // 高単価（希望より PROPER_HIGH_RATE_GAP_MAN 万円以上）なのに、必須に「近い経験」（△）か年数不足がある組。単価が読めない・IT 未経験×未経験可の組は対象外
 export function isHighRateWeakRequired(c: ProperCandidate): boolean {
-  const gap = properHighRateGapMan();
-  if (gap <= 0 || c.rateGapMan === null || c.rateGapMan === undefined || c.rateGapMan < gap) return false;
-  if (!c.judgment || c.judgment.inexperiencedOk) return false;
-  return (c.judgment.checks ?? []).some((k) => k.kind === '必須' && k.status === 'close') || yearShortRequiredOf(c).length > 0;
+  return isHighRateWeakJudgment(c.judgment, c.rateGapMan, properHighRateGapMan());
 }
 
 // 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。上限超え等の参考 → D。
