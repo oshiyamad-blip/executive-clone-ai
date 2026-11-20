@@ -56,3 +56,24 @@ export function projectBlocksResale(p: { title?: string; businessFlow?: string; 
 export function engineerBlocksResale(e: { businessFlow?: string }, mailText: string): boolean {
   return hasResaleRestriction([e.businessFlow ?? '', mailText].join('\n'));
 }
+
+// 商流の段数（こちらから見た段数。提携先の社員・個人事業主は1段、提携先の協力会社の要員は2段、「2社先」は3段）。読めなければ null
+const DEPTH_NUM = '[1一]';
+
+// 案件が許す段数。「貴社1社先まで」→1、「2社先まで」→2。「BPの場合は支援費を相談」のように相談で可とあるときは読まない
+export function projectAllowedDepth(p: { title?: string; businessFlow?: string; detail?: string }): number | null {
+  const s = [p.title ?? '', p.businessFlow ?? '', p.detail ?? ''].join('\n').normalize('NFKC');
+  if (/支援費|(?:BP|協力会社|[1-3一二三]社先)[^\n。]{0,12}相談/i.test(s)) return null;
+  if (/[1-3一二三]社先(?:まで)?(?:は)?(?:不可|NG|禁止|×)/.test(s)) return 0;
+  if (/[2二]社先まで/.test(s)) return 2;
+  if (new RegExp(`(?:(?:貴社|御社)\\s*)?${DEPTH_NUM}社先まで`).test(s)) return 1;
+  return null;
+}
+
+export function engineerDepth(e: { businessFlow?: string }, mailText: string): number | null {
+  const s = [e.businessFlow ?? '', mailText ?? ''].join('\n').normalize('NFKC');
+  if (/[2二]社先/.test(s)) return 3;
+  if (new RegExp(`${DEPTH_NUM}社先|(?<![A-Za-z])BP(?![A-Za-z])|(?:協力会社|パートナー(?:企業|会社)?)(?:の|所属)?(?:社員|個人事業主|要員|エンジニア|技術者)`, 'i').test(s)) return 2;
+  if (/(?:弊社|自社|当社)(?:の)?(?:正)?社員|弊社(?:プロパー|所属|個人事業主)/.test(s)) return 1;
+  return null;
+}

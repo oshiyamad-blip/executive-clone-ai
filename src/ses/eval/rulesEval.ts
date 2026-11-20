@@ -260,7 +260,7 @@ import type {
 } from '../../types/index.js';
 
 import { isHighRateWeakJudgment } from '../proper/judge.js';
-import { hasResaleRestriction, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
+import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
@@ -7261,6 +7261,26 @@ function externalMatchChecks(): void {
   for (const t of ['派遣ではありません', '準委任（派遣不可）', '客先常駐（準委任）', '派遣元', '人材派遣会社様からのご紹介も可', '契約形態：準委任（派遣不可）', '派遣契約ではありません'])
     check(`派遣でない案件は外さない: 「${t}」`, !projectBlocksResale({ title: 'x', detail: t }));
   for (const t of ['御社要員まで（商流）', '貴社所属の技術者まで', '貴社エンジニアのみ', '貴社人材まで']) check(`制限あり（要員・人材・技術者・エンジニア）: 「${t}」`, hasResaleRestriction(t));
+
+  section('外部マッチ: 商流の段数の照合（projectAllowedDepth / engineerDepth）');
+  check('案件の許す段数を読む', projectAllowedDepth({ businessFlow: '一社先まで' }) === 1 && projectAllowedDepth({ businessFlow: '貴社1社先まで' }) === 1 && projectAllowedDepth({ businessFlow: '2社先まで' }) === 2 &&
+    projectAllowedDepth({ businessFlow: '貴社BPの場合は支援費を相談' }) === null && projectAllowedDepth({ detail: 'Java' }) === null);
+  check('要員の段数を読む', engineerDepth({ businessFlow: '弊社1社先正社員' }, '') === 2 && engineerDepth({ businessFlow: 'BP' }, '') === 2 && engineerDepth({ businessFlow: '弊社社員' }, '') === 1 &&
+    engineerDepth({ businessFlow: '2社先' }, '') === 3 && engineerDepth({ businessFlow: '' }, '') === null);
+  const dsel = (pf: string, ef: string) => {
+    const r = selectExternalPairs({ now: new Date(), existingIds: new Set(), addedToday: 0, perRun: 8, dailyCap: 30,
+      projects: [project({ id: 'dp', title: '案件dp', requiredSkills: ['Java'], rateMax: 80, agentEmail: 's@partner-dp.example', businessFlow: pf })],
+      engineers: [engineer(['Java'], { id: 'eng_de', desiredRate: 60, agentEmail: 's@vendor-de.example', agentCompany: '要員元de', businessFlow: ef })] });
+    return r;
+  };
+  for (const [pf, ef] of [['一社先まで', '弊社1社先正社員'], ['貴社1社先まで', 'BP'], ['1社先まで', '1社先個人事業主']] as const) {
+    const r = dsel(pf, ef);
+    check(`段数超過は外す: 「${pf}」×「${ef}」`, r.pairs.length === 0 && r.stats.depthExceeded === 1, JSON.stringify(r.stats));
+  }
+  for (const [pf, ef] of [['一社先まで', '弊社社員'], ['2社先まで', '弊社1社先'], ['一社先まで', ''], ['', '弊社1社先'], ['1社先は支援費の相談', '弊社1社先']] as const) {
+    const r = dsel(pf, ef);
+    check(`段数が収まる・不明なら外さない: 「${pf}」×「${ef}」`, r.pairs.length === 1 && r.stats.depthExceeded === 0, JSON.stringify(r.stats));
+  }
 
   section('外部マッチ: 組の選び方（selectExternalPairs）');
   const now = new Date();
