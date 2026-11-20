@@ -625,3 +625,11 @@ export async function judgeProperPairs(
   }
   return out;
 }
+
+// 高単価（希望より gapMan 万円以上）なのに、必須に「近い経験」（△）か年数不足がある判定。gapMan が 0 以下・差が読めない・IT 未経験×未経験可は対象外
+// （営業リストの isHighRateWeakRequired と外部マッチが同じ基準を使う）
+export function isHighRateWeakJudgment(j: Pick<ProperJudgment, 'checks' | 'inexperiencedOk'> | undefined, rateGapMan: number | null | undefined, gapMan: number): boolean {
+  if (gapMan <= 0 || rateGapMan === null || rateGapMan === undefined || rateGapMan < gapMan) return false;
+  if (!j || j.inexperiencedOk) return false;
+  return (j.checks ?? []).some((k) => k.kind === '必須' && (k.status === 'close' || typeof k.shortYears === 'number'));
+}

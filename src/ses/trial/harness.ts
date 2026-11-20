@@ -24,9 +24,9 @@ import { attachmentMaterial } from './rawAttach.js';
 import { withListPageLine } from '../mail/htmlText.js';
 import { appendLabels, compareBackup, engineerHashOf, labelsDir, parseBackup, readFbExcludeIds, readLabelStore, salesKeyOf, salesMemosOf, writeBackupFiles, type BackupRow, type LabelPair, type LabelSales } from '../eval/labels.js';
 import { isClosedNotice } from '../mailKind.js';
-import { salesKeepHours } from '../config.js';
+import { properHighRateGapMan, salesKeepHours } from '../config.js';
 import { ownPairsForJudge, inexperiencedSkippedCount, metroResidenceSkippedCount, startWaitSkippedCount } from '../ownMatch.js';
-import { judgeSystemFor, judgeUserPrompt, profileTextOf, verifyJudgment, verifyOptsFor, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
+import { judgeSystemFor, judgeUserPrompt, profileTextOf, verifyJudgment, verifyOptsFor, isHighRateWeakJudgment, __setProperJudgeForTest, __setCachedProjectIdsForTest, type RawProperJudgment } from '../proper/judge.js';
 import { buildProperCandidates, dedupeProjects, selectPairsForJudge, pickAuditPairs } from '../proper/index.js';
 import { rosterEngineersFromValues, skillSheetText } from '../proper/roster.js';
 import { groupSimilarEngineers } from '../proper/group.js';
@@ -689,6 +689,7 @@ if (phase === 'prompts') {
   let judged = 0;
   let dropped = 0;
   let hardDropped = 0;
+  let highRateDropped = 0;
   let nextNo = next.no;
   let nextRow = next.row;
   const counts = { A: 0, B: 0 };
@@ -712,6 +713,12 @@ if (phase === 'prompts') {
         continue;
       }
       const j = verifyJudgment(r.judgment, profileTextOf(own), project, verifyOptsFor(own, project));
+      // 案件単価が希望より高いのに必須が△・年数不足の組は、自社要員の営業リストと同じく載せない
+      const projectRate = project.rateMax ?? project.rateMin;
+      if (typeof projectRate === 'number' && typeof engineer.desiredRate === 'number' && isHighRateWeakJudgment(j, projectRate - engineer.desiredRate, properHighRateGapMan())) {
+        highRateDropped += 1;
+        continue;
+      }
       const priority = extPriorityOf(j);
       if (!priority) {
         dropped += 1;
@@ -728,7 +735,7 @@ if (phase === 'prompts') {
   }
   writeFileSync(join(dir, 'ext_writes.json'), JSON.stringify(writes));
   writeFileSync(join(dir, 'ext_notify.json'), JSON.stringify(notify, null, 1));
-  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped, hardDropped }));
+  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped, hardDropped, highRateDropped }));
 } else {
   throw new Error(`PHASE が不明です: ${phase}`);
 }

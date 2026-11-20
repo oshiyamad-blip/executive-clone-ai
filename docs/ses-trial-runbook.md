@@ -297,11 +297,12 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 2. `PHASE=prep` のあとに `PHASE=ext_prep`（`RUN_DIR` は同じ）。入力は任意で、無ければ空として扱う:
    - `ext_existing_ids.json`: シートの「外部マッチ」タブの ID 列（`ext_<要員ID>_<案件ID>`）の配列。読み戻した値から作る
    - `ext_state.json`: `{"addedToday": n}`（今日 JST にすでに判定した組の数）
-   - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・candidates・selected・pairsByKey
+   - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・samePerson・candidates・selected・pairsByKey
    - 再委託・転売の制限（再委託不可・貴社まで・貴社社員まで・プロパーのみ・エンド直のみ など。「1社先まで」だけなら外さない）がある要員・案件、同じ営業元の組は組にしない。1人の要員・1件の案件につき 2 組まで
-   - 営業が一目で見送る組は `src/ses/external/hardRules.ts` の決まりごとで先に外す（外国籍不可×外国籍の要員・常時稼働でない要員×稼働の減を許さない案件・フルリモート必須の要員×出社が要る案件・案件の年齢上限を超える要員。不明は外さない）。要約の `hardExcluded`（国籍・稼働率・リモート・年齢ごとの数）、`ext_final` では判定後にも当たれば落とし `hardDropped`
+   - 営業が一目で見送る組は `src/ses/external/hardRules.ts` の決まりごとで先に外す（外国籍不可×外国籍の要員・常時稼働でない要員×稼働の減を許さない案件・フルリモート必須の要員×出社が要る案件・案件の年齢上限を超える要員。不明は外さない）。同じ会社の別の営業担当が別メールで送ってきた同じ要員（送信元ドメイン・イニシャル・年齢・希望単価・最寄駅（無ければ居住地）がすべて一致）は、要員メールの受信が新しい1人だけを残し、外した数を要約の `samePerson` に出す。要約の `hardExcluded`（国籍・稼働率・リモート・年齢ごとの数）、`ext_final` では判定後にも当たれば落とし `hardDropped`
 3. 判定は、要員キーを4つずつまとめて1担当にする（1組ずつ担当を立てると1組あたり約8万トークンかかるため）。`ext/` に外部マッチ用の判定の指示（キーごとに `system_<キー>.txt` を読み直し、全要素を判定して `jparts/<キー>_0.json` に書く）を置き、`runDir=<RUN_DIR>/ext` で起動する。結果を `ext/judged_<キー>.json` にまとめる。
-4. `PHASE=ext_final`: 入力は `ext_sheet.json`（`{"values": [[見出し…], …行]}`＝「外部マッチ」タブの今の値。タブが無い・空なら見出しだけとして扱う）。出力は `ext_writes.json`（`[{range, values}]`）と `ext_notify.json`。要約は judged・appended・A・B・dropped。
+4. `PHASE=ext_final`: 入力は `ext_sheet.json`（`{"values": [[見出し…], …行]}`＝「外部マッチ」タブの今の値。タブが無い・空なら見出しだけとして扱う）。出力は `ext_writes.json`（`[{range, values}]`）と `ext_notify.json`。要約は judged・appended・A・B・dropped・hardDropped・highRateDropped。
+   - 案件単価（上限、無ければ下限）が要員の希望より `PROPER_HIGH_RATE_GAP_MAN`（既定15万円、0で無効）以上高いのに、必須に△（近い経験）か年数不足がある組は、自社要員の営業リストと同じ基準で載せない（`highRateDropped`）
    - 優先度は「A 提案推奨」（提案推奨で必須が全部○）と「B 条件交渉」（条件付き、または必須に△・年数不足）。必須に×がある組・見送りは載せない
    - 既存の行の人の入力列には触れない（追記だけ）。No はこのタブで 1 から
 5. 書き込み: タブ「外部マッチ」が無ければ、見出し（`extHeaderRow()` ＝ `src/ses/external/sheet.ts` の `EXT_HEADER`、29列 A〜AC）で作る。`ext_writes.json` の各要素を `update_values` で書き、書いたあと ID 列を読み戻して確かめる。

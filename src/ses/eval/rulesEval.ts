@@ -258,6 +258,7 @@ import type {
   MatchResult,
 } from '../../types/index.js';
 
+import { isHighRateWeakJudgment } from '../proper/judge.js';
 import { hasResaleRestriction, projectBlocksResale, engineerBlocksResale } from '../external/resale.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
@@ -7179,9 +7180,10 @@ async function salesKeepWriteChecks(): Promise<void> {
 function externalMatchChecks(): void {
   section('外部マッチ: 商流・再委託の制限の検知（hasResaleRestriction）');
   const restricted = ['再委託不可', '再委託は不可', '再々委託禁止', '貴社まで', '貴社社員まで', '貴社正社員まで', '貴社所属まで', '弊社社員まで', '御社まで',
-    'プロパーのみ', '正社員のみ', 'エンド直のみ', '1社先まで不可', '２社先不可', '商流制限あり', '商流：貴社社員まで', '転売不可', '二次請け不可', '貴社社員様まで'];
+    'プロパーのみ', '正社員のみ', 'エンド直のみ', '1社先まで不可', '２社先不可', '商流制限あり', '商流：貴社社員まで', '転売不可', '二次請け不可', '貴社社員様まで',
+    '商流：貴社社員（契約社員可）まで', '貴社正社員(契約社員含む)まで', '弊社社員（契約社員含む）まで'];
   for (const t of restricted) check(`制限あり: 「${t}」`, hasResaleRestriction(t));
-  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '【商流制限】なし(浅い商流の方を優先)', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください'];
+  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '【商流制限】なし(浅い商流の方を優先)', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください', 'ご連絡は弊社まで', '1社先まで', '貴社1社先まで', '【商流制限】なし'];
   for (const t of open) check(`制限なし: 「${t}」`, !hasResaleRestriction(t));
   check('案件は題名・商流・詳細のどれかに制限があれば外す', projectBlocksResale({ title: 'Java案件', businessFlow: '', detail: '【条件】再委託不可' }) &&
     projectBlocksResale({ title: 'x', businessFlow: '貴社社員まで' }) && !projectBlocksResale({ title: 'x', businessFlow: '1社先まで', detail: 'Java' }));
@@ -7204,6 +7206,15 @@ function externalMatchChecks(): void {
   check('要員メール本文の制限でも外す', ids(mailBlocked).join() === 'ext_eng_e2_p1');
   const same = selectExternalPairs({ ...base, projects: [pj('p1', { agentEmail: 'x@same-co.example' })], engineers: [en('e1', { agentEmail: 'y@same-co.example' })] });
   check('同じ営業元の組は外す', same.pairs.length === 0 && same.stats.sameAgent === 1, JSON.stringify(same.stats));
+  const sp = (id: string, over: Partial<Engineer> = {}) => en(id, { displayName: 'K.S.', age: 35, desiredRate: 60, nearestStation: '架空駅', agentEmail: `a_${id}@dup-co.example`, receivedAt: new Date(now.getTime() - 3600000), ...over });
+  const dupSel = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1'), sp('e2', { receivedAt: new Date(now.getTime() - 60000) })] });
+  check('同じ人（同じドメイン・イニシャル・年齢・単価・最寄駅）は受信が新しい1人だけ残す', ids(dupSel).join() === 'ext_eng_e2_p1' && dupSel.stats.samePerson === 1, JSON.stringify(dupSel.stats));
+  const notDup = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1'), sp('e2', { age: 36 })] });
+  check('年齢が違えば別の人として両方残す', notDup.stats.samePerson === 0 && notDup.pairs.length === 2, JSON.stringify(notDup.stats));
+  const emptyField = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1', { nearestStation: '', residence: '' }), sp('e2', { nearestStation: '', residence: '' })] });
+  check('最寄駅も居住地も空なら同じ人とみなさない', emptyField.stats.samePerson === 0, JSON.stringify(emptyField.stats));
+  const initialsNorm = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1', { displayName: 'Ｋ．Ｓ．' }), sp('e2', { displayName: 'k.s', receivedAt: new Date(now.getTime() - 60000) })] });
+  check('イニシャルは全角・小文字の違いを吸収して比べる', initialsNorm.stats.samePerson === 1, JSON.stringify(initialsNorm.stats));
   const inj = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { injectionSuspected: true })] });
   check('指示混入の疑いのある要員は外す', inj.pairs.length === 0);
   const late = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { availableFrom: new Date(now.getTime() + 60 * 86400000).toISOString() }), en('e2', { availableFrom: new Date(now.getTime() + 10 * 86400000).toISOString() })] });
@@ -7221,6 +7232,15 @@ function externalMatchChecks(): void {
   const rest = selectExternalPairs({ ...grid, existingIds: skip });
   check('すでにある組の ID は選ばない', !ids(rest).includes(ids(full)[0]) && rest.stats.candidates === full.stats.candidates - 1, JSON.stringify(rest.stats));
   check('既定の上限は 8・30・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 8 && extDailyCap() === 30 && extEngineerLookbackDays() === 7));
+
+  section('外部マッチ: 高単価×必須の弱い組（isHighRateWeakJudgment）');
+  const jc = (status: 'met' | 'close', extra: Record<string, unknown> = {}) => ({ checks: [{ requirement: 'Java', kind: '必須', status, ...extra }], inexperiencedOk: false }) as unknown as Parameters<typeof isHighRateWeakJudgment>[0];
+  check('+15万・必須△ → 落とす', isHighRateWeakJudgment(jc('close'), 15, 15));
+  check('+15万・年数不足 → 落とす', isHighRateWeakJudgment(jc('met', { shortYears: 1 }), 20, 15));
+  check('+14万・必須△ → 落とさない', !isHighRateWeakJudgment(jc('close'), 14, 15));
+  check('必須がすべて○なら落とさない', !isHighRateWeakJudgment(jc('met'), 30, 15));
+  check('0 で無効・差が読めない・IT 未経験×未経験可は落とさない', !isHighRateWeakJudgment(jc('close'), 30, 0) && !isHighRateWeakJudgment(jc('close'), null, 15) &&
+    !isHighRateWeakJudgment({ ...jc('close'), inexperiencedOk: true } as Parameters<typeof isHighRateWeakJudgment>[0], 30, 15));
 
   section('外部マッチ: 決まりごとの除外（externalHardMismatch）');
   const hm = (eOver: Partial<Engineer>, mail: string, pOver: Partial<Project>) => externalHardMismatch(engineer(['Java'], eOver), mail, project({ title: '案件', businessFlow: '', ...pOver }));

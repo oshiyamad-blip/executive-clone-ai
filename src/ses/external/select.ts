@@ -27,6 +27,7 @@ export interface ExtSelectStats {
   restrictedEngineers: number;
   restrictedProjects: number;
   sameAgent: number;
+  samePerson: number; // 同じ会社の別の営業担当が送ってきた同じ要員（新しい1通だけ残して外した数）
   hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・年齢で決まりごとに外した組の数
   candidates: number;
   selected: number;
@@ -36,11 +37,36 @@ export function engineerStartsTooLate(e: Engineer, now: Date): boolean {
   return Boolean(e.availableFrom) && isStartTooLate(e.availableFrom as string, now.toISOString(), now, { days: 0, months: 1 });
 }
 
+// 同じ人の判定キー: 送信元ドメイン・イニシャル（英字のみ大文字）・年齢・希望単価・最寄駅（無ければ居住地）。どれか空なら同じ人とみなさない
+function samePersonKey(e: Engineer): string | null {
+  const domain = (e.agentEmail.split('@')[1] ?? '').trim().toLowerCase();
+  const initials = e.displayName.normalize('NFKC').replace(/[^A-Za-z]/g, '').toUpperCase();
+  const place = (e.nearestStation || e.residence || '').normalize('NFKC').replace(/\s/g, '');
+  if (!domain || !initials || e.age === null || e.desiredRate === null || !place) return null;
+  return [domain, initials, e.age, e.desiredRate, place].join('|');
+}
+
+export function dedupeSamePerson(engineers: Engineer[]): { kept: Engineer[]; removed: number } {
+  const newest = new Map<string, Engineer>();
+  for (const e of engineers) {
+    const k = samePersonKey(e);
+    if (k === null) continue;
+    const cur = newest.get(k);
+    if (!cur || e.receivedAt.getTime() > cur.receivedAt.getTime()) newest.set(k, e);
+  }
+  const kept = engineers.filter((e) => {
+    const k = samePersonKey(e);
+    return k === null || newest.get(k) === e;
+  });
+  return { kept, removed: engineers.length - kept.length };
+}
+
 export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]; stats: ExtSelectStats } {
   const { now } = input;
   const mailTextOf = input.mailTextOf ?? (() => '');
   const usable = input.engineers.filter((e) => e.status === 'available' && !e.injectionSuspected && !engineerStartsTooLate(e, now));
-  const engineers = usable.filter((e) => !engineerBlocksResale(e, mailTextOf(e)));
+  const unrestricted = usable.filter((e) => !engineerBlocksResale(e, mailTextOf(e)));
+  const { kept: engineers, removed: samePerson } = dedupeSamePerson(unrestricted);
   const openProjects = input.projects.filter((p) => p.status === 'open' && !p.injectionSuspected);
   const projects = openProjects.filter((p) => !projectBlocksResale(p));
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
@@ -71,9 +97,10 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
     stats: {
       engineers: engineers.length,
       projects: projects.length,
-      restrictedEngineers: usable.length - engineers.length,
+      restrictedEngineers: usable.length - unrestricted.length,
       restrictedProjects: openProjects.length - projects.length,
       sameAgent: selection.stats.reasons.sameAgent,
+      samePerson,
       hardExcluded,
       candidates: candidates.length,
       selected: pairs.length,
