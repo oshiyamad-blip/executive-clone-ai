@@ -886,6 +886,17 @@ export function properMaxStartWaitMonths(): number {
   return envNum('PROPER_MAX_START_WAIT_MONTHS', 1, { min: 0, int: true });
 }
 
+// 外部マッチ（試行）: 1回の実行でAI判定に回す組の上限・1日（JST）に新しく判定する組の上限・要員メールを遡る日数
+export function extPerRun(): number {
+  return envNum('EXT_PER_RUN', 8, { min: 0, int: true });
+}
+export function extDailyCap(): number {
+  return envNum('EXT_DAILY_CAP', 30, { min: 0, int: true });
+}
+export function extEngineerLookbackDays(): number {
+  return envNum('EXT_ENGINEER_LOOKBACK_DAYS', 7, { min: 1, int: true });
+}
+
 // 案件単価が希望よりこの額（万円/月）以上高く、必須に「近い経験」か年数不足がある組は優先度 C に下げる（営業の見送りと重なる型）。0 で無効
 export function properHighRateGapMan(): number {
   return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
