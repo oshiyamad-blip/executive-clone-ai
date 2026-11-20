@@ -902,6 +902,12 @@ export function properHighRateGapMan(): number {
   return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
 }
 
+// 待機中（稼働可能日が今日以前）の自社社員は、推奨・必須すべて○で単価だけ許容幅内で足りない組を B でなく A にする。false/0 で無効（既定は有効）
+export function properIdlePriority(): boolean {
+  const v = env('PROPER_IDLE_PRIORITY').toLowerCase();
+  return !(v === 'false' || v === '0');
+}
+
 // プロパー候補のAI判定に回す組の上限（社員ごと）。上限は安全弁（通常は足切りを通った組をすべて判定する）。超えた組は次の回に回る（判定の控えは数えない）
 export function properJudgePerEngineer(): number {
   return envNum('PROPER_JUDGE_PER_ENGINEER', 150, { min: 1, max: 300, int: true });

@@ -4949,6 +4949,38 @@ function salesListChecks(): void {
   check('優先度: 年数不足が尚可だけならA・年数不足の無い推奨もA',
     salesPriorityOf(withJ('recommend', [{ ...shortY, kind: '尚可' }])).startsWith('A') &&
       salesPriorityOf(withJ('recommend', [{ kind: '必須', requirement: 'Java', status: 'close' }])).startsWith('A'));
+  // 待機中（稼働可能日が今日以前）の要員は、推奨・必須すべて○で単価だけ許容幅内で足りない組を A にする
+  const idleNow = new Date('2026-11-20T03:00:00Z');
+  const metJava = [{ kind: '必須' as const, requirement: 'Java', status: 'met' as const }];
+  const idleCand = (over: Record<string, unknown> = {}, verdict: 'recommend' | 'conditional' = 'recommend', checks: Parameters<typeof jd>[1] = metJava) =>
+    withJ(verdict, checks, { meetsRate: false, rateGapMan: -3, engineerAvailableFrom: '2026-11-01', ...over });
+  const idleRow = salesRowOf(idleCand(), undefined, idleNow);
+  check('優先度: 待機中・推奨・必須すべて○・単価が許容幅内で不足ならA・確認事項に待機中の注記',
+    salesPriorityOf(idleCand(), idleNow).startsWith('A') && String(idleRow[col('優先度')]).startsWith('A') &&
+      String(idleRow[col('確認事項')]).includes('待機中のため、単価が3万円足りなくても A（本人の了承が前提）'));
+  check('優先度: 稼働可能日が今日（JST）ならA・明日以降・不明なら待機中とみなさずB（注記も出さない）',
+    salesPriorityOf(idleCand({ engineerAvailableFrom: '2026-11-20' }), idleNow).startsWith('A') &&
+      salesPriorityOf(idleCand({ engineerAvailableFrom: '2026-11-21' }), idleNow).startsWith('B') &&
+      salesPriorityOf(idleCand({ engineerAvailableFrom: null }), idleNow).startsWith('B') &&
+      salesPriorityOf(idleCand({ engineerAvailableFrom: undefined }), idleNow).startsWith('B') &&
+      !String(salesRowOf(idleCand({ engineerAvailableFrom: '2026-11-21' }), undefined, idleNow)[col('確認事項')]).includes('待機中のため'));
+  check('優先度: 待機中でも必須に近い経験（△）・必須の年数不足・条件付き判定ならB',
+    salesPriorityOf(idleCand({}, 'recommend', [...metJava, { kind: '必須', requirement: 'SQL', status: 'close' }]), idleNow).startsWith('B') &&
+      salesPriorityOf(idleCand({}, 'recommend', [shortY]), idleNow).startsWith('B') &&
+      salesPriorityOf(idleCand({}, 'conditional'), idleNow).startsWith('B'));
+  check('優先度: 待機中でも needsReview はC・reference はD（先に効く）。単価を満たす組に注記は付けない',
+    salesPriorityOf(idleCand({ needsReview: true }), idleNow).startsWith('C') && salesPriorityOf(idleCand({ reference: true }), idleNow).startsWith('D') &&
+      !String(salesRowOf(withJ('recommend', metJava, { engineerAvailableFrom: '2026-11-01' }), undefined, idleNow)[col('確認事項')]).includes('待機中のため'));
+  const savedIdle = process.env.PROPER_IDLE_PRIORITY;
+  try {
+    process.env.PROPER_IDLE_PRIORITY = 'false';
+    const off = salesPriorityOf(idleCand(), idleNow).startsWith('B') && !String(salesRowOf(idleCand(), undefined, idleNow)[col('確認事項')]).includes('待機中のため');
+    process.env.PROPER_IDLE_PRIORITY = '0';
+    check('優先度: PROPER_IDLE_PRIORITY が false / 0 なら待機中でもB', off && salesPriorityOf(idleCand(), idleNow).startsWith('B'));
+  } finally {
+    if (savedIdle === undefined) delete process.env.PROPER_IDLE_PRIORITY;
+    else process.env.PROPER_IDLE_PRIORITY = savedIdle;
+  }
   const humanCols = SALES_COLUMNS.flatMap((c, i) => (c.human ? [i] : []));
   check('人の入力の列は続いている（行の書き直しはその両側だけを書く）', humanCols.every((c, k) => k === 0 || c === humanCols[k - 1] + 1));
   const prot = formatRequests(7, 0, true).filter((r) => r.addProtectedRange);

@@ -11,8 +11,9 @@
 // - 精度チェック: 営業が候補ごとに「合っていたか」を付け、「精度集計」タブが優先度・要員ごとの妥当率を数式で出す（AI判定の精度の測定）
 import { google, type sheets_v4 } from 'googleapis';
 import { GOOGLE_REQUEST_TIMEOUT_MS, withGoogleRetry, columnLetter, quoteTab } from '../../database/sheetBook.js';
-import { properHighRateGapMan, properSalesSpreadsheetId, salesExpiredKeep, salesKeepHours, salesMinPriority } from '../config.js';
+import { properHighRateGapMan, properIdlePriority, properSalesSpreadsheetId, salesExpiredKeep, salesKeepHours, salesMinPriority } from '../config.js';
 import { sesMainAuth } from '../googleCreds.js';
+import { jstDateOf } from '../dates.js';
 import { norm } from './judge.js';
 import { normalizeSubject } from '../resend.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
@@ -123,16 +124,26 @@ export function isHighRateWeakRequired(c: ProperCandidate): boolean {
 // 優先度: 要確認（単価・スキル不明や指示混入疑い、AIの根拠が経歴に無い等）→ C。上限超え等の参考 → D。
 // 条件付きで経験の無い必須がある組も C。
 // AI判定のある候補は「推奨」かつ単価を満たせば A、ほかは B。AI判定の無い候補は、交渉や参考提案の注記が無く単価を満たす強マッチ → A
-export function salesPriorityOf(c: ProperCandidate): string {
-  return priorityOf(c, true);
+export function salesPriorityOf(c: ProperCandidate, now = new Date()): string {
+  return priorityOf(c, true, now);
+}
+
+// 待機中（稼働可能日が今日（JST）以前。不明は待機中としない）の要員の、推奨・必須すべて○（unmet・close なし）で、A に届かない理由が単価不足だけの組。B でなく A にする（本人の了承が前提）
+export function isIdleRateShortUpgrade(c: ProperCandidate, now = new Date()): boolean {
+  if (!properIdlePriority() || !c.judgment || c.judgment.verdict !== 'recommend' || c.meetsRate) return false;
+  if (c.rateGapMan === null || c.rateGapMan === undefined || c.rateGapMan >= 0) return false;
+  const from = c.engineerAvailableFrom;
+  if (!from || from > jstDateOf(now)) return false;
+  if ((c.judgment.checks ?? []).some((k) => k.kind === '必須' && (k.status === 'unmet' || k.status === 'close'))) return false;
+  return yearShortRequiredOf(c).length === 0;
 }
 
 // 高単価×必須△・年数不足の規則を入れる前の優先度（過去のラベルに規則を当てたとき、載らなくなる組を数えるため）
-export function salesPriorityWithoutHighRateRule(c: ProperCandidate): string {
-  return priorityOf(c, false);
+export function salesPriorityWithoutHighRateRule(c: ProperCandidate, now = new Date()): string {
+  return priorityOf(c, false, now);
 }
 
-function priorityOf(c: ProperCandidate, highRateRule: boolean): string {
+function priorityOf(c: ProperCandidate, highRateRule: boolean, now: Date): string {
   if (c.needsReview) return SALES_PRIORITIES.c;
   if (c.reference) return SALES_PRIORITIES.d;
   // IT 未経験の社員 × 未経験可の案件は、必須の技術が経験なしでも C にせず、条件交渉の B にする（確認事項の先頭に注記がある）
@@ -141,6 +152,7 @@ function priorityOf(c: ProperCandidate, highRateRule: boolean): string {
   // 高単価の案件は求める水準も高く、必須が近い経験どまり・年数不足の組は営業が見送りやすい。C にして営業リストの下限（B）で載せない
   if (highRateRule && isHighRateWeakRequired(c)) return SALES_PRIORITIES.c;
   if (c.judgment) {
+    if (isIdleRateShortUpgrade(c, now)) return SALES_PRIORITIES.a;
     if (c.judgment.verdict !== 'recommend' || !c.meetsRate) return SALES_PRIORITIES.b;
     // 必須に経験なしの要件があるのに「提案推奨」と見えるのを避け、B までに抑える
     if ((c.judgment.checks ?? []).some((k) => k.kind === '必須' && k.status === 'unmet')) return SALES_PRIORITIES.b;
@@ -288,10 +300,10 @@ function rateReasonLine(c: ProperCandidate): string {
 }
 
 // 候補1件を「全体」タブの1行にする（No と人の入力列は後で埋める）
-export function salesRowOf(c: ProperCandidate, project: Project | undefined): Row {
+export function salesRowOf(c: ProperCandidate, project: Project | undefined, now = new Date()): Row {
   const row: Row = HEADER.map(() => '');
   const { negotiation, confirm } = salesNotesOf(c.reason);
-  row[COL['優先度']] = salesPriorityOf(c);
+  row[COL['優先度']] = salesPriorityOf(c, now);
   row[COL['要員']] = c.properLabel;
   row[COL['案件名']] = c.projectTitle;
   row[COL['案件単価(万)']] = c.projectRate ?? '';
@@ -304,7 +316,10 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined): Ro
   const yearNotes = /^年数:/m.test(negotiation) ? [] : yearShortRequiredOf(c).map((y) => `年数: 必須${y.requirement}に対し経歴約${y.shortYears.toFixed(1)}年`);
   row[COL['交渉ポイント']] = [negotiation, ...yearNotes].filter(Boolean).join('\n');
   const unmet = c.needsReview || c.reference ? [] : unmetRequiredOf(c);
-  row[COL['確認事項']] = unmet.length > 0 ? [`要確認: 経験の無い必須があります（${unmet.join('、')}）`, confirm].filter(Boolean).join('\n') : confirm;
+  const idleNote = !c.needsReview && !c.reference && !c.judgment?.inexperiencedOk && isIdleRateShortUpgrade(c, now)
+    ? `待機中のため、単価が${Math.abs(c.rateGapMan ?? 0)}万円足りなくても A（本人の了承が前提）`
+    : '';
+  row[COL['確認事項']] = [unmet.length > 0 ? `要確認: 経験の無い必須があります（${unmet.join('、')}）` : '', confirm, idleNote].filter(Boolean).join('\n');
   row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {
