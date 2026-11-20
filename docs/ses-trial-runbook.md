@@ -300,7 +300,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
    - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・candidates・selected・pairsByKey
    - 再委託・転売の制限（再委託不可・貴社まで・貴社社員まで・プロパーのみ・エンド直のみ など。「1社先まで」だけなら外さない）がある要員・案件、同じ営業元の組は組にしない。1人の要員・1件の案件につき 2 組まで
    - 営業が一目で見送る組は `src/ses/external/hardRules.ts` の決まりごとで先に外す（外国籍不可×外国籍の要員・常時稼働でない要員×稼働の減を許さない案件・フルリモート必須の要員×出社が要る案件・案件の年齢上限を超える要員。不明は外さない）。要約の `hardExcluded`（国籍・稼働率・リモート・年齢ごとの数）、`ext_final` では判定後にも当たれば落とし `hardDropped`
-3. 判定は手順2の「判定の指示」と同じワークフローで、`runDir=<RUN_DIR>/ext`（`judge_instructions.md` を `ext/` にコピーしておく）。結果は `ext/judged_<キー>.json`。
+3. 判定は、要員キーを4つずつまとめて1担当にする（1組ずつ担当を立てると1組あたり約8万トークンかかるため）。`ext/` に外部マッチ用の判定の指示（キーごとに `system_<キー>.txt` を読み直し、全要素を判定して `jparts/<キー>_0.json` に書く）を置き、`runDir=<RUN_DIR>/ext` で起動する。結果を `ext/judged_<キー>.json` にまとめる。
 4. `PHASE=ext_final`: 入力は `ext_sheet.json`（`{"values": [[見出し…], …行]}`＝「外部マッチ」タブの今の値。タブが無い・空なら見出しだけとして扱う）。出力は `ext_writes.json`（`[{range, values}]`）と `ext_notify.json`。要約は judged・appended・A・B・dropped。
    - 優先度は「A 提案推奨」（提案推奨で必須が全部○）と「B 条件交渉」（条件付き、または必須に△・年数不足）。必須に×がある組・見送りは載せない
    - 既存の行の人の入力列には触れない（追記だけ）。No はこのタブで 1 から
