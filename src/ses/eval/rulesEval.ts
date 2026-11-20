@@ -7247,9 +7247,9 @@ function externalMatchChecks(): void {
   section('外部マッチ: 商流・再委託の制限の検知（hasResaleRestriction）');
   const restricted = ['再委託不可', '再委託は不可', '再々委託禁止', '貴社まで', '貴社社員まで', '貴社正社員まで', '貴社所属まで', '弊社社員まで', '御社まで',
     'プロパーのみ', '正社員のみ', 'エンド直のみ', '1社先まで不可', '２社先不可', '商流制限あり', '商流：貴社社員まで', '転売不可', '二次請け不可', '貴社社員様まで',
-    '商流：貴社社員（契約社員可）まで', '貴社正社員(契約社員含む)まで', '弊社社員（契約社員含む）まで'];
+    '商流：貴社社員（契約社員可）まで', '御社社員や個人事業主まで', '貴社社員・個人事業主まで', '貴社正社員、フリーランスまで', '貴社社員及び個人事業主まで', '貴社正社員(契約社員含む)まで', '弊社社員（契約社員含む）まで'];
   for (const t of restricted) check(`制限あり: 「${t}」`, hasResaleRestriction(t));
-  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '【商流制限】なし(浅い商流の方を優先)', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください', 'ご連絡は弊社まで', '1社先まで', '貴社1社先まで', '【商流制限】なし'];
+  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '【商流制限】なし(浅い商流の方を優先)', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください', 'ご連絡は弊社まで', '1社先まで', '貴社1社先まで', '【商流制限】なし', '個人事業主まで可（1社先まで）'];
   for (const t of open) check(`制限なし: 「${t}」`, !hasResaleRestriction(t));
   check('案件は題名・商流・詳細のどれかに制限があれば外す', projectBlocksResale({ title: 'Java案件', businessFlow: '', detail: '【条件】再委託不可' }) &&
     projectBlocksResale({ title: 'x', businessFlow: '貴社社員まで' }) && !projectBlocksResale({ title: 'x', businessFlow: '1社先まで', detail: 'Java' }));
@@ -7334,8 +7334,22 @@ function externalMatchChecks(): void {
   check('年齢: 45歳×「40代まで」→ 外さない・50歳 → 外す', hm({ age: 45 }, '', { businessFlow: '40代まで' }).length === 0 && rulesOf({ age: 50 }, '', { businessFlow: '40代まで' }).join() === 'age');
   check('年齢: 「45歳まで」「年齢：〜39歳」の上限・年齢不明は外さない', rulesOf({ age: 46 }, '', { detail: '45歳まで' }).join() === 'age' && rulesOf({ age: 40 }, '', { detail: '年齢：〜39歳' }).join() === 'age' &&
     hm({ age: null }, '', { businessFlow: '40代まで' }).length === 0 && hm({ age: 60 }, '', { businessFlow: '' }).length === 0);
+  check('在宅: 「ハイブリッド以上希望」×「フル出社」「在宅勤務なし」「リモート不可」「完全常駐」→ 外す', ['フル出社', '在宅勤務なし', 'リモート不可', '完全常駐'].every((t) => rulesOf({}, 'ハイブリッド以上希望', { detail: t }).join() === 'hybrid'));
+  check('在宅: 「リモート併用希望」「一部リモート希望」「週2日以上リモート希望」も外す', ['リモート併用希望', '一部リモート希望', '週2日以上リモート希望'].every((t) => rulesOf({}, t, { detail: 'フル出社' }).join() === 'hybrid'));
+  check('在宅: 案件がリモート不可(remote=none)でも外す', rulesOf({}, 'ハイブリッド以上希望', { remote: 'none' }).join() === 'hybrid');
+  check('在宅: 任意の言い方・案件が在宅あり・不明は外さない', hm({}, 'リモート併用希望（出社も可）', { detail: 'フル出社' }).length === 0 && hm({}, 'できれば一部リモート希望', { detail: 'フル出社' }).length === 0 &&
+    hm({}, 'ハイブリッド以上希望', { detail: '週3日出社・週2日リモート' }).length === 0 && hm({}, 'ハイブリッド以上希望', { detail: 'フルリモート不可。週2日在宅可' }).length === 0 &&
+    hm({}, 'ハイブリッド以上希望', { detail: '勤務地：架空市' }).length === 0);
   const hardSel = selectExternalPairs({ ...base, projects: [pj('p1', { businessFlow: '外国籍不可' }), pj('p2')], engineers: [en('e1')], mailTextOf: () => '国籍：シリア籍' });
   check('選別: 決まりごとに当たる組だけ判定に回さず、数を数える', ids(hardSel).join() === 'ext_eng_e1_p2' && hardSel.stats.hardExcluded.nationality === 1, JSON.stringify(hardSel.stats));
+
+  const highSel = selectExternalPairs({ ...base, projects: [pj('p1', { rateMax: 90 }), pj('p2', { rateMax: 70 })], engineers: [en('e1')], perEngineer: 1 });
+  check('並び: 単価差が15万未満の組を先にする（差15万以上は後ろ）', ids(highSel).join() === 'ext_eng_e1_p2', JSON.stringify(ids(highSel)));
+  const highOrd = selectExternalPairs({ ...base, projects: [pj('p1', { rateMax: 90 }), pj('p2', { rateMax: 70 })], engineers: [en('e1')], perEngineer: 2 });
+  check('並び: 後ろに回すだけで外さない', highOrd.pairs.length === 2 && highOrd.pairs[0].project.id === 'p2' && highOrd.pairs[1].project.id === 'p1', JSON.stringify(highOrd.pairs.map((p) => p.project.id)));
+  const noGap = withEnv({ PROPER_HIGH_RATE_GAP_MAN: '0' }, () => selectExternalPairs({ ...base, projects: [pj('p1', { rateMax: 90 }), pj('p2', { rateMax: 70 })], engineers: [en('e1')], perEngineer: 2 }));
+  const asIs = [...highOrd.pairs].sort(comparePairs).map((p) => p.project.id).join();
+  check('並び: 0 なら今の並び（comparePairs）のまま', noGap.pairs.map((p) => p.project.id).join() === asIs, JSON.stringify(noGap.pairs.map((p) => p.project.id)));
 
   section('外部マッチ: 優先度と行（extPriorityOf・extRowOf・nextExtRow）');
   const chk = (kind: '必須' | '尚可', status: 'met' | 'close' | 'unmet', shortYears?: number) => ({ kind, requirement: `${kind}要件`, quote: '', status, ...(shortYears === undefined ? {} : { shortYears }) });
