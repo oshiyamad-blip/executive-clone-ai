@@ -7214,7 +7214,7 @@ function externalMatchChecks(): void {
   const restricted = ['再委託不可', '再委託は不可', '再々委託禁止', '貴社まで', '貴社社員まで', '貴社正社員まで', '貴社所属まで', '弊社社員まで', '御社まで',
     'プロパーのみ', '正社員のみ', 'エンド直のみ', '1社先まで不可', '２社先不可', '商流制限あり', '商流：貴社社員まで', '転売不可', '二次請け不可', '貴社社員様まで'];
   for (const t of restricted) check(`制限あり: 「${t}」`, hasResaleRestriction(t));
-  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください'];
+  const open = ['', '1社先まで', '貴社1社先まで', '貴社 1社先まで', '再委託可', '商流制限なし', '商流制限：なし', '【商流制限】なし(浅い商流の方を優先)', '貴社のご提案をお待ちしております', 'Java 5年以上 週5日出社', 'ご連絡は弊社までお願いします', '弊社までご返信ください'];
   for (const t of open) check(`制限なし: 「${t}」`, !hasResaleRestriction(t));
   check('案件は題名・商流・詳細のどれかに制限があれば外す', projectBlocksResale({ title: 'Java案件', businessFlow: '', detail: '【条件】再委託不可' }) &&
     projectBlocksResale({ title: 'x', businessFlow: '貴社社員まで' }) && !projectBlocksResale({ title: 'x', businessFlow: '1社先まで', detail: 'Java' }));
