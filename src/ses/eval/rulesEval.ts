@@ -261,7 +261,7 @@ import type {
 } from '../../types/index.js';
 
 import { isHighRateWeakJudgment } from '../proper/judge.js';
-import { hasResaleRestriction, projectBlocksResale, engineerBlocksResale } from '../external/resale.js';
+import { hasResaleRestriction, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
@@ -7289,6 +7289,12 @@ function externalMatchChecks(): void {
   check('要員は商流の欄と本文のどちらの制限でも外す', engineerBlocksResale({ businessFlow: 'プロパーのみ' }, '') && engineerBlocksResale({ businessFlow: '' }, '貴社所属まで') &&
     !engineerBlocksResale({ businessFlow: '' }, '1社先まで可'));
 
+  for (const t of ['契約形態：派遣契約', '派遣契約前提', '派遣（労使協定方式に基づく契約のみ）', '※派遣案件です', '紹介予定派遣'])
+    check(`派遣案件は外す: 「${t}」`, projectBlocksResale({ title: 'x', detail: t }) && projectIsDispatch({ detail: t }));
+  for (const t of ['派遣ではありません', '準委任（派遣不可）', '客先常駐（準委任）', '派遣元', '人材派遣会社様からのご紹介も可', '契約形態：準委任（派遣不可）', '派遣契約ではありません'])
+    check(`派遣でない案件は外さない: 「${t}」`, !projectBlocksResale({ title: 'x', detail: t }));
+  for (const t of ['御社要員まで（商流）', '貴社所属の技術者まで', '貴社エンジニアのみ', '貴社人材まで']) check(`制限あり（要員・人材・技術者・エンジニア）: 「${t}」`, hasResaleRestriction(t));
+
   section('外部マッチ: 組の選び方（selectExternalPairs）');
   const now = new Date();
   const base = { now, existingIds: new Set<string>(), addedToday: 0, perRun: 8, dailyCap: 30 };
@@ -7311,7 +7317,13 @@ function externalMatchChecks(): void {
   const notDup = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1'), sp('e2', { age: 36 })] });
   check('年齢が違えば別の人として両方残す', notDup.stats.samePerson === 0 && notDup.pairs.length === 2, JSON.stringify(notDup.stats));
   const emptyField = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1', { nearestStation: '', residence: '' }), sp('e2', { nearestStation: '', residence: '' })] });
-  check('最寄駅も居住地も空なら同じ人とみなさない', emptyField.stats.samePerson === 0, JSON.stringify(emptyField.stats));
+  check('最寄駅も居住地も両方空なら場所は比べず同じ人', emptyField.stats.samePerson === 1, JSON.stringify(emptyField.stats));
+  const oneEmpty = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1', { nearestStation: '', residence: '' }), sp('e2', { receivedAt: new Date(now.getTime() - 60000) })] });
+  check('片方の駅が空でも同じ人（新しい1人を残す）', ids(oneEmpty).join() === 'ext_eng_e2_p1' && oneEmpty.stats.samePerson === 1, JSON.stringify(oneEmpty.stats));
+  const diffRate = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1'), sp('e2', { desiredRate: 65 })] });
+  check('希望単価が違えば別の人', diffRate.stats.samePerson === 0 && diffRate.pairs.length === 2, JSON.stringify(diffRate.stats));
+  const diffStation = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1'), sp('e2', { nearestStation: '別の架空駅' })] });
+  check('駅が両方あって違えば別の人', diffStation.stats.samePerson === 0, JSON.stringify(diffStation.stats));
   const initialsNorm = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [sp('e1', { displayName: 'Ｋ．Ｓ．' }), sp('e2', { displayName: 'k.s', receivedAt: new Date(now.getTime() - 60000) })] });
   check('イニシャルは全角・小文字の違いを吸収して比べる', initialsNorm.stats.samePerson === 1, JSON.stringify(initialsNorm.stats));
   const inj = selectExternalPairs({ ...base, projects: [pj('p1')], engineers: [en('e1', { injectionSuspected: true })] });
@@ -7330,7 +7342,7 @@ function externalMatchChecks(): void {
   const skip = new Set([ids(full)[0]]);
   const rest = selectExternalPairs({ ...grid, existingIds: skip });
   check('すでにある組の ID は選ばない', !ids(rest).includes(ids(full)[0]) && rest.stats.candidates === full.stats.candidates - 1, JSON.stringify(rest.stats));
-  check('既定の上限は 8・30・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 8 && extDailyCap() === 30 && extEngineerLookbackDays() === 7));
+  check('既定の上限は 16・60・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 16 && extDailyCap() === 60 && extEngineerLookbackDays() === 7));
 
   section('外部マッチ: 高単価×必須の弱い組（isHighRateWeakJudgment）');
   const jc = (status: 'met' | 'close', extra: Record<string, unknown> = {}) => ({ checks: [{ requirement: 'Java', kind: '必須', status, ...extra }], inexperiencedOk: false }) as unknown as Parameters<typeof isHighRateWeakJudgment>[0];
