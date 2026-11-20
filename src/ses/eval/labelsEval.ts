@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { buildProperCandidates } from '../proper/index.js';
 import { __setProperJudgeForTest, __setCachedProjectIdsForTest } from '../proper/judge.js';
-import { salesPriorityOf, salesPriorityWithoutHighRateRule, belowMinPriority, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
+import { salesPriorityOf, salesPriorityWithoutHighRateRule, salesPriorityWithoutBasicDesignRule, belowMinPriority, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
 import { jstDateOf } from '../dates.js';
 import {
   labelsDir, readLabelStore, latestSales, type LabelSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
@@ -61,7 +61,9 @@ export interface LabelsEvalResult {
   outcome: OutcomeResult;
   priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number;
     // 高単価×必須△・年数不足の規則（PROPER_HIGH_RATE_GAP_MAN）を当てて載らなくなる組と、そのうち営業が提案済以降にした組（0 でなければ規則を見直す）
-    highRateRule?: { dropped: number; droppedProposed: number; proposedKeys: string[] }; claude: { checked: number; good: number; validityPct: number | null } } | null;
+    highRateRule?: { dropped: number; droppedProposed: number; proposedKeys: string[] };
+    // 基本設計が必須なのに経歴に基本設計の無い組（PROPER_BASIC_DESIGN_STRICT）の規則で載らなくなる組と、そのうち営業が提案済以降にした組
+    basicDesignRule?: { dropped: number; droppedProposed: number; proposedKeys: string[] }; claude: { checked: number; good: number; validityPct: number | null } } | null;
 }
 
 const pct = (a: number, b: number): number | null => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
@@ -69,9 +71,10 @@ const bump = (m: Record<string, number>, k: string) => { m[k] = (m[k] ?? 0) + 1;
 
 // 保存した判定をそのまま返す判定器で今のコードの優先度を計算する。要員ごと・judgedAt の日付（JST）ごとにまとめて1回で通す
 // highRateDropped: 高単価×必須△・年数不足の規則（B4）で、規則が無ければ載っていた組が載らなくなるものの key
-async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<string, ProperEngineer>): Promise<{ priorities: Map<string, string>; highRateDropped: Set<string> }> {
+async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<string, ProperEngineer>): Promise<{ priorities: Map<string, string>; highRateDropped: Set<string>; basicDesignDropped: Set<string> }> {
   const out = new Map<string, string>();
   const highRateDropped = new Set<string>();
+  const basicDesignDropped = new Set<string>();
   const judgments = new Map(pairs.map((p) => [p.key, p.judgment]));
   __setProperJudgeForTest(async (e, p) => {
     const j = judgments.get(`${e.id}|${p.id}`);
@@ -95,6 +98,7 @@ async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<str
       const byKey = new Map(candidates.map((c) => [`${c.ownEngineerId}|${c.projectId}`, salesPriorityOf(c)]));
       for (const c of candidates) {
         if (belowMinPriority(salesPriorityOf(c)) && !belowMinPriority(salesPriorityWithoutHighRateRule(c))) highRateDropped.add(`${c.ownEngineerId}|${c.projectId}`);
+        if (belowMinPriority(salesPriorityOf(c)) && !belowMinPriority(salesPriorityWithoutBasicDesignRule(c))) basicDesignDropped.add(`${c.ownEngineerId}|${c.projectId}`);
       }
       for (const p of group) out.set(p.key, byKey.get(p.key) ?? PRIORITY_NONE);
     } catch (err) {
@@ -103,7 +107,7 @@ async function recomputedPriorities(pairs: LabelPair[], engineersByHash: Map<str
   }
   __setProperJudgeForTest(null);
   __setCachedProjectIdsForTest(null);
-  return { priorities: out, highRateDropped };
+  return { priorities: out, highRateDropped, basicDesignDropped };
 }
 
 export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
@@ -132,11 +136,12 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
   let priority: LabelsEvalResult['priority'] = null;
   const rated = usable.filter((p) => sales.has(p.key));
   if (rated.length > 0) {
-    const { priorities: now, highRateDropped } = await recomputedPriorities(rated, engineersByHash);
+    const { priorities: now, highRateDropped, basicDesignDropped } = await recomputedPriorities(rated, engineersByHash);
     const rows: Record<string, PriorityRow> = {};
     let changed = 0;
     let compared = 0;
     const highRateRule = { dropped: 0, droppedProposed: 0, proposedKeys: [] as string[] };
+    const basicDesignRule = { dropped: 0, droppedProposed: 0, proposedKeys: [] as string[] };
     const claude = { checked: 0, good: 0, validityPct: null as number | null };
     for (const p of rated) {
       const prio = now.get(p.key);
@@ -149,6 +154,13 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
         if (PROPOSED_OR_LATER.includes(s.status)) {
           highRateRule.droppedProposed += 1;
           highRateRule.proposedKeys.push(p.key);
+        }
+      }
+      if (basicDesignDropped.has(p.key)) {
+        basicDesignRule.dropped += 1;
+        if (PROPOSED_OR_LATER.includes(s.status)) {
+          basicDesignRule.droppedProposed += 1;
+          basicDesignRule.proposedKeys.push(p.key);
         }
       }
       if ((p.priority || PRIORITY_NONE) !== prio) changed += 1;
@@ -167,7 +179,7 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
     }
     for (const row of Object.values(rows)) row.validityPct = pct((row.checks['◎'] ?? 0) + (row.checks['○'] ?? 0), row.checked);
     claude.validityPct = pct(claude.good, claude.checked);
-    priority = { rows, changedFromStored: changed, compared, claude, highRateRule: { ...highRateRule, proposedKeys: highRateRule.proposedKeys.slice(0, MISSED_MAX) } };
+    priority = { rows, changedFromStored: changed, compared, claude, highRateRule: { ...highRateRule, proposedKeys: highRateRule.proposedKeys.slice(0, MISSED_MAX) }, basicDesignRule: { ...basicDesignRule, proposedKeys: basicDesignRule.proposedKeys.slice(0, MISSED_MAX) } };
   }
   const outcome = outcomeOf(pairs.map((p) => sales.get(p.key)).filter((x): x is LabelSales => x !== undefined));
   return { counts, recall, outcome, priority };
@@ -209,6 +221,12 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
     if (hr) {
       lines.push(`  高単価×必須△・年数不足の規則で載らなくなる組: ${hr.dropped}（うち営業が提案済以降にした組 ${hr.droppedProposed}${hr.droppedProposed > 0 ? '。規則を見直す' : ''}）`);
       if (hr.proposedKeys.length > 0) lines.push(`    提案済以降だった組（最大${MISSED_MAX}件）: ${hr.proposedKeys.join(', ')}`);
+    }
+    const bd = res.priority.basicDesignRule;
+    if (bd) {
+      lines.push(`  基本設計が必須で経歴に基本設計の無い組の規則で載らなくなる組: ${bd.dropped}（うち営業が提案済以降にした組 ${bd.droppedProposed}${bd.droppedProposed > 0 ? '。規則を見直す' : ''}）`);
+      lines.push('    （ラベルの控えに残る範囲で数えた近い値: 必須の文は保存した判定の checks、経歴は控えた要員の工程年数とプロフィール文。控えに無い情報は数えられない）');
+      if (bd.proposedKeys.length > 0) lines.push(`    提案済以降だった組（最大${MISSED_MAX}件）: ${bd.proposedKeys.join(', ')}`);
     }
     lines.push(`  保存時と優先度が違う組: ${res.priority.changedFromStored}/${res.priority.compared}`);
   }

@@ -7,6 +7,7 @@
 // 片方だけ1段足りなければ「経験交渉」として残す）。
 // 片方の値が分からない軸は判定しない（案件に書かれていない条件で落とさない。要員側が不明なら確認事項として根拠に載せる）
 import { normalizeSkill, skillCategory } from './skillDict.js';
+import { properBasicDesignStrict } from './config.js';
 
 export const PHASES = ['要件定義', '基本設計', '詳細設計', '製造', 'テスト', '運用保守'] as const;
 export type Phase = (typeof PHASES)[number];
@@ -264,8 +265,12 @@ export function evaluateLevel(project: ProjectLevel | undefined, engineer: Engin
     if (!top) v.unknowns.push(`${project.topPhase}の経験`);
     else {
       const steps = phaseIdx(top) - phaseIdx(project.topPhase);
-      if (steps >= 2) exclude = true;
-      else if (steps === 1) {
+      // 基本設計が必須の案件は、詳細設計以下の要員を経験交渉に回さず除外する（営業の実績で、基本設計の経験なしは見送りになるため）
+      const basicDesignRequired = project.topPhase === '基本設計' && steps >= 1 && properBasicDesignStrict();
+      if (steps >= 2 || basicDesignRequired) {
+        exclude = true;
+        if (basicDesignRequired) v.gaps.push(`工程は基本設計から（経験は${top}から）・基本設計が必須`);
+      } else if (steps === 1) {
         v.gaps.push(`工程は${project.topPhase}から（経験は${top}から）`);
         v.gapScore += 1;
         shortAxes.add('phase');
