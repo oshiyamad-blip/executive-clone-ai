@@ -3,6 +3,7 @@
 // 1回・1日の上限の内で上から採る
 import { primarySelectDetailed, comparePairs, isStartTooLate } from '../match.js';
 import { engineerBlocksResale, projectBlocksResale } from './resale.js';
+import { externalHardMismatches, type HardRule } from './hardRules.js';
 import type { Engineer, MatchPair, Project } from '../../types/index.js';
 
 export const extPairId = (engineerId: string, projectId: string): string => `ext_${engineerId}_${projectId}`;
@@ -26,6 +27,7 @@ export interface ExtSelectStats {
   restrictedEngineers: number;
   restrictedProjects: number;
   sameAgent: number;
+  hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・年齢で決まりごとに外した組の数
   candidates: number;
   selected: number;
 }
@@ -42,7 +44,15 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const openProjects = input.projects.filter((p) => p.status === 'open' && !p.injectionSuspected);
   const projects = openProjects.filter((p) => !projectBlocksResale(p));
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
-  const candidates = selection.pairs.filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id))).sort(comparePairs);
+  const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, age: 0 };
+  const candidates = selection.pairs
+    .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))
+    .filter((p) => {
+      const hits = externalHardMismatches(p.engineer, mailTextOf(p.engineer), p.project);
+      for (const h of hits) hardExcluded[h.rule] += 1;
+      return hits.length === 0;
+    })
+    .sort(comparePairs);
   const perEngineer = input.perEngineer ?? 2;
   const perProject = input.perProject ?? 2;
   const limit = Math.max(0, Math.min(input.perRun, input.dailyCap - input.addedToday));
@@ -64,6 +74,7 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       restrictedEngineers: usable.length - engineers.length,
       restrictedProjects: openProjects.length - projects.length,
       sameAgent: selection.stats.reasons.sameAgent,
+      hardExcluded,
       candidates: candidates.length,
       selected: pairs.length,
     },

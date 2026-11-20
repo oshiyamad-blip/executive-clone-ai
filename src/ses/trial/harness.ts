@@ -38,6 +38,7 @@ import { dedupeEngineers } from '../store.js';
 import { extDailyCap, extEngineerLookbackDays, extPerRun } from '../config.js';
 import { extOwnEngineer, extKeyOf } from '../external/profile.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
+import { externalHardMismatch } from '../external/hardRules.js';
 import { EXT_HEADER, EXT_LAST_COLUMN, EXT_TAB, extHeaderRow, extPriorityOf, extRowOf, nextExtRow } from '../external/sheet.js';
 import type { Engineer, Project, ProperEngineer, SesRawMail } from '../../types/index.js';
 
@@ -687,6 +688,7 @@ if (phase === 'prompts') {
   const notify: Array<{ no: number; priority: string; engineer: string; project: string; rate: unknown; projectRate: unknown }> = [];
   let judged = 0;
   let dropped = 0;
+  let hardDropped = 0;
   let nextNo = next.no;
   let nextRow = next.row;
   const counts = { A: 0, B: 0 };
@@ -705,6 +707,10 @@ if (phase === 'prompts') {
       judged += 1;
       const id = extPairId(engineer.id, project.id);
       if (next.ids.has(id)) continue;
+      if (externalHardMismatch(engineer, bodyOf.get(engineer.id) ?? '', project).length > 0) {
+        hardDropped += 1;
+        continue;
+      }
       const j = verifyJudgment(r.judgment, profileTextOf(own), project, verifyOptsFor(own, project));
       const priority = extPriorityOf(j);
       if (!priority) {
@@ -722,7 +728,7 @@ if (phase === 'prompts') {
   }
   writeFileSync(join(dir, 'ext_writes.json'), JSON.stringify(writes));
   writeFileSync(join(dir, 'ext_notify.json'), JSON.stringify(notify, null, 1));
-  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped }));
+  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped, hardDropped }));
 } else {
   throw new Error(`PHASE が不明です: ${phase}`);
 }

@@ -261,6 +261,7 @@ import type {
 
 import { hasResaleRestriction, projectBlocksResale, engineerBlocksResale } from '../external/resale.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
+import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
 import { extPerRun, extDailyCap, extEngineerLookbackDays } from '../config.js';
 
@@ -7253,6 +7254,35 @@ function externalMatchChecks(): void {
   const rest = selectExternalPairs({ ...grid, existingIds: skip });
   check('すでにある組の ID は選ばない', !ids(rest).includes(ids(full)[0]) && rest.stats.candidates === full.stats.candidates - 1, JSON.stringify(rest.stats));
   check('既定の上限は 8・30・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 8 && extDailyCap() === 30 && extEngineerLookbackDays() === 7));
+
+  section('外部マッチ: 決まりごとの除外（externalHardMismatch）');
+  const hm = (eOver: Partial<Engineer>, mail: string, pOver: Partial<Project>) => externalHardMismatch(engineer(['Java'], eOver), mail, project({ title: '案件', businessFlow: '', ...pOver }));
+  const rulesOf = (eOver: Partial<Engineer>, mail: string, pOver: Partial<Project>) => externalHardMismatches(engineer(['Java'], eOver), mail, project({ title: '案件', businessFlow: '', ...pOver })).map((m) => m.rule);
+  for (const t of ['外国籍不可', '外国籍NG', '外国籍×', '外国籍：検討不可', '日本国籍のみ', '外国籍の方は不可']) {
+    check(`国籍: 「${t}」×「シリア籍」→ 外す`, hm({}, '国籍：シリア籍', { businessFlow: t }).length === 1);
+  }
+  check('国籍: 「中国籍」「ベトナム籍」「外国籍（日本語N1）」も外国籍', ['中国籍', 'ベトナム籍', '外国籍（日本語N1）', '国籍：インド'].every((t) => hm({}, t, { businessFlow: '外国籍不可' }).length === 1));
+  check('国籍: 国籍が不明なら外さない', hm({}, '経験10年 Java', { businessFlow: '外国籍不可' }).length === 0);
+  check('国籍: 日本国籍・在籍は外国籍ではない', hm({}, '国籍：日本 / 現在A社在籍', { businessFlow: '外国籍不可' }).length === 0);
+  check('国籍: 案件が外国籍可なら外さない', hm({}, '中国籍', { businessFlow: '外国籍可' }).length === 0 && hm({}, '中国籍', { businessFlow: '外国籍：可' }).length === 0);
+  check('稼働: 「0.1人月〜最大0.5人月(1人月の案件と並行)」は短時間とみなす', rulesOf({ utilization: '随時（0.1人月〜最大0.5人月(1人月の案件と並行)）' }, '', { detail: '週5日稼働' }).includes('utilization'));
+  check('リモート: 「フルリモート(初日の出社可)」×「週3日出社」→ 外す', rulesOf({}, '希望: フルリモート(初日の出社可)', { detail: '飯田橋（週3日出社・週2日リモート）', remote: 'partial' }).includes('remote'));
+  check('リモート: 案件の「フルリモート不可」はリモート可と読まない', rulesOf({}, 'フルリモート必須', { detail: 'フルリモート不可。週3日出社' }).includes('remote'));
+  check('稼働: 「0.1〜0.5人月」×「週5日稼働」→ 外す', rulesOf({ utilization: '0.1〜0.5人月' }, '', { detail: '週5日稼働' }).join() === 'utilization');
+  check('稼働: 50%・週3日・週2〜3日・副業も外す', ['50%', '週3日', '週2〜3日', '副業（並行案件あり）'].every((u) => rulesOf({ utilization: u }, '', { detail: '稼働率100%' }).includes('utilization')));
+  check('稼働: 常時稼働の要員は外さない', hm({ utilization: '1.0人月' }, '', { detail: '週5日稼働' }).length === 0 && hm({ utilization: '100%' }, '', { detail: '週5日稼働' }).length === 0 && hm({ utilization: '' }, '', { detail: '週5日稼働' }).length === 0);
+  check('稼働: 案件が週3・稼働率の減を許すなら外さない', hm({ utilization: '週3日' }, '', { detail: '週3日〜稼働可' }).length === 0 && hm({ utilization: '50%' }, '', { detail: '稼働率：応相談' }).length === 0);
+  check('稼働: 出社の日数（週3日出社）は稼働率と読まない', hm({ utilization: '' }, '週3日出社可', { detail: '週5日稼働' }).length === 0);
+  check('リモート: 「フルリモート希望（初日のみ出社可）」×「週3日出社」→ 外す', rulesOf({}, 'フルリモート希望（初日のみ出社可）', { detail: '週3日出社' }).join() === 'remote');
+  check('リモート: フルリモート必須・出社不可×常駐・出社必須・remote=none → 外す', [['フルリモート必須', { detail: '常駐' }], ['出社不可', { detail: '出社必須' }], ['リモートのみ', { remote: 'none' as const }]]
+    .every(([m, p]) => rulesOf({}, m as string, p as Partial<Project>).includes('remote')));
+  check('リモート: ×「基本リモート」「フルリモート」「月1出社」→ 外さない', ['基本リモート', 'フルリモート', '月1回出社程度'].every((t) => hm({}, 'フルリモート必須', { detail: t, remote: 'partial' }).length === 0));
+  check('リモート: 要員がリモートを必須としなければ外さない', hm({}, 'リモート希望', { detail: '週3日出社' }).length === 0);
+  check('年齢: 45歳×「40代まで」→ 外さない・50歳 → 外す', hm({ age: 45 }, '', { businessFlow: '40代まで' }).length === 0 && rulesOf({ age: 50 }, '', { businessFlow: '40代まで' }).join() === 'age');
+  check('年齢: 「45歳まで」「年齢：〜39歳」の上限・年齢不明は外さない', rulesOf({ age: 46 }, '', { detail: '45歳まで' }).join() === 'age' && rulesOf({ age: 40 }, '', { detail: '年齢：〜39歳' }).join() === 'age' &&
+    hm({ age: null }, '', { businessFlow: '40代まで' }).length === 0 && hm({ age: 60 }, '', { businessFlow: '' }).length === 0);
+  const hardSel = selectExternalPairs({ ...base, projects: [pj('p1', { businessFlow: '外国籍不可' }), pj('p2')], engineers: [en('e1')], mailTextOf: () => '国籍：シリア籍' });
+  check('選別: 決まりごとに当たる組だけ判定に回さず、数を数える', ids(hardSel).join() === 'ext_eng_e1_p2' && hardSel.stats.hardExcluded.nationality === 1, JSON.stringify(hardSel.stats));
 
   section('外部マッチ: 優先度と行（extPriorityOf・extRowOf・nextExtRow）');
   const chk = (kind: '必須' | '尚可', status: 'met' | 'close' | 'unmet', shortYears?: number) => ({ kind, requirement: `${kind}要件`, quote: '', status, ...(shortYears === undefined ? {} : { shortYears }) });
