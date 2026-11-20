@@ -38,27 +38,44 @@ export function engineerStartsTooLate(e: Engineer, now: Date): boolean {
   return Boolean(e.availableFrom) && isStartTooLate(e.availableFrom as string, now.toISOString(), now, { days: 0, months: 1 });
 }
 
-// 同じ人の判定キー: 送信元ドメイン・イニシャル（英字のみ大文字）・年齢・希望単価・最寄駅（無ければ居住地）。どれか空なら同じ人とみなさない
-function samePersonKey(e: Engineer): string | null {
+// 同じ人: 送信元ドメイン・イニシャル（英字のみ大文字）・希望単価が一致（どれか空なら別人）。年齢と場所（最寄駅、無ければ居住地）は両方に値があれば一致すること（片方が空なら比べない）
+function samePersonBase(e: Engineer): string | null {
   const domain = (e.agentEmail.split('@')[1] ?? '').trim().toLowerCase();
   const initials = e.displayName.normalize('NFKC').replace(/[^A-Za-z]/g, '').toUpperCase();
-  const place = (e.nearestStation || e.residence || '').normalize('NFKC').replace(/\s/g, '');
-  if (!domain || !initials || e.age === null || e.desiredRate === null || !place) return null;
-  return [domain, initials, e.age, e.desiredRate, place].join('|');
+  if (!domain || !initials || e.desiredRate === null) return null;
+  return [domain, initials, e.desiredRate].join('|');
+}
+
+function placeOf(e: Engineer): string {
+  return (e.nearestStation || e.residence || '').normalize('NFKC').replace(/\s/g, '');
+}
+
+function isSamePerson(a: Engineer, b: Engineer): boolean {
+  if (a.age !== null && b.age !== null && a.age !== b.age) return false;
+  const pa = placeOf(a);
+  const pb = placeOf(b);
+  return !(pa && pb && pa !== pb);
 }
 
 export function dedupeSamePerson(engineers: Engineer[]): { kept: Engineer[]; removed: number } {
-  const newest = new Map<string, Engineer>();
+  const groups = new Map<string, Engineer[][]>();
   for (const e of engineers) {
-    const k = samePersonKey(e);
+    const k = samePersonBase(e);
     if (k === null) continue;
-    const cur = newest.get(k);
-    if (!cur || e.receivedAt.getTime() > cur.receivedAt.getTime()) newest.set(k, e);
+    const list = groups.get(k) ?? [];
+    const g = list.find((m) => m.every((x) => isSamePerson(x, e)));
+    if (g) g.push(e);
+    else list.push([e]);
+    groups.set(k, list);
   }
-  const kept = engineers.filter((e) => {
-    const k = samePersonKey(e);
-    return k === null || newest.get(k) === e;
-  });
+  const drop = new Set<Engineer>();
+  for (const list of groups.values()) {
+    for (const g of list) {
+      const newest = g.reduce((a, b) => (b.receivedAt.getTime() > a.receivedAt.getTime() ? b : a));
+      for (const e of g) if (e !== newest) drop.add(e);
+    }
+  }
+  const kept = engineers.filter((e) => !drop.has(e));
   return { kept, removed: engineers.length - kept.length };
 }
 

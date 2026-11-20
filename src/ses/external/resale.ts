@@ -2,7 +2,7 @@
 // 迷うときは外す側に倒す（誤って転売不可の人・案件を他社へ紹介するほうが、見送るより損が大きい）。
 // 「1社先まで」だけの記載（1段までは可）は外さない。「貴社1社先まで」も同じ
 
-const WHO = '(?:の)?(?:正社員|社員|従業員|所属|プロパー|雇用)?(?:の方|様)?';
+const WHO = '(?:の)?(?:(?:正社員|社員|従業員|所属|プロパー|雇用|要員|人材|技術者|エンジニア)(?:の)?){0,2}(?:の方|様)?';
 
 // 社員などのあとに付く短いかっこ書き（「貴社社員（契約社員可）まで」）。NFKC のあとは半角になるが、念のため全角も許す
 const NOTE = '(?:[（(][^\\n）)]{0,12}[）)])?';
@@ -28,6 +28,21 @@ const RESTRICTIONS: RegExp[] = [
   /商流(?:に)?制限(?![】\]）)：:\s]*(?:なし|無し|ありません|特になし))/,
 ];
 
+// 派遣の契約形態（他社の要員を派遣で出すと二重派遣になる）。「派遣ではありません」「派遣不可」「派遣元」「人材派遣会社様」など否定・業種の語は当てない
+const DISPATCH: RegExp[] = [
+  /契約形態\s*[：:]?\s*(?:労働者)?派遣/,
+  /派遣契約(?!\s*(?:は|も)?\s*(?:不可|NG|なし|無し|ではあ|ではな|ありません))/,
+  /紹介予定派遣/,
+  /派遣(?:案件|求人|募集|形態)(?!\s*(?:は|も)?\s*(?:ではあ|ではな|不可|NG|なし|無し|ありません))/,
+  /派遣前提/,
+  /派遣\s*[(](?:労使協定|労働者派遣)/,
+];
+
+export function projectIsDispatch(p: { title?: string; businessFlow?: string; detail?: string }): boolean {
+  const s = [p.title ?? '', p.businessFlow ?? '', p.detail ?? ''].join('\n').normalize('NFKC');
+  return DISPATCH.some((re) => re.test(s));
+}
+
 export function hasResaleRestriction(text: string): boolean {
   const s = (text ?? '').normalize('NFKC');
   if (!s.trim()) return false;
@@ -35,7 +50,7 @@ export function hasResaleRestriction(text: string): boolean {
 }
 
 export function projectBlocksResale(p: { title?: string; businessFlow?: string; detail?: string }): boolean {
-  return hasResaleRestriction([p.title ?? '', p.businessFlow ?? '', p.detail ?? ''].join('\n'));
+  return projectIsDispatch(p) || hasResaleRestriction([p.title ?? '', p.businessFlow ?? '', p.detail ?? ''].join('\n'));
 }
 
 export function engineerBlocksResale(e: { businessFlow?: string }, mailText: string): boolean {
