@@ -259,6 +259,7 @@ import type {
   MatchResult,
 } from '../../types/index.js';
 
+import { buildAgentIndex, fillAgent } from '../trial/fillAgent.js';
 import { isHighRateWeakJudgment } from '../proper/judge.js';
 import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
 import { selectExternalPairs, extPairId } from '../external/select.js';
@@ -6376,6 +6377,7 @@ async function main(): Promise<void> {
     await salesKeepWriteChecks();
     salesKeepChecks();
     externalMatchChecks();
+    fillAgentChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -7243,6 +7245,22 @@ async function salesKeepWriteChecks(): Promise<void> {
 
 
 // ===== 外部マッチ（試行）: 転売不可の除外・組の選び方・優先度 =====
+function fillAgentChecks(): void {
+  section('試運転: 営業元の補い（fillAgent）');
+  const idx = buildAgentIndex([
+    { from: '架空 太郎 <taro@sample-corp.example>', items: [{ agentCompany: '架空商事', agentContact: '架空 太郎', agentEmail: 'taro@sample-corp.example' }] },
+    { from: 'taro@sample-corp.example', items: [{ agentCompany: '', agentContact: '', agentEmail: '' }] },
+    { from: 'hanako@sample-corp.example', items: [{ agentCompany: '', agentContact: '', agentEmail: '' }] },
+  ]);
+  const a = fillAgent({ agentCompany: '', agentContact: '', agentEmail: '' }, '架空 太郎 <Taro@Sample-Corp.example>', idx);
+  check('空の agentEmail が from（名前付き）から入る', a.agentEmail === 'taro@sample-corp.example', JSON.stringify(a));
+  check('同じアドレスの別の案件から会社と担当者が入る', a.agentCompany === '架空商事' && a.agentContact === '架空 太郎', JSON.stringify(a));
+  const b = fillAgent({ agentCompany: '', agentContact: '', agentEmail: '' }, 'hanako@sample-corp.example', idx);
+  check('同じドメインからは会社だけが入る（担当者は空）', b.agentCompany === '架空商事' && b.agentContact === '' && b.agentEmail === 'hanako@sample-corp.example', JSON.stringify(b));
+  const c = fillAgent({ agentCompany: '別会社', agentContact: '別 人', agentEmail: 'x@other.example' }, 'taro@sample-corp.example', idx);
+  check('値が入っているものは変えない', c.agentCompany === '別会社' && c.agentContact === '別 人' && c.agentEmail === 'x@other.example', JSON.stringify(c));
+}
+
 function externalMatchChecks(): void {
   section('外部マッチ: 商流・再委託の制限の検知（hasResaleRestriction）');
   const restricted = ['再委託不可', '再委託は不可', '再々委託禁止', '貴社まで', '貴社社員まで', '貴社正社員まで', '貴社所属まで', '弊社社員まで', '御社まで',

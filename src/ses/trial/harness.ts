@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
+import { buildAgentIndex, fillAgent, type AgentFields } from './fillAgent.js';
 import { parseJstLabel } from './jstLabel.js';
 import { indexJudgedByContent, judgmentFor, splitReused, type ReusedPair } from './reuse.js';
 import { attachmentMaterial } from './rawAttach.js';
@@ -101,11 +102,17 @@ function malformedFieldCount(rows: OutRow[]): number {
   return n;
 }
 
+// 営業元の補いの材料（読み込んだ全行の案件・要員の営業元）
+function agentIndexOf(rows: OutRow[]) {
+  return buildAgentIndex(rows.map((r) => ({ from: r.from, items: [...(r.extraction?.projects ?? []), ...(r.extraction?.engineers ?? [])] as AgentFields[] })));
+}
+
 function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; failed: number } {
   const seen = new Set<string>();
   const projects: Project[] = [];
   let closed = 0;
   let failed = 0;
+  const agentIndex = agentIndexOf(rows);
   for (const r of rows) {
     if (seen.has(r.messageId) || !r.extraction) continue;
     seen.add(r.messageId);
@@ -115,8 +122,9 @@ function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; fail
     } as SesRawMail;
     if (isClosedNotice({ ...mail, body: r.bodyHead ?? '' })) closed += 1;
     const ps = (r.extraction.projects ?? []) as Parameters<typeof buildProject>[0][];
-    ps.forEach((raw, i) => {
+    ps.forEach((raw0, i) => {
       try {
+        const raw = fillAgent(raw0 as AgentFields, r.from, agentIndex) as unknown as typeof raw0;
         const p = buildProject(raw, mail, i, null) as Project;
         const detail = withListPageLine(attach(r, projectExcerpt(r.bodyHead ?? '', ps.map((x) => (x as { title: string }).title), i)).detail, r.listPageUrl);
         if (detail) p.detail = detail;
@@ -315,7 +323,9 @@ function externalEngineers(): { engineers: Engineer[]; bodyOf: Map<string, strin
   const built: Engineer[] = [];
   const bodyOf = new Map<string, string>();
   const mailOf = new Map<string, { subject: string }>();
-  for (const r of carriedRows(extEngineerLookbackDays()).rows) {
+  const extRows = carriedRows(extEngineerLookbackDays()).rows;
+  const agentIndex = agentIndexOf(extRows);
+  for (const r of extRows) {
     if (seen.has(r.messageId) || !r.extraction || r.extraction.injectionSuspected) continue;
     const raws = (r.extraction.engineers ?? []) as RawEngineer[];
     if (raws.length === 0) continue;
@@ -324,8 +334,9 @@ function externalEngineers(): { engineers: Engineer[]; bodyOf: Map<string, strin
       id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: r.bodyHead ?? '',
       messageIdHeader: '', references: '', receivedAt: new Date(r.receivedAt), attachments: [], sheetLinks: [],
     } as SesRawMail;
-    raws.forEach((raw, i) => {
+    raws.forEach((raw0, i) => {
       try {
+        const raw = fillAgent(raw0 as AgentFields, r.from, agentIndex) as RawEngineer;
         const e = buildEngineer(raw, mail, i, null);
         e.replyTarget = { from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', messageId: '', references: '' };
         built.push(e);
