@@ -26,6 +26,8 @@ export function extPriorityOf(j: Pick<ProperJudgment, 'verdict' | 'checks'>): st
   if (j.verdict === 'reject') return null;
   const required = (j.checks ?? []).filter((k) => k.kind === '必須');
   if (required.some((k) => k.status === 'unmet')) return null;
+  // 外部要員は経歴が抜粋だけで、必須がすべて近い経験どまり（△・年数不足）の組は営業が出せない（試運転で人が見て外していた組）
+  if (required.length > 0 && !required.some((k) => k.status === 'met' && typeof k.shortYears !== 'number')) return null;
   const weak = required.some((k) => k.status === 'close' || typeof k.shortYears === 'number');
   return j.verdict === 'recommend' && !weak ? SALES_PRIORITIES.a : SALES_PRIORITIES.b;
 }

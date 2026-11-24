@@ -7426,8 +7426,11 @@ function externalMatchChecks(): void {
   section('外部マッチ: 優先度と行（extPriorityOf・extRowOf・nextExtRow）');
   const chk = (kind: '必須' | '尚可', status: 'met' | 'close' | 'unmet', shortYears?: number) => ({ kind, requirement: `${kind}要件`, quote: '', status, ...(shortYears === undefined ? {} : { shortYears }) });
   check('提案推奨で必須が全部 met → A', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'met'), chk('尚可', 'unmet')] })?.startsWith('A') === true);
-  check('提案推奨でも必須に近い経験（△）→ B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close')] })?.startsWith('B') === true);
-  check('提案推奨でも必須に年数不足 → B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close', 1.5)] })?.startsWith('B') === true);
+  check('提案推奨で必須が met と close → B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'met'), chk('必須', 'close')] })?.startsWith('B') === true);
+  check('必須がすべて近い経験（△）は載せない', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close')] }) === null && extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'close')] }) === null);
+  check('提案推奨でも必須に年数不足（met の必須も1件）→ B', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'met'), chk('必須', 'close', 1.5)] })?.startsWith('B') === true);
+  check('必須がすべて年数不足は載せない', extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'close', 1.5)] }) === null && extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'met', 1.5)] }) === null);
+  check('必須が0件の条件付きは B のまま', extPriorityOf({ verdict: 'conditional', checks: [chk('尚可', 'met')] })?.startsWith('B') === true);
   check('条件付き（必須に経験なし無し）→ B', extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'met')] })?.startsWith('B') === true);
   check('必須に経験なし（×）は載せない', extPriorityOf({ verdict: 'conditional', checks: [chk('必須', 'unmet')] }) === null && extPriorityOf({ verdict: 'recommend', checks: [chk('必須', 'unmet')] }) === null);
   check('見送りは載せない', extPriorityOf({ verdict: 'reject', checks: [] }) === null);
