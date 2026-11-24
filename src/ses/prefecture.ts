@@ -1,4 +1,5 @@
 // 都道府県正規化と隣接判定（通勤圏の近似）。match の勤務地判定が参照する。
+import { stationPrefecture } from './station.js';
 
 const PREFECTURES = [
   '北海道',
@@ -210,7 +211,8 @@ export function normalizePrefecture(location: string): string | null {
     const inner = firstMatch(m[1] ?? '', STEM_KEYS);
     if (inner) return inner;
   }
-  return firstMatch(text, LOCATION_KEYS);
+  // 辞書で読めないときだけ、駅の表（国土数値情報の鉄道データ）から補う。候補が1つの県に決まるときだけ
+  return firstMatch(text, LOCATION_KEYS) ?? stationPrefecture(location);
 }
 
 function firstMatch(text: string, keys: Array<[string, string]>): string | null {

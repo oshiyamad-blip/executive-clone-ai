@@ -1,5 +1,6 @@
 // 外部マッチ（試行）: 営業リストの別タブ「外部マッチ」の列・優先度・行の組み立て（純関数）。「全体」タブには混ぜない
 import { checkReasonLines, markRequirementsInMail, jstLabel, SALES_PRIORITIES } from '../proper/salesList.js';
+import { commuteNoteOf } from '../commute.js';
 import type { Engineer, ProperJudgment, Project } from '../../types/index.js';
 
 export const EXT_TAB = '外部マッチ';
@@ -50,6 +51,7 @@ export function extRowOf(x: ExtRowInput): Array<string | number> {
     ...j.reviewNotes,
     e.businessFlow ? `要員の商流・所属: ${e.businessFlow}` : '',
     p.businessFlow ? `案件の商流: ${p.businessFlow}` : '',
+    commuteNoteOf(p, [e.nearestStation, e.residence]) ?? '',
   ].filter(Boolean);
   row[COL['No']] = x.no;
   row[COL['優先度']] = x.priority;

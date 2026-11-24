@@ -9,11 +9,12 @@ import { buildProperCandidates } from '../proper/index.js';
 import { __setProperJudgeForTest, __setCachedProjectIdsForTest } from '../proper/judge.js';
 import { salesPriorityOf, salesPriorityWithoutHighRateRule, salesPriorityWithoutBasicDesignRule, belowMinPriority, SALES_SKIPPED_STATUS } from '../proper/salesList.js';
 import { jstDateOf } from '../dates.js';
+import { commuteDistanceOf } from '../commute.js';
 import {
   labelsDir, readLabelStore, latestSales, type LabelSales, prefilterRecall, isClaudeCheck, reviveProject, PRIORITY_NONE, PROPOSED_OR_LATER,
   type LabelPair, type PrefilterRecall,
 } from './labels.js';
-import type { ProperEngineer } from '../../types/index.js';
+import type { Project, ProperEngineer } from '../../types/index.js';
 
 const MARKS = ['◎', '○', '△', '×'] as const;
 const MISSED_MAX = 20;
@@ -32,6 +33,42 @@ export interface OutcomeResult {
   skipReasons: Record<string, number>;
 }
 export const NO_SKIP_REASON = '（理由なし）';
+
+// 営業の見送り理由「勤務地・通勤」の行と、その組の直線距離（最寄駅と勤務地の駅）の分布。比べるために評価のある全組の分布も出す
+export const COMMUTE_SKIP_REASON = '勤務地・通勤';
+export const COMMUTE_BUCKETS = ['〜20km', '20〜30km', '30〜40km', '40km〜'] as const;
+export interface CommuteRow { project: Pick<Project, 'location' | 'remote'>; residence: string | null; skipReason: string }
+export interface CommuteDistribution {
+  skippedByCommute: number; // 見送り理由が「勤務地・通勤」の組
+  measured: number; // そのうち距離を出せた組
+  buckets: Record<(typeof COMMUTE_BUCKETS)[number], number>;
+  unmeasured: number; // 距離を出せなかった組（出せない理由は note）
+  allRated: { measured: number; buckets: Record<(typeof COMMUTE_BUCKETS)[number], number> }; // 営業の評価がある全組（比較用）
+  note: string;
+}
+const emptyBuckets = (): Record<(typeof COMMUTE_BUCKETS)[number], number> => ({ '〜20km': 0, '20〜30km': 0, '30〜40km': 0, '40km〜': 0 });
+const bucketOf = (km: number): (typeof COMMUTE_BUCKETS)[number] => (km < 20 ? '〜20km' : km < 30 ? '20〜30km' : km < 40 ? '30〜40km' : '40km〜');
+
+export function commuteDistribution(rows: CommuteRow[]): CommuteDistribution {
+  const out: CommuteDistribution = {
+    skippedByCommute: 0, measured: 0, buckets: emptyBuckets(), unmeasured: 0, allRated: { measured: 0, buckets: emptyBuckets() },
+    note: '距離を出せない組: 案件がフルリモート・勤務地や要員の住まいが駅の表に無い・要員の控えが無い（ラベルの控えに残る住まい・勤務地の原文で数える）',
+  };
+  for (const r of rows) {
+    const d = r.residence === null ? null : commuteDistanceOf(r.project, [r.residence]);
+    if (d) {
+      out.allRated.measured += 1;
+      out.allRated.buckets[bucketOf(d.km)] += 1;
+    }
+    if (r.skipReason.trim() !== COMMUTE_SKIP_REASON) continue;
+    out.skippedByCommute += 1;
+    if (d) {
+      out.measured += 1;
+      out.buckets[bucketOf(d.km)] += 1;
+    } else out.unmeasured += 1;
+  }
+  return out;
+}
 
 export function outcomeOf(listed: Array<Pick<LabelSales, 'status' | 'skipReason'>>): OutcomeResult {
   const proposed = listed.filter((s) => PROPOSED_OR_LATER.includes(s.status)).length;
@@ -59,6 +96,7 @@ export interface LabelsEvalResult {
   // rows・checks・validityPct は営業の評価だけ（Claude確認を除く）。以前の基準 JSON は Claude 分を含んでいた
   // 営業リストに載せた組（営業の評価がある組）のうち、提案済以降に進んだ割合と見送りの内訳
   outcome: OutcomeResult;
+  commute?: CommuteDistribution;
   priority: { rows: Record<string, PriorityRow>; changedFromStored: number; compared: number;
     // 高単価×必須△・年数不足の規則（PROPER_HIGH_RATE_GAP_MAN）を当てて載らなくなる組と、そのうち営業が提案済以降にした組（0 でなければ規則を見直す）
     highRateRule?: { dropped: number; droppedProposed: number; proposedKeys: string[] };
@@ -182,7 +220,14 @@ export async function evaluateLabels(dir: string): Promise<LabelsEvalResult> {
     priority = { rows, changedFromStored: changed, compared, claude, highRateRule: { ...highRateRule, proposedKeys: highRateRule.proposedKeys.slice(0, MISSED_MAX) }, basicDesignRule: { ...basicDesignRule, proposedKeys: basicDesignRule.proposedKeys.slice(0, MISSED_MAX) } };
   }
   const outcome = outcomeOf(pairs.map((p) => sales.get(p.key)).filter((x): x is LabelSales => x !== undefined));
-  return { counts, recall, outcome, priority };
+  const commute = commuteDistribution(
+    pairs.flatMap((p) => {
+      const s = sales.get(p.key);
+      if (!s) return [];
+      return [{ project: reviveProject(p.project), residence: engineersByHash.get(p.engineerHash)?.residence ?? null, skipReason: s.skipReason }];
+    }),
+  );
+  return { counts, recall, outcome, commute, priority };
 }
 
 const fmt = (v: number | null) => (v === null ? '-' : `${v}%`);
@@ -206,6 +251,14 @@ export function formatResult(res: LabelsEvalResult, base: LabelsEvalResult | nul
   lines.push(`  提案済以降: ${oc.proposed}/${oc.listed} = ${fmt(oc.proposedPct)}（目標 ${oc.targetPct}%）${oc.targetMet === null ? '' : oc.targetMet ? ' 目標達成' : ' 目標未達'}`);
   lines.push(`  見送り: ${oc.skipped}/${oc.listed} = ${fmt(oc.skippedPct)}`);
   for (const [reason, n] of Object.entries(oc.skipReasons).sort(([a], [b]) => a.localeCompare(b))) lines.push(`      見送り理由 ${reason}: ${n}`);
+  const cm = res.commute;
+  if (cm) {
+    lines.push('', '■ 見送り理由「勤務地・通勤」の組の直線距離（最寄駅と勤務地の駅。印は付けるだけで組は外していない）');
+    lines.push(`  見送り理由が「${COMMUTE_SKIP_REASON}」の組: ${cm.skippedByCommute}（距離を出せた ${cm.measured}・出せない ${cm.unmeasured}）`);
+    lines.push(`  距離の分布: ${COMMUTE_BUCKETS.map((b) => `${b} ${cm.buckets[b]}`).join(' / ')}`);
+    lines.push(`  （比較）営業の評価がある全組の分布（距離を出せた ${cm.allRated.measured}）: ${COMMUTE_BUCKETS.map((b) => `${b} ${cm.allRated.buckets[b]}`).join(' / ')}`);
+    lines.push(`  ${cm.note}`);
+  }
   lines.push('', '■ 優先度の妥当さ（営業の最新の評価がある組・今のコードで再計算）');
   if (!res.priority) {
     lines.push('  まだありません');

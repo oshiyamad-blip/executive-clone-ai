@@ -218,7 +218,9 @@ import { createReplyDraftForSender, draftRevocationReason, revokeReviewDrafts, r
 import { MAX_ATTACHMENT_CHARS, sourceBacked, profileSourceNumbers, projectExcerpt, withDetail, EXTRACT_SCHEMA } from '../extract.js';
 import { buildReplyRef, FROM_PLACEHOLDER } from '../draft.js';
 import { mkdtempSync, writeFileSync as writeFileSyncForEval, rmSync, appendFileSync, readFileSync as readFileSyncB } from 'fs';
-import { outcomeOf, formatResult } from './labelsEval.js';
+import { outcomeOf, formatResult, commuteDistribution } from './labelsEval.js';
+import { findStation, locate, locatePair, distanceKm, stationPrefecture, stationTableSize } from '../station.js';
+import { commuteNoteOf, commuteDistanceOf } from '../commute.js';
 import { appendLabels, salesMemosOf, backupLineOf, parseBackup, compareBackup, BACKUP_HEADER, writeBackupFiles, readLabelStore, readFbExcludeIds, latestSales, salesKeyOf, prefilterRecall, isSalesPositive, engineerHashOf, type BackupRow, type LabelPair, type LabelSales } from './labels.js';
 import { tmpdir } from 'os';
 import { join, relative } from 'path';
@@ -6411,6 +6413,7 @@ async function main(): Promise<void> {
     salesKeepChecks();
     externalMatchChecks();
     fillAgentChecks();
+    stationCommuteChecks();
   } finally {
     setDemoOverride(null);
   }
@@ -7471,4 +7474,92 @@ function externalMatchChecks(): void {
   check('次の行は表の下・No は最大+1・既存 ID を返す', nx.row === 3 && nx.no === 6 && nx.ids.has('ext_a_b'));
   const empty = nextExtRow([]);
   check('タブが空なら2行目・No は 1 から', empty.row === 2 && empty.no === 1);
+}
+
+function stationCommuteChecks(): void {
+  section('駅の表と通勤距離の印（src/ses/station.ts・commute.ts。印は確認事項に足すだけで組は外さない）');
+  const size = stationTableSize();
+  check('駅の表を読める（国土数値情報の鉄道データ・8000駅名以上）', size.names > 8000 && size.stations >= size.names, JSON.stringify(size));
+  const nameOf = (t: string) => findStation(t)?.name ?? null;
+  check('駅名の取り出し: 本蓮沼（フル常駐）→本蓮沼', nameOf('本蓮沼（フル常駐）') === '本蓮沼', String(nameOf('本蓮沼（フル常駐）')));
+  check('駅名の取り出し: 中河原（京王線 中河原駅）→中河原', nameOf('中河原（京王線 中河原駅）') === '中河原');
+  check('駅名の取り出し: 小田急線 伊勢原駅→伊勢原・子安駅（京急線）→子安', nameOf('小田急線 伊勢原駅') === '伊勢原' && nameOf('子安駅（京急線）') === '子安');
+  check('駅名の取り出し: 路線名が付いた「京王線中河原駅」→中河原', nameOf('京王線中河原駅') === '中河原');
+  check('駅名の取り出し: OBP（リモート環境あり）・リモート・出社は表に無く不明', nameOf('OBP（リモート環境あり）') === null && nameOf('リモート') === null && nameOf('フルリモート（出社なし）') === null);
+  // 同名の駅の選び方
+  const fuchu = findStation('府中');
+  check('同名の駅: 府中は東京・広島などの候補を全部持つ', (fuchu?.points.length ?? 0) >= 3 && ['東京都', '広島県'].every((p) => fuchu?.points.some((x) => x.pref === p)), show(fuchu?.points.map((x) => x.pref)));
+  check('同名の駅: 文に県名があればその県（府中（東京）→東京都・府中駅（広島）→広島県・広島県 府中→広島県）',
+    locate('府中（東京）')?.pref === '東京都' && locate('府中駅（広島）')?.pref === '広島県' && locate('広島県 府中')?.pref === '広島県');
+  check('同名の駅: 県名も相手も無ければ関東の候補（府中→東京都）', locate('府中')?.pref === '東京都');
+  const near = locate('広島駅');
+  check('同名の駅: 県名が無ければ相手の位置に一番近い候補（広島駅の近くの府中→広島県）', near !== null && locate('府中', near)?.pref === '広島県', String(locate('府中', near)?.pref));
+  const pairKo = locatePair('府中', '子安駅（京急線）');
+  check('同名の駅: 府中×子安は距離が短く出る東京の府中を選ぶ（広島・徳島ではない）', pairKo?.a.pref === '東京都' && pairKo.b.pref === '神奈川県', show(pairKo));
+  const tokyoHiroshima = locatePair('府中（東京）', '府中（広島）');
+  check('府中（東京）×府中（広島）は県名どおりに選び分け、500km以上離れる', tokyoHiroshima?.a.pref === '東京都' && tokyoHiroshima.b.pref === '広島県' && distanceKm(tokyoHiroshima.a, tokyoHiroshima.b) > 500);
+  // 都道府県の補完
+  check('normalizePrefecture: 辞書に無い駅名を駅の表で補う（子安→神奈川県・本蓮沼→東京都・伊勢原→神奈川県）',
+    normalizePrefecture('子安駅（京急線）') === '神奈川県' && normalizePrefecture('本蓮沼（フル常駐）') === '東京都' && normalizePrefecture('小田急線 伊勢原駅') === '神奈川県');
+  check('normalizePrefecture: 候補が複数の県にまたがる同名の駅は補わない（辞書で決まる府中は今までどおり東京都）・表に無い語は null',
+    stationPrefecture('大久保') === null && normalizePrefecture('府中') === '東京都' && normalizePrefecture('OBP（リモート環境あり）') === null && normalizePrefecture('フルリモート') === null);
+  check('normalizePrefecture: 今までの判定は変えない（丸の内駅（愛知）→愛知県・東京都 ひばりヶ丘駅→東京都・品川駅→東京都）',
+    normalizePrefecture('丸の内駅（愛知）') === '愛知県' && normalizePrefecture('東京都 ひばりヶ丘駅') === '東京都' && normalizePrefecture('品川駅') === '東京都');
+
+  // 通勤距離の印
+  const pj = (location: string, remote: Project['remote'] = 'partial') => ({ location, remote });
+  const d1 = commuteDistanceOf(pj('本蓮沼（フル常駐）'), ['子安駅（京急線）']);
+  check('通勤: 本蓮沼×子安の直線は30km台・片道は直線km×1.7分', d1 !== null && d1.km > 30 && d1.km < 35 && Math.abs(d1.minutes - d1.km * 1.7) < 1e-9, show(d1));
+  check('通勤: 直線30km以上は「通勤: 直線約○km（片道約○分の見込み）」の1行', /^通勤: 直線約3\d+km（片道約\d+分の見込み）$/.test(commuteNoteOf(pj('本蓮沼（フル常駐）'), ['子安駅（京急線）']) ?? ''), String(commuteNoteOf(pj('本蓮沼（フル常駐）'), ['子安駅（京急線）'])));
+  const d2 = commuteDistanceOf(pj('府中（東京）'), ['子安駅（京急線）']);
+  check('通勤: 子安と府中（東京）の直線は25〜27km（既定の30km未満なので印なし・SES_COMMUTE_FLAG_KM=25 なら印が付く）',
+    d2 !== null && d2.km > 25 && d2.km < 27 && commuteNoteOf(pj('府中（東京）'), ['子安駅（京急線）']) === null &&
+      /^通勤: 直線約2[56]km/.test(withEnv({ SES_COMMUTE_FLAG_KM: '25' }, () => commuteNoteOf(pj('府中（東京）'), ['子安駅（京急線）'])) ?? ''), show(d2));
+  check('通勤: 同じ区内（新宿×渋谷）では付かない', commuteNoteOf(pj('新宿'), ['渋谷駅']) === null && (commuteDistanceOf(pj('新宿'), ['渋谷駅'])?.km ?? 99) < 5);
+  check('通勤: フルリモートの案件（remote が full・勤務地がフルリモート）では付かない',
+    commuteNoteOf(pj('本蓮沼', 'full'), ['子安駅（京急線）']) === null && commuteNoteOf(pj('フルリモート'), ['子安駅（京急線）']) === null);
+  check('通勤: 位置が引けない側があれば付かない（OBP・要員の最寄が空）', commuteNoteOf(pj('OBP（リモート環境あり）'), ['子安駅']) === null && commuteNoteOf(pj('本蓮沼'), ['']) === null);
+  check('通勤: 要員は最寄駅が引けなければ住まいを使う', commuteNoteOf(pj('本蓮沼'), ['', '神奈川県 子安駅'])?.startsWith('通勤: 直線約3') === true);
+  check('通勤: 片道の係数は SES_COMMUTE_MIN_PER_KM・印の距離は SES_COMMUTE_FLAG_KM で変えられる・0 なら印なし',
+    /片道約\d+分/.test(withEnv({ SES_COMMUTE_MIN_PER_KM: '2' }, () => commuteNoteOf(pj('本蓮沼'), ['子安駅'])) ?? '') &&
+      Math.abs((withEnv({ SES_COMMUTE_MIN_PER_KM: '2' }, () => commuteDistanceOf(pj('本蓮沼'), ['子安駅']))?.minutes ?? 0) - (d1 ? d1.km * 2 : -1)) < 1e-9 &&
+      withEnv({ SES_COMMUTE_FLAG_KM: '40' }, () => commuteNoteOf(pj('本蓮沼'), ['子安駅'])) === null &&
+      withEnv({ SES_COMMUTE_FLAG_KM: '0' }, () => commuteNoteOf(pj('本蓮沼'), ['伊勢原駅'])) === null);
+
+  // 行への反映（優先度は変えない）
+  const base = {
+    id: 'ownmatch_c_p1', ownEngineerId: 'c', ownEngineerName: 'C.C', projectId: 'p1', projectTitle: 'Java開発', projectRate: 70,
+    requiredProjectRate: 65, rateGapMan: 5, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '必要案件単価65万円に対し案件単価70万円。', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'C.C',
+    judgment: { verdict: 'recommend', work: '', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks: [{ kind: '必須', requirement: 'Java', status: 'met', quote: 'Java' }] },
+  };
+  const far = { ...base, engineerResidence: '小田急線 伊勢原駅' } as unknown as ProperCandidate;
+  const nearCand = { ...base, engineerResidence: '渋谷駅' } as unknown as ProperCandidate;
+  const header = SALES_COLUMNS.map((c) => c.name);
+  const confirmOf = (c: ProperCandidate, loc: string, remote: Project['remote'] = 'partial') => String(salesRowOf(c, project({ location: loc, remote }))[header.indexOf('確認事項')]);
+  check('営業リスト: 遠い組の確認事項に通勤の1行が入り、優先度は印の有無で変わらない',
+    /通勤: 直線約5\d+km（片道約\d+分の見込み）/.test(confirmOf(far, '本蓮沼（フル常駐）')) && salesPriorityOf(far) === salesPriorityOf({ ...far, engineerResidence: '' } as ProperCandidate));
+  check('営業リスト: 近い組・フルリモート・要員の最寄が不明な組には入らない',
+    !confirmOf(nearCand, '新宿').includes('通勤:') && !confirmOf(far, '本蓮沼', 'full').includes('通勤:') && !confirmOf({ ...far, engineerResidence: undefined } as ProperCandidate, '本蓮沼').includes('通勤:'));
+  const ej = { verdict: 'recommend' as const, work: '保守', met: [], gaps: [], levelFit: '', pitch: '', concerns: [], reviewNotes: [], checks: [] };
+  const extConfirm = (nearestStation: string, loc: string, remote: Project['remote'] = 'partial') =>
+    String(extRowOf({ no: 1, priority: 'A 提案推奨', engineer: engineer(['Java'], { nearestStation, residence: '' }), project: project({ location: loc, remote }), judgment: ej, addedAt: new Date() })[EXT_HEADER.indexOf('確認すること')]);
+  check('外部マッチ: 確認することに通勤の1行（最寄駅から。フルリモート・近い組には入らない）',
+    extConfirm('子安駅（京急線）', '本蓮沼（フル常駐）').includes('通勤: 直線約32km') && !extConfirm('子安駅（京急線）', '本蓮沼', 'full').includes('通勤:') && !extConfirm('渋谷駅', '新宿').includes('通勤:'));
+
+  // ラベルの集計
+  const dist = commuteDistribution([
+    { project: project({ location: '新宿' }), residence: '渋谷駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: '府中（東京）' }), residence: '子安駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: '本蓮沼' }), residence: '子安駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: '本蓮沼' }), residence: '伊勢原駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: 'OBP' }), residence: '子安駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: '本蓮沼', remote: 'full' }), residence: '子安駅', skipReason: '勤務地・通勤' },
+    { project: project({ location: '新宿' }), residence: '渋谷駅', skipReason: '単価が安い' },
+    { project: project({ location: '新宿' }), residence: null, skipReason: '勤務地・通勤' },
+  ]);
+  check('ラベル評価: 見送り理由「勤務地・通勤」の組を数え、直線距離を〜20／20〜30／30〜40／40km〜に分ける',
+    dist.skippedByCommute === 7 && dist.measured === 4 && dist.unmeasured === 3 &&
+      dist.buckets['〜20km'] === 1 && dist.buckets['20〜30km'] === 1 && dist.buckets['30〜40km'] === 1 && dist.buckets['40km〜'] === 1 && dist.allRated.measured === 5 && dist.allRated.buckets['〜20km'] === 2, show(dist));
+  check('ラベル評価: 距離を出せない理由を出力に書く', dist.note.includes('フルリモート') && dist.note.includes('駅の表に無い'));
 }
