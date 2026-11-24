@@ -16,6 +16,7 @@ import { sesMainAuth } from '../googleCreds.js';
 import { jstDateOf } from '../dates.js';
 import { norm, isHighRateWeakJudgment } from './judge.js';
 import { requiresBasicDesign } from './basicDesign.js';
+import { commuteNoteOf } from '../commute.js';
 import { normalizeSubject } from '../resend.js';
 import { parseJstLabel } from '../trial/jstLabel.js';
 import type { Project, ProperCandidate, ProperEngineer, RateReason, RequirementCheck } from '../../types/index.js';
@@ -331,7 +332,9 @@ export function salesRowOf(c: ProperCandidate, project: Project | undefined, now
     ? `待機中のため、単価が${Math.abs(c.rateGapMan ?? 0)}万円足りなくても A（本人の了承が前提）`
     : '';
   const basicNote = !c.needsReview && !c.reference && isBasicDesignMissing(c) ? '基本設計の経験が経歴に無い（必須）' : '';
-  row[COL['確認事項']] = [unmet.length > 0 ? `要確認: 経験の無い必須があります（${unmet.join('、')}）` : '', basicNote, confirm, idleNote].filter(Boolean).join('\n');
+  // 通勤距離の印（確認事項に足すだけ。優先度・載せる載せないは変えない）
+  const commuteNote = project ? commuteNoteOf(project, [c.engineerResidence ?? '']) ?? '' : '';
+  row[COL['確認事項']] = [unmet.length > 0 ? `要確認: 経験の無い必須があります（${unmet.join('、')}）` : '', basicNote, confirm, idleNote, commuteNote].filter(Boolean).join('\n');
   row[COL['判定の理由']] = checkReasonLines(c.judgment?.checks ?? []);
   row[COL['ID']] = c.id;
   if (project) {

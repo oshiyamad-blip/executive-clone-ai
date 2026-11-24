@@ -887,6 +887,15 @@ export function properHighRateGapMan(): number {
   return envNum('PROPER_HIGH_RATE_GAP_MAN', 15, { min: 0 });
 }
 
+// 通勤距離の印（確認事項に足すだけで、組は外さない）: 常駐・出社のある案件で、要員の最寄駅と勤務地の駅の直線距離がこの km 以上のとき印を付ける。
+// 片道時間の目安は 直線km × 係数（分/km）。SES_COMMUTE_FLAG_KM が 0 なら印を付けない
+export function commuteFlagKm(): number {
+  return envNum('SES_COMMUTE_FLAG_KM', 30, { min: 0 });
+}
+export function commuteMinPerKm(): number {
+  return envNum('SES_COMMUTE_MIN_PER_KM', 1.7, { min: 0 });
+}
+
 // 基本設計が必須の案件に、基本設計の経験が無い自社社員を載せない（level.ts で工程が基本設計からの案件に詳細設計以下の要員は除外、
 // 営業リストでは必須に基本設計があり経歴に無い組を C にする）。既定は有効。false/0 で今までどおり（1段の不足は経験交渉の B）
 export function properBasicDesignStrict(): boolean {
