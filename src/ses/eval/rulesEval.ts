@@ -7423,6 +7423,13 @@ function externalMatchChecks(): void {
   check('在宅: 任意の言い方・案件が在宅あり・不明は外さない', hm({}, 'リモート併用希望（出社も可）', { detail: 'フル出社' }).length === 0 && hm({}, 'できれば一部リモート希望', { detail: 'フル出社' }).length === 0 &&
     hm({}, 'ハイブリッド以上希望', { detail: '週3日出社・週2日リモート' }).length === 0 && hm({}, 'ハイブリッド以上希望', { detail: 'フルリモート不可。週2日在宅可' }).length === 0 &&
     hm({}, 'ハイブリッド以上希望', { detail: '勤務地：架空市' }).length === 0);
+  check('勤務地: 愛知の出社案件 × 東京在住 → 外す', rulesOf({ prefecture: '東京都' }, '', { location: '愛知県名古屋市（丸の内駅）', prefecture: '愛知県', detail: '週5日出社' }).join() === 'area');
+  check('勤務地: 大阪の常駐 × 神奈川在住 → 外す', rulesOf({ prefecture: '神奈川県' }, '', { location: '大阪府大阪市', prefecture: '大阪府', detail: '常駐', remote: 'none' }).join() === 'area');
+  check('勤務地: 東京の出社 × 埼玉在住（同じ首都圏）→ 外さない', rulesOf({ prefecture: '埼玉県' }, '', { location: '東京都千代田区', prefecture: '東京都', detail: '週5日出社' }).length === 0);
+  check('勤務地: 愛知のフルリモート × 東京在住 → 外さない', rulesOf({ prefecture: '東京都' }, '', { location: '愛知県名古屋市', prefecture: '愛知県', remote: 'full' }).length === 0 &&
+    rulesOf({ prefecture: '東京都' }, '', { location: '愛知県名古屋市', prefecture: '愛知県', detail: 'フルリモート' }).length === 0);
+  check('勤務地: 案件の勤務地が不明・要員の住まいが不明 → 外さない', rulesOf({ prefecture: '東京都' }, '', { location: '', prefecture: null, detail: '週5日出社' }).length === 0 &&
+    rulesOf({ prefecture: null }, '', { location: '愛知県名古屋市', prefecture: '愛知県', detail: '週5日出社' }).length === 0);
   const hardSel = selectExternalPairs({ ...base, projects: [pj('p1', { businessFlow: '外国籍不可' }), pj('p2')], engineers: [en('e1')], mailTextOf: () => '国籍：シリア籍' });
   check('選別: 決まりごとに当たる組だけ判定に回さず、数を数える', ids(hardSel).join() === 'ext_eng_e1_p2' && hardSel.stats.hardExcluded.nationality === 1, JSON.stringify(hardSel.stats));
 

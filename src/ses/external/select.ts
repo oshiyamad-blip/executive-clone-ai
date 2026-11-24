@@ -30,7 +30,7 @@ export interface ExtSelectStats {
   sameAgent: number;
   samePerson: number; // 同じ会社の別の営業担当が送ってきた同じ要員（新しい1通だけ残して外した数）
   depthExceeded: number; // 要員の商流の段数が案件の許す段数（「1社先まで」など）を超えて外した組の数
-  hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢で決まりごとに外した組の数
+  hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢・勤務地と住まいで決まりごとに外した組の数
   candidates: number;
   selected: number;
 }
@@ -89,7 +89,7 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const openProjects = input.projects.filter((p) => p.status === 'open' && !p.injectionSuspected);
   const projects = openProjects.filter((p) => !projectBlocksResale(p));
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
-  const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0 };
+  const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0, area: 0 };
   let depthExceeded = 0;
   const candidates = selection.pairs
     .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))

@@ -1,9 +1,10 @@
 // 外部マッチ: 営業が一目で見送る組（国籍・稼働率・リモート・年齢）を、AI判定の前に決まりごとで外す。
 // 迷うときは外さない（不明は通す）。判定の根拠は文面にあるものだけ
 import { ageLimitOf } from '../match.js';
+import { isFullRemoteLocation, wideRegionOf } from '../prefecture.js';
 import type { Engineer, Project } from '../../types/index.js';
 
-export type HardRule = 'nationality' | 'utilization' | 'remote' | 'hybrid' | 'age';
+export type HardRule = 'nationality' | 'utilization' | 'remote' | 'hybrid' | 'age' | 'area';
 export interface HardMismatch {
   rule: HardRule;
   reason: string;
@@ -111,8 +112,22 @@ export function ageOverLimit(age: number | null | undefined, text: string): numb
   return limit !== null && age > limit ? limit : null;
 }
 
-type EngineerLike = Pick<Engineer, 'age' | 'utilization'> & Partial<Pick<Engineer, 'businessFlow' | 'skills' | 'residence' | 'availableDate'>>;
-type ProjectLike = Pick<Project, 'title' | 'businessFlow' | 'remote'> & Partial<Pick<Project, 'detail'>>;
+type EngineerLike = Pick<Engineer, 'age' | 'utilization'> & Partial<Pick<Engineer, 'businessFlow' | 'skills' | 'residence' | 'availableDate' | 'prefecture'>>;
+type ProjectLike = Pick<Project, 'title' | 'businessFlow' | 'remote'> & Partial<Pick<Project, 'detail' | 'location' | 'prefecture'>>;
+
+// --- 5. 勤務地と住まい ---
+// 案件の勤務地の都道府県と要員の住まいの都道府県が両方分かり、地方（首都圏・中部・近畿など）が違う組。フルリモートは外さない
+const FULL_REMOTE_TEXT = /フルリモート(?!\s*(?:不可|NG|×|は不可|はNG|はできません|ではない|ではありません))|完全リモート(?!\s*(?:不可|NG|×))/;
+
+export function areaMismatch(e: Pick<EngineerLike, 'prefecture'>, p: ProjectLike, pText: string): { project: string; engineer: string } | null {
+  const pr = wideRegionOf(p.prefecture ?? null);
+  const er = wideRegionOf(e.prefecture ?? null);
+  if (!pr || !er || pr === er) return null;
+  if (p.remote === 'full' || isFullRemoteLocation(p.location ?? '')) return null;
+  const s = norm(pText);
+  if (FULL_REMOTE_TEXT.test(s) && !PROJECT_ATTEND.some((re) => re.test(s)) && p.remote !== 'none') return null;
+  return { project: p.prefecture as string, engineer: e.prefecture as string };
+}
 
 export function externalHardMismatches(e: EngineerLike, mailText: string, p: ProjectLike): HardMismatch[] {
   const eText = [e.businessFlow ?? '', e.utilization ?? '', (e.skills ?? []).join(' '), e.residence ?? '', e.availableDate ?? '', mailText].join('\n');
@@ -124,6 +139,8 @@ export function externalHardMismatches(e: EngineerLike, mailText: string, p: Pro
   if (engineerNeedsHybrid(eText) && projectHasNoRemote(pText, p.remote)) out.push({ rule: 'hybrid', reason: '要員は在宅のある働き方が必須・案件は出社のみ' });
   const limit = ageOverLimit(e.age, pText);
   if (limit !== null) out.push({ rule: 'age', reason: `案件の年齢上限${limit}歳を超える（${e.age}歳）` });
+  const area = areaMismatch(e, p, pText);
+  if (area) out.push({ rule: 'area', reason: `案件の勤務地（${area.project}）と要員の住まい（${area.engineer}）が別の地方で、フルリモートでない` });
   return out;
 }
 
