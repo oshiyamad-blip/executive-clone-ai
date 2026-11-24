@@ -120,7 +120,11 @@ function projectsOf(rows: OutRow[]): { projects: Project[]; closed: number; fail
       id: `sesmail_${r.messageId}`, from: r.from ?? '', to: '', cc: '', subject: r.subject ?? '', body: attach(r).body,
       messageIdHeader: '', references: '', receivedAt: new Date(r.receivedAt), attachments: [], sheetLinks: [],
     } as SesRawMail;
-    if (isClosedNotice({ ...mail, body: r.bodyHead ?? '' })) closed += 1;
+    // 募集終了・充足の連絡は本番と同じく案件にしない（数えるだけ）
+    if (isClosedNotice({ ...mail, body: r.bodyHead ?? '' })) {
+      closed += 1;
+      continue;
+    }
     const ps = (r.extraction.projects ?? []) as Parameters<typeof buildProject>[0][];
     ps.forEach((raw0, i) => {
       try {
