@@ -128,12 +128,25 @@ export function engineersToKeep<T>(engineers: T[], projectsOnly: boolean): { kep
 // 件名の先頭のタグか、本文の完了形の文だけで判定する（「★1名参画決定★」「決定実績あり」は募集中の案件、
 // 「募集終了となった場合はご容赦」「スキル充足度」は通常の案件メールの定型文のため当てない）
 const CLOSED_SUBJECT = /^[\s★☆※]*(?:re|fw|fwd)?[\s:：]*[【\[［](?:募集終了|募集締切|募集締め切り|充足|CLOSE|クローズ|終了)[】\]］]/i;
-const CLOSED_BODY = /募集(?:枠)?(?:充足|終了|締め?切り?).{0,20}(?:となりました|とさせて(?:頂|いただ)きます|いたしました|致しました)|CLOSEとなりました|一度募集終了とさせて/;
+const CLOSED_SUBJECT_LEAD = /^[\s★☆※]*(?:re|fw|fwd)?[\s:：]*(?:本件充足|本案件充足|本件は充足|充足(?:致し|いたし|し)ました|本件(?:は)?(?:募集)?終了)/i;
+const CLOSED_BODY = /募集(?:枠)?(?:充足|終了|締め?切り?).{0,20}(?:となりました|とさせて(?:頂|いただ)きます|いたしました|致しました)|CLOSEとなりました|一度募集終了とさせて/g;
+const CLOSED_BODY_SENTENCE = /(?:本件|本案件|下記案件|下記の案件|上記案件|上記の案件|先日(?:ご)?(?:配信|送付|ご案内)した[^。\n]{0,30}案件)(?:は|ですが|につきまして|について)?[、,\s]{0,2}(?:募集)?(?:充足|終了)(?:致し|いたし|し)ました/g;
+// 「1名充足しましたが追加で1名募集」のように、一部だけ埋まって募集が続く文
+const CLOSED_CONTINUES = /追加|引き続き|もう1名|もう一名|別途|再募集/;
+
+function hasClosedSentence(body: string, re: RegExp): boolean {
+  for (const m of body.matchAll(re)) {
+    const end = (m.index ?? 0) + m[0].length;
+    if (!CLOSED_CONTINUES.test(body.slice(end, end + 40))) return true;
+  }
+  return false;
+}
 
 export function isClosedNotice(mail: Pick<SesRawMail, 'subject' | 'body'>): boolean {
-  if (CLOSED_SUBJECT.test(mail.subject.normalize('NFKC').slice(0, 200))) return true;
+  const subject = mail.subject.normalize('NFKC').slice(0, 200);
+  if (CLOSED_SUBJECT.test(subject) || CLOSED_SUBJECT_LEAD.test(subject)) return true;
   const body = mail.body.normalize('NFKC').slice(0, 3000);
-  return CLOSED_BODY.test(body);
+  return hasClosedSentence(body, CLOSED_BODY) || hasClosedSentence(body, CLOSED_BODY_SENTENCE);
 }
 
 // 募集終了の連絡の本文・件名に、募集中の案件の案件名が含まれるか（空白・記号を除いて比べる。短すぎる名前は使わない）
