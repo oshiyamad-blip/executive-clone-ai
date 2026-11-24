@@ -7429,7 +7429,15 @@ function externalMatchChecks(): void {
   check('勤務地: 愛知のフルリモート × 東京在住 → 外さない', rulesOf({ prefecture: '東京都' }, '', { location: '愛知県名古屋市', prefecture: '愛知県', remote: 'full' }).length === 0 &&
     rulesOf({ prefecture: '東京都' }, '', { location: '愛知県名古屋市', prefecture: '愛知県', detail: 'フルリモート' }).length === 0);
   check('勤務地: 案件の勤務地が不明・要員の住まいが不明 → 外さない', rulesOf({ prefecture: '東京都' }, '', { location: '', prefecture: null, detail: '週5日出社' }).length === 0 &&
-    rulesOf({ prefecture: null }, '', { location: '愛知県名古屋市', prefecture: '愛知県', detail: '週5日出社' }).length === 0);
+    rulesOf({ prefecture: null, residence: '' }, '', { location: '愛知県名古屋市', prefecture: '愛知県', detail: '週5日出社' }).length === 0);
+  check('勤務地: prefecture 欄が空でも、住まい「東京都 ひばりヶ丘駅」×勤務地「丸の内駅（愛知）」の出社案件は外す',
+    rulesOf({ prefecture: null, residence: '東京都 ひばりヶ丘駅' }, '', { location: '丸の内駅（愛知）', prefecture: null, remote: 'partial', detail: '週3日出社' }).join() === 'area');
+  check('勤務地: 勤務地「丸の内駅（愛知）」でもフルリモート案件は外さない',
+    rulesOf({ prefecture: null, residence: '東京都 ひばりヶ丘駅' }, '', { location: '丸の内駅（愛知）', prefecture: null, remote: 'full' }).length === 0);
+  check('都道府県: 明示された県名を駅名より優先（丸の内駅（愛知）→愛知県・丸の内→東京都・名古屋市 丸の内→愛知県・東京都 ひばりヶ丘駅→東京都・大阪府 梅田→大阪府）',
+    normalizePrefecture('丸の内駅（愛知）') === '愛知県' && normalizePrefecture('丸の内') === '東京都' && normalizePrefecture('名古屋市 丸の内') === '愛知県' &&
+    normalizePrefecture('東京都 ひばりヶ丘駅') === '東京都' && normalizePrefecture('大阪府 梅田') === '大阪府',
+    ['丸の内駅（愛知）', '丸の内', '名古屋市 丸の内', '東京都 ひばりヶ丘駅', '大阪府 梅田'].map((t) => `${t}→${normalizePrefecture(t)}`).join(' / '));
   const hardSel = selectExternalPairs({ ...base, projects: [pj('p1', { businessFlow: '外国籍不可' }), pj('p2')], engineers: [en('e1')], mailTextOf: () => '国籍：シリア籍' });
   check('選別: 決まりごとに当たる組だけ判定に回さず、数を数える', ids(hardSel).join() === 'ext_eng_e1_p2' && hardSel.stats.hardExcluded.nationality === 1, JSON.stringify(hardSel.stats));
 

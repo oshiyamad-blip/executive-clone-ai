@@ -188,6 +188,9 @@ const LOCATION_KEYS: Array<[string, string]> = (() => {
   return [...map.entries()].sort((a, b) => b[0].length - a[0].length);
 })();
 
+const FORMAL_KEYS: Array<[string, string]> = [...PREFECTURES].sort((a, b) => b.length - a.length).map((p) => [p, p]);
+const STEM_KEYS: Array<[string, string]> = Object.entries(STEMS).sort((a, b) => b[0].length - a[0].length);
+
 // 表記ゆれを吸収する前処理（全角英数・半角カナを NFKC で揃え、空白を除く）
 function prepare(text: string): string {
   return text.normalize('NFKC').replace(/\s+/g, '');
@@ -200,8 +203,19 @@ function prepare(text: string): string {
 export function normalizePrefecture(location: string): string | null {
   const text = prepare(location ?? '');
   if (!text) return null;
+  // 明示された県名は駅名・市区名より優先する（「丸の内駅（愛知）」は東京でなく愛知）。まず正式名、次にかっこ内の語幹
+  const formal = firstMatch(text, FORMAL_KEYS);
+  if (formal) return formal;
+  for (const m of text.matchAll(/[（(【]([^）)】]*)[）)】]/g)) {
+    const inner = firstMatch(m[1] ?? '', STEM_KEYS);
+    if (inner) return inner;
+  }
+  return firstMatch(text, LOCATION_KEYS);
+}
+
+function firstMatch(text: string, keys: Array<[string, string]>): string | null {
   for (let i = 0; i < text.length; i++) {
-    for (const [key, pref] of LOCATION_KEYS) {
+    for (const [key, pref] of keys) {
       if (text.startsWith(key, i)) return pref;
     }
   }

@@ -1,7 +1,7 @@
 // 外部マッチ: 営業が一目で見送る組（国籍・稼働率・リモート・年齢）を、AI判定の前に決まりごとで外す。
 // 迷うときは外さない（不明は通す）。判定の根拠は文面にあるものだけ
 import { ageLimitOf } from '../match.js';
-import { isFullRemoteLocation, wideRegionOf } from '../prefecture.js';
+import { isFullRemoteLocation, normalizePrefecture, wideRegionOf } from '../prefecture.js';
 import type { Engineer, Project } from '../../types/index.js';
 
 export type HardRule = 'nationality' | 'utilization' | 'remote' | 'hybrid' | 'age' | 'area';
@@ -119,14 +119,17 @@ type ProjectLike = Pick<Project, 'title' | 'businessFlow' | 'remote'> & Partial<
 // 案件の勤務地の都道府県と要員の住まいの都道府県が両方分かり、地方（首都圏・中部・近畿など）が違う組。フルリモートは外さない
 const FULL_REMOTE_TEXT = /フルリモート(?!\s*(?:不可|NG|×|は不可|はNG|はできません|ではない|ではありません))|完全リモート(?!\s*(?:不可|NG|×))/;
 
-export function areaMismatch(e: Pick<EngineerLike, 'prefecture'>, p: ProjectLike, pText: string): { project: string; engineer: string } | null {
-  const pr = wideRegionOf(p.prefecture ?? null);
-  const er = wideRegionOf(e.prefecture ?? null);
+export function areaMismatch(e: Pick<EngineerLike, 'prefecture' | 'residence'>, p: ProjectLike, pText: string): { project: string; engineer: string } | null {
+  // 抽出結果の prefecture は空のことが多いので、要員は住まい・案件は勤務地の文字から補う
+  const ePref = e.prefecture ?? normalizePrefecture(e.residence ?? '');
+  const pPref = p.prefecture ?? normalizePrefecture(p.location ?? '');
+  const pr = wideRegionOf(pPref);
+  const er = wideRegionOf(ePref);
   if (!pr || !er || pr === er) return null;
   if (p.remote === 'full' || isFullRemoteLocation(p.location ?? '')) return null;
   const s = norm(pText);
   if (FULL_REMOTE_TEXT.test(s) && !PROJECT_ATTEND.some((re) => re.test(s)) && p.remote !== 'none') return null;
-  return { project: p.prefecture as string, engineer: e.prefecture as string };
+  return { project: pPref as string, engineer: ePref as string };
 }
 
 export function externalHardMismatches(e: EngineerLike, mailText: string, p: ProjectLike): HardMismatch[] {
