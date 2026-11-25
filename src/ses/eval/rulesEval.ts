@@ -264,7 +264,7 @@ import type {
 import { buildAgentIndex, fillAgent } from '../trial/fillAgent.js';
 import { isHighRateWeakJudgment } from '../proper/judge.js';
 import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale, engineerIsIndividual, projectAllowsOnlyEmployeeAtDepth1 } from '../external/resale.js';
-import { selectExternalPairs, extPairId, extTitleKey } from '../external/select.js';
+import { selectExternalPairs, extPairId, extTitleKey, extPersonKey, samePersonKey } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
 import { extPerRun, extDailyCap, extEngineerLookbackDays } from '../config.js';
@@ -7404,6 +7404,20 @@ function externalMatchChecks(): void {
   check('別の要員なら選ぶ', jOther.pairs.length === 1 && jOther.stats.judgedBefore === 0);
   const jNone = selectExternalPairs(jBase);
   check('judgedTitleKeys 未指定なら今までどおり（judgedBefore=0）', jNone.pairs.length === 1 && jNone.stats.judgedBefore === 0);
+  const sheetPT = [{ person: extPersonKey('G.W.', 's@vendor-x.example'), title: extTitleKey('【架空】Java 基盤案件') }];
+  const gwq = (over: Partial<Engineer> = {}) => en('g1', { displayName: 'G.W.Q.', agentEmail: 'n@vendor-x.example', ...over });
+  const gProj = [pj('p1', { title: '[架空]Java　基盤案件' })];
+  const sg = selectExternalPairs({ ...base, projects: gProj, engineers: [gwq()], sheetPersonTitles: sheetPT });
+  check('シートにある「G.W.」×案件の、新しい要員「G.W.Q.」（同じドメイン）×同じ案件名（記号違い）は外す', sg.pairs.length === 0 && sg.stats.onSheetSamePerson === 1, JSON.stringify(sg.stats));
+  const sgDom = selectExternalPairs({ ...base, projects: gProj, engineers: [gwq({ agentEmail: 'n@other.example' })], sheetPersonTitles: sheetPT });
+  check('ドメインが違えば外さない', sgDom.pairs.length === 1 && sgDom.stats.onSheetSamePerson === 0, JSON.stringify(sgDom.stats));
+  const sgTitle = selectExternalPairs({ ...base, projects: [pj('p1', { title: '別の架空案件' })], engineers: [gwq()], sheetPersonTitles: sheetPT });
+  check('案件名が違えば外さない', sgTitle.pairs.length === 1 && sgTitle.stats.onSheetSamePerson === 0, JSON.stringify(sgTitle.stats));
+  const sgUnk = selectExternalPairs({ ...base, projects: gProj, engineers: [gwq({ displayName: '（イニシャル不明）' })], sheetPersonTitles: [{ person: extPersonKey('（イニシャル不明）', 's@vendor-x.example'), title: extTitleKey('[架空]Java　基盤案件') }] });
+  check('イニシャル不明は照合しない（人のキーは空）', extPersonKey('（イニシャル不明）', 'a@b.example') === '' && sgUnk.pairs.length === 1 && sgUnk.stats.onSheetSamePerson === 0, JSON.stringify(sgUnk.stats));
+  check('samePersonKey: 接頭辞は2文字以上のときだけ同じ人', samePersonKey('GW|a.example', 'GWQ|a.example') && !samePersonKey('G|a.example', 'GWQ|a.example') && !samePersonKey('GW|a.example', 'GWQ|b.example') && !samePersonKey('', 'GW|a.example'));
+  const inRun = selectExternalPairs({ ...base, projects: gProj, engineers: [gwq({ id: 'eng_g1', displayName: 'G.W.', desiredRate: 60 }), gwq({ id: 'eng_g2', displayName: 'G.W.Q.', desiredRate: 60 })] });
+  check('同じ回で同じ人（G.W. と G.W.Q.）が別の要員IDで同じ案件と2行になる組は1つ残す', inRun.pairs.length === 1 && inRun.stats.samePersonInRun === 1, JSON.stringify(inRun.stats));
   check('既定の上限は 16・60・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 16 && extDailyCap() === 60 && extEngineerLookbackDays() === 7));
 
   section('外部マッチ: 高単価×必須の弱い組（isHighRateWeakJudgment）');

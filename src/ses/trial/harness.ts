@@ -38,7 +38,7 @@ import { buildEngineer, type RawEngineer } from '../extract.js';
 import { dedupeEngineers } from '../store.js';
 import { extDailyCap, extEngineerLookbackDays, extPerRun } from '../config.js';
 import { extOwnEngineer, extKeyOf } from '../external/profile.js';
-import { selectExternalPairs, extPairId, extTitleKey } from '../external/select.js';
+import { selectExternalPairs, extPairId, extTitleKey, extPersonKey } from '../external/select.js';
 import { externalHardMismatch } from '../external/hardRules.js';
 import { EXT_HEADER, EXT_LAST_COLUMN, EXT_TAB, extHeaderRow, extPriorityOf, extRowOf, nextExtRow } from '../external/sheet.js';
 import type { Engineer, Project, ProperEngineer, SesRawMail } from '../../types/index.js';
@@ -686,7 +686,19 @@ if (phase === 'prompts') {
   const kept = dedupeProjects(projects).kept;
   const existingIds = new Set(has('ext_existing_ids.json') ? read<string[]>('ext_existing_ids.json') : []);
   const addedToday = has('ext_state.json') ? Number(read<{ addedToday?: number }>('ext_state.json').addedToday ?? 0) || 0 : 0;
-  const sel = selectExternalPairs({ projects: kept, engineers: engs, now, existingIds, judgedTitleKeys, addedToday, perRun: extPerRun(), dailyCap: extDailyCap(), mailTextOf: (e) => bodyOf.get(e.id) ?? '' });
+  // 「外部マッチ」タブの行の人のキー×案件名（要員メールの再送で要員IDが変わった同じ人の組を選ばない）
+  let sheetPersonTitles: Array<{ person: string; title: string }> | undefined;
+  if (has('ext_sheet.json')) {
+    const sv = read<{ values?: string[][] }>('ext_sheet.json').values ?? [];
+    const head = sv[0] ?? [];
+    const ci = head.indexOf('要員');
+    const ai = head.indexOf('要員の営業元メール');
+    const ti = head.indexOf('案件名');
+    if (ci >= 0 && ai >= 0 && ti >= 0) {
+      sheetPersonTitles = sv.slice(1).map((r) => ({ person: extPersonKey(String(r[ci] ?? ''), String(r[ai] ?? '')), title: extTitleKey(String(r[ti] ?? '')) })).filter((x) => x.person && x.title);
+    }
+  }
+  const sel = selectExternalPairs({ projects: kept, engineers: engs, now, existingIds, judgedTitleKeys, sheetPersonTitles, addedToday, perRun: extPerRun(), dailyCap: extDailyCap(), mailTextOf: (e) => bodyOf.get(e.id) ?? '' });
   const extDir = join(dir, 'ext');
   mkdirSync(extDir, { recursive: true });
   const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
