@@ -303,6 +303,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 2. `PHASE=prep` のあとに `PHASE=ext_prep`（`RUN_DIR` は同じ）。入力は任意で、無ければ空として扱う:
    - `ext_existing_ids.json`: シートの「外部マッチ」タブの ID 列（`ext_<要員ID>_<案件ID>`）の配列。読み戻した値から作る
    - `ext_state.json`: `{"addedToday": n}`（今日 JST にすでに判定した組の数）
+   - `ext_sheet.json`（「外部マッチ」タブの値。見出しの「要員」「要員の営業元メール」「案件名」で列を引く）があれば、シートにある同じ人（イニシャルは記号違い・先頭一致の GW と GWQ も同じ、送信元ドメインが同じ）×同じ案件名の組は、要員メールの再送で要員IDが変わっても選ばない。外した数は出力の onSheetSamePerson、同じ回の中で同じ人×同じ案件名が複数あって1つだけ残した数は samePersonInRun
    - 前の回（`EXT_ENGINEER_LOOKBACK_DAYS` 日以内の run_*）の `ext/pairs.json`・`ext/meta.json` を読み、前の回までに判定した同じ要員×同じ案件名（記号・空白・全角半角の違いは同じとみなす）の組は、再送で案件IDが変わっても選ばない。外した数は出力の judgedBefore
    - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・samePerson・judgedBefore・candidates・selected・pairsByKey
    - 再委託・転売の制限（再委託不可・貴社まで・貴社社員まで・プロパーのみ・エンド直のみ など。「1社先まで」だけなら外さない）がある要員・案件、同じ営業元の組は組にしない。1人の要員・1件の案件につき 2 組まで

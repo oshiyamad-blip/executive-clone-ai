@@ -14,12 +14,32 @@ export function extTitleKey(title: string): string {
   return title.normalize('NFKC').toLowerCase().replace(/[\s\u3000【】\[\]［］()（）「」『』・/／\-ー_~〜★☆※!！?？:：、。]/g, '');
 }
 
+// 人のキー: イニシャル（NFKC・大文字・英字のみ）|送信元ドメイン。イニシャルが空・不明なら空文字（照合しない）。要員IDは再送で変わるのでこちらで同じ人を探す
+export function extPersonKey(initials: string, agentEmail: string): string {
+  const ini = initials.normalize('NFKC').replace(/[^A-Za-z]/g, '').toUpperCase();
+  const domain = (agentEmail.split('@')[1] ?? '').trim().toLowerCase();
+  if (!ini || !domain) return '';
+  return `${ini}|${domain}`;
+}
+
+// 同じ人か: ドメインが同じで、イニシャルが一致するか一方が他方の先頭で、短い方が2文字以上（G.W. と G.W.Q.）
+export function samePersonKey(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const [ia, da] = a.split('|');
+  const [ib, db] = b.split('|');
+  if (!ia || !ib || da !== db) return false;
+  if (ia === ib) return ia.length >= 1;
+  const [short, long] = ia.length <= ib.length ? [ia, ib] : [ib, ia];
+  return short.length >= 2 && long.startsWith(short);
+}
+
 export interface ExtSelectInput {
   projects: Project[];
   engineers: Engineer[];
   now: Date;
   existingIds: Set<string>; // すでにシートにある・判定済みの組の ID（ext_<要員ID>_<案件ID>）
   judgedTitleKeys?: Set<string>; // 前の回までに判定した「要員ID|正規化した案件名」（再送で案件IDが替わった組を外す）
+  sheetPersonTitles?: Array<{ person: string; title: string }>; // シートにある行の extPersonKey と extTitleKey(案件名)（要員メールの再送で要員IDが変わった同じ人×同じ案件を外す）
   addedToday: number; // 今日（JST）すでに判定した組の数
   perRun: number;
   dailyCap: number;
@@ -38,6 +58,8 @@ export interface ExtSelectStats {
   depthExceeded: number; // 要員の商流の段数が案件の許す段数（「1社先まで」など）を超えて外した組の数
   hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢・勤務地と住まいで決まりごとに外した組の数
   judgedBefore: number; // 前の回までに判定した同じ要員×同じ案件名で外した組の数
+  onSheetSamePerson: number; // シートにある同じ人（記号・イニシャルの揺れを含む）×同じ案件名で外した組の数
+  samePersonInRun: number; // 同じ回の中で、同じ人×同じ案件名の組が複数あり1つだけ残して外した数
   candidates: number;
   selected: number;
 }
@@ -99,12 +121,24 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0, area: 0 };
   let depthExceeded = 0;
   let judgedBefore = 0;
+  let onSheetSamePerson = 0;
+  let samePersonInRun = 0;
+  const sheetPT = (input.sheetPersonTitles ?? []).filter((x) => x.person);
+  const personOf = (e: Engineer): string => extPersonKey(e.displayName, e.agentEmail);
   const candidates = selection.pairs
     .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))
     .filter((p) => {
       const judged = input.judgedTitleKeys?.has(`${p.engineer.id}|${extTitleKey(p.project.title)}`) ?? false;
       if (judged) judgedBefore += 1;
       return !judged;
+    })
+    .filter((p) => {
+      const person = personOf(p.engineer);
+      if (!person || sheetPT.length === 0) return true;
+      const tk = extTitleKey(p.project.title);
+      const hit = sheetPT.some((x) => x.title === tk && samePersonKey(x.person, person));
+      if (hit) onSheetSamePerson += 1;
+      return !hit;
     })
     .filter((p) => {
       const allowed = projectAllowedDepth(p.project);
@@ -119,7 +153,26 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       for (const h of hits) hardExcluded[h.rule] += 1;
       return hits.length === 0;
     })
-    .sort(comparePairs);
+    .sort(comparePairs)
+    .filter(
+      (() => {
+        // 年齢・希望単価が両方にあって違えば別の人（既存の dedupeSamePerson と同じ見方）
+        const seen: Array<{ person: string; title: string; e: Engineer }> = [];
+        const differs = (a: Engineer, b: Engineer): boolean =>
+          (a.age !== null && b.age !== null && a.age !== b.age) || (a.desiredRate !== null && b.desiredRate !== null && a.desiredRate !== b.desiredRate);
+        return (p: MatchPair): boolean => {
+          const person = personOf(p.engineer);
+          if (!person) return true;
+          const title = extTitleKey(p.project.title);
+          if (seen.some((x) => x.title === title && x.e.id !== p.engineer.id && !differs(x.e, p.engineer) && samePersonKey(x.person, person))) {
+            samePersonInRun += 1;
+            return false;
+          }
+          seen.push({ person, title, e: p.engineer });
+          return true;
+        };
+      })(),
+    );
   // 判定のあとで高単価×必須△の規則に落ちる組が多いので、単価差が額未満の組を先にする（各グループの中は comparePairs のまま）
   const gap = properHighRateGapMan();
   if (gap > 0) {
@@ -154,6 +207,8 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       depthExceeded,
       hardExcluded,
       judgedBefore,
+      onSheetSamePerson,
+      samePersonInRun,
       candidates: candidates.length,
       selected: pairs.length,
     },
