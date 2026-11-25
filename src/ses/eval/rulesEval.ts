@@ -7466,7 +7466,9 @@ function externalMatchChecks(): void {
   check('行は見出しと同じ列数で、ID は ext_<要員ID>_<案件ID>・対応状況は未着手・人の入力列は空', row.length === EXT_HEADER.length && col('ID') === 'ext_eng_e1_p1' && col('対応状況') === '未着手' &&
     col('見送り理由') === '' && col('担当営業') === '' && col('メモ') === '' && col('No') === 3 && col('差(万)') === 20, JSON.stringify(row));
   check('確認することに懸念と要員の商流が入る', String(col('確認すること')).includes('面談2回') && String(col('確認すること')).includes('要員の商流・所属: 1社先まで'));
-  check('最終列は AC（29列）', EXT_HEADER.length === 29 && EXT_LAST_COLUMN === 'AC');
+  check('最終列は AE（31列）', EXT_HEADER.length === 31 && EXT_LAST_COLUMN === 'AE');
+  check('「精度チェック」「精度メモ」は「メモ」の直後で、新しい行では空', EXT_HEADER.indexOf('精度チェック') === EXT_HEADER.indexOf('メモ') + 1 && EXT_HEADER.indexOf('精度メモ') === EXT_HEADER.indexOf('メモ') + 2 &&
+    col('精度チェック') === '' && col('精度メモ') === '');
   const header = extHeaderRow();
   const sheet = [header, header.map((_, i) => (i === 0 ? '5' : i === EXT_HEADER.length - 1 ? 'ext_a_b' : ''))];
   const nx = nextExtRow(sheet);
