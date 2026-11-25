@@ -167,6 +167,7 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
       違うセルだけを連続する列ごとの範囲にして、`wf/wNN.json`（1ファイル60KB以下）にまとめる（M〜R 列は書かない。NBSP・前後の空白・数値の表記の違いは同じとみなす）。
       標準出力は件数だけ（`appendRows`・`updateRows`・`cellsWritten`・`cellsSkippedSame`・`files`）。
       書き込みの担当は `wf/` のファイル1つにつき1人（sonnet）。各要素の `range` に `values` をそのまま（1文字も変えずに）`update_values` で書かせる。
+      担当には要素を `python3 -c 'json.dumps(..., ensure_ascii=True)'` で出させ、その JSON をそのまま渡させる（日本語のまま写させると、英単語の大文字・小文字などを書き換えることがある。例: 案件詳細の「Spring」が「spring」になった）。外部マッチの書き込みも同じ。
       書いた後に「全体」の A1:AE<最終行> を読み戻し、`npm run ses:trial:writeplan -- verify <RUN_DIR> <書いた後の読み取りのファイル>` を実行する。
       違うセル（受信日時・追加日時・最終更新の列は除く）は `wf/fixNN.json`（1セル1ファイル）になり、標準出力は `{"checked":N,"mismatch":M}`。fix があれば同じ要領で書き直す。
       書く内容の決まり:
