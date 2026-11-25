@@ -9,11 +9,17 @@ import type { Engineer, MatchPair, Project } from '../../types/index.js';
 
 export const extPairId = (engineerId: string, projectId: string): string => `ext_${engineerId}_${projectId}`;
 
+// 再送で案件IDが変わっても同じ案件名とみなすための正規化（記号・空白・全角半角の違いを除く）
+export function extTitleKey(title: string): string {
+  return title.normalize('NFKC').toLowerCase().replace(/[\s\u3000【】\[\]［］()（）「」『』・/／\-ー_~〜★☆※!！?？:：、。]/g, '');
+}
+
 export interface ExtSelectInput {
   projects: Project[];
   engineers: Engineer[];
   now: Date;
   existingIds: Set<string>; // すでにシートにある・判定済みの組の ID（ext_<要員ID>_<案件ID>）
+  judgedTitleKeys?: Set<string>; // 前の回までに判定した「要員ID|正規化した案件名」（再送で案件IDが替わった組を外す）
   addedToday: number; // 今日（JST）すでに判定した組の数
   perRun: number;
   dailyCap: number;
@@ -31,6 +37,7 @@ export interface ExtSelectStats {
   samePerson: number; // 同じ会社の別の営業担当が送ってきた同じ要員（新しい1通だけ残して外した数）
   depthExceeded: number; // 要員の商流の段数が案件の許す段数（「1社先まで」など）を超えて外した組の数
   hardExcluded: Record<HardRule, number>; // 国籍・稼働率・リモート・ハイブリッド・年齢・勤務地と住まいで決まりごとに外した組の数
+  judgedBefore: number; // 前の回までに判定した同じ要員×同じ案件名で外した組の数
   candidates: number;
   selected: number;
 }
@@ -91,8 +98,14 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
   const selection = primarySelectDetailed(projects, engineers, undefined, { now, tally: false });
   const hardExcluded: Record<HardRule, number> = { nationality: 0, utilization: 0, remote: 0, hybrid: 0, age: 0, area: 0 };
   let depthExceeded = 0;
+  let judgedBefore = 0;
   const candidates = selection.pairs
     .filter((p) => !input.existingIds.has(extPairId(p.engineer.id, p.project.id)))
+    .filter((p) => {
+      const judged = input.judgedTitleKeys?.has(`${p.engineer.id}|${extTitleKey(p.project.title)}`) ?? false;
+      if (judged) judgedBefore += 1;
+      return !judged;
+    })
     .filter((p) => {
       const allowed = projectAllowedDepth(p.project);
       const depth = engineerDepth(p.engineer, mailTextOf(p.engineer));
@@ -139,6 +152,7 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
       samePerson,
       depthExceeded,
       hardExcluded,
+      judgedBefore,
       candidates: candidates.length,
       selected: pairs.length,
     },

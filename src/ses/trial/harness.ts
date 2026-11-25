@@ -15,7 +15,7 @@
 //   PHASE=ext_prep  外部マッチ（試行）: 提携先の要員メール × 他社の案件 → 判定に回す少数の組（ext/pairs.json・system_<キー>.txt・meta.json）
 //   PHASE=ext_final 外部マッチ: ext/judged_<キー>.json → 「外部マッチ」タブへの追記（ext_writes.json・ext_notify.json）
 //   PHASE=labels_verify  labels_backup*.tsv と backup_readback/*.txt（Drive から読み戻したもの）を突き合わせる
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildProject, projectExcerpt, EXTRACT_SYSTEM, EXTRACT_SCHEMA } from '../extract.js';
 import { buildAgentIndex, fillAgent, type AgentFields } from './fillAgent.js';
@@ -38,7 +38,7 @@ import { buildEngineer, type RawEngineer } from '../extract.js';
 import { dedupeEngineers } from '../store.js';
 import { extDailyCap, extEngineerLookbackDays, extPerRun } from '../config.js';
 import { extOwnEngineer, extKeyOf } from '../external/profile.js';
-import { selectExternalPairs, extPairId } from '../external/select.js';
+import { selectExternalPairs, extPairId, extTitleKey } from '../external/select.js';
 import { externalHardMismatch } from '../external/hardRules.js';
 import { EXT_HEADER, EXT_LAST_COLUMN, EXT_TAB, extHeaderRow, extPriorityOf, extRowOf, nextExtRow } from '../external/sheet.js';
 import type { Engineer, Project, ProperEngineer, SesRawMail } from '../../types/index.js';
@@ -660,13 +660,33 @@ if (phase === 'prompts') {
   writeFileSync(join(dir, 'score.json'), JSON.stringify(score, null, 1));
   console.log(JSON.stringify(score));
 } else if (phase === 'ext_prep') {
+  // 前の回（遡り日数以内）で判定した同じ要員×同じ案件名の組。再送で案件IDが替わっても選ばない
+  const judgedTitleKeys = new Set<string>();
+  const judgedSince = now.getTime() - extEngineerLookbackDays() * 24 * 60 * 60 * 1000;
+  for (const d of carryDirs()) {
+    try {
+      if (statSync(d).mtimeMs < judgedSince) continue;
+      const pf = join(d, 'ext', 'pairs.json');
+      const mf = join(d, 'ext', 'meta.json');
+      if (!existsSync(pf) || !existsSync(mf)) continue;
+      const prevPairs = JSON.parse(readFileSync(pf, 'utf8')) as Record<string, Array<{ title?: string }>>;
+      const prevMeta = JSON.parse(readFileSync(mf, 'utf8')) as Record<string, { engineerId?: string }>;
+      for (const [key, list] of Object.entries(prevPairs)) {
+        const engineerId = prevMeta[key]?.engineerId;
+        if (!engineerId) continue;
+        for (const x of list) if (typeof x.title === 'string') judgedTitleKeys.add(`${engineerId}|${extTitleKey(x.title)}`);
+      }
+    } catch (err) {
+      console.error(`前の回の外部マッチの組を読めませんでした（飛ばします）: ${d}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // 要員: この回＋前の回（EXT_ENGINEER_LOOKBACK_DAYS 日以内）の要員メールの抽出。案件: prep と同じ重複統合後の募集中案件
   const { engineers: engs, bodyOf, mailOf } = externalEngineers();
   const { projects } = projectsOf(carriedRows().rows);
   const kept = dedupeProjects(projects).kept;
   const existingIds = new Set(has('ext_existing_ids.json') ? read<string[]>('ext_existing_ids.json') : []);
   const addedToday = has('ext_state.json') ? Number(read<{ addedToday?: number }>('ext_state.json').addedToday ?? 0) || 0 : 0;
-  const sel = selectExternalPairs({ projects: kept, engineers: engs, now, existingIds, addedToday, perRun: extPerRun(), dailyCap: extDailyCap(), mailTextOf: (e) => bodyOf.get(e.id) ?? '' });
+  const sel = selectExternalPairs({ projects: kept, engineers: engs, now, existingIds, judgedTitleKeys, addedToday, perRun: extPerRun(), dailyCap: extDailyCap(), mailTextOf: (e) => bodyOf.get(e.id) ?? '' });
   const extDir = join(dir, 'ext');
   mkdirSync(extDir, { recursive: true });
   const pairs: Record<string, Array<{ projectId: string; title: string; user: string }>> = {};
