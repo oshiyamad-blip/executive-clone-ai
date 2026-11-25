@@ -3,7 +3,7 @@
 // 1回・1日の上限の内で上から採る
 import { properHighRateGapMan } from '../config.js';
 import { primarySelectDetailed, comparePairs, isStartTooLate } from '../match.js';
-import { engineerBlocksResale, engineerDepth, projectAllowedDepth, projectBlocksResale } from './resale.js';
+import { engineerBlocksResale, engineerDepth, engineerIsIndividual, projectAllowedDepth, projectAllowsOnlyEmployeeAtDepth1, projectBlocksResale } from './resale.js';
 import { externalHardMismatches, type HardRule } from './hardRules.js';
 import type { Engineer, MatchPair, Project } from '../../types/index.js';
 
@@ -109,7 +109,8 @@ export function selectExternalPairs(input: ExtSelectInput): { pairs: MatchPair[]
     .filter((p) => {
       const allowed = projectAllowedDepth(p.project);
       const depth = engineerDepth(p.engineer, mailTextOf(p.engineer));
-      const over = allowed !== null && depth !== null && depth > allowed;
+      const individualOver = projectAllowsOnlyEmployeeAtDepth1(p.project) && depth !== null && depth >= 1 && engineerIsIndividual(p.engineer, mailTextOf(p.engineer));
+      const over = (allowed !== null && depth !== null && depth > allowed) || individualOver;
       if (over) depthExceeded += 1;
       return !over;
     })
