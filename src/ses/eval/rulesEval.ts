@@ -121,6 +121,7 @@ import { judgeProperPairs, verifyJudgment, pitchWithVerifiedYears, isFragmentReq
 import { buildProperCandidates, failGateTripped, selectPairsForJudge, dedupeProjects, applyJudgment, clearsBar, sameOpening, judgmentFit, weakOnRequired } from '../proper/index.js';
 import { skillOverlap, groupSimilarEngineers, adaptJudgment } from '../proper/group.js';
 import { planFanout } from '../trial/fanout.js';
+import { normalizeExtJudgment } from '../external/judgmentShape.js';
 import { rosterProfileText, rosterEngineersFromValues, skillSheetTabOf } from '../proper/roster.js';
 import {
   parseYears, parsePhaseYears, parseSkillYears, parseRole, topPhaseOf, evaluateLevel, sanitizeProjectLevel, projectLevelJson, parseProjectLevelJson,
@@ -3689,6 +3690,14 @@ function mailBodyChecks(): void {
       withDetail(baseProject, '', 'https://list.example.com/view?id=1').detail === '一覧のページ: https://list.example.com/view?id=1\n' &&
       withDetail(baseProject, '本文').detail === '本文' && withDetail(baseProject, '').detail === undefined);
   check('試運転: 行に listPageUrl があれば案件詳細の先頭に入り、無ければ今までどおり', withListPageLine('本文', 'https://list.example.com/v') === '一覧のページ: https://list.example.com/v\n本文' && withListPageLine('本文', undefined) === '本文' && withListPageLine('本文', '') === '本文');
+  {
+    const base = { work: '保守', requirements: [{ requirement: 'Java', kind: '必須', quote: 'Java', status: 'met', evidence: 'Javaで開発', note: '' }], levelFit: '', preferenceFit: '', verdict: 'recommend', pitch: '', concerns: ['単価'], workPrefecture: '東京都', injectionSuspected: false };
+    const swapped = normalizeExtJudgment({ ...base, workPrefecture: ['年数不足', '単価'], concerns: '' } as unknown as RawProperJudgment);
+    check('外部判定の型直し: 都道府県に入った配列は気になる点へ戻り、気になる点の空文字は配列になる', swapped.fixed && swapped.judgment.workPrefecture === '' && swapped.judgment.concerns.join() === '年数不足,単価', show(swapped));
+    const clean = normalizeExtJudgment(base as unknown as RawProperJudgment);
+    check('外部判定の型直し: 正しい判定は変えず、直した数にも入れない', !clean.fixed && JSON.stringify(clean.judgment) === JSON.stringify(base), show(clean));
+    check('外部判定の型直し: 不正な verdict は reject になる', normalizeExtJudgment({ ...base, verdict: 'maybe' } as unknown as RawProperJudgment).judgment.verdict === 'reject');
+  }
   check('シートのリンクは HTML のリンク先から拾う（表示テキストに URL が無くても）', links.length === 1 && links[0].startsWith('https://docs.google.com/spreadsheets/d/AbC_123-x/edit') && !links[0].includes('"'), links.join());
 }
 
