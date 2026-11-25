@@ -303,7 +303,8 @@ Claude Code の定期実行（Routine）が、APIキーの代わりに抽出とA
 2. `PHASE=prep` のあとに `PHASE=ext_prep`（`RUN_DIR` は同じ）。入力は任意で、無ければ空として扱う:
    - `ext_existing_ids.json`: シートの「外部マッチ」タブの ID 列（`ext_<要員ID>_<案件ID>`）の配列。読み戻した値から作る
    - `ext_state.json`: `{"addedToday": n}`（今日 JST にすでに判定した組の数）
-   - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・samePerson・candidates・selected・pairsByKey
+   - 前の回（`EXT_ENGINEER_LOOKBACK_DAYS` 日以内の run_*）の `ext/pairs.json`・`ext/meta.json` を読み、前の回までに判定した同じ要員×同じ案件名（記号・空白・全角半角の違いは同じとみなす）の組は、再送で案件IDが変わっても選ばない。外した数は出力の judgedBefore
+   - 出力は `<RUN_DIR>/ext/` の `pairs.json`（キー＝要員キー `X…`）・`system_<キー>.txt`・`meta.json`。標準出力の要約: engineers・projects・restrictedEngineers・restrictedProjects・sameAgent・samePerson・judgedBefore・candidates・selected・pairsByKey
    - 再委託・転売の制限（再委託不可・貴社まで・貴社社員まで・プロパーのみ・エンド直のみ など。「1社先まで」だけなら外さない）がある要員・案件、同じ営業元の組は組にしない。1人の要員・1件の案件につき 2 組まで
    - 案件の文（題名・商流・詳細）に派遣の契約形態（派遣契約・派遣前提・紹介予定派遣・派遣案件など）があれば外部マッチの対象にしない（他社の要員を派遣で出すと二重派遣になるため。「派遣ではありません」「派遣不可」「派遣元」は外さない。自社要員の照合には影響しない）。再委託の制限の語に「要員」「人材」「技術者」「エンジニア」も含む（「御社要員まで」など）
    - 商流の段数も照合する（`resale.ts` の `projectAllowedDepth` / `engineerDepth`）。案件の「貴社1社先まで」「一社先まで」は許す段数1、「2社先まで」は2。要員は提携先の社員・個人事業主が1段、「1社先」「BP」「協力会社」などが2段、「2社先」が3段で、要員の段数が案件の許す段数を超える組は外す（要約の `depthExceeded`）。どちらかが読めない・「BPは支援費を相談」など相談で可の案件は外さない

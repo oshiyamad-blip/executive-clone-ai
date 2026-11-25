@@ -264,7 +264,7 @@ import type {
 import { buildAgentIndex, fillAgent } from '../trial/fillAgent.js';
 import { isHighRateWeakJudgment } from '../proper/judge.js';
 import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
-import { selectExternalPairs, extPairId } from '../external/select.js';
+import { selectExternalPairs, extPairId, extTitleKey } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
 import { extPerRun, extDailyCap, extEngineerLookbackDays } from '../config.js';
@@ -7354,6 +7354,14 @@ function externalMatchChecks(): void {
   const skip = new Set([ids(full)[0]]);
   const rest = selectExternalPairs({ ...grid, existingIds: skip });
   check('すでにある組の ID は選ばない', !ids(rest).includes(ids(full)[0]) && rest.stats.candidates === full.stats.candidates - 1, JSON.stringify(rest.stats));
+  const jt = (t: string, eid = 'eng_e1') => new Set([`${eid}|${extTitleKey(t)}`]);
+  const jBase = { ...base, projects: [pj('p1', { title: '【架空】Java 開発案件／基盤' })], engineers: [en('e1')] };
+  const jHit = selectExternalPairs({ ...jBase, judgedTitleKeys: jt('[架空]Ｊａｖａ開発案件・基盤！') });
+  check('前の回に判定した同じ要員×同じ案件名（記号・空白・全角半角の違いだけ）は選ばない', jHit.pairs.length === 0 && jHit.stats.judgedBefore === 1, JSON.stringify(jHit.stats));
+  const jOther = selectExternalPairs({ ...jBase, judgedTitleKeys: jt('【架空】Java 開発案件／基盤', 'eng_e2') });
+  check('別の要員なら選ぶ', jOther.pairs.length === 1 && jOther.stats.judgedBefore === 0);
+  const jNone = selectExternalPairs(jBase);
+  check('judgedTitleKeys 未指定なら今までどおり（judgedBefore=0）', jNone.pairs.length === 1 && jNone.stats.judgedBefore === 0);
   check('既定の上限は 16・60・7日', withEnv({ EXT_PER_RUN: undefined, EXT_DAILY_CAP: undefined, EXT_ENGINEER_LOOKBACK_DAYS: undefined }, () => extPerRun() === 16 && extDailyCap() === 60 && extEngineerLookbackDays() === 7));
 
   section('外部マッチ: 高単価×必須の弱い組（isHighRateWeakJudgment）');
