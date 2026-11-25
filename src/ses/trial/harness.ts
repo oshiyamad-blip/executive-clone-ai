@@ -39,6 +39,7 @@ import { dedupeEngineers } from '../store.js';
 import { extDailyCap, extEngineerLookbackDays, extPerRun } from '../config.js';
 import { extOwnEngineer, extKeyOf } from '../external/profile.js';
 import { selectExternalPairs, extPairId, extTitleKey, extPersonKey } from '../external/select.js';
+import { normalizeExtJudgment } from '../external/judgmentShape.js';
 import { externalHardMismatch } from '../external/hardRules.js';
 import { EXT_HEADER, EXT_LAST_COLUMN, EXT_TAB, extHeaderRow, extPriorityOf, extRowOf, nextExtRow } from '../external/sheet.js';
 import type { Engineer, Project, ProperEngineer, SesRawMail } from '../../types/index.js';
@@ -734,6 +735,7 @@ if (phase === 'prompts') {
   const writes: Array<{ range: string; values: Array<Array<string | number>> }> = [];
   const notify: Array<{ no: number; priority: string; engineer: string; project: string; rate: unknown; projectRate: unknown }> = [];
   let judged = 0;
+  let normalized = 0;
   let dropped = 0;
   let hardDropped = 0;
   let highRateDropped = 0;
@@ -753,6 +755,9 @@ if (phase === 'prompts') {
       const project = projectById.get(r.projectId);
       if (!project || !allowed.has(r.projectId) || !r.judgment) continue;
       judged += 1;
+      const fixedJ = normalizeExtJudgment(r.judgment);
+      if (fixedJ.fixed) normalized += 1;
+      r.judgment = fixedJ.judgment;
       const id = extPairId(engineer.id, project.id);
       if (next.ids.has(id)) continue;
       if (externalHardMismatch(engineer, bodyOf.get(engineer.id) ?? '', project).length > 0) {
@@ -782,7 +787,7 @@ if (phase === 'prompts') {
   }
   writeFileSync(join(dir, 'ext_writes.json'), JSON.stringify(writes));
   writeFileSync(join(dir, 'ext_notify.json'), JSON.stringify(notify, null, 1));
-  console.log(JSON.stringify({ judged, appended: writes.length, A: counts.A, B: counts.B, dropped, hardDropped, highRateDropped }));
+  console.log(JSON.stringify({ judged, normalized, appended: writes.length, A: counts.A, B: counts.B, dropped, hardDropped, highRateDropped }));
 } else {
   throw new Error(`PHASE が不明です: ${phase}`);
 }
