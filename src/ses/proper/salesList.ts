@@ -707,10 +707,23 @@ export function planSalesUpdate(
   const split = splitByMinPriority(fresh);
   fresh = split.kept;
   const belowIds = new Set(split.below.flatMap((r) => [String(r[COL['ID']]), canonical(String(r[COL['ID']]))]));
-  const belowKeys = new Set(split.below.map((r) => legacyKey(String(r[COL['要員']]), String(r[COL['案件名']]))));
+  // 要員＋案件名の照合は、下限より低い候補のメールが行のメール以上に新しいときだけ（古い再送の判定で新しい行を消さない）
+  const belowLatest = new Map<string, number>();
+  for (const r of split.below) {
+    const k = legacyKey(String(r[COL['要員']]), String(r[COL['案件名']]));
+    const t = parseJstLabel(String(r[COL['受信日時']] ?? ''));
+    const old = belowLatest.get(k);
+    belowLatest.set(k, old === undefined ? t : Math.max(old, t)); // 読めない時刻は NaN のまま残る（Math.max は NaN を返す）
+  }
+  const belowByKey = (prev: Row) => {
+    const latest = belowLatest.get(legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']])));
+    if (latest === undefined) return false;
+    const at = parseJstLabel(String(prev[COL['受信日時']] ?? ''));
+    return Number.isNaN(latest) || Number.isNaN(at) || latest >= at;
+  };
   const demoted = (prev: Row) =>
     belowMinPriority(String(prev[COL['優先度']])) || belowIds.has(String(prev[COL['ID']]).trim()) || belowIds.has(canonical(String(prev[COL['ID']]).trim())) ||
-    belowKeys.has(legacyKey(String(prev[COL['要員']]), String(prev[COL['案件名']])));
+    belowByKey(prev);
   // 追加から間もない行は、候補から外れても残す（募集終了・下限より低い行・要員が営業中でない行は除く。募集終了は eligible が先に片付ける）
   const recentKeep = (id: string, prev: Row) =>
     addedWithinHours(prev[COL['追加日時']], opts.addedAt, opts.keepHours ?? 0) && !demoted(prev) && Boolean(opts.engineerActive?.(id, prev));

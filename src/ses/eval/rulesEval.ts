@@ -7221,6 +7221,18 @@ function salesKeepChecks(): void {
       const fresh = planSalesUpdate([sheetRow(target)], [header, sheetRow(target)], () => false, undefined, undefined, { addedAt: at10h, keepHours: 48, engineerActive: () => true });
       return fresh?.updates.length === 1 && fresh.keptRecent === 0 && kept(dup).length === 2;
     })());
+  // 下限より低い候補の要員＋案件名の照合は、候補のメールが行のメール以上に新しいときだけ行を下げる
+  const belowCand = (id: string, receivedAt: Date) => salesRowOf({
+    id, ownEngineerId: 'a', ownEngineerName: 'A.A', projectId: id, projectTitle: '再送の案件', projectRate: 55,
+    requiredProjectRate: 55, rateGapMan: 0, meetsRate: true, skillMatchRate: 1, band: 'strong' as const, locationOk: true, timingOk: true,
+    needsReview: false, score: 100, reason: '', agentEmail: 'x@example.com', detectedAt: new Date(), properLabel: 'A.A',
+  } as unknown as ProperCandidate, { requiredSkills: [], location: '', remote: 'unknown', startPeriod: '', agentCompany: '', agentContact: '', agentEmail: '', receivedAt } as unknown as Project).map((v, i) => (i === col('優先度') ? 'C 要確認' : v));
+  const belowRow = sheetRow('ownmatch_a_proj_0000000m', { 案件名: '再送の案件', 受信日時: '2026/11/25 16:42', 追加日時: '2026/11/25 17:00' });
+  const belowPlan = (recv: Date) => planSalesUpdate([belowCand('ownmatch_a_proj_0000000n', recv)], [header, belowRow], () => false, undefined, undefined, { addedAt: '2026/11/25 18:00', keepHours: 48, engineerActive: () => true });
+  const olderBelow = belowPlan(new Date('2026-11-25T11:22:00+09:00'));
+  const newerBelow = belowPlan(new Date('2026-11-25T17:30:00+09:00'));
+  check('下限より低い候補が同じ要員＋案件名でも、古いメールのものなら新しいメールの行を消さない', olderBelow?.deleteIds.length === 0 && kept(olderBelow).join() === belowRow[col('ID')], show(olderBelow));
+  check('下限より低い候補のメールが行のメールより新しければ、要員＋案件名の照合で今までどおり行を下げる（消す）', newerBelow?.deleteIds.join() === belowRow[col('ID')], show(newerBelow));
   check('addedWithinHours: ちょうど48時間は内、読めなければ偽、0 以下は偽', addedWithinHours('2026/10/01 08:00', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/03 08:01', 48) &&
     !addedWithinHours('x', '2026/10/03 08:00', 48) && !addedWithinHours('2026/10/01 08:00', '2026/10/01 09:00', 0));
 }
