@@ -161,7 +161,7 @@ import { windowsOf } from '../trial/windows.js';
 import { fixListRows, hourGroups, internalDateOfId, listQueryOf } from '../trial/listHours.js';
 import { planLabelSheet, packLabelElements, exportCli } from './labelSheet.js';
 import { chunkRunDir } from '../trial/chunks.js';
-import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites } from '../trial/writePlan.js';
+import { planWrites, packElements, joinSheetRows, sheetRowsOf, verifyWrites, EXT_VERIFY_SKIP } from '../trial/writePlan.js';
 import { contentKeyOf, indexJudgedByContent, splitReused, judgmentFor } from '../trial/reuse.js';
 import { mkdirSync as mkdirSyncBf, readdirSync as readdirSyncBf } from 'fs';
 import { buildProperProposalBody } from '../proper/proposal.js';
@@ -6169,6 +6169,21 @@ function trialUsageChecks(): void {
   const ver = verifyWrites(plan.elements.slice(0, 2), after);
   check('writePlan verify: 書いた後のシートと比べ、違うセルだけ1セルの書き直しにする（受信日時・追加日時・最終更新の列は除く）',
     ver.checked === 23 && ver.fixes.length === 1 && ver.fixes[0].range === "'全体'!S9" && ver.fixes[0].values[0][0] === 'n18', show({ checked: ver.checked, fixes: ver.fixes.map((f) => f.range) }));
+
+  {
+    const extRow = (): string[] => Array.from({ length: 31 }, (_, i) => `v${i}`);
+    const planned = [{ range: "'外部マッチ'!A40:AE40", values: [extRow()] }];
+    const readback = (row: string[]) => sheetRowsOf({ range: "'外部マッチ'!A1:AE40", values: [...Array.from({ length: 39 }, () => [] as string[]), row] });
+    const same = verifyWrites(planned, readback(extRow()), EXT_VERIFY_SKIP);
+    check('writePlan verify-ext: 同じ行は違い0', same.checked === 30 && same.fixes.length === 0, show({ checked: same.checked, n: same.fixes.length }));
+    const long = Array.from({ length: 400 }, (_, i) => `案件の本文${i}`).join('/');
+    const pl2 = [{ range: "'外部マッチ'!A40:AE40", values: [extRow().map((v, i) => (i === 28 ? long : v))] }];
+    const rb = extRow().map((v, i) => (i === 28 ? long.replace('本文200', '本丈200') : v));
+    const diff = verifyWrites(pl2, readback(rb), EXT_VERIFY_SKIP);
+    check('writePlan verify-ext: 長い文の1文字違いは AC40 の1セルの書き直し', diff.fixes.length === 1 && diff.fixes[0].range === "'外部マッチ'!AC40" && diff.fixes[0].values[0][0] === long, show(diff.fixes.map((f) => f.range)));
+    const nb = verifyWrites(planned, readback(extRow().map((v, i) => (i === 10 ? ` ${v}\u00a0` : v))), EXT_VERIFY_SKIP);
+    check('writePlan verify-ext: NBSP・前後の空白の違いは同じ', nb.fixes.length === 0);
+  }
 
   // 再送の判定の使い回し
   const proj = (over: Partial<Parameters<typeof contentKeyOf>[0]> = {}) => ({

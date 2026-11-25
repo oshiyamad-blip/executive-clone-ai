@@ -3,10 +3,12 @@
 // 個人データを扱うので標準出力は件数だけ。
 //   plan   <RUN_DIR> <A:AB の読み取り> <AC:AE の読み取り> [fileBytes=60000]  → <RUN_DIR>/wf/wNN.json
 //   verify <RUN_DIR> <書いた後の A:AE の読み取り>                             → <RUN_DIR>/wf/fixNN.json（1セル1ファイル）
+//   verify-ext <RUN_DIR> <「外部マッチ」を A1 から読んだもの>                  → <RUN_DIR>/wf/extfixNN.json（ext_writes_final.json と照合）
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SALES_COLUMNS, shortenedOnlyCell } from '../proper/salesList.js';
+import { EXT_HEADER } from '../external/sheet.js';
 
 export interface WriteElement {
   range: string;
@@ -28,7 +30,10 @@ const HUMAN_LAST = Math.max(...HUMAN); // R
 const STATUS_COL = HUMAN_FIRST; // 対応状況
 const NOT_STARTED = '未着手';
 // 読み戻しの照合で除く機械の列（受信日時・追加日時・最終更新）
-const VERIFY_SKIP = new Set(['受信日時', '追加日時', '最終更新'].map((n) => SALES_COLUMNS.findIndex((c) => c.name === n)));
+const VERIFY_SKIP_NAMES = ['受信日時', '追加日時', '最終更新'];
+const VERIFY_SKIP = new Set(VERIFY_SKIP_NAMES.map((n) => SALES_COLUMNS.findIndex((c) => c.name === n)));
+// 外部マッチの見出しにも同じ名前の列だけ除く
+export const EXT_VERIFY_SKIP = new Set(VERIFY_SKIP_NAMES.flatMap((n) => (EXT_HEADER.includes(n) ? [EXT_HEADER.indexOf(n)] : [])));
 
 export function colLetter(i: number): string {
   let n = i;
@@ -168,7 +173,7 @@ export function packElements(elements: WriteElement[], fileBytes: number): Write
 }
 
 // 書いた要素の各セルを書いた後のシートと比べ、違うセルを1セルの書き直しにする（受信日時・追加日時・最終更新の列は除く）
-export function verifyWrites(elements: WriteElement[], sheet: Map<number, unknown[]>): { checked: number; fixes: WriteElement[] } {
+export function verifyWrites(elements: WriteElement[], sheet: Map<number, unknown[]>, skip: Set<number> = VERIFY_SKIP): { checked: number; fixes: WriteElement[] } {
   let checked = 0;
   const fixes: WriteElement[] = [];
   for (const w of elements) {
@@ -179,7 +184,7 @@ export function verifyWrites(elements: WriteElement[], sheet: Map<number, unknow
       const sheetName = w.range.slice(0, w.range.lastIndexOf('!'));
       vals.forEach((v, i) => {
         const col = pr.col + i;
-        if (VERIFY_SKIP.has(col)) return;
+        if (skip.has(col)) return;
         checked += 1;
         if (normCell(v) !== normCell((sheet.get(rowNo) ?? [])[col])) fixes.push({ range: `${sheetName}!${colLetter(col)}${rowNo}`, values: [[v]] });
       });
@@ -221,14 +226,27 @@ export function verifyRunDir(runDir: string, afterFile: string) {
   return { checked, mismatch: fixes.length };
 }
 
+// 外部マッチ: ext_writes_final.json の各セルを読み戻しと比べ、違うセルを wf/extfixNN.json（1セル1ファイル）にする
+export function verifyExtRunDir(runDir: string, afterFile: string) {
+  const wf = join(runDir, 'wf');
+  const planned = readJson(join(runDir, 'ext_writes_final.json')) as WriteElement[];
+  const { checked, fixes } = verifyWrites(planned, sheetRowsOf(readJson(afterFile)), EXT_VERIFY_SKIP);
+  mkdirSync(wf, { recursive: true });
+  for (const f of listFiles(wf, /^extfix\d+\.json$/)) rmSync(join(wf, f));
+  fixes.forEach((fx, i) => writeFileSync(join(wf, `extfix${String(i).padStart(2, '0')}.json`), JSON.stringify([fx])));
+  return { checked, mismatch: fixes.length };
+}
+
 function main(): void {
   const [mode, runDirArg, a, b, c] = process.argv.slice(2);
   if (mode === 'plan' && runDirArg && a && b) {
     console.log(JSON.stringify(planRunDir(resolve(runDirArg), resolve(a), resolve(b), c ? Number(c) : 60_000)));
   } else if (mode === 'verify' && runDirArg && a) {
     console.log(JSON.stringify(verifyRunDir(resolve(runDirArg), resolve(a))));
+  } else if (mode === 'verify-ext' && runDirArg && a) {
+    console.log(JSON.stringify(verifyExtRunDir(resolve(runDirArg), resolve(a))));
   } else {
-    console.error('使い方: npm run ses:trial:writeplan -- plan <RUN_DIR> <A:AB の読み取り> <AC:AE の読み取り> [fileBytes=60000]\n        npm run ses:trial:writeplan -- verify <RUN_DIR> <書いた後の A:AE の読み取り>');
+    console.error('使い方: npm run ses:trial:writeplan -- plan <RUN_DIR> <A:AB の読み取り> <AC:AE の読み取り> [fileBytes=60000]\n        npm run ses:trial:writeplan -- verify <RUN_DIR> <書いた後の A:AE の読み取り>\n        npm run ses:trial:writeplan -- verify-ext <RUN_DIR> <「外部マッチ」を A1 から読んだファイル>');
     process.exitCode = 1;
   }
 }
