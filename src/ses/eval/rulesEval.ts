@@ -7314,6 +7314,31 @@ function externalMatchChecks(): void {
   const emp1 = '商流：貴社1社先の社員または貴社直個人まで';
   check('「1社先の社員または貴社直個人まで」は制限でなく段数1・社員のみと読む', !projectBlocksResale({ title: 'x', businessFlow: emp1 }) && projectAllowedDepth({ businessFlow: emp1 }) === 1 &&
     projectAllowsOnlyEmployeeAtDepth1({ businessFlow: emp1 }) && !projectAllowsOnlyEmployeeAtDepth1({ businessFlow: '貴社1社先まで' }));
+  // 商流の書き方の追加（1社先は社員だけ・貴社の直接の人だけ・貴社まで）
+  const emp1b = '商流：貴社1社先社員、または貴社個人事業主まで';
+  check('「貴社1社先社員、または貴社個人事業主まで」は段数1・社員のみ（制限でなく）', !projectBlocksResale({ title: 'x', businessFlow: emp1b }) && projectAllowedDepth({ businessFlow: emp1b }) === 1 && projectAllowsOnlyEmployeeAtDepth1({ businessFlow: emp1b }));
+  for (const ef of ['弊社個人事業主', '1社先個人事業主', '一社先個人事業主']) {
+    const r = dsel(emp1b, ef);
+    check(`1社先社員のみ（「の」なし）は他社の個人事業主を外す: 「${ef}」`, r.pairs.length === 0 && r.stats.depthExceeded === 1, JSON.stringify(r.stats));
+  }
+  for (const ef of ['弊社正社員', '弊社社員']) {
+    const r = dsel(emp1b, ef);
+    check(`1社先社員のみ（「の」なし）でも他社の社員は外さない: 「${ef}」`, r.pairs.length === 1 && r.stats.depthExceeded === 0, JSON.stringify(r.stats));
+  }
+  check('要員の所属「一社先正社員」は段数2・社員、「一社先個人事業主」は個人',
+    engineerDepth({ businessFlow: '一社先正社員' }, '') === 2 && !engineerIsIndividual({ businessFlow: '一社先正社員' }, '') &&
+    engineerIsIndividual({ businessFlow: '一社先個人事業主' }, '') && engineerIsIndividual({ businessFlow: '1社先個人事業主' }, ''));
+  const ownOnly = ['貴社社員様・貴社個人事業主様まで', '貴社社員・個人事業主まで', '貴社所属の個人事業主まで', '御社所属【個人事業主】まで（社員不可）',
+    '貴社所属の個人事業主まで 1社先は不可', '貴社迄', '商流：貴社まで', '貴社プロパー様', '貴社プロパーのみ', '貴社正社員希望', '御社所属【正社員】まで'];
+  for (const t of ownOnly) check(`こちらの直接の人だけ（他社の要員は外す）: 「${t}」`, projectBlocksResale({ title: 'x', businessFlow: t }));
+  for (const t of ['貴社所属の個人事業主まで（1社先は支援費対応）', '御社所属【個人事業主】まで 1社先要員は支援費', '貴社1社先まで', '貴社から1社先まで', '商流制限：無し', '制限なし',
+    '貴社まで直接ご提案ください', '貴社までご連絡ください', '貴社までお問い合わせください', '貴社までご返信願います', '他社正社員も可'])
+    check(`制限でない・許可つき: 「${t}」`, !projectBlocksResale({ title: 'x', businessFlow: t }));
+  check('貴社迄・貴社まで単独は段数0', projectAllowedDepth({ businessFlow: '貴社迄' }) === 0 && projectAllowedDepth({ businessFlow: '貴社1社先まで' }) === 1 && projectAllowedDepth({ businessFlow: '貴社まで直接ご提案ください' }) === null);
+  const own2 = selectExternalPairs({ now: new Date(), existingIds: new Set(), addedToday: 0, perRun: 8, dailyCap: 30,
+    projects: [project({ id: 'dq', title: '案件dq', requiredSkills: ['Java'], rateMax: 80, agentEmail: 's@partner-dq.example', businessFlow: '貴社所属の個人事業主まで' })],
+    engineers: [engineer(['Java'], { id: 'eng_dq', desiredRate: 60, agentEmail: 's@vendor-dq.example', agentCompany: '要員元dq', businessFlow: '弊社個人事業主' })] });
+  check('こちらの直接の人だけの案件は外部マッチに出さず restrictedProjects に数える', own2.pairs.length === 0 && own2.stats.restrictedProjects === 1, JSON.stringify(own2.stats));
   check('要員の個人事業主の判定', engineerIsIndividual({ businessFlow: '弊社直個人事業主' }, '') && engineerIsIndividual({ businessFlow: '' }, '所属：個人事業主') && !engineerIsIndividual({ businessFlow: '弊社正社員' }, '所属：1社先の正社員'));
   for (const ef of ['弊社直個人事業主', '弊社登録個人事業主']) {
     const r = dsel(emp1, ef);
