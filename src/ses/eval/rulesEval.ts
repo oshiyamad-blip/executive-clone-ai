@@ -263,7 +263,7 @@ import type {
 
 import { buildAgentIndex, fillAgent } from '../trial/fillAgent.js';
 import { isHighRateWeakJudgment } from '../proper/judge.js';
-import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale } from '../external/resale.js';
+import { hasResaleRestriction, projectAllowedDepth, engineerDepth, projectBlocksResale, projectIsDispatch, engineerBlocksResale, engineerIsIndividual, projectAllowsOnlyEmployeeAtDepth1 } from '../external/resale.js';
 import { selectExternalPairs, extPairId, extTitleKey } from '../external/select.js';
 import { externalHardMismatch, externalHardMismatches } from '../external/hardRules.js';
 import { extPriorityOf, extRowOf, nextExtRow, EXT_HEADER, EXT_LAST_COLUMN, extHeaderRow } from '../external/sheet.js';
@@ -7305,6 +7305,23 @@ function externalMatchChecks(): void {
   for (const [pf, ef] of [['一社先まで', '弊社社員'], ['2社先まで', '弊社1社先'], ['一社先まで', ''], ['', '弊社1社先'], ['1社先は支援費の相談', '弊社1社先']] as const) {
     const r = dsel(pf, ef);
     check(`段数が収まる・不明なら外さない: 「${pf}」×「${ef}」`, r.pairs.length === 1 && r.stats.depthExceeded === 0, JSON.stringify(r.stats));
+  }
+
+  for (const t of ['所属：御社雇用の方', '御社雇用の方のみ', '貴社雇用者に限る', '商流：貴社雇用の方', '御社雇用の社員および個人事業主まで'])
+    check(`御社雇用の制限は外す: 「${t}」`, projectBlocksResale({ title: 'x', detail: t }));
+  for (const t of ['所属：不問', '商流：貴社1社先まで', '雇用形態は問いません', '貴社のご提案をお待ちしております'])
+    check(`御社雇用の語が無い案件は外さない: 「${t}」`, !projectBlocksResale({ title: 'x', detail: t }));
+  const emp1 = '商流：貴社1社先の社員または貴社直個人まで';
+  check('「1社先の社員または貴社直個人まで」は制限でなく段数1・社員のみと読む', !projectBlocksResale({ title: 'x', businessFlow: emp1 }) && projectAllowedDepth({ businessFlow: emp1 }) === 1 &&
+    projectAllowsOnlyEmployeeAtDepth1({ businessFlow: emp1 }) && !projectAllowsOnlyEmployeeAtDepth1({ businessFlow: '貴社1社先まで' }));
+  check('要員の個人事業主の判定', engineerIsIndividual({ businessFlow: '弊社直個人事業主' }, '') && engineerIsIndividual({ businessFlow: '' }, '所属：個人事業主') && !engineerIsIndividual({ businessFlow: '弊社正社員' }, '所属：1社先の正社員'));
+  for (const ef of ['弊社直個人事業主', '弊社登録個人事業主']) {
+    const r = dsel(emp1, ef);
+    check(`1社先の社員のみの案件は他社の個人事業主を外す: 「${ef}」`, r.pairs.length === 0 && r.stats.depthExceeded === 1, JSON.stringify(r.stats));
+  }
+  for (const ef of ['弊社正社員', '弊社社員']) {
+    const r = dsel(emp1, ef);
+    check(`1社先の社員のみの案件でも他社の社員は外さない: 「${ef}」`, r.pairs.length === 1 && r.stats.depthExceeded === 0, JSON.stringify(r.stats));
   }
 
   section('外部マッチ: 組の選び方（selectExternalPairs）');

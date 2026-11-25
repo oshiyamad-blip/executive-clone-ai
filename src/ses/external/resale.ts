@@ -24,6 +24,9 @@ const RESTRICTIONS: RegExp[] = [
   // エンド直のみ
   /エンド(?:直|直接)(?:契約|取引|請け)?(?:のみ|限定|まで|希望)/,
   /直(?:請け|契約|取引)(?:のみ|限定)/,
+  // 貴社雇用の方のみ（こちらが雇用する人だけ。他社の要員は出せない）。「所属：御社雇用の方」「貴社雇用者に限る」「御社雇用の方」
+  /(?:御社|貴社)(?:の)?(?:直接)?雇用(?:の方|者|の人)/,
+  /(?:所属|商流|制限|条件)[：:\s]*(?:御社|貴社)(?:の)?(?:直接)?雇用(?:のみ|限定|に限る|まで)/,
   // 商流の制限あり（「制限なし」は当たらない）
   /商流(?:に)?制限(?![】\]）)：:\s]*(?:なし|無し|ありません|特になし))/,
 ];
@@ -66,14 +69,29 @@ export function projectAllowedDepth(p: { title?: string; businessFlow?: string; 
   if (/支援費|(?:BP|協力会社|[1-3一二三]社先)[^\n。]{0,12}相談/i.test(s)) return null;
   if (/[1-3一二三]社先(?:まで)?(?:は)?(?:不可|NG|禁止|×)/.test(s)) return 0;
   if (/[2二]社先まで/.test(s)) return 2;
+  if (EMPLOYEE_ONLY_1.test(s)) return 1;
   if (new RegExp(`(?:(?:貴社|御社)\\s*)?${DEPTH_NUM}社先まで`).test(s)) return 1;
   return null;
+}
+
+// 「貴社1社先の社員(または貴社直個人)まで」: 1社先まで、ただし1社先は社員だけ（他社が抱える個人事業主は出せない）
+const EMPLOYEE_ONLY_1 = /[1一]社先の(?:正)?社員(?:\s*(?:まで|のみ)|[^\n。]{0,20}まで)/;
+
+export function projectAllowsOnlyEmployeeAtDepth1(p: { title?: string; businessFlow?: string; detail?: string }): boolean {
+  const s = [p.title ?? '', p.businessFlow ?? '', p.detail ?? ''].join('\n').normalize('NFKC');
+  return EMPLOYEE_ONLY_1.test(s);
+}
+
+// 要員が個人事業主・フリーランス・個人（所属の文）か
+export function engineerIsIndividual(e: { businessFlow?: string }, mailText: string): boolean {
+  const s = [e.businessFlow ?? '', mailText ?? ''].join('\n').normalize('NFKC');
+  return /(?:所属|身分|雇用形態|契約形態|区分)[^\n]{0,10}(?:個人事業主|フリーランス|個人)|(?:弊社|自社|当社)(?:直|登録|契約)?(?:の)?(?:個人事業主|フリーランス)|^\s*(?:個人事業主|フリーランス)\s*$/m.test(s);
 }
 
 export function engineerDepth(e: { businessFlow?: string }, mailText: string): number | null {
   const s = [e.businessFlow ?? '', mailText ?? ''].join('\n').normalize('NFKC');
   if (/[2二]社先/.test(s)) return 3;
   if (new RegExp(`${DEPTH_NUM}社先|(?<![A-Za-z])BP(?![A-Za-z])|(?:協力会社|パートナー(?:企業|会社)?)(?:の|所属)?(?:社員|個人事業主|要員|エンジニア|技術者)`, 'i').test(s)) return 2;
-  if (/(?:弊社|自社|当社)(?:の)?(?:正)?社員|弊社(?:プロパー|所属|個人事業主)/.test(s)) return 1;
+  if (/(?:弊社|自社|当社)(?:の)?(?:正)?社員|弊社(?:プロパー|所属|個人事業主)|(?:弊社|自社|当社)(?:直|登録|契約)(?:の)?(?:個人事業主|フリーランス)/.test(s)) return 1;
   return null;
 }
