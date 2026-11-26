@@ -68,6 +68,12 @@ function parseRange(range: string): ParsedRange | null {
 export function normCell(v: unknown): string {
   if (v === null || v === undefined) return '';
   const s = (typeof v === 'number' ? String(v) : String(v).replace(/ /g, ' ')).trim();
+  // Sheets は日時の0埋め（時・月・日）を落として返すので、0埋めの正規形にそろえる
+  const dt = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+  if (dt) {
+    const p = (x: string): string => x.padStart(2, '0');
+    return `${dt[1]}/${p(dt[2])}/${p(dt[3])}${dt[4] !== undefined ? ` ${p(dt[4])}:${dt[5]}${dt[6] !== undefined ? `:${dt[6]}` : ''}` : ''}`;
+  }
   return /^-?\d+(\.\d+)?$/.test(s) ? String(Number(s)) : s;
 }
 

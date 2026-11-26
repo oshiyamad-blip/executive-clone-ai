@@ -6183,6 +6183,11 @@ function trialUsageChecks(): void {
     check('writePlan verify-ext: 長い文の1文字違いは AC40 の1セルの書き直し', diff.fixes.length === 1 && diff.fixes[0].range === "'外部マッチ'!AC40" && diff.fixes[0].values[0][0] === long, show(diff.fixes.map((f) => f.range)));
     const nb = verifyWrites(planned, readback(extRow().map((v, i) => (i === 10 ? ` ${v}\u00a0` : v))), EXT_VERIFY_SKIP);
     check('writePlan verify-ext: NBSP・前後の空白の違いは同じ', nb.fixes.length === 0);
+    const withCell = (v: string): string[] => extRow().map((x, i) => (i === 10 ? v : x));
+    const dtv = (planned10: string, read10: string) => verifyWrites([{ range: "'外部マッチ'!A40:AE40", values: [withCell(planned10)] }], readback(withCell(read10)), EXT_VERIFY_SKIP);
+    check('writePlan verify-ext: 日時の時の0埋め（08:35 と 8:35）の違いは同じ', dtv('2026/11/26 08:35', '2026/11/26 8:35').fixes.length === 0);
+    check('writePlan verify-ext: 日付の月日の0埋め（2026/01/05 と 2026/1/5）の違いは同じ', dtv('2026/01/05', '2026/1/5').fixes.length === 0);
+    check('writePlan verify-ext: 日時の分が違えば1セルの書き直し', dtv('2026/11/26 08:35', '2026/11/26 8:36').fixes.length === 1);
   }
 
   // 再送の判定の使い回し
