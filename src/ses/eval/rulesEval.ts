@@ -3695,6 +3695,9 @@ function mailBodyChecks(): void {
     check('外部判定の型直し: 都道府県に入った配列は気になる点へ戻り、気になる点の空文字は配列になる', swapped.fixed && swapped.judgment.workPrefecture === '' && swapped.judgment.concerns.join() === '年数不足,単価', show(swapped));
     const clean = normalizeExtJudgment(base as unknown as RawProperJudgment);
     check('外部判定の型直し: 正しい判定は変えず、直した数にも入れない', !clean.fixed && JSON.stringify(clean.judgment) === JSON.stringify(base), show(clean));
+    const shifted = normalizeExtJudgment({ ...base, verdict: '記載なし', pitch: 'conditional', concerns: '架空の提案文です。', workPrefecture: ['年数不足'], rateReason: '東京都' } as unknown as RawProperJudgment);
+    check('外部判定の型直し: verdict から1つずれた欄は元の位置へ戻る',
+      shifted.fixed && shifted.judgment.verdict === 'conditional' && shifted.judgment.pitch === '架空の提案文です。' && shifted.judgment.concerns.join() === '年数不足' && shifted.judgment.workPrefecture === '東京都', show(shifted));
     check('外部判定の型直し: 不正な verdict は reject になる', normalizeExtJudgment({ ...base, verdict: 'maybe' } as unknown as RawProperJudgment).judgment.verdict === 'reject');
   }
   check('シートのリンクは HTML のリンク先から拾う（表示テキストに URL が無くても）', links.length === 1 && links[0].startsWith('https://docs.google.com/spreadsheets/d/AbC_123-x/edit') && !links[0].includes('"'), links.join());
