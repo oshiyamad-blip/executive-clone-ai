@@ -6,6 +6,17 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 export function normalizeExtJudgment(raw: RawProperJudgment): { judgment: RawProperJudgment; fixed: boolean } {
   const before = JSON.stringify(raw);
   const j = { ...(raw as unknown as Record<string, unknown>) };
+  // 判定ファイルの欄が verdict から1つずれて返ることがある（verdict に別の文、pitch に本来の verdict）。そのまま reject にすると条件付きの組が消えるため戻す
+  const isVerdict = (v: unknown) => v === 'recommend' || v === 'conditional' || v === 'reject';
+  if (!isVerdict(j.verdict) && isVerdict(j.pitch)) {
+    const old = { ...j };
+    j.preferenceFit = typeof old.preferenceFit === 'string' && old.preferenceFit ? old.preferenceFit : str(old.verdict);
+    j.verdict = old.pitch;
+    j.pitch = str(old.concerns);
+    j.concerns = Array.isArray(old.workPrefecture) && old.workPrefecture.every((x) => typeof x === 'string') ? old.workPrefecture : [];
+    j.workPrefecture = str(old.rateReason);
+    delete j.rateReason;
+  }
   const concernsOk = Array.isArray(j.concerns) && j.concerns.length > 0;
   if (Array.isArray(j.workPrefecture) && j.workPrefecture.every((x) => typeof x === 'string') && !concernsOk) j.concerns = j.workPrefecture;
   if (typeof j.workPrefecture !== 'string') j.workPrefecture = '';

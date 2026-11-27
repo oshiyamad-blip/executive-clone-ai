@@ -284,7 +284,7 @@ async function judgedCandidates() {
   for (const e of list) {
     const label = e.proposalLabel || e.displayName;
     if (!has(`judged_${label}.json`)) continue;
-    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, r.judgment);
+    for (const r of read<Array<{ projectId: string; judgment: RawProperJudgment }>>(`judged_${label}.json`)) judged.set(`${e.id}|${r.projectId}`, normalizeExtJudgment(r.judgment).judgment);
   }
   // 再送で代表が替わった組は、prep が reused.json に残した前の案件の判定を使う（判定の中身はそのまま。projectId だけ新しい案件）
   const reused = has('reused.json') ? read<ReusedPair[]>('reused.json') : [];
